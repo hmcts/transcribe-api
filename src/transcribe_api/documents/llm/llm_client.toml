@@ -1,0 +1,14 @@
+title = "LLM Client Config Vars"
+
+[llm_params]
+AZURE_GROK_API_VERSION = "2024-05-01-preview"
+AZURE_OPENAI_API_VERSION = "2025-03-01-preview"
+GEMINI_SAFETY_OVERRIDE_CATEGORIES = ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]
+NUM_RETRIES = 3
+RETRY_STRATEGY = "exponential_backoff_retry"
+TIMEOUT = 180
+VERTEX_LOCATIONS = [
+    "europe-west1", # Belgium
+    "europe-west4", # Netherlands
+    "europe-west8", # Milan
+]

@@ -1,0 +1,12 @@
+#!groovy
+
+@Library("Infrastructure@2.5.2")
+
+def type = "python"
+def product = "transcribe"
+def component = "api"
+
+// docs:
+// 1. https://github.com/hmcts/cnp-jenkins-library
+// 2. https://hmcts.github.io/ways-of-working/common-pipeline/common-pipeline.html#common-pipeline
+withPipeline(type, product, component) {}

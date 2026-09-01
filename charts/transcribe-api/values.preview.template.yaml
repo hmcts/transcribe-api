@@ -1,0 +1,5 @@
+python:
+  image: 'hmctsprod.azurecr.io/transcribe/api:pr-${CHANGE_ID}'
+  ingressHost: transcribe-api-pr-${CHANGE_ID}.preview.platform.hmcts.net
+  postgresql:
+    enabled: true

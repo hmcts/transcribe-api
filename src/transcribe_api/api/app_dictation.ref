@@ -1,0 +1,179 @@
+import asyncio
+import logging
+import os
+from contextlib import asynccontextmanager
+
+import sentry_sdk
+import uvicorn
+from azure.monitor.opentelemetry import configure_azure_monitor
+from fastapi import FastAPI
+from fastapi.exceptions import HTTPException as FastAPIHTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordBearer
+from opentelemetry import trace
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+from api.privileged_routes import router as admin_router
+from api.routes import router as api_router
+from app.audio.transcription_polling_service import TranscriptionPollingService
+from hmcts_azure_auth.roles import validate_approles_config
+from utils.cors_utils import parse_origins
+from utils.exception_handlers import http_exception_handler, unhandled_exception_handler
+from utils.middleware import add_request_id
+from utils.settings import get_settings
+from utils.version import APP_VERSION
+
+log = logging.getLogger("uvicorn")
+
+if os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+    configure_azure_monitor()
+else:
+    log.warning("APPLICATIONINSIGHTS_CONNECTION_STRING not configured; Azure Monitor is disabled")
+
+# Global polling task that handles all users
+global_polling_task: asyncio.Task | None = None
+
+
+@asynccontextmanager
+async def lifespan(app_: FastAPI):  # noqa: ARG001
+    global global_polling_task  # noqa: PLW0603
+
+    log.info("Starting up...")
+
+    # Fail fast if AUTH_APPROLES is set but contains invalid configuration.
+    # Skip in local dev so developers aren't blocked by unconfigured env vars.
+    if settings.ENVIRONMENT != "local":
+        validate_approles_config()
+
+    # Start the global transcription polling service (with 3 workers by default)
+    log.info("Starting global transcription polling service for all users...")
+    polling_service = TranscriptionPollingService()
+    global_polling_task = asyncio.create_task(polling_service.run_polling_loop())
+    log.info("Global transcription polling service started")
+
+    yield
+
+    # Cancel the global polling task on shutdown
+    if global_polling_task:
+        log.info("Shutting down global transcription polling service...")
+        global_polling_task.cancel()
+
+        # Wait for task to complete cancellation
+        try:
+            await global_polling_task
+        except asyncio.CancelledError:
+            log.info("Global transcription polling service stopped")
+
+    log.info("Shutting down...")
+
+
+settings = get_settings()
+if settings.SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=settings.SENTRY_DSN,
+        environment=settings.ENVIRONMENT,
+        send_default_pii=False,
+        # Set traces_sample_rate to 1.0 to capture 100%
+        # of transactions for tracing.
+        traces_sample_rate=1.0,
+        # Set profile_session_sample_rate to 1.0 to profile 100%
+        # of profile sessions.
+        profile_session_sample_rate=1.0,
+        # Set profile_lifecycle to "trace" to automatically
+        # run the profiler on when there is an active transaction
+        profile_lifecycle="trace",
+    )
+else:
+    log.warning("SENTRY_DSN not configured; Sentry is disabled")
+
+app = FastAPI(
+    lifespan=lifespan,
+    title="Courts Transcribe API",
+    version=APP_VERSION,
+    openapi_url="/api/openapi.json",
+)
+
+if settings.DISABLE_FASTAPI_INSTRUMENTATION:
+    log.info("DISABLE_FASTAPI_INSTRUMENTATION was set, skipping FastAPI OpenTelemetry instrumentation.")
+else:
+    log.info("Instrumenting FastAPI with OpenTelemetry.")
+    FastAPIInstrumentor.instrument_app(app)
+
+# Configure CORS based on environment
+# For local development, use hardcoded origins
+# For deployed environments, use CORS_ALLOWED_ORIGINS from infrastructure
+LOCAL_DEV_ORIGINS = [
+    "http://localhost:3000",  # Local frontend development
+    "http://127.0.0.1:3000",  # Alternative localhost
+]
+
+
+def build_cors_origins() -> list[str]:
+    """Derive the list of allowed CORS origins with safe fallbacks."""
+    if settings.ENVIRONMENT == "local":
+        return LOCAL_DEV_ORIGINS
+
+    origins = parse_origins(settings.CORS_ALLOWED_ORIGINS)
+    if origins:
+        return origins
+
+    # Fall back to APP_URL if infra did not provide CORS_ALLOWED_ORIGINS
+    app_url_origins = parse_origins(settings.APP_URL)
+    if app_url_origins:
+        log.warning(
+            "CORS_ALLOWED_ORIGINS not configured for %s; falling back to APP_URL=%s",
+            settings.ENVIRONMENT,
+            settings.APP_URL,
+        )
+        return app_url_origins
+
+    log.warning(
+        "CORS configuration missing for %s; defaulting to local development origins.",
+        settings.ENVIRONMENT,
+    )
+    return LOCAL_DEV_ORIGINS
+
+
+origins = build_cors_origins()
+
+if origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,  # Needed for Easy Auth and cookies
+        allow_methods=["*"],  # Let OPTIONS succeed without guessing methods
+        allow_headers=["*"],  # Avoids 403 on Authorization, custom headers, etc.
+        expose_headers=["X-Request-ID"],
+        max_age=86400,  # Cache preflight for 24 hours
+    )
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+
+# Add middleware and exception handlers
+@app.middleware("http")
+async def request_id_middleware(request, call_next):
+    return await add_request_id(request, call_next)
+
+
+@app.exception_handler(FastAPIHTTPException)
+async def http_exception_wrapper(request, exc):  # noqa: ARG001
+    span = trace.get_current_span()
+    span.record_exception(exc)
+    span.set_status(trace.StatusCode.ERROR, str(exc))
+    return await http_exception_handler(exc)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_wrapper(request, exc):  # noqa: ARG001
+    span = trace.get_current_span()
+    span.record_exception(exc)
+    span.set_status(trace.StatusCode.ERROR, str(exc))
+    return await unhandled_exception_handler(exc)
+
+
+app.include_router(api_router, prefix="/api")
+app.include_router(admin_router, prefix="/api")
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8080)  # noqa: S104  # nosec B104

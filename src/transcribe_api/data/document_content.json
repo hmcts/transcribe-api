@@ -1,0 +1,242 @@
+{
+    "hearing_types": [
+        {
+            "id": "face_to_face",
+            "title": "Face to face",
+            "hearing_title": "The Hearing",
+            "hearing_description": "The hearing took place face to face. It was recorded using [the Cloud Video Platform / a Tascam handheld device]. That recording is the record of proceedings and should be consulted in the event of any dispute about what was said at the hearing."
+        },
+        {
+            "id": "cvp",
+            "title": "CVP",
+            "hearing_title": "The Hearing",
+            "hearing_description": "The hearing took place by video on the Cloud Video Platform. It was recorded. That recording is the record of proceedings and should be consulted in the event of any dispute about what was said at the hearing."
+        },
+        {
+            "id": "no_hearing_papers",
+            "title": "No hearing - A decision on papers",
+            "hearing_title": "Proceeding Without A Hearing",
+            "hearing_description": "When giving notice of appeal the appellant elected to have their appeal determined without an oral hearing. The Respondent \\[has not opposed that request / consented to that request on \\[DATE\\]\\]. I find that Rule 25(1)(a) of the Tribunal Procedure (First-tier Tribunal) (Immigration and Asylum Chamber) Rules 2014) is met in this case. I have considered the issues raised in this appeal against the guidance provided in Ghira (R 25 – AIP – Fairness) \\[2025\\] UKUT 00350 (IAC). I must still consider whether the appeal can be disposed of fairly and justly without a hearing, in accordance with the overriding objective and common law fairness. Having considered the evidence and information before me in this appeal I am satisfied that it is appropriate to proceed as the Appellant has requested, and that there can be a fair decision on the appeal following a consideration of the written evidence filed by the parties."
+        },
+        {
+            "id": "other",
+            "title": "Other",
+            "hearing_title": "The Hearing",
+            "hearing_description": "[DESCRIBE THE HEARING]"
+        }
+    ],
+    "legal_frameworks": [
+        {
+            "id": "revocation_protection_danger_section_72",
+            "title": "Revocation of Protection for Danger - Section 72",
+            "rank": 1,
+            "content": "The Immigration Rules provide as follows in relation to revocation of Refugee status on the basis that an individual is a danger to the UK:\n\n> 339AC. This paragraph applies where the Secretary of State is satisfied that: Article 33(2) of the Refugee Convention applies in that:\n>\n> 1. there are reasonable grounds for regarding the person as a danger to the security of the United Kingdom; or\n> 2. having been convicted by a final judgment of a particularly serious crime, the person constitutes a danger to the community of the United Kingdom (see section 72 of the Nationality Immigration and Asylum Act 2002).'\n\nWhere the date of conviction is before 28 June 2022, section 72 of the Nationality, Immigration and Asylum Act 2002 says that where a person has been sentenced to imprisonment for at least 2 years, there are rebuttable presumptions that they have committed a particularly serious crime and that they are a danger to the community. Such a person is excluded from protection from refoulement under the Refugee Convention unless they rebut either of these presumptions.\n\nWhere the date of conviction was on or after 28 June 2022, section 72 of the Nationality, Immigration and Asylum Act 2002 says that where a person has been sentenced to imprisonment for at least 12 months, they have committed a particularly serious crime and there is a rebuttable presumption that they are a danger to the community. Such a person is excluded from protection from refoulement under the Refugee Convention unless they rebut the presumption that they are a danger to the community.",
+            "issues": [
+                "[IF PRE-NABA] Has the appellant rebutted the presumptions that they have committed a particularly serious crime or that they are a danger to the community?",
+                "[OR IF POST-NABA] Has the appellant rebutted the presumption of being a danger to the community?"
+            ]
+        },
+        {
+            "id": "revocation_protection_cessation",
+            "title": "Revocation of Protection - Cessation",
+            "rank": 2,
+            "content": "The Immigration Rules provide as follows in relation to revocation of Refugee status on cessation grounds:\n\n> '339A. This paragraph applies when the Secretary of State is satisfied that one or more of the following applies:\n>\n> (i) they have voluntarily re-availed themselves of the protection of the country of nationality;\n>\n> (ii) having lost their nationality, they have voluntarily re-acquired it;\n>\n> (iii) they have acquired a new nationality, and enjoy the protection of the country of their new nationality;\n>\n> (iv) they have voluntarily re-established themselves in the country which they left or outside which they remained owing to a fear of persecution;\n>\n> (v) they can no longer, because the circumstances in connection with which they have been recognised as a refugee have ceased to exist, continue to refuse to avail themselves of the protection of the country of nationality; or\n>\n> (vi) being a stateless person with no nationality, they are able, because the circumstances in connection with which they have been recognised as a refugee have ceased to exist, to return to the country of former habitual residence\n>\n> In considering (v) and (vi), the Secretary of State shall have regard to whether the change of circumstances is of such a significant and non-temporary nature that the refugee's fear of persecution can no longer be regarded as well-founded.'",
+            "issues": [
+                "Has the respondent established the basis for the cessation decision asserted?"
+            ]
+        },
+        {
+            "id": "revocation_protection_misrepresentation",
+            "title": "Revocation of Protection for Misrepresentation",
+            "rank": 3,
+            "content": "The Immigration Rules provide as follows in relation to revocation of Refugee status on misrepresentation grounds:\n\n> '339AB. This paragraph applies where the Secretary of State is satisfied that the person's misrepresentation or omission of facts, including the use of false documents, were decisive for the grant of refugee status and the person does not otherwise qualify for refugee status under paragraph 334.'",
+            "issues": [
+                "Has the respondent established that the misrepresentation or omission of facts were decisive for the grant of refugee status and the person does not otherwise qualify for refugee status?"
+            ]
+        },
+        {
+            "id": "revocation_protection_exclusion",
+            "title": "Revocation of Protection for Bad Conduct Pre-Grant - Exclusion",
+            "rank": 4,
+            "content": "The Immigration Rules provide as follows in relation to revocation of refugee status on exclusions grounds:\n\n> '339AA. This paragraph applies where the Secretary of State is satisfied that the person should have been, or is, excluded from being a refugee in accordance with Article 1D and 1E of the 1951 Refugee Convention and Article 1F of the Refugee Convention, as defined in section 36 of the Nationality and Borders Act 2022.'\n\nArticles 1D-F provide as follows:\n\n> 'D. This Convention shall not apply to persons who are at present receiving from organs or agencies of the United Nations other than the United Nations High Commissioner for Refugees protection or assistance.\n>\n> When such protection or assistance has ceased for any reason, without the position of such persons being definitively settled in accordance with the relevant resolutions adopted by the General Assembly of the United Nations, these persons shall ipso facto be entitled to the benefits of this Convention.\n>\n> E. This Convention shall not apply to a person who is recognized by the competent authorities of the country in which he has taken residence as having the rights and obligations which are attached to the possession of the nationality of that country.\n>\n> F. The provisions of this Convention shall not apply to any person with respect to whom there are serious reasons for considering that:\n>\n> (a) he has committed a crime against peace, a war crime, or a crime against humanity, as defined in the international instruments drawn up to make provision in respect of such crimes;\n>\n> (b) he has committed a serious non-political crime outside the country of refuge prior to his admission to that country as a refugee;\n>\n> (c) he has been guilty of acts contrary to the purposes and principles of the United Nations.'",
+            "issues": [
+                "Has the respondent established that the appellant is excluded from the Refugee Convention?"
+            ]
+        },
+        {
+            "id": "asylum_pre_naba",
+            "title": "Asylum Pre-NABA",
+            "rank": 5,
+            "content": "To succeed in an appeal on asylum grounds, an appellant must show a well-founded fear of persecution for a Convention reason (race, religion, nationality, membership of a particular social group, political opinion). The burden of proof is upon the appellant. As per the decision in Karanakaran v SSHD \\[2000\\] 3 All ER 449 the single standard of proof is a reasonable degree of likelihood. I must determine whether it is reasonably likely that:\n\n1. Taking the claim at its highest, there is a Convention reason;\n2. Considering the credibility of the account, the appellant fears persecution for that Convention reason;\n3. The appellant would be persecuted for that Convention reason;\n4. There would not be sufficient protection available; and\n5. The appellant could not internally relocate.",
+            "issues": [
+                "Taking the claim at its highest, is there a Convention reason?",
+                "Considering the credibility of the account, is it reasonably likely that the appellant fears persecution for that Convention reason?",
+                "Is it reasonably likely that the appellant would be persecuted for that Convention reason?",
+                "Is it reasonably likely there would not be sufficient protection available?",
+                "Is it reasonably likely that the appellant could not internally relocate?"
+            ]
+        },
+        {
+            "id": "asylum_post_naba",
+            "title": "Asylum Post-NABA",
+            "rank": 6,
+            "content": "To succeed in an appeal on asylum grounds, the appellant must show a well-founded fear of persecution for a Convention reason (race, religion, nationality, membership of a particular social group, political opinion). The burden of proof rests on the appellant. As the asylum claim was made on or after 28 June 2022, pursuant to s32 of the Nationality and Borders Act 2022, in considering whether the appellant qualifies as a refugee, I must apply a two-stage test. As per the guidance from JCK (s.32 NABA 2022) Botswana \\[2024\\] UKUT 00100 I must first determine the following matters on the balance of probabilities:\n\n1. Taking the appellant's claim at its highest, is there a convention reason?\n2. Does the appellant fear persecution for that convention reason?\n\nIf so, I must go on to determine whether it is reasonably likely that:\n\n1. The appellant would be persecuted for that Convention reason;\n2. There would not be sufficient protection available; and\n3. The appellant could not internally relocate.",
+            "issues": [
+                "On the balance of probabilities, taking the appellant's claim at its highest, is there a Convention reason?",
+                "On the balance of probabilities does the appellant fear persecution for that Convention reason?",
+                "Is it reasonably likely that the Appellant would be persecuted for that Convention reason?",
+                "Is it reasonably likely there would not be sufficient protection available?",
+                "Is it reasonably likely that the Appellant could not internally relocate?"
+            ]
+        },
+        {
+            "id": "humanitarian_protection",
+            "title": "Humanitarian Protection",
+            "rank": 7,
+            "content": "To succeed on an appeal on humanitarian protection grounds the Appellant must not be a refugee; they must show substantial grounds for believing that they would face a real risk of suffering serious harm in their country of origin. The burden of proof rests on the Appellant.",
+            "issues": [
+                "Does the Appellant face a real risk of suffering serious harm in their country of return?"
+            ]
+        },
+        {
+            "id": "article_8_non_deportation",
+            "title": "Article 8 Non-deportation",
+            "rank": 8,
+            "content": "The relevant provisions of the Immigration Rules in this appeal are: \\[Insert relevant paragraphs, usually no need to cite the full provisions unless they are in dispute\\]\n\nIn so far as they rely on article 8 outside the Rules it is for the appellant to show that article 8(1) of the ECHR is engaged and if so, it is for the respondent to show that the decision was in accordance with the law, made in pursuance of a legitimate aim and that it was proportionate to the legitimate aim. The standard of proof is the balance of probabilities. Sections 117A to 117D of the 2002 Act are relevant to any assessment under article 8 of the ECHR outside the Rules.",
+            "issues": [
+                "Partner - Leave to Remain: Does the appellant have a genuine and subsisting relationship with a partner who is in the UK and is a British Citizen, settled or has refugee leave, humanitarian protection or limited leave under Appendix EU.",
+                "If so, would they face very significant difficulties in continuing their family life outside the UK that could not be overcome or would entail very serious hardship for the Appellant or his/her partner?",
+                "Child: Does the appellant have a genuine and subsisting parental relationship with a qualifying child?",
+                "Would it be reasonable for the child to leave the UK?",
+                "Private Life: Does the appellant face very significant obstacles to integration in the country of return?",
+                "All cases: Would the appellant's removal would give rise to unjustifiably harsh consequences such that it is disproportionate and therefore unlawful under section 6 of the Human Rights Act 1998?"
+            ]
+        },
+        {
+            "id": "eea_deportation",
+            "title": "EEA Deportation",
+            "rank": 9,
+            "content": "As relevant and preserved, regulation 23 of the Immigration (European Economic Area) Regulations 2016 (the \"EEA Regulations\") states:\n\n> (6) Subject to paragraphs (7) and (8), an EEA national who has entered the United Kingdom or the family member of such a national who has entered the United Kingdom may be removed if—\n>\n> (a) that person does not have or ceases to have a right to reside under these Regulations;\n>\n> (b) the Secretary of State has decided that the person's removal is justified on grounds of public policy, public security or public health in accordance with regulation 27; or\n>\n> (c) the Secretary of State has decided that the person's removal is justified on grounds of misuse of rights under regulation 26(3).\n>\n> (7) A person must not be removed under paragraph (6)—\n>\n> (a) as the automatic consequence of having recourse to the social assistance system of the United Kingdom; or\n>\n> (b) if that person has leave to remain in the United Kingdom under the 1971 Act unless that person's removal is justified on the grounds of public policy, public security or public health in accordance with regulation 27.\n>\n> (8) A decision under paragraph (6)(b) must state that upon execution of any deportation order arising from that decision, the person against whom the order was made is prohibited from entering the United Kingdom—\n>\n> (a) until the order is revoked; or\n>\n> (b) for the period specified in the order.\n>\n> (9) A decision taken under paragraph (6)(b) or (c) has the effect of terminating any right to reside otherwise enjoyed by the individual concerned.\n\nRegulation 27 of the EEA Regulations states:\n\n> (1) In this regulation, a \"relevant decision\" means an EEA decision taken on the grounds of public policy, public security or public health.\n>\n> (2) A relevant decision may not be taken to serve economic ends.\n>\n> (3) A relevant decision may not be taken in respect of a person with a right of permanent residence under regulation 15 except on serious grounds of public policy and public security.\n>\n> (4) A relevant decision may not be taken except on imperative grounds of public security in respect of an EEA national who—\n>\n> (a) has a right of permanent residence under regulation 15 and who has resided in the United Kingdom for a continuous period of at least ten years prior to the relevant decision; or\n>\n> (b) is under the age of 18, unless the relevant decision is in the best interests of the person concerned, as provided for in the Convention on the Rights of the Child adopted by the General Assembly of the United Nations on 20th November 1989.\n>\n> (5) The public policy and public security requirements of the United Kingdom include restricting rights otherwise conferred by these Regulations in order to protect the fundamental interests of society, and where a relevant decision is taken on grounds of public policy or public security it must also be taken in accordance with the following principles—\n>\n> (a) the decision must comply with the principle of proportionality;\n>\n> (b) the decision must be based exclusively on the personal conduct of the person concerned;\n>\n> (c) the personal conduct of the person must represent a genuine, present and sufficiently serious threat affecting one of the fundamental interests of society, taking into account past conduct of the person and that the threat does not need to be imminent;\n>\n> (d) matters isolated from the particulars of the case or which relate to considerations of general prevention do not justify the decision;\n>\n> (e) a person's previous criminal convictions do not in themselves justify the decision;\n>\n> (f) the decision may be taken on preventative grounds, even in the absence of a previous criminal conviction, provided the grounds are specific to the person.\n>\n> (6) Before taking a relevant decision on the grounds of public policy and public security in relation to a person (\"P\") who is resident in the United Kingdom, the decision maker must take account of considerations such as the age, state of health, family and economic situation of P, P's length of residence in the United Kingdom, P's social and cultural integration into the United Kingdom and the extent of P's links with P's country of origin.\n>\n> (7) In the case of a relevant decision taken on grounds of public health—\n>\n> (a) a disease that does not have epidemic potential as defined by the relevant instruments of the World Health Organisation or is not a disease listed in Schedule 1 to the Health Protection (Notification) Regulations 2010; or\n>\n> (b) if the person concerned is in the United Kingdom, any disease occurring after the three month period beginning on the date on which the person arrived in the United Kingdom,\n>\n> does not constitute grounds for the decision.\n>\n> (8) A court or tribunal considering whether the requirements of this regulation are met must (in particular) have regard to the considerations contained in Schedule 1 (considerations of public policy, public security and the fundamental interests of society etc.).\n\nSchedule 1 of the EEA Regulations states as relevant:\n\n> **Considerations of public policy and public security**\n>\n> 1\\. The EU Treaties do not impose a uniform scale of public policy or public security values: member States enjoy considerable discretion, acting within the parameters set by the EU Treaties, applied where relevant by the EEA agreement, to define their own standards of public policy and public security, for purposes tailored to their individual contexts, from time to time.\n>\n> **Application of paragraph 1 to the United Kingdom**\n>\n> 2\\. An EEA national or the family member of an EEA national having extensive familial and societal links with persons of the same nationality or language does not amount to integration in the United Kingdom; a significant degree of wider cultural and societal integration must be present before a person may be regarded as integrated in the United Kingdom.\n>\n> 3\\. Where an EEA national or the family member of an EEA national has received a custodial sentence, or is a persistent offender, the longer the sentence, or the more numerous the convictions, the greater the likelihood that the individual's continued presence in the United Kingdom represents a genuine, present and sufficiently serious threat affecting of the fundamental interests of society.\n>\n> 4\\. Little weight is to be attached to the integration of an EEA national or the family member of an EEA national within the United Kingdom if the alleged integrating links were formed at or around the same time as—\n>\n> (a) the commission of a criminal offence;\n>\n> (b) an act otherwise affecting the fundamental interests of society;\n>\n> (c) the EEA national or family member of an EEA national was in custody.\n>\n> 5\\. The removal from the United Kingdom of an EEA national or the family member of an EEA national who is able to provide substantive evidence of not demonstrating a threat (for example, through demonstrating that the EEA national or the family member of an EEA national has successfully reformed or rehabilitated) is less likely to be proportionate.\n>\n> ...\n>\n> **The fundamental interests of society**\n>\n> 7\\. For the purposes of these Regulations, the fundamental interests of society in the United Kingdom include—\n>\n> (a) preventing unlawful immigration and abuse of the immigration laws, and maintaining the integrity and effectiveness of the immigration control system (including under these Regulations) and of the Common Travel Area;\n>\n> (b) maintaining public order;\n>\n> (c) preventing social harm;\n>\n> (d) preventing the evasion of taxes and duties;\n>\n> (e) protecting public services;\n>\n> (f) excluding or removing an EEA national or family member of an EEA national with a conviction (including where the conduct of that person is likely to cause, or has in fact caused, public offence) and maintaining public confidence in the ability of the relevant authorities to take such action;\n>\n> (g) tackling offences likely to cause harm to society where an immediate or direct victim may be difficult to identify but where there is wider societal harm (such as offences related to the misuse of drugs or crime with a cross-border dimension as mentioned in Article 83(1) of the Treaty on the Functioning of the European Union);\n>\n> (h) combating the effects of persistent offending (particularly in relation to offences, which if taken in isolation, may otherwise be unlikely to meet the requirements of regulation 27);\n>\n> (i) protecting the rights and freedoms of others, particularly from exploitation and trafficking;\n>\n> (j) protecting the public;\n>\n> (k) acting in the best interests of a child (including where doing so entails refusing a child admission to the United Kingdom, or otherwise taking an EEA decision against a child);\n>\n> (l) countering terrorism and extremism and protecting shared values.\n\nThe Respondent seeks to exclude the Appellant under regulation 23(6)(b).\n\nRegulation 27 implements articles 27 to 29 of Directive 2004/38/EC (the \"Directive\"). The order in which the provisions are set out is different in the EEA Regulations and the Directive. In particular, the substance of regulation 27(3) and (4) appear in Article 28(2) and (3) under the heading \"protection against expulsion\". The substance of regulation 27(5) appears in article 27. The substance of regulation 27(6) appears in article 28(1). The provisions in the Directive and EEA Regulations are not materially different, but I mention the order they appear in because it assists understanding of how the order in which the issues must be considered. Regulations 27(3) and (4) set the level of protection of an individual depending on length of residence. Regulation 27(5) sets out how to assess whether that threshold is met. Regulation 27(6) sets out the necessity of considering the subjective circumstances of the individual facing expulsion before reaching a final decision on whether to expel. Regulation 27(8) requires me to have regard to the considerations in Schedule 1.",
+            "issues": [
+                "What level of protection does the Appellant have from expulsion - i.e. are grounds of public policy or public security, serious grounds of public policy or public security or imperative grounds of public security required?",
+                "Are there such grounds applying the principles in regulation 27(5) of the EEA Regulations?",
+                "If so, is the decision proportionate taking account of the considerations in regulations 27(6) of the EEA Regulations?"
+            ]
+        },
+        {
+            "id": "article_8_deportation",
+            "title": "Article 8 Deportation",
+            "rank": 10,
+            "content": "Section 117C of the Nationality, Immigration and Asylum Act 2002 states:\n\n> (1) The deportation of foreign criminals is in the public interest.\n>\n> (2) The more serious the offence committed by a foreign criminal, the greater is the public interest in deportation of the criminal.\n>\n> (3) In the case of a foreign criminal (\"C\") who has not been sentenced to a period of imprisonment of four years or more, the public interest requires C's deportation unless Exception 1 or Exception 2 applies.\n>\n> (4) Exception 1 applies where—\n>\n> (a) C has been lawfully resident in the United Kingdom for most of C's life,\n>\n> (b) C is socially and culturally integrated in the United Kingdom, and\n>\n> (c) there would be very significant obstacles to C's integration into the country to which C is proposed to be deported.\n>\n> (5) Exception 2 applies where C has a genuine and subsisting relationship with a qualifying partner, or a genuine and subsisting parental relationship with a qualifying child, and the effect of C's deportation on the partner or child would be unduly harsh.\n>\n> (6) In the case of a foreign criminal who has been sentenced to a period of imprisonment of at least four years, the public interest requires deportation unless there are very compelling circumstances, over and above those described in Exceptions 1 and 2.\n>\n> (7) The considerations in subsections (1) to (6) are to be taken into account where a court or tribunal is considering a decision to deport a foreign criminal only to the extent that the reason for the decision was the offence or offences for which the criminal has been convicted.\n\nParagraphs 46 to 50 of HA (Iraq) v Secretary of State for the Home Department [2022] UKSC 22 explained very compelling circumstances. It is possible for the Appellant to succeed despite not satisfying Exceptions 1 or 2, or to succeed in a very strong claim that does satisfy Exception 1 or 2. The relevant factors to consider are:\n\n- the nature and seriousness of the offence committed by the applicant;\n- the length of the applicant's stay in the country from which he or she is to be expelled;\n- the time elapsed since the offence was committed and the applicant's conduct during that period;\n- the nationalities of the various persons concerned;\n- the applicant's family situation, such as the length of the marriage, and other factors expressing the effectiveness of a couple's family life;\n- whether the spouse knew about the offence at the time when he or she entered into a family relationship;\n- whether there are children of the marriage, and if so, their age; and\n- the seriousness of the difficulties which the spouse is likely to encounter in the country to which the applicant is to be expelled …\n- the best interests and well-being of the children, in particular the seriousness of the difficulties which any children of the applicant are likely to encounter in the country to which the applicant is to be expelled; and\n- the solidity of social, cultural and family ties with the host country and with the country of destination.\n\nSeriousness of the offence is assessed by reference to the sentence imposed. If there is information showing the sentence was changed for reasons unrelated to seriousness, for example prior offences, personal mitigation or a guilty plea, these should be discounted from the level of sentence when assessing seriousness in the context of section 117C.",
+            "issues": [
+                "Has the appellant lived lawfully in the UK for more than half his life?",
+                "Is the appellant socially and culturally integrated?",
+                "Does the appellant face very significant obstacles to integration in his country of return?",
+                "Does the appellant have a genuine and subsisting relationship with a qualifying partner or qualifying child?",
+                "Would it be unduly harsh on the partner / child / children if the appellant were deported?",
+                "Are there very compelling circumstances so that the public interest in deportation is outweighed by the level of interference with the appellant's private and family life?"
+            ]
+        },
+        {
+            "id": "article_3_deliberate_harm",
+            "title": "Article 3 - Deliberate Harm",
+            "rank": 11,
+            "content": "For the appellant to succeed on Article 3 ECHR grounds, the appellant has the burden to prove to the lower standard a real risk of torture, inhuman and/or degrading treatment or punishment (\"the treatment\"). Article 3 is a non-derogable right. The treatment complained of must reach a minimum level of severity, which is a relative threshold and depends on all the circumstances of the case, such as the nature and context of the treatment, the manner and method of execution, duration, physical or mental effects and the appellant's sex, age and state of health. Article 3 includes both positive and negative obligations on the state to refrain from the treatment and/or to take measures to effectively protect people from such treatment. [NOTE THERE IS GUIDANCE IN CASE LAW FOR SPECIFIC SITUATIONS AND COUNTRIES. CONSULT THIS WHEN SETTING OUT LEGAL FRAMEWORK.]",
+            "issues": [
+                "Is the appellant at real risk of torture, inhuman and/or degrading treatment or punishment?"
+            ]
+        },
+        {
+            "id": "article_3_medical",
+            "title": "Article 3 - Medical",
+            "rank": 12,
+            "content": "The question is whether the refusal breaches the appellant's Article 3 ECHR right not to be \"subjected to torture or to inhuman or degrading treatment or punishment\". The appellant must establish that they are a seriously ill person and adduce evidence capable of demonstrating that substantial grounds have been shown for believing that as a seriously ill person they would face a real risk, on account of the absence of appropriate treatment or the lack of access to such treatment, of being exposed to a serious, rapid and irreversible decline in their state of health resulting in intense suffering, or to a significant reduction in life expectancy.",
+            "issues": [
+                "Is the Appellant 'seriously ill' and requiring treatment, which he/she is currently receiving?",
+                "If so, is the evidence capable of demonstrating that substantial grounds have been shown for believing that the Appellant would face a real risk of either an absence of appropriate treatment or an inability to access appropriate treatment in the receiving country?",
+                "If so, without appropriate treatment would the Appellant be exposed to a significant reduction in life expectancy or a serious rapid and irreversible decline in their state of health resulting in intense suffering?",
+                "If so has the Respondent discharged their residual obligations by presenting adequate assurances from the receiving state as to the care that the receiving state will have available and accessible to the appellant; and/or preparing the respondent's own package of measures as a means for the Appellant to overcome accessibility problems?"
+            ]
+        },
+        {
+            "id": "eu_settlement_scheme",
+            "title": "EU Settlement Scheme",
+            "rank": 13,
+            "content": "The grounds of appeal open to the appellant are that the respondent's decision either does not comply with the Residence Scheme Immigration Rules or does not comply with the Withdrawal Agreement between the UK and the EU. The Residence Scheme Immigration Rules are in Appendix EU and Appendix EU (Family Permit) of the Immigration Rules. The parties say the following provisions are relevant to the issues in dispute:\n\n\\[QUOTE PROVISIONS FROM WITHDRAWAL AGREEMENT OR APPENDIX EU OR APPENDIX EU (FAMILY PERMIT)\\]",
+            "issues": [
+                "Does the appellant qualify for leave to remain or settled status under Appendix EU or Appendix EU (Family Permit)?",
+                "Does the decision breach the appellant's rights under the Withdrawal Agreement?"
+            ]
+        },
+        {
+            "id": "deprivation_citizenship_fraud",
+            "title": "Deprivation of Citizenship - Fraud",
+            "rank": 14,
+            "content": "First, in cases where it is disputed, the Tribunal is required to find as a fact whether there has been fraud, false representation or concealment of a material fact, which is the statutory precondition for the making of a deprivation order under s40(3) of the British Nationality Act 1981 ('the precedent fact issue').\n\nSecond, if the statutory precondition is met by proof of the precedent facts, the Tribunal is required to review on public law grounds whether the citizenship was obtained by the impermissible means ('the causation issue').\n\nThird, the Tribunal is required to review on public law grounds the Secretary of State's exercise of her discretion to make a deprivation order ('the discretion issue').\n\nFourth, and only if the decision to deprive is identified as a lawful one, the Tribunal must consider whether the Secretary of State has acted in breach of other relevant legal obligations, including section 6 Human Rights Act 1998. The Tribunal is required to resolve that question for itself whilst giving due weight to the findings, evaluations and policies of the Secretary of State. This Article 8 assessment may include evidence that was not before the Secretary of State, and which post-dated the decision under appeal. However, Tribunal may not revisit as part of this Article 8 assessment the conclusions reached previously upon either the lawfulness of the Secretary of State's conclusion that the condition precedent existed, or, the Secretary of State's exercise of her discretion.",
+            "issues": [
+                "Has there been fraud, false representation or concealment of a material fact?",
+                "Was it open to the Respondent to conclude that citizenship was obtained by impermissible means?",
+                "Was it open to the Respondent to deprive the Appellant of citizenship?",
+                "Is deprivation of citizenship a breach of the Appellant's human rights?"
+            ]
+        },
+        {
+            "id": "deprivation_citizenship_conducive",
+            "title": "Deprivation of Citizenship - Conducive",
+            "rank": 15,
+            "content": "First, the Tribunal is obliged to review on a public law basis the Secretary of State's decision that the condition precedent to section 40(2) of the British Nationality Act 1981 was satisfied. It is possible for an appeal to be based on evidence which was not before Secretary of State at the time that when the deprivation decision was taken, and there is nothing in the statutory provisions which restricts the admissible evidence to matters which arose before then. As the Secretary of State may have taken the decision without giving the Appellant an opportunity to make representations evidence relating to matters post-dating the decision may have a bearing on whether the deprivation of citizenship remains appropriate.\n\nSecond, the Tribunal must review on a public law basis the Secretary of State's decision to exercise his discretion to deprive the Appellant of British citizenship.\n\nThird, and only if the decision to deprive is identified as a lawful one, the Tribunal must identify the reasonably foreseeable consequences for the Appellant of that lawful deprivation against the relevant public interest, in order to ascertain whether or not the decision is disproportionate, and thus unlawful under section 6 of the Human Rights Act 1998. This Article 8 assessment may include evidence that was not before the Secretary of State, and which post-dated the decision under appeal. However, the Tribunal may not revisit as part of this Article 8 assessment the conclusions reached previously upon either the lawfulness of the SSHD's conclusion that the condition precedent existed, or the Secretary of State's exercise of her discretion.",
+            "issues": [
+                "Is it open to the Respondent to conclude that deprivation of citizenship is conducive to the public good?",
+                "Was it open to the Respondent to deprive the Appellant of citizenship?",
+                "Is deprivation of citizenship a breach of the Appellant's human rights?"
+            ]
+        },
+        {
+            "id": "credibility",
+            "title": "Credibility",
+            "rank": 16,
+            "content": "My approach to assessing credibility comes from KB & AH (credibility-structured approach) Pakistan [2017] UKUT 491 (IAC) where the Upper Tribunal commended consideration of sufficiency of detail, internal consistency, external consistency and plausibility. I consider any documents along with all the evidence in the round. I am also conscious that just because a person has lied about one thing does not mean he has lied about another.\n\nSection 8 Asylum and Immigration (Treatment of Claimants etc) Act 2004 means that behaviour designed or likely to conceal information, mislead, obstruct or delay consideration of a claim, and claims made after a negative decision has been made or after there was an opportunity to make a claim in a safe country are damaging to credibility.",
+            "issues": []
+        },
+        {
+            "id": "devaseelan",
+            "title": "Devaseelan",
+            "rank": 17,
+            "content": "The then Immigration Appeal Tribunal in Devaseelan (Second Appeals - ECHR - Extra-Territorial Effect) Sri Lanka * [2002] UKIAT 00702 gave guidance on consideration of facts which have been previously looked at by the Tribunal. Its mode of analysis was neatly summarised by the Court of Appeal in Secretary of State for the Home Department v BK (Afghanistan) [2019] EWCA Civ 1358 at paragraph 32 as follows:\n\n1. The first adjudicator's determination should always be the starting-point. It is the authoritative assessment of the appellant's status at the time it was made. In principle issues such as whether the appellant was properly represented, or whether he gave evidence, are irrelevant to this.\n2. Facts happening since the first adjudicator's determination can always be taken into account by the second adjudicator.\n3. Facts happening before the first adjudicator's determination but having no relevance to the issues before him can always be taken into account by the second adjudicator.\n4. Facts personal to the appellant that were not brought to the attention of the first adjudicator, although they were relevant to the issues before him, should be treated by the second adjudicator with the greatest circumspection.\n5. Evidence of other facts, for example country evidence, may not suffer from the same concerns as to credibility, but should be treated with caution.\n6. If before the second adjudicator the appellant relies on facts that are not materially different from those put to the first adjudicator, the second adjudicator should regard the issues as settled by the first adjudicator's determination and make his findings in line with that determination rather than allowing the matter to be re-litigated.\n7. The force of the reasoning underlying guidelines (4) and (6) is greatly reduced if there is some very good reason why the appellant's failure to adduce relevant evidence before the first adjudicator should not be, as it were, held against him. Such reasons will be rare.\n8. The foregoing does not cover every possibility. By covering the major categories into which second appeals fall, the guidance is intended to indicate the principles for dealing with such appeals. It will be for the second adjudicator to decide which of them is or are appropriate in any given case.\n\nIn BK Afghanistan at paragraph 37 the Court of Appeal further emphasised the importance of not allowing the guidance to place unacceptable restrictions on the second adjudicator's ability to determine the appeal in front of him.",
+            "issues": [
+                "Are there good reasons to depart from the previous findings of the Tribunal?"
+            ]
+        }
+    ],
+    "anonymity": {
+        "statuses": [
+            {
+                "id": "granted",
+                "title": "Anonymity",
+                "content": "In making this decision I have considered that justice being administered openly and in public is a fundamental tenet of the justice system but it may be qualified by the interests of the parties and family members. I have decided to make an anonymity direction because [REASONS].",
+                "identifier": "Yes",
+                "header": "(ANONYMITY ORDER MADE)",
+                "order_header": "ANONYMITY ORDER",
+                "order_text": "Unless and until the Tribunal, the Upper Tribunal, or, a Court orders otherwise, pursuant To rule 13(1)(b) of the Tribunal Procedure (First-tier Tribunal) (Immigration and Asylum Chamber) Rules 2014, the appellant [and/or any member of his family, expert, witness or other person the Tribunal considers should not be identified], is granted anonymity. No-one shall publish or reveal either directly or indirectly any information, including their names or their addresses, that is likely to lead members of the public to identify them. Failure to comply with this order could amount to a contempt of court."
+            },
+            {
+                "id": "sought_but_refused",
+                "title": "No Anonymity",
+                "content": "In making this decision I have considered that justice being administered openly and in public is a fundamental tenet of the justice system but it may be qualified by the interests of the parties and family members. I have decided not to make an anonymity direction because [REASONS].",
+                "identifier": "One was sought but refused",
+                "header": "[DELETE]",
+                "order_header": "[DELETE]",
+                "order_text": "[DELETE]"
+            },
+            {
+                "id": "not_sought",
+                "title": "[DELETE]",
+                "content": "[DELETE]",
+                "identifier": "No",
+                "header": "[DELETE]",
+                "order_header": "[DELETE]",
+                "order_text": "[DELETE]"
+            }
+        ]
+    }
+}

@@ -1,0 +1,24 @@
+python:
+  applicationPort: 8000
+  image: 'hmctsprod.azurecr.io/transcribe/api:latest'
+  ingressHost: transcribe-api-{{ .Values.global.environment }}.service.core-compute-{{ .Values.global.environment }}.internal
+  environment:
+    # non-secret config only; secrets arrive via keyVaults below
+    ENVIRONMENT: '{{ .Values.global.environment }}'
+  keyVaults:
+    transcribe:
+      secrets:
+        - name: AppInsightsConnectionString
+          alias: APPLICATIONINSIGHTS_CONNECTION_STRING
+        - name: entra-client-id
+          alias: ENTRA_CLIENT_ID
+        - name: entra-client-secret
+          alias: ENTRA_CLIENT_SECRET
+        - name: entra-tenant-id
+          alias: ENTRA_TENANT_ID
+        - name: azure-storage-account-name
+          alias: AZURE_STORAGE_ACCOUNT_NAME
+        - name: azure-speech-endpoint
+          alias: AZURE_SPEECH_ENDPOINT
+  postgresql:
+    enabled: false   # see architecture Q6: sub-chart vs component Terraform
