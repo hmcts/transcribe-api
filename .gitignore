@@ -10,3 +10,7 @@ local-audio-storage/
 # Helm dependency artefacts — resolved by the pipeline at deploy time
 charts/**/charts/
 charts/**/Chart.lock
+
+# Terraform working directories
+**/.terraform/
+**/.terraform.lock.hcl
