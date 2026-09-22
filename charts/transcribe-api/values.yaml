@@ -40,8 +40,12 @@ python:
           alias: AZURE_AD_CLIENT_SECRET
         - name: azure-storage-account-name
           alias: AZURE_STORAGE_ACCOUNT_NAME
-        - name: azure-speech-key
-          alias: AZURE_SPEECH_KEY
+        # Speech authenticates with Entra, not an API key: the account is
+        # built with local_auth_enabled = false so no key exists. Setting
+        # AZURE_SPEECH_RESOURCE_ID selects the Managed Identity path in
+        # routes_dictation.py, which mints an aad#<resourceId>#<token>.
+        - name: azure-speech-resource-id
+          alias: AZURE_SPEECH_RESOURCE_ID
         - name: azure-speech-endpoint
           alias: AZURE_SPEECH_ENDPOINT
         - name: azure-openai-api-key
