@@ -6,7 +6,37 @@ def type = "python"
 def product = "transcribe"
 def component = "api"
 
+// Runtime secrets are mounted from Key Vault by the Helm chart (see
+// charts/transcribe-api/values.yaml). This block is the separate, build-time
+// mechanism: it pulls a secret into the Jenkins environment so it can be
+// substituted into values.{env}.template.yaml. Only App Insights needs it —
+// the OpenTelemetry distro in the HMCTS base image reads the connection string
+// from the environment, not from a mounted file.
+def secrets = [
+  'transcribe-${env}': [
+    secret('AppInsightsConnectionString', 'APP_INSIGHTS_CONNECTION_STRING'),
+  ]
+]
+
+static LinkedHashMap<String, Object> secret(String secretName, String envVar) {
+  [ $class: 'AzureKeyVaultSecret',
+    secretType: 'Secret',
+    name: secretName,
+    version: '',
+    envVariable: envVar
+  ]
+}
+
 // docs:
 // 1. https://github.com/hmcts/cnp-jenkins-library
 // 2. https://hmcts.github.io/ways-of-working/common-pipeline/common-pipeline.html#common-pipeline
-withPipeline(type, product, component) {}
+withPipeline(type, product, component) {
+  loadVaultSecrets(secrets)
+
+  // AKS only. There is no App Service deployment for this product.
+  disableLegacyDeployment()
+
+  // Keep the long-lived environment branches in step with master so a deploy
+  // to demo/ithc/perftest is never built from stale code.
+  syncBranchesWithMaster(['demo', 'ithc', 'perftest'])
+}

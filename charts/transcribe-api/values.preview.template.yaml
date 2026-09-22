@@ -1,5 +1,14 @@
 python:
   image: 'hmctsprod.azurecr.io/transcribe/api:pr-${CHANGE_ID}'
   ingressHost: transcribe-api-pr-${CHANGE_ID}.preview.platform.hmcts.net
+  environment:
+    APP_URL: https://transcribe-web-pr-${CHANGE_ID}.preview.platform.hmcts.net
+    APPLICATIONINSIGHTS_CONNECTION_STRING: ${APP_INSIGHTS_CONNECTION_STRING}
+  # Per-PR environments get a throwaway in-cluster Postgres rather than a real
+  # Azure server, so a preview costs nothing to create and nothing to destroy.
   postgresql:
     enabled: true
+    auth:
+      username: transcribe
+      password: transcribe
+      database: transcribe

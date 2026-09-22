@@ -1,3 +1,8 @@
 python:
   environment:
-    ENVIRONMENT: staging
+    APP_URL: https://transcribe-web-aat.service.core-compute-aat.internal
+    # The App Insights OpenTelemetry distro baked into the HMCTS distroless
+    # base image reads this from the ENVIRONMENT, so it cannot come through the
+    # mounted-file route. ${...} is substituted by the pipeline from the vault
+    # secret declared in Jenkinsfile_CNP.
+    APPLICATIONINSIGHTS_CONNECTION_STRING: ${APP_INSIGHTS_CONNECTION_STRING}

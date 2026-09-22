@@ -2,23 +2,61 @@ python:
   applicationPort: 8000
   image: 'hmctsprod.azurecr.io/transcribe/api:latest'
   ingressHost: transcribe-api-{{ .Values.global.environment }}.service.core-compute-{{ .Values.global.environment }}.internal
+
+  # The base chart defaults these to /health/liveness and /health/readiness,
+  # which this service does not serve — leaving them unset makes every pod fail
+  # its probes and the release never goes ready. Both upstream apps mounted
+  # their health endpoint under the /api prefix (see api/app.py).
+  readinessPath: /api/health
+  livenessPath: /api/health
+  startupPath: /api/health
+
   environment:
-    # non-secret config only; secrets arrive via keyVaults below
+    # Non-secret configuration only. Anything sensitive comes from Key Vault,
+    # either as a mounted file (keyVaults below) or, where an env var is
+    # genuinely required, substituted into values.{env}.template.yaml.
     ENVIRONMENT: '{{ .Values.global.environment }}'
+    AZURE_STORAGE_CONTAINER_NAME: audio
+    AZURE_STORAGE_TRANSCRIPTION_CONTAINER: transcriptions
+    # Background pollers run as their own workload (architecture 4.3), so the
+    # request-serving deployment must not start them.
+    RUN_WORKERS: 'false'
+
   keyVaults:
+    # Resolves to Key Vault "transcribe-{env}". The CSI driver mounts each
+    # secret as a FILE at /mnt/secrets/transcribe/<alias> — it does NOT set
+    # environment variables. Each alias is therefore spelled exactly as the
+    # pydantic-settings field name, and runtime/secret_files.py points
+    # pydantic-settings at that directory.
     transcribe:
       secrets:
-        - name: AppInsightsConnectionString
-          alias: APPLICATIONINSIGHTS_CONNECTION_STRING
+        - name: database-connection-string
+          alias: DATABASE_CONNECTION_STRING
         - name: entra-client-id
-          alias: ENTRA_CLIENT_ID
-        - name: entra-client-secret
-          alias: ENTRA_CLIENT_SECRET
+          alias: AZURE_AD_CLIENT_ID
         - name: entra-tenant-id
-          alias: ENTRA_TENANT_ID
+          alias: AZURE_AD_TENANT_ID
+        - name: entra-client-secret
+          alias: AZURE_AD_CLIENT_SECRET
         - name: azure-storage-account-name
           alias: AZURE_STORAGE_ACCOUNT_NAME
+        - name: azure-speech-key
+          alias: AZURE_SPEECH_KEY
         - name: azure-speech-endpoint
           alias: AZURE_SPEECH_ENDPOINT
+        - name: azure-openai-api-key
+          alias: AZURE_OPENAI_API_KEY
+        - name: azure-openai-endpoint
+          alias: AZURE_OPENAI_ENDPOINT
+        - name: gov-notify-api-key
+          alias: GOV_NOTIFY_API_KEY
+        - name: jwt-secret-key
+          alias: JWT_SECRET_KEY
+        - name: webhook-secret-encryption-key
+          alias: WEBHOOK_SECRET_ENCRYPTION_KEY
+
+  # Off by default: AAT uses the Azure Postgres Flexible Server built by
+  # infrastructure/. Preview turns this on so per-PR environments are
+  # self-contained (values.preview.template.yaml).
   postgresql:
-    enabled: false   # see architecture Q6: sub-chart vs component Terraform
+    enabled: false

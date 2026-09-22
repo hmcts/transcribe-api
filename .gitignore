@@ -6,3 +6,7 @@ __pycache__/
 uv.lock.bak
 local-audio-storage/
 .env
+
+# Helm dependency artefacts — resolved by the pipeline at deploy time
+charts/**/charts/
+charts/**/Chart.lock

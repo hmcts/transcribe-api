@@ -1,0 +1,21 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: "transcribe-api"
+  description: HMCTS Transcribe backend — recording and dictation transcription, document generation, judicial domain
+  annotations:
+    # Must match folder-name/job-name in Jenkins.
+    jenkins.io/job-full-name: cft:HMCTS_j_to_z/transcribe-api
+    github.com/project-slug: 'hmcts/transcribe-api'
+  tags:
+    - python
+    - fastapi
+  links:
+    - url: https://hmcts-reform.slack.com/app_redirect?channel=platops-help
+      title: platops-help on Slack
+      icon: chat
+spec:
+  type: service
+  system: transcribe
+  lifecycle: experimental
+  owner: group:default/ai-enablement

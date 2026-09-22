@@ -4,6 +4,8 @@ from functools import cache
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from transcribe_api.runtime.secret_files import secrets_dir
+
 
 class Settings(BaseSettings):
     API_PORT: int = 8080
@@ -74,13 +76,13 @@ class Settings(BaseSettings):
 class LocalSettings(Settings):
     """Settings class that loads from .env file for local development."""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", secrets_dir=secrets_dir())
 
 
 class ProductionSettings(Settings):
     """Settings class for production environments (no .env file)."""
 
-    model_config = SettingsConfigDict(extra="ignore")
+    model_config = SettingsConfigDict(extra="ignore", secrets_dir=secrets_dir())
 
 
 @cache
