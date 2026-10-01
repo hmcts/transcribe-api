@@ -10,8 +10,11 @@ provider "azurerm" {
 # component writes its connection string back into it rather than handing
 # credentials to the Helm chart, so the chart only ever names a secret.
 data "azurerm_key_vault" "transcribe" {
-  name                = "${var.product}-${var.env}"
-  resource_group_name = "${var.product}-${var.env}"
+  name = "${var.product}-${var.env}"
+  # The vault is named "<product>-<env>" but lives in the shared-infrastructure
+  # resource group, which is named differently. Using the vault's own name here
+  # looks right and resolves to a resource group that does not exist.
+  resource_group_name = "${var.product}-shared-infrastructure-${var.env}"
 }
 
 module "postgresql" {
