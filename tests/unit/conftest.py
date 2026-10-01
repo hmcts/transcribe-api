@@ -1,4 +1,8 @@
-"""Root conftest for the merged test suite.
+"""Conftest for the merged unit suite.
+
+Scoped to tests/unit deliberately: tests/smoke and tests/functional run against
+a deployed environment over HTTP and must not have a local settings environment
+pinned underneath them.
 
 Two problems arise from merging two suites into one process, and both are fixed
 here rather than in either suite.

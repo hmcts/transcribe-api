@@ -78,7 +78,11 @@ dependencies = [
     "click>=8.1.7",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
+# PEP 735 dependency group, NOT [project.optional-dependencies]. The common
+# pipeline builds with `uv sync --locked`, which installs default dependency
+# groups but no extras — as an extra, pytest was simply absent and the test
+# stage failed with "Failed to spawn: pytest".
 # Union of both upstream test suites' needs. Floors take the higher of the two.
 dev = [
     "pytest>=9.0.3",
@@ -110,4 +114,4 @@ pythonpath = ["src"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py312"
+target-version = "py313"

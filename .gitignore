@@ -14,3 +14,7 @@ charts/**/Chart.lock
 # Terraform working directories
 **/.terraform/
 **/.terraform.lock.hcl
+
+# Pipeline test output
+test-results/
+coverage.xml
