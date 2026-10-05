@@ -23,6 +23,8 @@ here rather than in either suite.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 # A complete, inert test environment. Values are fake by design; nothing here
@@ -53,6 +55,22 @@ TEST_ENV: dict[str, str] = {
     "DISABLE_FASTAPI_INSTRUMENTATION": "true",
     "RUN_WORKERS": "false",
 }
+
+
+# Pin the environment at IMPORT time as well as per test.
+#
+# The autouse fixture below runs before each test, which is too late for some
+# modules: several import code that calls get_settings() at module level, so
+# settings are built during COLLECTION, before any fixture runs. On a developer
+# machine that is masked by .env (LocalSettings reads it); on the CNP Jenkins
+# agent there is no .env, and collection failed with "7 validation errors for
+# LocalSettings" — exactly the seven required dictation fields.
+#
+# pytest imports a conftest.py before collecting the modules beside it, so
+# setting the variables here guarantees they exist for every collection-time
+# import. Real environment variables outrank env_file in pydantic-settings, so
+# this also keeps the suite independent of whatever a local .env contains.
+os.environ.update(TEST_ENV)
 
 
 def _clear_settings_caches() -> None:
