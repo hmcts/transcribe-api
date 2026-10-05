@@ -111,6 +111,14 @@ packages = ["src/transcribe_api"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src"]
+# The common pipeline runs `pytest tests/unit --cov=app --cov-report=xml`, with
+# --cov=app hard-coded in PythonBuilder because the reference app's package is
+# called `app`. Ours is transcribe_api, so on its own that measures nothing and
+# coverage.xml is never written — Sonar then reports no coverage at all.
+# --cov accumulates, so naming our package here makes coverage collect real
+# data alongside the pipeline's flag (it still warns that `app` was never
+# imported; that warning is harmless).
+addopts = "--cov=transcribe_api"
 
 [tool.ruff]
 line-length = 120
