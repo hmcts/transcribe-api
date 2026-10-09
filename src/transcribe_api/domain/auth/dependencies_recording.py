@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import logging
 
-from hmcts_azure_auth import build_current_user_dep
 from hmcts_azure_auth import get_allowlisted_user as _lib_get_allowlisted_user
 from hmcts_azure_auth.audit import AuditWriter
 from hmcts_azure_auth.roles import get_valid_roles
+
+from transcribe_api.domain.auth.token_auth import build_token_user_dep
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
@@ -83,10 +84,10 @@ def _resolve_user(azure_user_id: str, email: str, roles: list[str]) -> Authentic
     return AuthenticatedUser(db_user=user, app_roles=roles)
 
 
-# FastAPI dependency that resolves the current authenticated User.
-# Handles Easy Auth header parsing, JWT verification, identity cross-check,
-# and DB lookup/create — all via the library and the resolver above.
-get_current_user = build_current_user_dep(_resolve_user)
+# FastAPI dependency that resolves the current authenticated User from a
+# verified bearer token only — see domain/auth/token_auth.py for why this is not
+# the library's Easy Auth based dependency.
+get_current_user = build_token_user_dep(_resolve_user)
 
 
 def get_allowlisted_user(

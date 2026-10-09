@@ -1,17 +1,22 @@
-"""Locate Key Vault secrets mounted into the pod by the CNP Helm chart.
+"""Load Key Vault secrets mounted into the pod by the CNP Helm chart.
 
 The HMCTS `python` base chart's `keyVaults:` block does NOT create environment
 variables. It provisions a SecretProviderClass and mounts each secret as a FILE
-under `/mnt/secrets/<vault>/<alias>` via the Azure Key Vault CSI driver.
+at `/mnt/secrets/<vault>/<alias>` via the Azure Key Vault CSI driver. Each alias
+in charts/transcribe-api/values.yaml is spelled as the environment variable it
+stands for.
 
-pydantic-settings reads exactly that shape through `secrets_dir`, so each
-chart-side `alias` is simply the settings field name. Precedence is unchanged:
-real environment variables still win over files, which is what keeps local
-development and the test suite behaving as before.
+Everything that reads configuration here reads the ENVIRONMENT — our two
+pydantic-settings classes, and hmcts-fastapi-azure-auth's own AuthSettings,
+which builds the JWT verifier from AZURE_AD_TENANT_ID / AZURE_AD_CLIENT_ID. An
+earlier version pointed only our settings classes at this directory
+(pydantic's secrets_dir); the library would never have seen the tenant ID and
+every authenticated request would have failed. Loading the files into
+os.environ once, at package import, gives every consumer the same view.
 
-The directory is probed rather than hard-coded so that local runs, the test
-suite and the worker entrypoint — none of which have the mount — skip it
-instead of tripping pydantic-settings' "directory does not exist" warning.
+A variable already present in the environment is never overwritten, so an
+explicit env var (local runs, tests) still wins. The directory is probed, so
+local runs and the test suite, which have no mount, are unaffected.
 """
 
 from __future__ import annotations
@@ -23,7 +28,19 @@ from pathlib import Path
 DEFAULT_SECRETS_DIR = "/mnt/secrets/transcribe"
 
 
-def secrets_dir() -> str | None:
-    """Return the mounted secrets directory, or None when it is not present."""
-    candidate = os.environ.get("SECRETS_DIR", DEFAULT_SECRETS_DIR)
-    return candidate if Path(candidate).is_dir() else None
+def load_secret_files_into_environ(directory: str | None = None) -> list[str]:
+    """Copy each mounted secret file into os.environ. Returns the names loaded."""
+    root = Path(directory or os.environ.get("SECRETS_DIR", DEFAULT_SECRETS_DIR))
+    if not root.is_dir():
+        return []
+
+    loaded: list[str] = []
+    for entry in sorted(root.iterdir()):
+        # The CSI driver also creates ..data / ..timestamp bookkeeping entries.
+        if entry.name.startswith(".") or not entry.is_file():
+            continue
+        if entry.name in os.environ:
+            continue
+        os.environ[entry.name] = entry.read_text().strip()
+        loaded.append(entry.name)
+    return loaded

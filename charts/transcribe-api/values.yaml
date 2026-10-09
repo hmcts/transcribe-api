@@ -21,13 +21,23 @@ python:
     # Background pollers run as their own workload (architecture 4.3), so the
     # request-serving deployment must not start them.
     RUN_WORKERS: 'false'
+    # Callers are authenticated from a verified Entra ID bearer token only
+    # (domain/auth/token_auth.py). Pinned on explicitly rather than left to
+    # library defaults; the app also refuses an unverified token regardless.
+    JWT_ENABLE_VERIFICATION: 'true'
+    JWT_VERIFICATION_STRICT: 'true'
 
   keyVaults:
     # Resolves to Key Vault "transcribe-{env}". The CSI driver mounts each
     # secret as a FILE at /mnt/secrets/transcribe/<alias> — it does NOT set
-    # environment variables. Each alias is therefore spelled exactly as the
-    # pydantic-settings field name, and runtime/secret_files.py points
-    # pydantic-settings at that directory.
+    # environment variables. Each alias is spelled as the environment variable
+    # it stands for, and runtime/secret_files.py loads the files into the
+    # environment at package import, so every reader (our settings and the
+    # auth library's) sees them.
+    #
+    # Every secret listed here must exist in the vault or the CSI driver will
+    # not mount any of them and the pod will not start — so list only what the
+    # app reads.
     transcribe:
       secrets:
         - name: database-connection-string
@@ -36,8 +46,6 @@ python:
           alias: AZURE_AD_CLIENT_ID
         - name: entra-tenant-id
           alias: AZURE_AD_TENANT_ID
-        - name: entra-client-secret
-          alias: AZURE_AD_CLIENT_SECRET
         - name: azure-storage-account-name
           alias: AZURE_STORAGE_ACCOUNT_NAME
         # Speech authenticates with Entra, not an API key: the account is
@@ -54,8 +62,6 @@ python:
           alias: AZURE_OPENAI_ENDPOINT
         - name: gov-notify-api-key
           alias: GOV_NOTIFY_API_KEY
-        - name: jwt-secret-key
-          alias: JWT_SECRET_KEY
         - name: webhook-secret-encryption-key
           alias: WEBHOOK_SECRET_ENCRYPTION_KEY
 

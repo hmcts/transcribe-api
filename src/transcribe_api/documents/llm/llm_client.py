@@ -12,7 +12,6 @@ from litellm import acompletion
 from pydantic import BaseModel
 from pathlib import Path
 
-from pyprojroot import here
 
 from transcribe_api.runtime.settings_dictation import get_settings
 

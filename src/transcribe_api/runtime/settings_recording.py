@@ -6,7 +6,6 @@ from typing import Literal
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from transcribe_api.runtime.secret_files import secrets_dir
 
 
 class Settings(BaseSettings):
@@ -83,7 +82,7 @@ class Settings(BaseSettings):
     # Observability
     SENTRY_DSN: str | None = None
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore", secrets_dir=secrets_dir())
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @field_validator("BATCH_TRANSCRIPTION_THRESHOLD_HOURS")
     @classmethod
