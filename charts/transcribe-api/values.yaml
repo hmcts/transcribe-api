@@ -26,6 +26,11 @@ python:
     # library defaults; the app also refuses an unverified token regardless.
     JWT_ENABLE_VERIFICATION: 'true'
     JWT_VERIFICATION_STRICT: 'true'
+    # Tokens are issued by the MoJ tenant (JusticeUK) to the same app
+    # registrations courtstranscribe and batch-audio-transcription use. The
+    # IDs are not secret; the client ID (the expected audience) differs per
+    # environment and is set in values.<env>.template.yaml.
+    AZURE_AD_TENANT_ID: c6874728-71e6-41fe-a9e1-2e8c36776ad8
 
   keyVaults:
     # Resolves to Key Vault "transcribe-{env}". The CSI driver mounts each
@@ -42,10 +47,6 @@ python:
       secrets:
         - name: database-connection-string
           alias: DATABASE_CONNECTION_STRING
-        - name: entra-client-id
-          alias: AZURE_AD_CLIENT_ID
-        - name: entra-tenant-id
-          alias: AZURE_AD_TENANT_ID
         - name: azure-storage-account-name
           alias: AZURE_STORAGE_ACCOUNT_NAME
         # Speech authenticates with Entra, not an API key: the account is

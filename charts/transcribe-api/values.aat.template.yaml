@@ -1,6 +1,10 @@
 python:
   environment:
-    APP_URL: https://transcribe-web-aat.service.core-compute-aat.internal
+    # transcribe-web's public hostname (Front Door).
+    APP_URL: https://benchnotes.aat.platform.hmcts.net
+    # courtstranscribe's dev app registration: tokens transcribe-web obtains
+    # carry it as their audience.
+    AZURE_AD_CLIENT_ID: a6407440-40bc-48da-94d6-170febce9384
     # The App Insights OpenTelemetry distro baked into the HMCTS distroless
     # base image reads this from the ENVIRONMENT, so it cannot come through the
     # mounted-file route. ${...} is substituted by the pipeline from the vault
