@@ -1,8 +1,4 @@
-"""The CNP pipeline's startup checker calls GET <AKS_TEST_URL>/health — a fixed
-path in cnp-jenkins-library (vars/helmInstall.groovy) — before it runs any
-tests. It accepts any status as "reachable" but retries until it sees 200, so
-the app must answer at the root, not only under /api.
-"""
+"""The CNP pipeline's startup check polls GET /health at the root."""
 
 from fastapi.testclient import TestClient
 
