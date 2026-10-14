@@ -21,6 +21,16 @@ checks (get_allowlisted_user accepts our dependency via current_user_dep).
 One deliberate tightening: the library's verifier returns None, rather than
 raising, when verification is disabled or strict mode is off. Here None is
 always a 401. There is no path on which an unverified token authenticates.
+
+App access role
+---------------
+The Entra app registration is shared with courtstranscribe and
+batch-audio-transcription, so a token valid for it does not mean the caller
+should have this app. When AUTH_ACCESS_ROLE is set (e.g. BenchNotes.AAT), a
+caller without that app role is refused with 403 here, before any application
+user is resolved or created. The check is the library's own role check, so
+the 403 and the UNAUTHORISED_ACCESS_ATTEMPT log line match every other
+role-gated route. Unset or blank: not checked.
 """
 
 from __future__ import annotations
@@ -31,7 +41,8 @@ import os
 from collections.abc import Callable
 from typing import Annotated, Any
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Request
+from hmcts_azure_auth import get_allowlisted_user
 from hmcts_azure_auth.jwt import get_jwt_service
 from hmcts_azure_auth.models import AuthUser
 from hmcts_azure_auth.roles import get_valid_roles
@@ -52,11 +63,16 @@ def _is_local_dev() -> bool:
     return os.getenv("ENVIRONMENT", "production").lower() == "local"
 
 
+def _access_role() -> str:
+    return os.getenv("AUTH_ACCESS_ROLE", "").strip()
+
+
 def _unauthorised(detail: str) -> HTTPException:
     return HTTPException(status_code=401, detail=detail, headers=_UNAUTHORISED_HEADERS)
 
 
 async def get_token_auth_user(
+    request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> AuthUser:
     """Return the caller's identity, taken solely from a verified bearer token."""
@@ -87,12 +103,17 @@ async def get_token_auth_user(
     if not user_id:
         raise _unauthorised("Bearer token has no oid claim")
 
-    return AuthUser(
+    user = AuthUser(
         user_id=user_id,
         name=claims.get("name") or "",
         email=claims.get("email") or "",
         roles=claims.get("roles") or [],
     )
+
+    access_role = _access_role()
+    if access_role:
+        await get_allowlisted_user(required_roles_all=[access_role])(request, user)
+    return user
 
 
 def build_token_user_dep(user_resolver: Callable[[str, str, list[str]], Any]) -> Callable:
