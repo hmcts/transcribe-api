@@ -227,6 +227,13 @@ def create_app() -> FastAPI:
     app.include_router(dictation_admin_router, prefix="/api")
     app.include_router(recording_router)
 
+    # The CNP pipeline's startup checker polls GET <AKS_TEST_URL>/health, a path
+    # fixed in cnp-jenkins-library (vars/helmInstall.groovy), until it gets 200.
+    # Both upstream health routes live under /api, so answer here too.
+    @app.get("/health", include_in_schema=False)
+    async def root_health() -> dict[str, str]:
+        return {"status": "ok"}
+
     # slowapi rate limiting (recording service)
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)

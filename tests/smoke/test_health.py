@@ -26,6 +26,13 @@ def client():
         yield c
 
 
+def test_root_health(client: httpx.Client) -> None:
+    """The pipeline's startup checker polls /health at the root (api/app.py)."""
+    response = client.get("/health")
+    assert response.status_code == 200, f"{TEST_URL}/health returned {response.status_code}"
+    assert response.json()["status"] == "ok"
+
+
 def test_dictation_health(client: httpx.Client) -> None:
     """The dictation surface is mounted at /api (see api/app.py)."""
     response = client.get("/api/health")

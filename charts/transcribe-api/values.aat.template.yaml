@@ -2,6 +2,10 @@ python:
   # The image this build pushed; the pipeline substitutes IMAGE_NAME. Without
   # it the chart's default ':latest' tag is pulled, which is never published.
   image: ${IMAGE_NAME}
+  # The hostname the pipeline tests this release on: it registers
+  # <release>.aat.platform.hmcts.net in private DNS and polls /health there
+  # (SERVICE_FQDN). The long-running AAT release is Flux's, from values.yaml.
+  ingressHost: ${SERVICE_FQDN}
   environment:
     # transcribe-web's public hostname (Front Door).
     APP_URL: https://benchnotes.aat.platform.hmcts.net
