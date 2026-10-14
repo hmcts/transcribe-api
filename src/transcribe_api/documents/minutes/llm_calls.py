@@ -295,16 +295,18 @@ Please generate a structured summary of this conversation."""
     try:
         # Call the LLM to generate the summary
         response = await llm_completion(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            model=LLMModel.GPT_4O_MINI,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            model=LLMModel.AZURE_GPT_4O,
             temperature=0.3,
         )
     except Exception as e:
         sentry_sdk.capture_exception(e)
         raise HTTPException(status_code=500, detail=f"Failed to generate realtime summary: {e!s}") from e
     else:
-        summary = response.strip()
+        summary = response.choices[0].message.content.strip()
 
         langfuse_context.update_current_observation(
             input={

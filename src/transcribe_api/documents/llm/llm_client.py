@@ -6,6 +6,7 @@ from enum import StrEnum
 from tomllib import load
 from typing import Any
 
+import litellm
 from langfuse import Langfuse
 from langfuse.decorators import langfuse_context, observe
 from litellm import acompletion
@@ -28,9 +29,14 @@ with _config_path.open("rb") as f:
 
 llm_params = toml_data["llm_params"]
 
+# Azure OpenAI is Entra-only (no API key): without this litellm never falls
+# back to DefaultAzureCredential, i.e. the pod's workload identity.
+litellm.enable_azure_ad_token_refresh = True
+
 
 class LLMModel(StrEnum):
-    AZURE_GPT_4O = "azure/gpt-4o-2024-08-06"
+    # Deployment name in transcribe-shared-infrastructure/openai.tf.
+    AZURE_GPT_4O = "azure/gpt-4o"
     AZURE_GROK_3 = "azure/grok-3"
     VERTEX_GEMINI_25_PRO = "vertex_ai/gemini-2.5-pro"
     VERTEX_GEMINI_20_FLASH = "vertex_ai/gemini-2.0-flash"
