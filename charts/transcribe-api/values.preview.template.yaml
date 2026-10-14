@@ -1,5 +1,5 @@
 python:
-  image: 'hmctsprod.azurecr.io/transcribe/api:pr-${CHANGE_ID}'
+  image: ${IMAGE_NAME}
   ingressHost: transcribe-api-pr-${CHANGE_ID}.preview.platform.hmcts.net
   environment:
     APP_URL: https://transcribe-web-pr-${CHANGE_ID}.preview.platform.hmcts.net

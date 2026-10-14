@@ -1,4 +1,7 @@
 python:
+  # The image this build pushed; the pipeline substitutes IMAGE_NAME. Without
+  # it the chart's default ':latest' tag is pulled, which is never published.
+  image: ${IMAGE_NAME}
   environment:
     # transcribe-web's public hostname (Front Door).
     APP_URL: https://benchnotes.aat.platform.hmcts.net
