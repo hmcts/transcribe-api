@@ -184,33 +184,37 @@ def test_local_development_uses_the_mock_identity(client, monkeypatch):
     assert r.json()["user_id"] == token_auth.LOCAL_DEV_USER_ID
 
 
-ACCESS_ROLE = "BenchNotes.AAT"
+APP_ROLES = "Judge,LegalTextManager,SystemAdministrator,Normal"
 
 
-def test_access_role_set_and_missing_is_403(client, monkeypatch):
-    """The registration is shared with other apps; their users must not get in."""
-    monkeypatch.setenv("AUTH_ACCESS_ROLE", ACCESS_ROLE)
-    r = client.get("/whoami", headers={"Authorization": f"Bearer {_token(roles=['Judge'])}"})
+def test_access_roles_set_and_none_held_is_403(client, monkeypatch):
+    """With a dedicated registration, a caller must hold one of the app's roles."""
+    monkeypatch.setenv("AUTH_ACCESS_ROLES", APP_ROLES)
+    r = client.get("/whoami", headers={"Authorization": f"Bearer {_token(roles=[])}"})
     assert r.status_code == 403
-    assert ACCESS_ROLE in r.json()["detail"]
 
 
-def test_access_role_set_and_held_authenticates(client, monkeypatch):
-    monkeypatch.setenv("AUTH_ACCESS_ROLE", ACCESS_ROLE)
-    r = client.get("/whoami", headers={"Authorization": f"Bearer {_token(roles=['Judge', ACCESS_ROLE])}"})
+def test_access_roles_set_and_one_held_authenticates(client, monkeypatch):
+    monkeypatch.setenv("AUTH_ACCESS_ROLES", APP_ROLES)
+    r = client.get("/whoami", headers={"Authorization": f"Bearer {_token(roles=['LegalTextManager'])}"})
     assert r.status_code == 200
-    assert r.json()["roles"] == ["Judge", ACCESS_ROLE]
 
 
-def test_blank_access_role_is_not_checked(client, monkeypatch):
-    monkeypatch.setenv("AUTH_ACCESS_ROLE", " ")
+def test_access_roles_ignores_roles_outside_the_list(client, monkeypatch):
+    monkeypatch.setenv("AUTH_ACCESS_ROLES", "Judge, LegalTextManager")
+    r = client.get("/whoami", headers={"Authorization": f"Bearer {_token(roles=['Normal', 'SomethingElse'])}"})
+    assert r.status_code == 403
+
+
+def test_blank_access_roles_are_not_checked(client, monkeypatch):
+    monkeypatch.setenv("AUTH_ACCESS_ROLES", " , ")
     r = client.get("/whoami", headers={"Authorization": f"Bearer {_token(roles=[])}"})
     assert r.status_code == 200
 
 
-def test_user_without_access_role_is_never_resolved(client, monkeypatch):
+def test_user_without_an_access_role_is_never_resolved(client, monkeypatch):
     """No application user row is created for someone refused at the door."""
-    monkeypatch.setenv("AUTH_ACCESS_ROLE", ACCESS_ROLE)
+    monkeypatch.setenv("AUTH_ACCESS_ROLES", APP_ROLES)
     resolved: list[str] = []
 
     def resolver(azure_user_id: str, email: str, roles: list[str]):
@@ -221,6 +225,6 @@ def test_user_without_access_role_is_never_resolved(client, monkeypatch):
     async def me(user=Depends(token_auth.build_token_user_dep(resolver))):
         return user
 
-    r = client.get("/me", headers={"Authorization": f"Bearer {_token(roles=['Judge'])}"})
+    r = client.get("/me", headers={"Authorization": f"Bearer {_token(roles=[])}"})
     assert r.status_code == 403
     assert resolved == []
