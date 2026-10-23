@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, Index, Text, UniqueConstraint, text
+from sqlalchemy import Column, DateTime, Index, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -25,9 +25,10 @@ class BatchJobStatus(StrEnum):
 
 
 class BaseTable(SQLModel):
+    # The recording tables have always used timestamptz (User is not one of them).
     id: UUID = Field(default_factory=uuid4, primary_key=True)
-    created_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    updated_datetime: datetime | None = Field(default=None)
+    created_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
+    updated_datetime: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
 
 
 class WordInfo(SQLModel):
@@ -329,4 +330,4 @@ class SpeechBatchJob(BaseTable, table=True):
 
     # Webhook delivery guard — set atomically by the replica that wins the dispatch race.
     # NULL means no webhook has been dispatched yet for this job.
-    webhook_dispatched_at: datetime | None = Field(default=None)
+    webhook_dispatched_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))

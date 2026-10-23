@@ -3,7 +3,7 @@ from enum import StrEnum
 from typing import Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import CheckConstraint, Column, select
+from sqlalchemy import CheckConstraint, Column, DateTime, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import Field, Relationship, SQLModel
@@ -53,7 +53,8 @@ class TemplateMetadata(SQLModel):
 class MinuteVersion(BaseTable, table=True):
     html_content: str
     template: TemplateMetadata = Field(sa_column=Column(JSONB))
-    transcription_id: UUID = Field(foreign_key="transcription.id")
+    # index: dictation migration a8f2c9d5e1b3 (15-20s p95 latency fix); restored by 0002
+    transcription_id: UUID = Field(foreign_key="transcription.id", index=True)
     transcription: "Transcription" = Relationship(back_populates="minute_versions")
     trace_id: str | None = Field(default=None)
     star_rating: int | None = Field(default=None)
@@ -99,7 +100,8 @@ class Tag(BaseTable, table=True):
 
 
 class Transcription(BaseTable, table=True):
-    user_id: UUID = Field(default=None, foreign_key="user.id")
+    # index: dictation migration a8f2c9d5e1b3; restored by 0002
+    user_id: UUID = Field(default=None, foreign_key="user.id", index=True)
     user: User | None = Relationship(back_populates="transcriptions")
     title: str | None = Field(default=None)
     minute_versions: list["MinuteVersion"] = Relationship(back_populates="transcription")
@@ -122,11 +124,12 @@ class DocumentContent(SQLModel, table=True):
 
     id: int = Field(default=1, primary_key=True)
     content: dict = Field(sa_column=Column(JSONB, nullable=False))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
 
 
 class TranscriptionJob(BaseTable, table=True):
-    transcription_id: UUID = Field(foreign_key="transcription.id")
+    # index: dictation migration a8f2c9d5e1b3; restored by 0002
+    transcription_id: UUID = Field(foreign_key="transcription.id", index=True)
     transcription: "Transcription" = Relationship(back_populates="transcription_jobs")
     dialogue_entries: list[DialogueEntry] = Field(sa_column=Column(JSONB))
     error_message: str | None = Field(default=None)
@@ -146,7 +149,7 @@ class AuditLog(SQLModel, table=True):
     __tablename__ = "audit_log"
 
     id: UUID = Field(default_factory=uuid4, primary_key=True, nullable=False)
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True, sa_type=DateTime(timezone=True))
     event_type: str = Field(index=True)
     user_id: str = Field(index=True)
     email: str
@@ -161,6 +164,12 @@ class LiveTranscriptDraft(BaseTable, table=True):
     """One draft per user — upserted on every debounced save, deleted on submit/restore/discard."""
 
     __tablename__ = "live_transcript_draft"
+
+    # timestamptz, unlike the other dictation tables (as in the old schema).
+    created_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
+    updated_datetime: datetime | None = Field(
+        default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True)
+    )
 
     user_id: UUID = Field(foreign_key="user.id", unique=True)
     transcript: dict = Field(sa_column=Column(JSONB, nullable=False))

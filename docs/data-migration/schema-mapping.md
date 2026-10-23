@@ -23,6 +23,8 @@ Order of the courtstranscribe history: `de7d26bcb326` -> `d3ee506fc6d8` -> `ed7a
 
 The batch-audio-transcription history runs in order from `001` to `013`.
 
+Update: revision `0002` fixes the two regressions this document describes against `0001`. It restores `timestamp with time zone` on every column that had it in the old schemas, and adds back the three dictation foreign-key indexes. With the target at `0002`, copy the old `timestamptz` columns as they are, with no `AT TIME ZONE 'UTC'`. The rest of this document still describes `0001`.
+
 ## Summary of differences
 
 - Table names. The two old schemas share only one table name, `user`. The new schema is the union of both: 12 tables. `transcriptionjob` (dictation) and `transcription_job` (recording) are separate tables with different columns, and both still exist.

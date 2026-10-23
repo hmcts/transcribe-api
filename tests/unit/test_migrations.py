@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 
 import pytest
 from alembic.script import ScriptDirectory
@@ -34,21 +35,51 @@ EXPECTED_TABLES = {
 }
 
 
-def _offline_sql(monkeypatch) -> str:
+# Columns that were `timestamp with time zone` in the old schemas (see
+# docs/data-migration/schema-mapping.md). 0001 created them naive; 0002 restores
+# them. Every other timestamp column was naive in the old schemas and stays so.
+AWARE_TIMESTAMP_COLUMNS = {
+    "audit_log": ["timestamp"],
+    "caller": ["created_datetime", "updated_datetime"],
+    "correction_dataset_entry": ["created_datetime", "updated_datetime"],
+    "document_content": ["updated_at"],
+    "live_transcript_draft": ["created_datetime", "updated_datetime"],
+    "transcription_job": ["created_datetime", "updated_datetime", "webhook_dispatched_at"],
+}
+
+# Dictation migration a8f2c9d5e1b3 (fix for 15-20s p95 latency); 0001 lost them.
+FK_INDEXES = {
+    "ix_transcription_user_id": ("transcription", "user_id"),
+    "ix_minuteversion_transcription_id": ("minuteversion", "transcription_id"),
+    "ix_transcriptionjob_transcription_id": ("transcriptionjob", "transcription_id"),
+}
+
+
+def _offline_sql(monkeypatch, revision: str = "head", downgrade: bool = False) -> str:
     monkeypatch.setenv("DATABASE_CONNECTION_STRING", POSTGRES_URL)
     buffer = io.StringIO()
     config = migrations.alembic_config()
     config.output_buffer = buffer
     from alembic import command
 
-    command.upgrade(config, "head", sql=True)
+    if downgrade:
+        command.downgrade(config, revision, sql=True)
+    else:
+        command.upgrade(config, revision, sql=True)
     return buffer.getvalue()
+
+
+def _alter_type_sql(table: str, column: str, type_sql: str) -> re.Pattern[str]:
+    return re.compile(
+        rf'ALTER TABLE "?{table}"? ALTER COLUMN "?{column}"? TYPE {type_sql} '
+        rf"""USING "?{column}"? AT TIME ZONE 'UTC'"""
+    )
 
 
 def test_there_is_one_history_with_one_head():
     script = ScriptDirectory.from_config(migrations.alembic_config())
     assert script.get_bases() == ["0001"]
-    assert script.get_heads() == ["0001"]
+    assert script.get_heads() == ["0002"]
 
 
 def test_baseline_creates_every_table(monkeypatch):
@@ -67,6 +98,48 @@ def test_baseline_keeps_the_schema_rules_that_only_old_migrations_had(monkeypatc
     # recording 012: idempotency for JWT callers
     assert "CREATE UNIQUE INDEX ix_transcription_job_user_idempotency" in sql
     assert "WHERE user_id IS NOT NULL AND idempotency_key IS NOT NULL" in sql
+
+
+def test_0002_restores_the_dictation_foreign_key_indexes(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0001:0002")
+    for name, (table, column) in FK_INDEXES.items():
+        assert f"CREATE INDEX {name} ON {table} ({column})" in sql, name
+
+
+def test_0002_restores_timezones_reading_existing_values_as_utc(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0001:0002")
+    for table, columns in AWARE_TIMESTAMP_COLUMNS.items():
+        for column in columns:
+            assert _alter_type_sql(table, column, "TIMESTAMP WITH TIME ZONE").search(sql), f"{table}.{column}"
+    # Nothing else changes type: the columns that were naive stay naive.
+    altered = len(re.findall(r"ALTER COLUMN \S+ TYPE", sql))
+    assert altered == sum(len(c) for c in AWARE_TIMESTAMP_COLUMNS.values())
+
+
+def test_0002_downgrade_reverses_it(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0002:0001", downgrade=True)
+    for table, columns in AWARE_TIMESTAMP_COLUMNS.items():
+        for column in columns:
+            assert _alter_type_sql(table, column, "TIMESTAMP WITHOUT TIME ZONE").search(sql), f"{table}.{column}"
+    for name, (table, _column) in FK_INDEXES.items():
+        assert f"DROP INDEX {name}" in sql, name
+
+
+def test_the_models_declare_the_restored_timezones_and_indexes():
+    """Without a database: the models must say what 0002 does, or autogenerate drifts."""
+    from sqlalchemy import DateTime
+
+    tables = migrations.target_metadata().tables
+    for table in tables.values():
+        for column in table.columns:
+            if isinstance(column.type, DateTime):
+                expected = column.name in AWARE_TIMESTAMP_COLUMNS.get(table.name, [])
+                assert column.type.timezone is expected, f"{table.name}.{column.name}"
+    for name, (table, column) in FK_INDEXES.items():
+        index = next((i for i in tables[table].indexes if i.name == name), None)
+        assert index is not None, name
+        assert [c.name for c in index.columns] == [column]
+        assert not index.unique
 
 
 class _FakeConnection:
@@ -177,3 +250,52 @@ def test_baseline_matches_the_models_on_a_real_database():
         context = MigrationContext.configure(connection)
         diff = compare_metadata(context, migrations.target_metadata())
     assert diff == []
+
+
+@pytest.mark.skipif(not os.getenv("TEST_POSTGRES_URL"), reason="needs TEST_POSTGRES_URL (a throwaway Postgres)")
+def test_0002_keeps_existing_naive_values_as_utc_whatever_the_session_timezone():
+    """Rows written under 0001 hold UTC wall-clock time; 0002 must not shift them."""
+    from datetime import UTC, datetime
+
+    from alembic import command
+    from sqlalchemy import create_engine, text
+
+    engine = create_engine(os.environ["TEST_POSTGRES_URL"], connect_args={"options": "-c timezone=Europe/London"})
+    with engine.begin() as connection:
+        connection.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public"))
+
+    def migrate(step, revision):
+        with engine.begin() as connection:
+            config = migrations.alembic_config()
+            config.attributes["connection"] = connection
+            step(config, revision)
+
+    migrate(command.upgrade, "0001")
+    summer_noon_utc = datetime(2026, 7, 1, 12, 0)  # BST, so London is UTC+1
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO audit_log (id, timestamp, event_type, user_id, email, held_roles, required_roles)"
+                " VALUES (gen_random_uuid(), :ts, 'denied', 'u', 'e', '[]', '[]')"
+            ),
+            {"ts": summer_noon_utc},
+        )
+
+    migrate(command.upgrade, "head")
+    with engine.connect() as connection:
+        stored = connection.execute(text("SELECT timestamp FROM audit_log")).scalar_one()
+    assert stored == summer_noon_utc.replace(tzinfo=UTC)
+
+    migrate(command.downgrade, "0001")
+    with engine.connect() as connection:
+        stored = connection.execute(text("SELECT timestamp FROM audit_log")).scalar_one()
+        indexes = (
+            connection.execute(
+                text("SELECT indexname FROM pg_indexes WHERE indexname = ANY(:names)"),
+                {"names": list(FK_INDEXES)},
+            )
+            .scalars()
+            .all()
+        )
+    assert stored == summer_noon_utc
+    assert indexes == []
