@@ -10,8 +10,13 @@ import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlmodel import Session, select
+from sqlmodel import Session
 
+from transcribe_api.domain.blob_ownership import (
+    AmbiguousBlobOwnerError,
+    blob_owner_segment,
+    resolve_blob_owner,
+)
 from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager
 from transcribe_api.stt.pipeline import transcribe_and_generate_llm_output
 from transcribe_api.stt.utils import extract_transcription_id_from_blob_path
@@ -164,11 +169,13 @@ class TranscriptionPollingService:
         else:
             return unprocessed
 
-    def extract_user_email_from_blob_path(self, blob_path: str) -> str | None:
+    def resolve_blob_owner_from_path(self, blob_path: str) -> User | None:
         """
-        Extract user email from blob path.
+        Find the existing user who owns an upload blob.
 
-        Expected format: user-uploads/{email}/{filename}
+        Uploads are written to user-uploads/{azure_user_id}/{filename}; legacy blobs to
+        user-uploads/{email}/{filename}. The rules are shared with the API's ownership
+        check (domain.blob_ownership). Users are never created here.
 
         Parameters
         ----------
@@ -177,52 +184,20 @@ class TranscriptionPollingService:
 
         Returns
         -------
-        str | None
-            The user email if extraction is successful, None otherwise.
-        """
-        min_parts = 3  # Minimum parts for valid path: user-uploads/{email}/{filename}
-        try:
-            parts = blob_path.split("/")
-            if len(parts) >= min_parts and parts[0] == "user-uploads":
-                return parts[1]
-
-        except Exception as e:
-            logger.error(f"Error extracting email from blob path '{blob_path}': {e}")
-
-        return None
-
-    def get_or_create_user_by_email(self, email: str) -> User | None:
-        """
-        Look up user by email in the database.
-
-        Note: This only looks up existing users. New users must be created
-        through the authentication flow.
-
-        Parameters
-        ----------
-        email : str
-            The user's email address.
-
-        Returns
-        -------
         User | None
-            The User object if found, None otherwise.
+            The owning User, or None if the path is malformed or no user matches.
+
+        Raises
+        ------
+        AmbiguousBlobOwnerError
+            If a legacy email segment matches more than one user.
         """
-        try:
-            with Session(engine) as session:
-                statement = select(User).where(User.email == email)
-                user = session.exec(statement).first()
-
-                if user:
-                    logger.info(f"Found user for email: {email}")
-                else:
-                    logger.warning(f"No user found for email: {email}")
-
-                return user
-
-        except Exception as e:
-            logger.error(f"Error looking up user by email '{email}': {e}")
+        segment = blob_owner_segment(blob_path)
+        if segment is None:
             return None
+
+        with Session(engine) as session:
+            return resolve_blob_owner(session, segment)
 
     async def process_discovered_audio(self, blob_info: dict) -> bool:
         """
@@ -230,10 +205,9 @@ class TranscriptionPollingService:
 
         This method:
         1. Marks blob as in_progress to prevent duplicate processing
-        2. Extracts user email from blob path
-        3. Looks up user in database
-        4. Triggers transcription processing
-        5. Marks blob as processed
+        2. Resolves the owning user from the blob path (object id, or legacy email)
+        3. Triggers transcription processing
+        4. Marks blob as processed
 
         Parameters
         ----------
@@ -256,26 +230,25 @@ class TranscriptionPollingService:
                 logger.warning(f"Blob already being processed by another worker, skipping: {blob_path}")
                 return False
 
-            # Extract user email from path
-            user_email = self.extract_user_email_from_blob_path(blob_path)
-            if not user_email:
-                error_msg = f"Could not extract user email from blob path: {blob_path}"
-                logger.error(error_msg)
+            try:
+                user = self.resolve_blob_owner_from_path(blob_path)
+            except AmbiguousBlobOwnerError:
+                # Neither the log nor the stored error carries the segment: legacy segments are emails.
+                error_msg = "Blob owner is ambiguous: legacy email segment matches more than one user"
+                logger.error(f"{error_msg}; not transcribing")
                 await self._mark_blob_with_error(blob_path, error_msg)
                 return False
 
-            # Look up user in database
-            user = self.get_or_create_user_by_email(user_email)
             if not user:
-                error_msg = f"User not found for email: {user_email}"
-                logger.error(error_msg)
+                error_msg = "No user found for blob owner segment"
+                logger.error(f"{error_msg}; not transcribing")
                 await self._mark_blob_with_error(blob_path, error_msg)
                 return False
 
             # Trigger transcription processing
-            transcription_id = extract_transcription_id_from_blob_path(blob_path, user_email)
+            transcription_id = extract_transcription_id_from_blob_path(blob_path, str(user.id))
 
-            logger.info(f"Starting transcription for blob: {blob_path} (user: {user_email})")
+            logger.info(f"Starting transcription for blob: {blob_path} (user_id: {user.id})")
 
             await transcribe_and_generate_llm_output(
                 user_upload_blob_storage_file_key=blob_path,
@@ -288,7 +261,7 @@ class TranscriptionPollingService:
             # Mark blob as processed
             await self._mark_blob_as_processed_and_soft_delete(blob_path)
 
-            logger.info(f"Successfully processed audio file: {blob_path} (user: {user_email})")
+            logger.info(f"Successfully processed audio file: {blob_path} (user_id: {user.id})")
 
         except Exception as e:
             error_msg = f"Error processing audio file {blob_path}: {e}"

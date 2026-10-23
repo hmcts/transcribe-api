@@ -1,8 +1,12 @@
 """Unit tests for TranscriptionPollingService._should_skip_blob."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
+
+# Imported at module level, not under the get_settings patch below: importing
+# work_poller pulls in the pipeline, which builds clients from settings at import.
+from transcribe_api.stt.work_poller import TranscriptionPollingService
 
 
 @pytest.fixture
@@ -11,8 +15,6 @@ def service():
         patch("transcribe_api.stt.work_poller.get_settings"),
         patch("transcribe_api.stt.work_poller.AsyncAzureBlobManager"),
     ):
-        from transcribe_api.stt.work_poller import TranscriptionPollingService
-
         return TranscriptionPollingService()
 
 
@@ -135,57 +137,6 @@ class TestShouldSkipBlob:
     def test_reset_from_stale_not_skipped(self, service):
         blob = make_blob("user-uploads/user@example.com/audio.mp3", {"status": "reset_from_stale"})
         assert service._should_skip_blob(blob) is False
-
-
-class TestExtractUserEmailFromBlobPath:
-    def test_extracts_email_from_valid_path(self, service):
-        result = service.extract_user_email_from_blob_path("user-uploads/user@example.com/audio.mp3")
-        assert result == "user@example.com"
-
-    def test_returns_none_for_invalid_path(self, service):
-        result = service.extract_user_email_from_blob_path("other-prefix/audio.mp3")
-        assert result is None
-
-    def test_returns_none_for_short_path(self, service):
-        result = service.extract_user_email_from_blob_path("user-uploads")
-        assert result is None
-
-    def test_handles_nested_path(self, service):
-        result = service.extract_user_email_from_blob_path("user-uploads/user@test.com/folder/file.wav")
-        assert result == "user@test.com"
-
-
-class TestGetOrCreateUserByEmail:
-    def test_returns_user_when_found(self, service):
-        from unittest.mock import patch
-
-        from transcribe_api.domain.models_dictation import User
-        mock_user = MagicMock(spec=User)
-        mock_session = MagicMock()
-        mock_session.exec.return_value.first.return_value = mock_user
-        mock_ctx = MagicMock()
-        mock_ctx.__enter__ = MagicMock(return_value=mock_session)
-        mock_ctx.__exit__ = MagicMock(return_value=False)
-        with patch("transcribe_api.stt.work_poller.Session", return_value=mock_ctx):
-            result = service.get_or_create_user_by_email("user@example.com")
-        assert result is mock_user
-
-    def test_returns_none_when_not_found(self, service):
-        from unittest.mock import patch
-        mock_session = MagicMock()
-        mock_session.exec.return_value.first.return_value = None
-        mock_ctx = MagicMock()
-        mock_ctx.__enter__ = MagicMock(return_value=mock_session)
-        mock_ctx.__exit__ = MagicMock(return_value=False)
-        with patch("transcribe_api.stt.work_poller.Session", return_value=mock_ctx):
-            result = service.get_or_create_user_by_email("unknown@example.com")
-        assert result is None
-
-    def test_returns_none_on_exception(self, service):
-        from unittest.mock import patch
-        with patch("transcribe_api.stt.work_poller.Session", side_effect=RuntimeError("db error")):
-            result = service.get_or_create_user_by_email("user@example.com")
-        assert result is None
 
 
 @pytest.mark.asyncio

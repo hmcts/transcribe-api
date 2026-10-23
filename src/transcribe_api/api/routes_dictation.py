@@ -20,6 +20,11 @@ from transcribe_api.stt.utils import (
     generate_blob_upload_url,
     get_file_blob_path,
 )
+from transcribe_api.domain.blob_ownership import (
+    USER_UPLOADS_PREFIX,
+    blob_owner_segment,
+    segment_belongs_to_user,
+)
 from transcribe_api.domain.interface_dictation import (
     add_tag_to_transcription,
     delete_live_draft,
@@ -87,26 +92,20 @@ def _validate_blob_ownership(blob_path: str, current_user: "User", request: Requ
 
     Accepts both new OID-based paths (user-uploads/{azure_user_id}/...) and legacy
     email-based paths (user-uploads/{email}/...) during the Phase 1 transition window.
+    The segment rules are shared with the background poller (domain.blob_ownership).
 
     Phase 1: New uploads use OID-based paths; legacy email paths remain accessible.
     Phase 2 (separate ticket, optional): Backfill script renames legacy blobs to OID paths
     and removes this dual-format tolerance.
     """
-    if not blob_path.startswith("user-uploads/"):
+    if not blob_path.startswith(USER_UPLOADS_PREFIX):
         return
 
-    parts = blob_path.split("/")
-    if len(parts) < 2 or not parts[1]:  # noqa: SIM102
+    segment = blob_owner_segment(blob_path)
+    if segment is None:
         raise HTTPException(status_code=400, detail="Invalid blob path")
 
-    segment = parts[1]
-
-    matches = (
-        segment == str(current_user.azure_user_id)
-        or segment.lower() == current_user.email.lower()
-    )
-
-    if not matches:
+    if not segment_belongs_to_user(segment, current_user):
         logger.warning(
             "UNAUTHORISED_ACCESS_ATTEMPT user_id=%s user_email=%s "
             "reason=blob_ownership_mismatch attempted_resource=%s",
