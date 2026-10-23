@@ -1,82 +1,52 @@
+"""Alembic environment for the merged transcribe-api schema.
+
+One history for the whole database. At API startup, runtime/migrations.py runs
+`upgrade head` on its own connection (passed in config.attributes, holding the
+migration lock). From the command line, the connection string comes from
+DATABASE_CONNECTION_STRING.
+"""
+
 import os
 from logging.config import fileConfig
 
-from dotenv import load_dotenv
-from sqlalchemy import engine_from_config, pool
-from sqlmodel import SQLModel
+from sqlalchemy import create_engine, pool
 
 from alembic import context
+from transcribe_api.runtime.migrations import target_metadata
 
-# Load environment variables from .env file
-load_dotenv()
-
-# this is the Alembic Config object, which provides
-# access to the values within the .ini file in use.
 config = context.config
 
-# Interpret the config file for Python logging.
-# This line sets up loggers basically.
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
-
-# Import your models here for autogenerate to work
-
-# add your model's MetaData object here
-# for 'autogenerate' support
-target_metadata = SQLModel.metadata
-
-# other values from the config, defined by the needs of env.py,
-# can be acquired:
-# my_important_option = config.get_main_option("my_important_option")
-# ... etc.
+# Only configure logging for command-line runs; at startup the app owns logging.
+if config.config_file_name is not None and "connection" not in config.attributes:
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 
-def get_url():
-    return os.getenv("DATABASE_CONNECTION_STRING", "postgresql://localhost:5432/justicetranscribe_db")
+def get_url() -> str:
+    return os.getenv("DATABASE_CONNECTION_STRING", "postgresql://localhost:5432/transcription_svc")
 
 
 def run_migrations_offline() -> None:
-    """Run migrations in 'offline' mode.
-
-    This configures the context with just a URL
-    and not an Engine, though an Engine is acceptable
-    here as well.  By skipping the Engine creation
-    we don't even need a DBAPI to be available.
-
-    Calls to context.execute() here emit the given string to the
-    script output.
-
-    """
-    url = get_url()
     context.configure(
-        url=url,
-        target_metadata=target_metadata,
+        url=get_url(),
+        target_metadata=target_metadata(),
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
-
     with context.begin_transaction():
         context.run_migrations()
 
 
 def run_migrations_online() -> None:
-    """Run migrations in 'online' mode.
+    connection = config.attributes.get("connection")
+    if connection is not None:
+        context.configure(connection=connection, target_metadata=target_metadata())
+        with context.begin_transaction():
+            context.run_migrations()
+        return
 
-    In this scenario we need to create an Engine
-    and associate a connection with the context.
-
-    """
-    configuration = config.get_section(config.config_ini_section)
-    configuration["sqlalchemy.url"] = get_url()
-    connectable = engine_from_config(
-        configuration,
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
-
-    with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
-
+    engine = create_engine(get_url(), poolclass=pool.NullPool)
+    with engine.connect() as connection:
+        context.configure(connection=connection, target_metadata=target_metadata())
         with context.begin_transaction():
             context.run_migrations()
 

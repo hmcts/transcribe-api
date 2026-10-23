@@ -61,6 +61,30 @@ injects a mock identity with **all** roles. Never deploy with it.
 Background pollers do not run in the API process. Set `RUN_WORKERS=true`, or
 run `python -m transcribe_api.worker` as a separate workload.
 
+## Database migrations
+
+One Alembic history in `alembic/`. Its first revision, `0001_baseline`, replaced
+the two histories inherited from the dictation and recording services. Deployed
+environments set `RUN_MIGRATIONS=true`, and the API runs `upgrade head` at
+startup under a Postgres advisory lock (`runtime/migrations.py`), so the pods
+starting together migrate one at a time.
+
+After changing a model, generate a revision against an up-to-date database:
+
+```bash
+DATABASE_CONNECTION_STRING=postgresql://... .venv/bin/alembic revision --autogenerate -m "describe the change"
+```
+
+Check that the history still matches the models against a throwaway Postgres:
+
+```bash
+TEST_POSTGRES_URL=postgresql://... .venv/bin/python -m pytest tests/unit/test_migrations.py
+```
+
+Existing courtstranscribe and batch-audio-transcription databases are not on
+this history yet; moving them over needs a schema comparison and
+`alembic stamp 0001`.
+
 ## Tests
 
 ```bash
@@ -69,9 +93,6 @@ run `python -m transcribe_api.worker` as a separate workload.
 
 ## Outstanding
 
-- Two Alembic histories are not yet consolidated: `alembic/` (dictation, 14
-  revisions) and `alembic_recording/` (recording, 13). Local schema is created
-  from SQLModel metadata for now.
 - Settings are still two modules (`settings_recording`, `settings_dictation`).
 - `passlib` pins Python `<3.13` (it imports the removed stdlib `crypt`).
   Replacing it with direct `bcrypt` calls unlocks 3.13+.

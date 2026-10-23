@@ -3,7 +3,7 @@ from enum import StrEnum
 from typing import Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, select
+from sqlalchemy import CheckConstraint, Column, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import Field, Relationship, SQLModel
@@ -64,6 +64,15 @@ class MinuteVersion(BaseTable, table=True):
 
 # Main models with table=True for DB tables
 class User(BaseTable, table=True):
+    # Was only in dictation migration 8e2a5d9f3b7c; declared here so the model
+    # and the migration baseline describe the same schema.
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('Normal', 'Judge', 'LegalTextManager', 'SystemAdministrator')",
+            name="ck_user_role_valid",
+        ),
+    )
+
     email: str = Field(index=True)
     azure_user_id: str = Field(unique=True, index=True)
     has_completed_onboarding: bool = Field(default=False)

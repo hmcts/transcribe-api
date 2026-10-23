@@ -38,11 +38,10 @@ FROM ${REGISTRY_NAME}.azurecr.io/base/python:3.13-distroless
 COPY --from=builder /opt/deps /opt/deps
 
 # The project itself is not pip-installed (--no-install-project above); its
-# source is laid down directly and reached through PYTHONPATH. Both Alembic
-# trees ship so migrations can be run from this same image.
+# source is laid down directly and reached through PYTHONPATH. The Alembic
+# history ships too: the API applies it at startup (runtime/migrations.py).
 COPY src/transcribe_api/ /opt/app/transcribe_api/
 COPY alembic/ /opt/app/alembic/
-COPY alembic_recording/ /opt/app/alembic_recording/
 COPY alembic.ini pyproject.toml /opt/app/
 
 ENV PYTHONPATH=/opt/otel:/opt/deps:/opt/app \

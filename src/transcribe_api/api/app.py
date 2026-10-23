@@ -47,6 +47,15 @@ def _run_workers_in_web_process() -> bool:
     return os.environ.get("RUN_WORKERS", "").lower() in ("1", "true", "yes")
 
 
+def _run_migrations_at_startup() -> bool:
+    """Whether to bring the database schema up to date before serving.
+
+    Default false: local runs and tests create their schema themselves. The
+    deployed chart sets RUN_MIGRATIONS=true. See runtime/migrations.py.
+    """
+    return os.environ.get("RUN_MIGRATIONS", "").lower() in ("1", "true", "yes")
+
+
 def _json_safe(obj: Any) -> Any:
     """Replace non-finite floats with their string form.
 
@@ -122,6 +131,15 @@ async def lifespan(app: FastAPI):
     # dictation service skipped it locally so developers are not blocked.
     if settings.ENVIRONMENT not in ("local", "test"):
         validate_approles_config()
+
+    # Before anything touches the database. A failed migration stops startup,
+    # so the pod never serves against a schema it does not match.
+    if _run_migrations_at_startup():
+        from starlette.concurrency import run_in_threadpool
+
+        from transcribe_api.runtime import migrations
+
+        await run_in_threadpool(migrations.run_migrations)
 
     tasks: list[asyncio.Task] = []
     if settings.ENVIRONMENT != "test" and _run_workers_in_web_process():

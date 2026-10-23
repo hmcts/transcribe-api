@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, Text, UniqueConstraint
+from sqlalchemy import Column, Index, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -259,6 +259,17 @@ class SpeechBatchJob(BaseTable, table=True):
         UniqueConstraint(
             "caller_id", "idempotency_key", name="uq_transcription_job_caller_idempotency"
         ),
+        # The two indexes below were only in recording migrations 012 and 007;
+        # declared here so the model and the migration baseline match.
+        # Idempotency for JWT-authenticated submissions (no Caller row).
+        Index(
+            "ix_transcription_job_user_idempotency",
+            "user_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("user_id IS NOT NULL AND idempotency_key IS NOT NULL"),
+        ),
+        Index("ix_transcription_job_dialogue_entries_gin", "dialogue_entries", postgresql_using="gin"),
     )
 
     # NULL for JWT-authenticated submissions (no Caller row exists).
