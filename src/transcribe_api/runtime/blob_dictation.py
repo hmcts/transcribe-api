@@ -3,7 +3,8 @@
 import mimetypes
 from pathlib import Path
 
-from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
+from azure.core import MatchConditions
+from azure.core.exceptions import ResourceExistsError, ResourceModifiedError, ResourceNotFoundError
 from azure.identity.aio import DefaultAzureCredential
 from azure.storage.blob import ContentSettings
 from azure.storage.blob.aio import BlobServiceClient as AsyncBlobServiceClient
@@ -21,6 +22,13 @@ def _sanitize_for_log(value: object) -> str:
 # =============================================================================
 # Blob Management Functions
 # =============================================================================
+
+
+def _if_match(etag: str | None) -> dict:
+    """SDK keyword arguments making a write conditional on the blob still having ``etag``."""
+    if etag is None:
+        return {}
+    return {"etag": etag, "match_condition": MatchConditions.IfNotModified}
 
 
 class AsyncAzureBlobManager:
@@ -153,7 +161,11 @@ class AsyncAzureBlobManager:
             return True
 
     async def delete_blob(
-        self, blob_name: str, container_name: str | None = None, delete_snapshots: str = "include"
+        self,
+        blob_name: str,
+        container_name: str | None = None,
+        delete_snapshots: str = "include",
+        etag: str | None = None,
     ) -> bool:
         """Delete a blob from Azure Storage (async).
 
@@ -166,6 +178,8 @@ class AsyncAzureBlobManager:
         delete_snapshots : str, optional
             How to handle snapshots. Options: "include", "only", None.
             Default is "include".
+        etag : str, optional
+            Only delete if the blob still has this ETag (If-Match); False if it has changed.
 
         Returns
         -------
@@ -177,9 +191,12 @@ class AsyncAzureBlobManager:
 
             async with AsyncBlobServiceClient(account_url=self.account_url, credential=self.credential) as blob_service:
                 blob_client = blob_service.get_blob_client(container=container, blob=blob_name)
-                await blob_client.delete_blob(delete_snapshots=delete_snapshots)
+                await blob_client.delete_blob(delete_snapshots=delete_snapshots, **_if_match(etag))
 
             logger.info(f"Successfully deleted blob: {container}/{blob_name}")
+        except ResourceModifiedError:
+            logger.info(f"Blob changed since it was read, not deleted: {container}/{blob_name}")
+            return False
         except ResourceNotFoundError:
             logger.warning(f"Blob not found: {container}/{blob_name}")
             return False
@@ -237,6 +254,7 @@ class AsyncAzureBlobManager:
             - metadata: dict (blob metadata if include_metadata=True)
             - last_modified: datetime
             - size: int (blob size in bytes)
+            - etag: str (pass to set_blob_metadata/delete_blob to make them conditional)
         """
         try:
             container = container_name or self.container_name
@@ -254,6 +272,7 @@ class AsyncAzureBlobManager:
                         "name": blob.name,
                         "last_modified": blob.last_modified,
                         "size": blob.size,
+                        "etag": blob.etag,
                     }
                     if include_metadata:
                         blob_info["metadata"] = blob.metadata or {}
@@ -297,7 +316,37 @@ class AsyncAzureBlobManager:
             logger.error(f"Failed to get metadata for blob {container}/{blob_name}: {e}")
             return {}
 
-    async def set_blob_metadata(self, blob_name: str, metadata: dict, container_name: str | None = None) -> bool:
+    async def get_blob_properties(self, blob_name: str, container_name: str | None = None) -> dict | None:
+        """Get a blob's metadata together with its ETag and last-modified time (async).
+
+        Returns
+        -------
+        dict | None
+            {"name", "metadata", "etag", "last_modified"}, or None if the blob is not found or on error.
+        """
+        try:
+            container = container_name or self.container_name
+
+            async with AsyncBlobServiceClient(account_url=self.account_url, credential=self.credential) as blob_service:
+                blob_client = blob_service.get_blob_client(container=container, blob=blob_name)
+                properties = await blob_client.get_blob_properties()
+                return {
+                    "name": blob_name,
+                    "metadata": properties.metadata or {},
+                    "etag": properties.etag,
+                    "last_modified": properties.last_modified,
+                }
+
+        except ResourceNotFoundError:
+            logger.warning(f"Blob not found when getting properties: {container}/{blob_name}")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get properties for blob {container}/{blob_name}: {e}")
+            return None
+
+    async def set_blob_metadata(
+        self, blob_name: str, metadata: dict, container_name: str | None = None, etag: str | None = None
+    ) -> bool:
         """Set metadata on a specific blob (async).
 
         Parameters
@@ -309,6 +358,9 @@ class AsyncAzureBlobManager:
             Keys must be valid HTTP header names (alphanumeric + underscore).
         container_name : str, optional
             Container name. If None, uses the default container from settings.
+        etag : str, optional
+            Only write if the blob still has this ETag (If-Match), so a read-then-write
+            cannot overwrite a concurrent change. False if the blob has changed.
 
         Returns
         -------
@@ -320,9 +372,13 @@ class AsyncAzureBlobManager:
 
             async with AsyncBlobServiceClient(account_url=self.account_url, credential=self.credential) as blob_service:
                 blob_client = blob_service.get_blob_client(container=container, blob=blob_name)
-                await blob_client.set_blob_metadata(metadata=metadata)
+                await blob_client.set_blob_metadata(metadata=metadata, **_if_match(etag))
 
             logger.info(f"Successfully set metadata on blob: {container}/{blob_name}")
+
+        except ResourceModifiedError:
+            logger.info(f"Blob changed since it was read, metadata not set: {container}/{blob_name}")
+            return False
 
         except ResourceNotFoundError:
             logger.error(f"Blob not found when setting metadata: {container}/{blob_name}")

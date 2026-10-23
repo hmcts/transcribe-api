@@ -7,7 +7,7 @@ issues on long audio recordings.
 """
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlmodel import Session
@@ -24,6 +24,12 @@ from transcribe_api.runtime.db_dictation import engine
 from transcribe_api.domain.models_dictation import User
 from transcribe_api.runtime.logger import logger
 from transcribe_api.runtime.settings_dictation import get_settings
+
+# A claim (status=in_progress) older than this is taken to be abandoned by a worker that
+# died or was replaced mid-transcription, and may be claimed again. Claims are not renewed
+# while held, so this must comfortably exceed the longest processing time: the speech
+# request alone may take two 900s attempts (stt/fast_client.py), then LLM generation.
+STALE_CLAIM_AFTER = timedelta(hours=2)
 
 
 class TranscriptionPollingService:
@@ -51,7 +57,6 @@ class TranscriptionPollingService:
         self.user_uploads_prefix = "user-uploads/"
         self.supported_extensions = {".mp4", ".webm", ".wav", ".m4a", ".mp3", ".ogg", ".aac", ".mov"}
         self.max_retry_attempts = 2  # Allow 2 total attempts (1 retry max as requested)
-        # Record startup time - only process files uploaded after this
         self.startup_time = datetime.now(UTC)
         self._is_first_poll = True
 
@@ -62,9 +67,37 @@ class TranscriptionPollingService:
         self._shutdown = False
 
         logger.info(
-            f"Global polling service initialized with {self.num_workers} workers - "
-            f"will process files for all users uploaded after {self.startup_time.isoformat()}"
+            f"Global polling service initialized with {self.num_workers} workers at {self.startup_time.isoformat()}"
         )
+
+    @staticmethod
+    def _is_stale_claim(metadata: dict, last_modified: datetime | None) -> bool:
+        """Whether an in_progress claim is old enough to have been abandoned.
+
+        The claim time is the started_at written by the claim; failing that, the blob's
+        last-modified time (setting metadata updates it). With neither, the claim is
+        treated as live: wrongly leaving it costs a delay, wrongly taking it a duplicate.
+        """
+        claimed_at = last_modified
+        try:
+            claimed_at = datetime.fromisoformat(metadata["started_at"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        if claimed_at is None:
+            return False
+        if claimed_at.tzinfo is None:
+            claimed_at = claimed_at.replace(tzinfo=UTC)
+        return datetime.now(UTC) - claimed_at > STALE_CLAIM_AFTER
+
+    def _claim_refusal(self, metadata: dict, last_modified: datetime | None) -> str | None:
+        """Why a blob in this metadata state must not be claimed, or None if it may be."""
+        if metadata.get("processed") == "true":
+            return "already processed"
+        if metadata.get("status") == "permanently_failed":
+            return "permanently failed"
+        if metadata.get("status") == "in_progress" and not self._is_stale_claim(metadata, last_modified):
+            return "claimed by a live worker"
+        return None
 
     def _should_skip_blob(self, blob: dict) -> bool:
         """
@@ -73,7 +106,7 @@ class TranscriptionPollingService:
         Used during polling to filter out blobs that should NOT be transcribed:
         - Already successfully processed blobs
         - Permanently failed blobs (exceeded retry limit)
-        - Currently being processed blobs (in_progress status)
+        - Currently being processed blobs (in_progress status, unless the claim is stale)
         - Non-audio files
         - Files not in the user-uploads prefix
 
@@ -100,26 +133,12 @@ class TranscriptionPollingService:
         if blob_path.suffix.lower() not in self.supported_extensions:
             return True
 
-        # Check metadata for processing status
-        metadata = blob.get("metadata", {})
-
-        # Skip if already successfully processed
-        if metadata.get("processed") == "true":
+        # New uploads have no metadata and are not skipped; nor are "retrying" blobs,
+        # "reset_from_stale" ones (written by earlier versions) or stale claims.
+        refusal = self._claim_refusal(blob.get("metadata", {}), blob.get("last_modified"))
+        if refusal:
+            logger.debug(f"Skipping blob ({refusal}): {blob_name}")
             return True
-
-        # Skip if permanently failed
-        if metadata.get("status") == "permanently_failed":
-            logger.debug(f"Skipping permanently failed blob: {blob_name}")
-            return True
-
-        # Skip if currently being processed (prevents duplicate processing)
-        if metadata.get("status") == "in_progress":
-            logger.debug(f"Skipping blob already in progress: {blob_name}")
-            return True
-
-        # Don't skip if status is "reset_from_stale" or "retrying" - these should be reprocessed
-        # Also don't skip new blobs with no metadata
-
         return False
 
     async def poll_for_new_audio_files(self) -> list[dict]:
@@ -223,11 +242,11 @@ class TranscriptionPollingService:
         logger.info(f"Processing discovered audio file: {blob_path}")
 
         try:
-            # CRITICAL: Mark as in_progress immediately to prevent race conditions
-            # If this returns False, another worker is already processing this blob
+            # Claim the blob first. If this returns False another worker holds (or has
+            # finished) it, or it could not be claimed; either way it is not ours to process.
             marked = await self._mark_blob_in_progress(blob_path)
             if not marked:
-                logger.warning(f"Blob already being processed by another worker, skipping: {blob_path}")
+                logger.info(f"Blob not claimed, skipping: {blob_path}")
                 return False
 
             try:
@@ -275,9 +294,11 @@ class TranscriptionPollingService:
         """
         Mark a blob as currently being processed to prevent duplicate processing.
 
-        This is called at the start of processing to prevent the polling loop
-        from discovering and queuing the same blob multiple times if processing
-        takes longer than the polling interval.
+        This is the claim. It reads the blob's current state and writes the claim only
+        if the blob is unchanged since that read (ETag If-Match), so when two pollers
+        (e.g. the old and new pod of a rolling update, or a blob queued twice) race for
+        the same blob, exactly one claim succeeds. A stale claim (see STALE_CLAIM_AFTER)
+        is taken over the same way.
 
         Parameters
         ----------
@@ -287,16 +308,24 @@ class TranscriptionPollingService:
         Returns
         -------
         bool
-            True if successfully marked, False otherwise.
+            True if this poller now holds the claim, False otherwise.
         """
         try:
-            # Get current metadata to preserve retry count
-            current_metadata = await self.azure_blob_manager.get_blob_metadata(blob_path) or {}
-
-            # Check if already in progress (race condition)
-            if current_metadata.get("status") == "in_progress":
-                logger.warning(f"Blob already marked as in_progress: {blob_path}")
+            current = await self.azure_blob_manager.get_blob_properties(blob_path)
+            if current is None:
+                logger.warning(f"Blob could not be read, not claiming: {blob_path}")
                 return False
+
+            current_metadata = current["metadata"]
+            refusal = self._claim_refusal(current_metadata, current["last_modified"])
+            if refusal:
+                logger.info(f"Not claiming blob ({refusal}): {blob_path}")
+                return False
+            if current_metadata.get("status") == "in_progress":
+                logger.warning(
+                    f"Reclaiming stale claim (started_at={current_metadata.get('started_at')}, "
+                    f"retry_count={current_metadata.get('retry_count', '0')}): {blob_path}"
+                )
 
             metadata = {
                 "processed": "false",
@@ -304,12 +333,14 @@ class TranscriptionPollingService:
                 "started_at": datetime.now(UTC).isoformat(),
                 "retry_count": current_metadata.get("retry_count", "0"),
             }
-            success = await self.azure_blob_manager.set_blob_metadata(blob_name=blob_path, metadata=metadata)
+            success = await self.azure_blob_manager.set_blob_metadata(
+                blob_name=blob_path, metadata=metadata, etag=current["etag"]
+            )
             if success:
                 logger.info(f"Marked blob as in_progress: {blob_path}")
                 return True
             else:
-                logger.warning(f"Failed to mark blob as in_progress: {blob_path}")
+                logger.info(f"Claim not written (blob changed by another worker, or write failed): {blob_path}")
                 return False
 
         except Exception as e:
@@ -399,7 +430,13 @@ class TranscriptionPollingService:
 
     def _should_delete_old_blob(self, metadata: dict) -> tuple[bool, str]:
         """
-        Determine if an old blob should be deleted during startup cleanup.
+        Determine if a blob should be deleted during startup cleanup.
+
+        Only audio already marked processed is deleted: its transcript and document
+        exist, and process_discovered_audio leaves deleting it to this cleanup. Every
+        other blob is kept. New uploads have no metadata until claimed, so a blob
+        without metadata is unprocessed work, not legacy junk. Claims are not reset here;
+        a stale one is taken over by the next claim (see _mark_blob_in_progress).
 
         Parameters
         ----------
@@ -411,24 +448,12 @@ class TranscriptionPollingService:
         tuple[bool, str]
             (should_delete, reason) - True if should delete, with reason for logging.
         """
-        # Case 1: Successfully processed blobs - safe to delete
         if metadata.get("processed") == "true":
             return True, "successfully processed"
 
-        # Case 2: Legacy blob without metadata - delete for data protection
-        # These are pre-migration blobs that never had metadata tracking
-        if not metadata or ("processed" not in metadata and "retry_count" not in metadata and "status" not in metadata):
-            return True, "legacy blob without metadata"
-
-        # Case 3: Stale in_progress blobs (worker crashed or service restarted)
-        # Reset them so they can be retried
-        if metadata.get("status") == "in_progress":
-            return False, "stale in_progress - will reset"
-
-        # Case 4: Blob with retry metadata - keep for processing/investigation
-        status = metadata.get("status", "unknown")
+        status = metadata.get("status", "unclaimed")
         retry_count = metadata.get("retry_count", "0")
-        return False, f"has metadata (status={status}, retry_count={retry_count})"
+        return False, f"not processed (status={status}, retry_count={retry_count})"
 
     def _evaluate_blob_for_cleanup(self, blob: dict) -> tuple[bool, str | None]:
         """
@@ -460,92 +485,50 @@ class TranscriptionPollingService:
         should_delete, reason = self._should_delete_old_blob(metadata)
         return should_delete, reason
 
-    async def _cleanup_old_blobs_on_startup(self) -> None:  # noqa: C901, PLR0912, PLR0915
+    async def _cleanup_old_blobs_on_startup(self) -> None:
         """
-        Clean up old blobs from before the service startup time.
+        Delete processed audio uploads; runs once, on the first poll.
 
-        This runs once on the first poll to:
-        1. Remove old recordings that should have been cleaned up
-        2. Reset stale in_progress blobs (from crashed workers)
-        3. Ensure we only work with new uploads from this session
+        Nothing else is touched: unprocessed uploads, retrying and failed blobs, and
+        in_progress claims (which may be held by another worker that is still running,
+        e.g. the other pod of a rolling update) are left for the polling loop.
         """
         try:
-            logger.info("Starting cleanup of old blobs from before service startup...")
+            logger.info("Starting startup cleanup of processed audio uploads...")
 
-            # List all blobs with user-uploads prefix (all users)
             all_blobs = await self.azure_blob_manager.list_blobs_in_prefix(
                 prefix=self.user_uploads_prefix, include_metadata=True
             )
 
-            # Evaluate blobs for cleanup
-            old_blobs = []
-            stale_in_progress_blobs = []
-
+            processed_blobs = []
             for blob in all_blobs:
                 should_delete, reason = self._evaluate_blob_for_cleanup(blob)
-
-                if reason is None:  # Skip blobs that don't meet criteria
+                if reason is None:  # not an audio upload
                     continue
-
-                blob_name = blob["name"]
                 if should_delete:
-                    old_blobs.append(blob)
-                    logger.info(f"Will clean up old blob ({reason}): {blob_name}")
-                elif reason == "stale in_progress - will reset":
-                    stale_in_progress_blobs.append(blob)
-                    logger.info(f"Will reset stale in_progress blob: {blob_name}")
+                    processed_blobs.append(blob)
                 else:
-                    logger.info(f"Keeping old blob ({reason}): {blob_name}")
+                    logger.info(f"Keeping blob ({reason}): {blob['name']}")
 
-            # Delete old blobs
-            if old_blobs:
-                logger.info(f"Found {len(old_blobs)} old blob(s) to clean up")
+            if not processed_blobs:
+                logger.info("No processed audio uploads to delete")
+                return
 
-                for blob in old_blobs:
-                    blob_name = blob["name"]
-                    try:
-                        success = await self.azure_blob_manager.delete_blob(blob_name)
-                        if success:
-                            logger.info(f"Deleted old blob: {blob_name}")
-                        else:
-                            logger.warning(f"Failed to delete old blob: {blob_name}")
-                    except Exception as e:
-                        logger.error(f"Error deleting old blob {blob_name}: {e}")
+            deleted = 0
+            for blob in processed_blobs:
+                blob_name = blob["name"]
+                try:
+                    # Conditional on the listed ETag: if the blob changed since the
+                    # listing, it is no longer known to be processed and is kept.
+                    if await self.azure_blob_manager.delete_blob(blob_name, etag=blob.get("etag")):
+                        deleted += 1
+                        logger.info(f"Deleted processed audio upload: {blob_name}")
+                    else:
+                        logger.warning(f"Did not delete processed audio upload: {blob_name}")
+                except Exception as e:
+                    logger.error(f"Error deleting processed audio upload {blob_name}: {e}")
 
-                logger.info(f"Cleanup complete - deleted {len(old_blobs)} old blob(s)")
-            else:
-                logger.info("No old blobs found to clean up")
-
-            # Reset stale in_progress blobs
-            if stale_in_progress_blobs:
-                logger.info(f"Found {len(stale_in_progress_blobs)} stale in_progress blob(s) to reset")
-
-                for blob in stale_in_progress_blobs:
-                    blob_name = blob["name"]
-                    try:
-                        current_metadata = blob.get("metadata", {})
-                        retry_count = current_metadata.get("retry_count", "0")
-
-                        # Reset status to allow reprocessing, but keep retry history
-                        metadata = {
-                            "processed": "false",
-                            "status": "reset_from_stale",
-                            "reset_at": datetime.now(UTC).isoformat(),
-                            "retry_count": retry_count,  # ← Preserve retry count!
-                        }
-                        success = await self.azure_blob_manager.set_blob_metadata(
-                            blob_name=blob_name, metadata=metadata
-                        )
-                        if success:
-                            logger.info(f"Reset stale in_progress blob (retry_count={retry_count}): {blob_name}")
-                        else:
-                            logger.warning(f"Failed to reset stale blob: {blob_name}")
-                    except Exception as e:
-                        logger.error(f"Error resetting stale blob {blob_name}: {e}")
-
-                logger.info(f"Reset complete - processed {len(stale_in_progress_blobs)} stale blob(s)")
-            else:
-                logger.info("No stale in_progress blobs found to reset")
+            logger.info(f"Startup cleanup complete - deleted {deleted} of {len(processed_blobs)} processed upload(s)")
 
         except Exception as e:
             logger.error(f"Error during startup cleanup: {e}")
@@ -554,8 +537,8 @@ class TranscriptionPollingService:
         """
         Worker coroutine that pulls blobs from the queue and processes them.
 
-        On shutdown, the worker exits immediately. Any in-progress blobs will be
-        recovered by the startup cleanup on next service start.
+        On shutdown, the worker exits immediately. Its in-progress claims are taken
+        over by a poller once they are stale (STALE_CLAIM_AFTER).
 
         Parameters
         ----------
@@ -588,6 +571,13 @@ class TranscriptionPollingService:
 
         logger.info(f"Worker {worker_id} stopped")
 
+    async def poll_cycle(self) -> list[dict]:
+        """Run the startup cleanup on the first call, then poll for blobs to process."""
+        if self._is_first_poll:
+            await self._cleanup_old_blobs_on_startup()
+            self._is_first_poll = False
+        return await self.poll_for_new_audio_files()
+
     async def run_polling_loop(self) -> None:
         """
         Run the continuous global polling loop with parallel workers.
@@ -596,7 +586,7 @@ class TranscriptionPollingService:
         1. Starts worker tasks to process blobs in parallel
         2. Polls for new audio files every 30 seconds
         3. Adds discovered files to a queue for workers to process
-        4. Cleans up old blobs on first poll
+        4. Deletes processed audio uploads on first poll
         """
         logger.info(
             f"Starting global transcription polling service with {self.num_workers} workers "
@@ -613,13 +603,7 @@ class TranscriptionPollingService:
         try:
             while not self._shutdown:
                 try:
-                    # On first poll, clean up old blobs
-                    if self._is_first_poll:
-                        await self._cleanup_old_blobs_on_startup()
-                        self._is_first_poll = False
-
-                    # Poll for new files
-                    unprocessed_files = await self.poll_for_new_audio_files()
+                    unprocessed_files = await self.poll_cycle()
 
                     # Add discovered files to queue for workers to process
                     for blob_info in unprocessed_files:
@@ -634,7 +618,7 @@ class TranscriptionPollingService:
 
         finally:
             # Fast shutdown: abandon queue and cancel workers immediately
-            # Any in-progress blobs will be recovered by startup cleanup
+            # Abandoned claims are taken over by a poller once stale (STALE_CLAIM_AFTER)
             logger.info("Shutting down polling service (fast shutdown)...")
             self._shutdown = True
 

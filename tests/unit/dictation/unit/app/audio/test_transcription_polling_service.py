@@ -1,12 +1,13 @@
 """Unit tests for TranscriptionPollingService._should_skip_blob."""
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
 
 # Imported at module level, not under the get_settings patch below: importing
 # work_poller pulls in the pipeline, which builds clients from settings at import.
-from transcribe_api.stt.work_poller import TranscriptionPollingService
+from transcribe_api.stt.work_poller import STALE_CLAIM_AFTER, TranscriptionPollingService
 
 
 @pytest.fixture
@@ -80,6 +81,22 @@ class TestShouldSkipBlob:
             metadata={"status": "in_progress"},
         )
         assert service._should_skip_blob(blob) is True
+
+    def test_fresh_claim_is_skipped(self, service):
+        started = datetime.now(UTC) - timedelta(minutes=10)
+        blob = make_blob(
+            "user-uploads/user@example.com/audio.mp3",
+            metadata={"status": "in_progress", "started_at": started.isoformat()},
+        )
+        assert service._should_skip_blob(blob) is True
+
+    def test_stale_claim_is_not_skipped(self, service):
+        started = datetime.now(UTC) - STALE_CLAIM_AFTER - timedelta(minutes=1)
+        blob = make_blob(
+            "user-uploads/user@example.com/audio.mp3",
+            metadata={"status": "in_progress", "started_at": started.isoformat()},
+        )
+        assert service._should_skip_blob(blob) is False
 
     def test_permanently_failed_is_skipped(self, service):
         blob = make_blob(
@@ -177,30 +194,47 @@ class TestPollForNewAudioFiles:
         assert result == []
 
 
+def blob_properties(metadata: dict, etag: str = '"0x1"') -> dict:
+    return {"name": "user-uploads/user/audio.mp3", "metadata": metadata, "etag": etag, "last_modified": None}
+
+
 @pytest.mark.asyncio
 class TestMarkBlobInProgress:
     async def test_returns_true_on_success(self, service):
         from unittest.mock import AsyncMock
-        service.azure_blob_manager.get_blob_metadata = AsyncMock(return_value={})
+        service.azure_blob_manager.get_blob_properties = AsyncMock(return_value=blob_properties({}))
         service.azure_blob_manager.set_blob_metadata = AsyncMock(return_value=True)
         result = await service._mark_blob_in_progress("user-uploads/user/audio.mp3")
         assert result is True
+        assert service.azure_blob_manager.set_blob_metadata.await_args.kwargs["etag"] == '"0x1"'
 
     async def test_returns_false_when_already_in_progress(self, service):
         from unittest.mock import AsyncMock
-        service.azure_blob_manager.get_blob_metadata = AsyncMock(return_value={"status": "in_progress"})
+        service.azure_blob_manager.get_blob_properties = AsyncMock(
+            return_value=blob_properties({"status": "in_progress"})
+        )
+        service.azure_blob_manager.set_blob_metadata = AsyncMock(return_value=True)
         result = await service._mark_blob_in_progress("user-uploads/user/audio.mp3")
         assert result is False
+        service.azure_blob_manager.set_blob_metadata.assert_not_awaited()
 
     async def test_returns_false_when_set_metadata_fails(self, service):
         from unittest.mock import AsyncMock
-        service.azure_blob_manager.get_blob_metadata = AsyncMock(return_value={})
+        service.azure_blob_manager.get_blob_properties = AsyncMock(return_value=blob_properties({}))
         service.azure_blob_manager.set_blob_metadata = AsyncMock(return_value=False)
         result = await service._mark_blob_in_progress("user-uploads/user/audio.mp3")
         assert result is False
 
+    async def test_returns_false_when_blob_cannot_be_read(self, service):
+        from unittest.mock import AsyncMock
+        service.azure_blob_manager.get_blob_properties = AsyncMock(return_value=None)
+        service.azure_blob_manager.set_blob_metadata = AsyncMock(return_value=True)
+        result = await service._mark_blob_in_progress("user-uploads/user/audio.mp3")
+        assert result is False
+        service.azure_blob_manager.set_blob_metadata.assert_not_awaited()
+
     async def test_returns_false_on_exception(self, service):
         from unittest.mock import AsyncMock
-        service.azure_blob_manager.get_blob_metadata = AsyncMock(side_effect=RuntimeError("network"))
+        service.azure_blob_manager.get_blob_properties = AsyncMock(side_effect=RuntimeError("network"))
         result = await service._mark_blob_in_progress("user-uploads/user/audio.mp3")
         assert result is False

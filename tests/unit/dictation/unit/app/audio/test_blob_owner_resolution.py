@@ -58,6 +58,13 @@ def service(db_engine):
         svc = TranscriptionPollingService()
         svc.azure_blob_manager.get_blob_metadata = AsyncMock(return_value={})
         svc.azure_blob_manager.set_blob_metadata = AsyncMock(return_value=True)
+
+        # The claim reads metadata with its ETag; serve it from whatever get_blob_metadata returns.
+        async def get_blob_properties(name):
+            metadata = await svc.azure_blob_manager.get_blob_metadata(name)
+            return {"name": name, "metadata": metadata, "etag": '"0x1"', "last_modified": None}
+
+        svc.azure_blob_manager.get_blob_properties = get_blob_properties
         yield svc
 
 
@@ -180,7 +187,7 @@ class TestProcessDiscoveredAudio:
         async def get_metadata(_name):
             return dict(stored)
 
-        async def set_metadata(blob_name, metadata):
+        async def set_metadata(blob_name, metadata, etag=None):
             stored.clear()
             stored.update(metadata)
             return True
