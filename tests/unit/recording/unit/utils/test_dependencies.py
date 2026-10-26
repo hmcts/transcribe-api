@@ -1,5 +1,6 @@
 """Unit tests for _resolve_user() in utils/dependencies.py."""
 
+import logging
 from unittest.mock import MagicMock, patch
 
 from sqlalchemy.exc import IntegrityError
@@ -99,6 +100,22 @@ class TestResolveUserRoleSync:
 
         assert user.role == "Normal"
         mock_session.commit.assert_not_called()
+
+    def test_does_not_log_the_email_of_an_existing_user(self, caplog):
+        user = self._existing_user(role="Normal")
+        mock_session = MagicMock()
+        mock_session.exec.return_value.first.return_value = user
+
+        with (
+            patch("transcribe_api.domain.auth.dependencies_recording.get_engine"),
+            patch("transcribe_api.domain.auth.dependencies_recording.Session") as MockSession,
+            caplog.at_level(logging.DEBUG),
+        ):
+            MockSession.return_value.__enter__.return_value = mock_session
+            _resolve_user(roles=["Normal"])
+
+        assert caplog.records
+        assert "test@example.com" not in caplog.text
 
     def test_does_not_overwrite_role_when_jwt_carries_no_known_role(self):
         # primary_role resolves to None when no JWT role matches the configured
