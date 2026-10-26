@@ -203,6 +203,24 @@ class TestUploadAudio:
         assert normalize.inputs == []
         manager.create_blob_from_file.assert_not_called()
 
+    def test_writes_the_upload_with_an_async_file_api(self, client, as_current_user, mocker):
+        """Up to 200 MB is written per upload: the writes must not block the event loop."""
+        import aiofiles
+
+        from transcribe_api.api import routes_recording
+
+        self._mock_blob_manager(mocker)
+        normalize = self._mock_normalize(mocker)
+        opened = mocker.patch.object(routes_recording.aiofiles, "open", wraps=aiofiles.open)
+
+        response = client.post(
+            "/api/v1/uploads",
+            files={"file": ("hearing.mp3", b"fake-audio-bytes", "audio/mpeg")},
+        )
+        assert response.status_code == 201
+        assert opened.call_args.args[1] == "wb"
+        assert normalize.inputs == [(".mp3", b"fake-audio-bytes")]
+
     def test_returns_503_when_ffmpeg_is_not_installed(self, client, as_current_user, mocker):
         manager = self._mock_blob_manager(mocker)
         mocker.patch(

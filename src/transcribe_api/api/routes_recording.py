@@ -12,6 +12,7 @@ from typing import Annotated
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
+import aiofiles
 from fastapi import (
     APIRouter,
     Body,
@@ -558,14 +559,14 @@ async def _save_upload_capped(file: UploadFile, max_bytes: int, target: Path) ->
     memory alongside the decoded WAV.
     """
     total = 0
-    with target.open("wb") as out:
+    async with aiofiles.open(target, "wb") as out:
         while chunk := await file.read(_UPLOAD_CHUNK_BYTES):
             total += len(chunk)
             if total > max_bytes:
                 raise HTTPException(
                     status_code=413, detail="Audio file exceeds the maximum upload size"
                 )
-            out.write(chunk)
+            await out.write(chunk)
 
 
 @router.post("/uploads", status_code=201, response_model=UploadResponse)
