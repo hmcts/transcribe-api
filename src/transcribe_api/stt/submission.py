@@ -8,6 +8,7 @@ from uuid import UUID
 from sqlmodel import Session
 
 from transcribe_api.stt.batch_client import BatchSubmissionError, submit_batch_job
+from transcribe_api.stt.speech_auth import SpeechAuthError
 from transcribe_api.domain.interface_recording import save_job
 from transcribe_api.domain.models_recording import BatchJobStatus, JobStatus, SpeechBatchJob
 
@@ -74,6 +75,17 @@ async def submit_and_queue_batch_job(
         # Store only the high-level message — full Azure error detail (which
         # may contain endpoint URLs or subscription IDs) goes to Sentry only.
         job.error_message = "Azure batch transcription submission failed"
+        job = save_job(session, job)
+        raise
+    except SpeechAuthError as exc:
+        # The pod's workload identity could not get a token (federation or
+        # role assignment missing); the detail is in the log and Sentry.
+        logger.error("Batch submission failed for job %s: %s", job.id, exc)
+        import sentry_sdk
+
+        sentry_sdk.capture_exception(exc)
+        job.status = JobStatus.FAILED
+        job.error_message = "Could not authenticate to Azure Speech"
         job = save_job(session, job)
         raise
     except Exception as exc:

@@ -61,6 +61,10 @@ injects a mock identity with **all** roles. Never deploy with it.
 Background pollers do not run in the API process. Set `RUN_WORKERS=true`, or
 run `python -m transcribe_api.worker` as a separate workload.
 
+Azure Speech is called with the pod's workload identity (an Entra token for the
+custom-subdomain `AZURE_SPEECH_ENDPOINT`, `stt/speech_auth.py`); set
+`AZURE_SPEECH_KEY` only for local development against a key-enabled account.
+
 Uploads are converted with `ffmpeg` and probed with `ffprobe`, which the image
 provides (Dockerfile). Install both to exercise uploads locally; deployed pods
 refuse to start without them.

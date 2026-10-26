@@ -91,3 +91,40 @@ def isolate_test_environment(monkeypatch: pytest.MonkeyPatch):
     _clear_settings_caches()
     yield
     _clear_settings_caches()
+
+
+class FakeSpeechCredential:
+    """Stands in for DefaultAzureCredential in stt/speech_auth.py."""
+
+    instances = 0
+
+    def __init__(self, *args, **kwargs) -> None:
+        type(self).instances += 1
+        self.scopes: list[tuple[str, ...]] = []
+        self.error: Exception | None = None
+
+    def get_token(self, *scopes, **kwargs):
+        from azure.core.credentials import AccessToken
+
+        self.scopes.append(scopes)
+        if self.error is not None:
+            raise self.error
+        return AccessToken("aad-token", 9999999999)
+
+
+@pytest.fixture
+def speech_workload_identity(monkeypatch: pytest.MonkeyPatch):
+    """No Speech key, as in AKS: Speech calls authenticate with a fake Entra credential.
+
+    Returns the credential the helper uses; set ``.error`` to make get_token fail.
+    """
+    from transcribe_api.stt import speech_auth
+
+    monkeypatch.setenv("AZURE_SPEECH_KEY", "")
+    _clear_settings_caches()
+    FakeSpeechCredential.instances = 0
+    monkeypatch.setattr(speech_auth, "DefaultAzureCredential", FakeSpeechCredential)
+    speech_auth._credential.cache_clear()
+    credential = speech_auth._credential()
+    yield credential
+    speech_auth._credential.cache_clear()

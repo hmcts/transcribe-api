@@ -22,6 +22,7 @@ from transcribe_api.stt.utils import (
 from transcribe_api.domain.models_dictation import DialogueEntry
 from transcribe_api.runtime.logger import logger
 from transcribe_api.runtime.settings_dictation import get_settings
+from transcribe_api.stt.speech_auth import SpeechAuthError, speech_auth_headers
 
 TOO_MANY_REQUESTS = 429
 # Azure batch transcription profanity options are: Masked, Removed, None.
@@ -163,13 +164,16 @@ async def transcribe_audio_with_azure(audio_file_path: Path):
     """
 
     settings = get_settings()
-    if not settings.AZURE_SPEECH_KEY:
-        raise HTTPException(status_code=500, detail="AZURE_SPEECH_KEY not set")
     if not settings.AZURE_SPEECH_ENDPOINT:
         raise HTTPException(status_code=500, detail="AZURE_SPEECH_ENDPOINT not set")
 
     url = f"{settings.AZURE_SPEECH_ENDPOINT.rstrip('/')}/speechtotext/transcriptions:transcribe?api-version=2024-11-15"
-    headers = {"Ocp-Apim-Subscription-Key": settings.AZURE_SPEECH_KEY}
+    # Workload identity bearer token; the key header only for local dev.
+    try:
+        headers = await speech_auth_headers(settings.AZURE_SPEECH_KEY)
+    except SpeechAuthError as exc:
+        logger.error(str(exc))
+        raise HTTPException(status_code=500, detail="Could not authenticate to Azure Speech") from exc
     async with aiofiles.open(audio_file_path, "rb") as audio_file:
         audio_content = await audio_file.read()
         files: Any = {

@@ -104,9 +104,10 @@ def _compose_model_display_name(model_details: dict) -> str | None:
 def _is_trusted_speech_url(model_identifier: str) -> bool:
     """True only when model_identifier is an HTTPS URL on our Speech host.
 
-    The subscription key travels in the request header, so we must never
-    dereference an arbitrary URL: a malformed or off-Azure `model.self` would
-    otherwise exfiltrate the key (SSRF). We require HTTPS and an exact host
+    Our Speech credentials (an Entra bearer token, or the subscription key in
+    local dev) travel in the request header, so we must never dereference an
+    arbitrary URL: a malformed or off-Azure `model.self` would otherwise
+    exfiltrate them (SSRF). We require HTTPS and an exact host
     match against the configured AZURE_SPEECH_ENDPOINT — the only host our
     Speech credentials are valid for. Anything else (non-URL fallback labels,
     http, a different host) is rejected and the caller falls back to the raw
@@ -133,8 +134,8 @@ async def _resolve_model_display_name(model_identifier: str) -> str | None:
     model_identifier is Azure's `model.self` URL when the batch response
     carried one, otherwise a non-URL fallback label (which can't be
     dereferenced). Resolution is skipped unless the identifier is an HTTPS URL
-    on our configured Speech host (see `_is_trusted_speech_url`) so the
-    subscription key is never sent anywhere else. Any failure — untrusted or
+    on our configured Speech host (see `_is_trusted_speech_url`) so our
+    Speech credentials are never sent anywhere else. Any failure — untrusted or
     non-URL identifier, network error, 401, deleted model — is caught and
     logged and yields None so job completion and the metadata display are
     never broken (DIAAT-243 AC5).

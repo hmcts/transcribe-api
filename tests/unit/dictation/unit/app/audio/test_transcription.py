@@ -45,8 +45,61 @@ def mock_http_response():
 
 @pytest.mark.asyncio
 class TestTranscribeAudioWithAzure:
-    async def test_missing_speech_key_raises_500(self, audio_file):
-        with patch("transcribe_api.stt.fast_client.get_settings") as mock_get:
+    async def test_no_speech_key_sends_workload_identity_bearer_token(
+        self, audio_file, mock_http_response, speech_workload_identity
+    ):
+        """AKS has no Speech key: authenticate with the pod's Entra identity,
+        not a 500 "AZURE_SPEECH_KEY not set"."""
+        posted = []
+
+        async def fake_post(url, **kwargs):
+            posted.append(kwargs["headers"])
+            return mock_http_response({"phrases": [VALID_PHRASE]})
+
+        with (
+            patch("transcribe_api.stt.fast_client.get_settings") as mock_get,
+            patch("httpx.AsyncClient") as mock_client_class,
+        ):
+            settings = MagicMock()
+            settings.AZURE_SPEECH_KEY = ""
+            settings.AZURE_SPEECH_ENDPOINT = "https://test.cognitiveservices.azure.com"
+            mock_get.return_value = settings
+            mock_client = AsyncMock()
+            mock_client.post = fake_post
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            from transcribe_api.stt.fast_client import transcribe_audio_with_azure
+
+            await transcribe_audio_with_azure(audio_file)
+
+        assert posted == [{"Authorization": "Bearer aad-token"}]
+
+    async def test_speech_key_header_when_a_key_is_configured(
+        self, mock_settings, audio_file, mock_http_response
+    ):
+        posted = []
+
+        async def fake_post(url, **kwargs):
+            posted.append(kwargs["headers"])
+            return mock_http_response({"phrases": [VALID_PHRASE]})
+
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post = fake_post
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            from transcribe_api.stt.fast_client import transcribe_audio_with_azure
+
+            await transcribe_audio_with_azure(audio_file)
+
+        assert posted == [{"Ocp-Apim-Subscription-Key": "test-key"}]
+
+    async def test_speech_credential_failure_raises_500(self, audio_file, speech_workload_identity):
+        speech_workload_identity.error = RuntimeError("no federated token")
+        with (
+            patch("transcribe_api.stt.fast_client.get_settings") as mock_get,
+            patch("httpx.AsyncClient") as mock_client_class,
+        ):
             settings = MagicMock()
             settings.AZURE_SPEECH_KEY = ""
             settings.AZURE_SPEECH_ENDPOINT = "https://test.cognitiveservices.azure.com"
@@ -57,8 +110,9 @@ class TestTranscribeAudioWithAzure:
             with pytest.raises(HTTPException) as exc:
                 await transcribe_audio_with_azure(audio_file)
 
-            assert exc.value.status_code == 500
-            assert "AZURE_SPEECH_KEY" in exc.value.detail
+        assert exc.value.status_code == 500
+        assert "authenticate to Azure Speech" in exc.value.detail
+        mock_client_class.assert_not_called()
 
     async def test_missing_endpoint_raises_500(self, audio_file):
         with patch("transcribe_api.stt.fast_client.get_settings") as mock_get:

@@ -585,3 +585,94 @@ class TestDeleteBatchJob:
             mock_client.delete = AsyncMock(return_value=mock_response)
 
             await delete_batch_job("https://job-url")
+
+
+class TestWorkloadIdentityAuth:
+    """No Speech key (AKS): every Speech REST call carries an Entra bearer token."""
+
+    @staticmethod
+    def _client(mock_client_cls):
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        return mock_client
+
+    @staticmethod
+    def _assert_bearer(headers):
+        assert headers["Authorization"] == "Bearer aad-token"
+        assert "Ocp-Apim-Subscription-Key" not in headers
+
+    @pytest.mark.asyncio
+    async def test_submit_sends_bearer_token(self, speech_workload_identity):
+        from transcribe_api.stt.batch_client import submit_batch_job
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = self._client(mock_client_cls)
+            mock_client.post = AsyncMock(
+                return_value=_make_response(status_code=201, headers={"Location": "https://job"})
+            )
+            await submit_batch_job("https://sas-url", "test-job")
+
+        self._assert_bearer(mock_client.post.call_args.kwargs["headers"])
+
+    @pytest.mark.asyncio
+    async def test_status_model_and_delete_send_bearer_token(self, speech_workload_identity):
+        from transcribe_api.stt.batch_client import (
+            delete_batch_job,
+            get_batch_job_status,
+            get_model_details,
+        )
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = self._client(mock_client_cls)
+            mock_client.get = AsyncMock(return_value=_make_response(body={"status": "Running"}))
+            mock_client.delete = AsyncMock(return_value=_make_response(status_code=204))
+
+            await get_batch_job_status("https://job")
+            await get_model_details("https://test.cognitiveservices.azure.com/models/abc")
+            await delete_batch_job("https://job")
+
+        for call in mock_client.get.call_args_list:
+            self._assert_bearer(call.kwargs["headers"])
+        self._assert_bearer(mock_client.delete.call_args.kwargs["headers"])
+
+    @pytest.mark.asyncio
+    async def test_results_listing_sends_bearer_but_sas_content_url_gets_no_auth(
+        self, speech_workload_identity
+    ):
+        from transcribe_api.stt.batch_client import get_batch_results
+
+        files_data = {
+            "values": [{"kind": "Transcription", "links": {"contentUrl": "https://results-sas-url"}}]
+        }
+        calls = []
+
+        async def fake_get(url, **kwargs):
+            calls.append((url, kwargs))
+            if url.endswith("/files"):
+                return _make_response(body=files_data)
+            return _make_response(body={"recognizedPhrases": []})
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = self._client(mock_client_cls)
+            mock_client.get = fake_get
+            await get_batch_results("https://job")
+
+        (files_url, files_kwargs), (content_url, content_kwargs) = calls
+        assert files_url == "https://job/files"
+        self._assert_bearer(files_kwargs["headers"])
+        # The contentUrl is a SAS link: no token is sent to it.
+        assert content_url == "https://results-sas-url"
+        assert "headers" not in content_kwargs
+
+    @pytest.mark.asyncio
+    async def test_credential_failure_is_not_retried_and_makes_no_request(self, speech_workload_identity):
+        from transcribe_api.stt.batch_client import submit_batch_job
+        from transcribe_api.stt.speech_auth import SpeechAuthError
+
+        speech_workload_identity.error = RuntimeError("no federated token")
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            with pytest.raises(SpeechAuthError):
+                await submit_batch_job("https://sas-url", "test-job")
+            mock_client_cls.assert_not_called()
+        assert len(speech_workload_identity.scopes) == 1

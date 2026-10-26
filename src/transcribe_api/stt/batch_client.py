@@ -9,6 +9,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 from uwotm8 import convert_american_to_british_spelling
 
 from transcribe_api.runtime.settings_recording import get_settings
+from transcribe_api.stt.speech_auth import speech_auth_headers
 from transcribe_api.domain.models_recording import (
     DialogueEntry,
     NBestCandidate,
@@ -35,8 +36,9 @@ class BatchResultError(Exception):
     """Batch transcription results could not be retrieved."""
 
 
-def _auth_headers() -> dict[str, str]:
-    return {"Ocp-Apim-Subscription-Key": get_settings().AZURE_SPEECH_KEY}
+async def _auth_headers() -> dict[str, str]:
+    # Workload identity bearer token; the key header only for local dev.
+    return await speech_auth_headers(get_settings().AZURE_SPEECH_KEY)
 
 
 def _submit_url() -> str:
@@ -79,8 +81,9 @@ async def submit_batch_job(
             "speakers": {"minCount": 1, "maxCount": 5},
         }
 
+    headers = await _auth_headers()
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-        response = await client.post(_submit_url(), headers=_auth_headers(), json=payload)
+        response = await client.post(_submit_url(), headers=headers, json=payload)
 
     if response.status_code >= _HTTP_SERVER_ERROR_MIN:
         response.raise_for_status()
@@ -102,8 +105,9 @@ async def submit_batch_job(
 @_RETRY_POLICY
 async def get_batch_job_status(job_url: str) -> dict:
     """Return the full Azure batch job status JSON."""
+    headers = await _auth_headers()
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-        response = await client.get(job_url, headers=_auth_headers())
+        response = await client.get(job_url, headers=headers)
         response.raise_for_status()
     return response.json()
 
@@ -114,18 +118,18 @@ async def get_model_details(model_url: str) -> dict:
     The `model.self` URL Azure returns on a completed batch job is an
     authenticated REST endpoint ending in an opaque GUID. Fetching it yields
     the model's human-readable details (`displayName`, `locale`,
-    `createdDateTime`, ...). The call reuses the backend's existing Speech
-    subscription key via the same `Ocp-Apim-Subscription-Key` header as every
-    other batch call — the key stays server-side and never leaves this
-    process; only the parsed, non-sensitive display fields are surfaced to
-    callers.
+    `createdDateTime`, ...). The call carries the same Speech credentials as
+    every other batch call (see stt/speech_auth.py), so callers must only pass
+    URLs on our Speech host (polling_service._is_trusted_speech_url); only
+    the parsed, non-sensitive display fields are surfaced to callers.
 
     Deliberately un-retried: resolution is best-effort and runs inline on the
     job-completion path (the caller catches failures), so a single fast
     attempt is preferred over the batch retry policy's multi-second backoff.
     """
+    headers = await _auth_headers()
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-        response = await client.get(model_url, headers=_auth_headers())
+        response = await client.get(model_url, headers=headers)
         response.raise_for_status()
     return response.json()
 
@@ -136,8 +140,9 @@ async def get_batch_results(
     transcription_job_id: UUID | None = None,
 ) -> list[DialogueEntry]:
     """Download and parse batch transcription results."""
+    headers = await _auth_headers()
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-        files_response = await client.get(f"{job_url}/files", headers=_auth_headers())
+        files_response = await client.get(f"{job_url}/files", headers=headers)
         files_response.raise_for_status()
         files_data = files_response.json()
 
@@ -153,6 +158,7 @@ async def get_batch_results(
                 f"Transcription file missing contentUrl in batch results for job: {job_url}"
             )
 
+        # A SAS link to Speech's own storage: no Speech credentials go to it.
         result_response = await client.get(content_url)
         result_response.raise_for_status()
         result_data = result_response.json()
@@ -223,8 +229,9 @@ async def get_batch_results(
 @_RETRY_POLICY
 async def delete_batch_job(job_url: str) -> None:
     """Delete a completed batch job from Azure. Non-fatal on HTTP 404."""
+    headers = await _auth_headers()
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-        response = await client.delete(job_url, headers=_auth_headers())
+        response = await client.delete(job_url, headers=headers)
 
     if response.status_code == 404:
         return

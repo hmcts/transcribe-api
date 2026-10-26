@@ -230,6 +230,21 @@ class TestResolveModelDisplayName:
         mock_get.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_untrusted_host_gets_no_token_and_no_request(self, speech_workload_identity):
+        """With workload identity a bearer token is sent instead of a key; the
+        host check must still stop it reaching a foreign model.self URL."""
+        from transcribe_api.stt.polling_service import _resolve_model_display_name
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            result = await _resolve_model_display_name(
+                "https://attacker.example.com/speechtotext/v3.2/models/base/abc"
+            )
+
+        assert result is None
+        mock_client_cls.assert_not_called()
+        assert speech_workload_identity.scopes == []
+
+    @pytest.mark.asyncio
     async def test_skips_resolution_for_non_https_url(self):
         """Plain http is rejected even on the right host — the key only travels
         over TLS."""
