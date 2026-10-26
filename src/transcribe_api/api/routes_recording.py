@@ -5,8 +5,9 @@ import math
 import mimetypes
 import re
 import socket
+import tempfile
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Annotated
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
@@ -549,6 +550,24 @@ async def _read_upload_capped(
     return b"".join(chunks)
 
 
+async def _save_upload_capped(file: UploadFile, max_bytes: int, target: Path) -> None:
+    """Write the upload to ``target`` in chunks, aborting once max_bytes is exceeded.
+
+    The audio upload goes to disk rather than memory: ffmpeg reads it from a
+    file anyway, and up to 200 MB per request would otherwise sit in the API's
+    memory alongside the decoded WAV.
+    """
+    total = 0
+    with target.open("wb") as out:
+        while chunk := await file.read(_UPLOAD_CHUNK_BYTES):
+            total += len(chunk)
+            if total > max_bytes:
+                raise HTTPException(
+                    status_code=413, detail="Audio file exceeds the maximum upload size"
+                )
+            out.write(chunk)
+
+
 @router.post("/uploads", status_code=201, response_model=UploadResponse)
 @limiter.limit("50/hour")
 async def upload_audio(
@@ -564,40 +583,60 @@ async def upload_audio(
             f"Allowed: {', '.join(sorted(_ALLOWED_AUDIO_EXTENSIONS))}",
         )
 
-    content = await _read_upload_capped(file, _MAX_UPLOAD_BYTES)
-
-    # Transcode every accepted upload to 16 kHz mono PCM WAV — the format Azure
-    # Speech handles most reliably — before storing. A file that cannot be
-    # decoded is rejected here rather than creating a job doomed to fail with a
-    # cryptic "The recordings URI contains invalid data" from Speech.
-    try:
-        content = await normalize_to_wav(content, extension)
-    except AudioDecodeError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "The audio file could not be decoded. "
-                "It may be corrupt or in an unsupported format."
-            ),
-        ) from exc
-
     safe_filename = _sanitize_filename(file.filename or "audio")
     wav_filename = f"{PurePosixPath(safe_filename).stem}.wav"
     blob_name = f"uploads/{current_user.id}/{uuid4()}-{wav_filename}"
 
-    if get_settings().AUDIO_STORAGE_BACKEND == "local":
-        local_storage.save(content, blob_name)
-        try:
-            audio_url = local_storage.build_url(blob_name)
-        except ValueError as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-        return UploadResponse(audio_url=audio_url, blob_name=blob_name)
+    # The upload and its WAV live in temp files and the WAV is streamed to
+    # storage: the WAV is about 115 MB per hour of audio, and holding both in
+    # memory could take a long recording past the pod's memory limit.
+    with tempfile.TemporaryDirectory(prefix="upload-") as tmpdir:
+        # The input keeps its extension so ffmpeg can sniff the source format.
+        input_path = Path(tmpdir) / f"input{extension}"
+        wav_path = Path(tmpdir) / "output.wav"
+        await _save_upload_capped(file, _MAX_UPLOAD_BYTES, input_path)
 
-    async with AsyncAzureBlobManager() as blob_manager:
-        uploaded = await blob_manager.create_blob_from_bytes(content, blob_name)
-        if not uploaded:
-            raise HTTPException(status_code=502, detail="Failed to store audio file")
-        audio_url = blob_manager.build_blob_url(blob_name)
+        # Transcode every accepted upload to 16 kHz mono PCM WAV — the format
+        # Azure Speech handles most reliably — before storing. A file that
+        # cannot be decoded is rejected here rather than creating a job doomed
+        # to fail with a cryptic "The recordings URI contains invalid data"
+        # from Speech.
+        try:
+            await normalize_to_wav(input_path, wav_path)
+        except AudioDecodeError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "The audio file could not be decoded. "
+                    "It may be corrupt or in an unsupported format."
+                ),
+            ) from exc
+        except FileNotFoundError as exc:
+            # ffmpeg is not installed: the server is misconfigured, the upload
+            # is fine. Deployed pods check for it at startup (api/app.py), so
+            # this should not happen; if it does, say so rather than 500.
+            logger.error("Cannot transcode upload, ffmpeg is not available: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Audio conversion is unavailable on the server. "
+                    "Please try again later or contact support."
+                ),
+            ) from exc
+
+        if get_settings().AUDIO_STORAGE_BACKEND == "local":
+            local_storage.save_file(wav_path, blob_name)
+            try:
+                audio_url = local_storage.build_url(blob_name)
+            except ValueError as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+            return UploadResponse(audio_url=audio_url, blob_name=blob_name)
+
+        async with AsyncAzureBlobManager() as blob_manager:
+            uploaded = await blob_manager.create_blob_from_file(wav_path, blob_name)
+            if not uploaded:
+                raise HTTPException(status_code=502, detail="Failed to store audio file")
+            audio_url = blob_manager.build_blob_url(blob_name)
 
     return UploadResponse(audio_url=audio_url, blob_name=blob_name)
 

@@ -115,10 +115,31 @@ class TestVersion:
         assert response.status_code == 200
 
 
+def _patch_normalize(mocker, wav_bytes=b"WAVDATA"):
+    """Stand in for ffmpeg: record each input, write wav_bytes to the output path."""
+
+    async def fake(input_path, output_path):
+        fake.inputs.append((input_path.suffix, input_path.read_bytes()))
+        output_path.write_bytes(wav_bytes)
+
+    fake.inputs = []
+    mocker.patch("transcribe_api.api.routes_recording.normalize_to_wav", new=fake)
+    return fake
+
+
 class TestUploadAudio:
     def _mock_blob_manager(self, mocker, *, upload_ok=True, blob_url="https://x/y.wav"):
         manager = mocker.AsyncMock()
         manager.create_blob_from_bytes = mocker.AsyncMock(return_value=upload_ok)
+        # The WAV is streamed from its temp file; capture the bytes before the
+        # temp directory is removed.
+        manager.stored = {}
+
+        async def from_file(path, blob_name, *args, **kwargs):
+            manager.stored[blob_name] = path.read_bytes()
+            return upload_ok
+
+        manager.create_blob_from_file = mocker.AsyncMock(side_effect=from_file)
         manager.build_blob_url = mocker.Mock(return_value=blob_url)
         manager.__aenter__ = mocker.AsyncMock(return_value=manager)
         manager.__aexit__ = mocker.AsyncMock(return_value=False)
@@ -127,10 +148,7 @@ class TestUploadAudio:
 
     def _mock_normalize(self, mocker, wav_bytes=b"WAVDATA"):
         """Patch out the ffmpeg transcode so uploads never touch real ffmpeg."""
-        return mocker.patch(
-            "transcribe_api.api.routes_recording.normalize_to_wav",
-            new=mocker.AsyncMock(return_value=wav_bytes),
-        )
+        return _patch_normalize(mocker, wav_bytes)
 
     def test_returns_201_with_audio_url(self, client, as_current_user, mocker):
         self._mock_blob_manager(mocker)
@@ -155,8 +173,51 @@ class TestUploadAudio:
             files={"file": ("hearing.mp3", b"fake-audio-bytes", "audio/mpeg")},
         )
         assert response.status_code == 201
-        stored_bytes = manager.create_blob_from_bytes.call_args.args[0]
-        assert stored_bytes == b"WAVDATA"
+        # Streamed from disk, never buffered as bytes.
+        manager.create_blob_from_bytes.assert_not_called()
+        assert list(manager.stored.values()) == [b"WAVDATA"]
+        assert list(manager.stored) == [response.json()["blob_name"]]
+
+    def test_transcodes_the_upload_from_a_file_with_its_extension(self, client, as_current_user, mocker):
+        self._mock_blob_manager(mocker)
+        normalize = self._mock_normalize(mocker)
+
+        response = client.post(
+            "/api/v1/uploads",
+            files={"file": ("hearing.M4A", b"fake-audio-bytes", "audio/mp4")},
+        )
+        assert response.status_code == 201
+        assert normalize.inputs == [(".m4a", b"fake-audio-bytes")]
+
+    def test_returns_413_when_upload_exceeds_the_cap(self, client, as_current_user, mocker):
+        manager = self._mock_blob_manager(mocker)
+        normalize = self._mock_normalize(mocker)
+        mocker.patch("transcribe_api.api.routes_recording._MAX_UPLOAD_BYTES", 10)
+        mocker.patch("transcribe_api.api.routes_recording._UPLOAD_CHUNK_BYTES", 4)
+
+        response = client.post(
+            "/api/v1/uploads",
+            files={"file": ("hearing.mp3", b"x" * 11, "audio/mpeg")},
+        )
+        assert response.status_code == 413
+        assert normalize.inputs == []
+        manager.create_blob_from_file.assert_not_called()
+
+    def test_returns_503_when_ffmpeg_is_not_installed(self, client, as_current_user, mocker):
+        manager = self._mock_blob_manager(mocker)
+        mocker.patch(
+            "transcribe_api.api.routes_recording.normalize_to_wav",
+            new=mocker.AsyncMock(side_effect=FileNotFoundError(2, "No such file or directory", "ffmpeg")),
+        )
+
+        response = client.post(
+            "/api/v1/uploads",
+            files={"file": ("hearing.mp3", b"fake-audio-bytes", "audio/mpeg")},
+        )
+        assert response.status_code == 503
+        assert "audio conversion is unavailable" in response.json()["detail"].lower()
+        manager.create_blob_from_file.assert_not_called()
+        manager.create_blob_from_bytes.assert_not_called()
 
     def test_returns_422_when_audio_cannot_be_decoded(self, client, as_current_user, mocker):
         from transcribe_api.stt.preprocessing import AudioDecodeError
@@ -173,6 +234,7 @@ class TestUploadAudio:
         )
         assert response.status_code == 422
         # No blob is stored for an undecodable upload — no doomed job is created.
+        manager.create_blob_from_file.assert_not_called()
         manager.create_blob_from_bytes.assert_not_called()
 
     def test_rejects_unsupported_extension(self, client, as_current_user):
@@ -213,10 +275,7 @@ class TestUploadAudioLocalBackend:
         get_settings.cache_clear()
 
     def test_stores_locally_and_returns_tunnel_url(self, client, as_current_user, mocker):
-        mocker.patch(
-            "transcribe_api.api.routes_recording.normalize_to_wav",
-            new=mocker.AsyncMock(return_value=b"WAVDATA"),
-        )
+        _patch_normalize(mocker, b"WAVDATA")
         response = client.post(
             "/api/v1/uploads",
             files={"file": ("hearing.mp3", b"fake-audio-bytes", "audio/mpeg")},
@@ -232,10 +291,7 @@ class TestUploadAudioLocalBackend:
 
     def test_never_touches_azure_blob_manager(self, client, as_current_user, mocker):
         blob_manager_cls = mocker.patch("transcribe_api.api.routes_recording.AsyncAzureBlobManager")
-        mocker.patch(
-            "transcribe_api.api.routes_recording.normalize_to_wav",
-            new=mocker.AsyncMock(return_value=b"WAVDATA"),
-        )
+        _patch_normalize(mocker, b"WAVDATA")
 
         client.post(
             "/api/v1/uploads",

@@ -16,6 +16,9 @@ from transcribe_api.runtime.settings_recording import get_settings
 logger = logging.getLogger(__name__)
 
 
+_FILE_UPLOAD_BLOCK_BYTES = 4 * 1024 * 1024
+
+
 def _sanitize_for_log(value: object) -> str:
     """Stringify and repr-wrap value to prevent log injection via control characters."""
     return repr(str(value))
@@ -48,10 +51,10 @@ class AsyncAzureBlobManager:
         # mounting ~/.azure into the container.
         self.credential = None if self._connection_string else DefaultAzureCredential()
 
-    def _blob_service_client(self) -> AsyncBlobServiceClient:
+    def _blob_service_client(self, **kwargs) -> AsyncBlobServiceClient:
         if self._connection_string:
-            return AsyncBlobServiceClient.from_connection_string(self._connection_string)
-        return AsyncBlobServiceClient(account_url=self.account_url, credential=self.credential)
+            return AsyncBlobServiceClient.from_connection_string(self._connection_string, **kwargs)
+        return AsyncBlobServiceClient(account_url=self.account_url, credential=self.credential, **kwargs)
 
     async def __aenter__(self):
         """Async context manager entry."""
@@ -151,7 +154,13 @@ class AsyncAzureBlobManager:
         file_path_safe = _sanitize_for_log(file_path)
 
         try:
-            async with self._blob_service_client() as blob_service:
+            # Upload in 4 MiB blocks. The SDK's default reads any file up to
+            # 64 MiB whole into memory for a single request; a recording's WAV
+            # is about 115 MB per hour of audio.
+            async with self._blob_service_client(
+                max_single_put_size=_FILE_UPLOAD_BLOCK_BYTES,
+                max_block_size=_FILE_UPLOAD_BLOCK_BYTES,
+            ) as blob_service:
                 blob_client = blob_service.get_blob_client(container=container, blob=blob_name)
 
                 # Infer content type from file extension so Azure serves

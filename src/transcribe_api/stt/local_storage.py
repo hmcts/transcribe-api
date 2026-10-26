@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
 from pathlib import Path
 from urllib.parse import quote
 
@@ -48,6 +49,13 @@ def _storage_root() -> Path:
 def save(content: bytes, blob_name: str) -> Path:
     target = _storage_root() / _flat_filename(blob_name)
     target.write_bytes(content)
+    return target
+
+
+def save_file(source: Path, blob_name: str) -> Path:
+    """Copy a file into storage without reading it into memory."""
+    target = _storage_root() / _flat_filename(blob_name)
+    shutil.copyfile(source, target)
     return target
 
 

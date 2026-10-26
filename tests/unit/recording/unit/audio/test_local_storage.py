@@ -121,3 +121,17 @@ class TestDelete:
     def test_rejects_path_traversal(self):
         with pytest.raises(ValueError, match="invalid blob_name"):
             local_storage.delete("../../etc/passwd")
+
+
+class TestSaveFile:
+    def test_copies_a_file_into_storage(self, tmp_path):
+        source = tmp_path / "source.wav"
+        source.write_bytes(b"WAVDATA")
+        local_storage.save_file(source, "uploads/caller-1/file.wav")
+        assert local_storage.read("uploads/caller-1/file.wav") == b"WAVDATA"
+
+    def test_rejects_path_traversal(self, tmp_path):
+        source = tmp_path / "source.wav"
+        source.write_bytes(b"x")
+        with pytest.raises(ValueError, match="invalid blob_name"):
+            local_storage.save_file(source, "../../etc/passwd")
