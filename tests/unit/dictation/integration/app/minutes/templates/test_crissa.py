@@ -71,19 +71,15 @@ async def test_generate_full_crissa():
         ),
     ]
 
-    # Test email
-    test_user_email = "test@example.com"
-
     print("🚀 Starting CRISSA generation test...")
     print(f"📝 Sample dialogue entries: {len(sample_dialogue_entries)} entries")
-    print(f"👤 Test user email: {test_user_email}")
     print("-" * 50)
 
     try:
         # Call the function
         result = await generate_full_crissa(
             dialogue_entries=sample_dialogue_entries,
-            user_email=test_user_email,
+            user_id="eval-integration",
             # Optional parameters with defaults:
             # prompt_version=None,
             # model_name=LLMModel.VERTEX_GEMINI_25_PRO,

@@ -18,6 +18,15 @@ from transcribe_api.domain.models_recording import (
 )
 
 _TICKS_PER_SECOND: int = 10_000_000
+# Azure documents the ceiling on `diarization.speakers.maxCount` as "must be
+# less than 36 and more or equal to the minCount property", so 35 is the
+# highest value the service accepts. We ask for the full range rather than a
+# lower guess because exceeding maxCount doesn't fail the job: the service
+# quietly folds the surplus voices into the labels it is allowed to emit, and
+# downstream that's indistinguishable from a diarisation bug. Court hearings
+# can carry well over five participants (judge, several counsel, appellant,
+# respondent, interpreter, witnesses, clerk).
+_MAX_DIARIZATION_SPEAKERS: int = 35
 _HTTP_TIMEOUT: float = 30.0
 _HTTP_SERVER_ERROR_MIN: int = 500
 
@@ -78,7 +87,7 @@ async def submit_batch_job(
         payload["properties"]["diarizationEnabled"] = True
         payload["properties"]["diarization"] = {
             "enabled": True,
-            "speakers": {"minCount": 1, "maxCount": 5},
+            "speakers": {"minCount": 1, "maxCount": _MAX_DIARIZATION_SPEAKERS},
         }
 
     headers = await _auth_headers()

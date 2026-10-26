@@ -88,10 +88,10 @@ def _write_content(data: dict[str, Any]) -> None:
         raise HTTPException(status_code=500, detail=f"Unable to persist document content: {exc}") from exc
 
 
-def _log_admin_content_change(*, admin_email: str, action: str, item_id: str) -> None:
+def _log_admin_content_change(*, admin_id: str, action: str, item_id: str) -> None:
     logger.info(
-        "Admin %s %s '%s'",
-        sanitize_for_log(admin_email),
+        "Admin admin_id=%s %s '%s'",
+        sanitize_for_log(admin_id),
         action,
         sanitize_for_log(item_id),
     )
@@ -183,7 +183,7 @@ async def update_hearing_type(
             items[i] = payload.model_dump()
             _write_content(data)
             _log_admin_content_change(
-                admin_email=admin_user.email,
+                admin_id=str(admin_user.id),
                 action="updated hearing type",
                 item_id=item_id,
             )
@@ -205,7 +205,7 @@ async def create_hearing_type(
     items.append(new_item)
     _write_content(data)
     _log_admin_content_change(
-        admin_email=admin_user.email,
+        admin_id=str(admin_user.id),
         action="created hearing type",
         item_id=payload.id,
     )
@@ -226,7 +226,7 @@ async def delete_hearing_type(
         raise HTTPException(status_code=404, detail=f"Hearing type '{item_id}' not found")
     _write_content(data)
     _log_admin_content_change(
-        admin_email=admin_user.email,
+        admin_id=str(admin_user.id),
         action="deleted hearing type",
         item_id=item_id,
     )
@@ -251,7 +251,7 @@ async def update_legal_framework(
             items[i] = payload.model_dump()
             _write_content(data)
             _log_admin_content_change(
-                admin_email=admin_user.email,
+                admin_id=str(admin_user.id),
                 action="updated legal framework",
                 item_id=item_id,
             )
@@ -275,7 +275,7 @@ async def create_legal_framework(
     data["legal_frameworks"] = items
     _write_content(data)
     _log_admin_content_change(
-        admin_email=admin_user.email,
+        admin_id=str(admin_user.id),
         action="created legal framework",
         item_id=payload.id,
     )
@@ -296,7 +296,7 @@ async def delete_legal_framework(
         raise HTTPException(status_code=404, detail=f"Legal framework '{item_id}' not found")
     _write_content(data)
     _log_admin_content_change(
-        admin_email=admin_user.email,
+        admin_id=str(admin_user.id),
         action="deleted legal framework",
         item_id=item_id,
     )
@@ -322,7 +322,7 @@ async def update_anonymity_status(
             data["anonymity"]["statuses"] = statuses
             _write_content(data)
             _log_admin_content_change(
-                admin_email=admin_user.email,
+                admin_id=str(admin_user.id),
                 action="updated anonymity status",
                 item_id=item_id,
             )
@@ -338,21 +338,17 @@ async def update_anonymity_status(
 def _log_admin_transcript_access(
     *,
     admin_id: str,
-    admin_email: str,
     action: str,
     target_transcription_id: str | None = None,
     target_owner_id: str | None = None,
-    target_owner_email: str | None = None,
 ) -> None:
     logger.info(
-        "ADMIN_TRANSCRIPT_ACCESS action=%s admin_id=%s admin_email=%s "
-        "target_transcription_id=%s target_owner_id=%s target_owner_email=%s",
+        "ADMIN_TRANSCRIPT_ACCESS action=%s admin_id=%s "
+        "target_transcription_id=%s target_owner_id=%s",
         action,
         sanitize_for_log(admin_id),
-        sanitize_for_log(admin_email),
         sanitize_for_log(target_transcription_id) if target_transcription_id else "N/A",
         sanitize_for_log(target_owner_id) if target_owner_id else "N/A",
-        sanitize_for_log(target_owner_email) if target_owner_email else "N/A",
     )
 
 
@@ -380,7 +376,6 @@ async def admin_list_transcriptions(
     )
     _log_admin_transcript_access(
         admin_id=str(admin_user.id),
-        admin_email=admin_user.email,
         action="LIST_TRANSCRIPTIONS",
     )
     def _to_utc(dt: datetime | None) -> datetime | None:
@@ -408,14 +403,11 @@ async def admin_get_transcription(
 ) -> Transcription:
     """View any transcription regardless of owner. SystemAdministrator only."""
     transcription = admin_get_transcription_by_id(transcription_id)
-    owner = get_user_by_id(transcription.user_id)
     _log_admin_transcript_access(
         admin_id=str(admin_user.id),
-        admin_email=admin_user.email,
         action="VIEW_TRANSCRIPTION",
         target_transcription_id=str(transcription_id),
         target_owner_id=str(transcription.user_id),
-        target_owner_email=owner.email,
     )
     return transcription
 
@@ -427,7 +419,6 @@ async def admin_get_document_download_url(
 ) -> dict[str, str]:
     """Download any transcript document regardless of owner. SystemAdministrator only."""
     transcription = admin_get_transcription_by_id(transcription_id)
-    owner = get_user_by_id(transcription.user_id)
 
     blob_path: str | None = None
     if transcription.transcription_jobs:
@@ -458,11 +449,9 @@ async def admin_get_document_download_url(
 
     _log_admin_transcript_access(
         admin_id=str(admin_user.id),
-        admin_email=admin_user.email,
         action="DOWNLOAD_DOCUMENT",
         target_transcription_id=str(transcription_id),
         target_owner_id=str(transcription.user_id),
-        target_owner_email=owner.email,
     )
 
     return {"download_url": download_url}
@@ -512,9 +501,8 @@ async def admin_list_users_route(
     """List all registered users. SystemAdministrator only."""
     users, total = admin_list_users(page=page, page_size=page_size, search_email=search_email)
     logger.info(
-        "ADMIN_USER_LIST admin_id=%s admin_email=%s total=%d",
+        "ADMIN_USER_LIST admin_id=%s total=%d",
         sanitize_for_log(str(admin_user.id)),
-        sanitize_for_log(admin_user.email),
         total,
     )
     items = [
@@ -606,10 +594,9 @@ async def admin_delete_user_route(
     except UserHasTranscriptionsError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     logger.info(
-        "ADMIN_USER_DELETED admin_id=%s target_user_id=%s target_email=%s",
+        "ADMIN_USER_DELETED admin_id=%s target_user_id=%s",
         sanitize_for_log(str(admin_user.id)),
         sanitize_for_log(str(user_id)),
-        sanitize_for_log(target.email),
     )
     app_roles: list[str] = admin_user.app_roles
     write_audit_event(AuditEvent(

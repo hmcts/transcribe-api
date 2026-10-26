@@ -19,6 +19,20 @@ def _sanitize_for_log(value: object) -> str:
     return sanitize_for_log(value)
 
 
+def _redact_blob_path(blob_path: str) -> str:
+    """Replace the user-email segment in a blob path with [redacted].
+
+    Legacy paths follow user-uploads/{email}/{filename}; the email at
+    segment index 1 is the PII that must not appear in logs.
+    Safe to call on any blob path — non-matching paths are returned unchanged.
+    """
+    parts = blob_path.split("/")
+    if len(parts) >= 3 and parts[0] == "user-uploads":  # noqa: PLR2004
+        parts[1] = "[redacted]"
+        return _sanitize_for_log("/".join(parts))
+    return _sanitize_for_log(blob_path)
+
+
 # =============================================================================
 # Blob Management Functions
 # =============================================================================
@@ -90,7 +104,7 @@ class AsyncAzureBlobManager:
         """
         container = container_name or self.container_name
         container_safe = _sanitize_for_log(container)
-        blob_safe = _sanitize_for_log(blob_name)
+        blob_safe = _redact_blob_path(blob_name)
 
         try:
             async with AsyncBlobServiceClient(account_url=self.account_url, credential=self.credential) as blob_service:
@@ -126,7 +140,7 @@ class AsyncAzureBlobManager:
         """
         container = container_name or self.container_name
         container_safe = _sanitize_for_log(container)
-        blob_safe = _sanitize_for_log(blob_name)
+        blob_safe = _redact_blob_path(blob_name)
         file_path_safe = _sanitize_for_log(file_path)
 
         try:
@@ -193,15 +207,15 @@ class AsyncAzureBlobManager:
                 blob_client = blob_service.get_blob_client(container=container, blob=blob_name)
                 await blob_client.delete_blob(delete_snapshots=delete_snapshots, **_if_match(etag))
 
-            logger.info(f"Successfully deleted blob: {container}/{blob_name}")
+            logger.info(f"Successfully deleted blob: {container}/{_redact_blob_path(blob_name)}")
         except ResourceModifiedError:
-            logger.info(f"Blob changed since it was read, not deleted: {container}/{blob_name}")
+            logger.info(f"Blob changed since it was read, not deleted: {container}/{_redact_blob_path(blob_name)}")
             return False
         except ResourceNotFoundError:
-            logger.warning(f"Blob not found: {container}/{blob_name}")
+            logger.warning(f"Blob not found: {container}/{_redact_blob_path(blob_name)}")
             return False
         except Exception as e:
-            logger.error(f"Failed to delete blob {container}/{blob_name}: {e}")
+            logger.error(f"Failed to delete blob {container}/{_redact_blob_path(blob_name)}: {e}")
             return False
         else:
             return True
@@ -229,7 +243,7 @@ class AsyncAzureBlobManager:
                 return await blob_client.exists()
 
         except Exception as e:
-            logger.error(f"Failed to check if blob exists {container}/{blob_name}: {e}")
+            logger.error(f"Failed to check if blob exists {container}/{_redact_blob_path(blob_name)}: {e}")
             return False
 
     async def list_blobs_in_prefix(
@@ -278,10 +292,10 @@ class AsyncAzureBlobManager:
                         blob_info["metadata"] = blob.metadata or {}
                     blobs.append(blob_info)
 
-            logger.info(f"Listed {len(blobs)} blobs with prefix '{prefix}' in container '{container}'")
+            logger.info(f"Listed {len(blobs)} blobs with prefix '{_redact_blob_path(prefix)}' in container '{container}'")
 
         except Exception as e:
-            logger.error(f"Failed to list blobs with prefix '{prefix}' in container '{container}': {e}")
+            logger.error(f"Failed to list blobs with prefix '{_redact_blob_path(prefix)}' in container '{container}': {e}")
             return []
         else:
             return blobs
@@ -310,10 +324,10 @@ class AsyncAzureBlobManager:
                 return properties.metadata or {}
 
         except ResourceNotFoundError:
-            logger.warning(f"Blob not found when getting metadata: {container}/{blob_name}")
+            logger.warning(f"Blob not found when getting metadata: {container}/{_redact_blob_path(blob_name)}")
             return {}
         except Exception as e:
-            logger.error(f"Failed to get metadata for blob {container}/{blob_name}: {e}")
+            logger.error(f"Failed to get metadata for blob {container}/{_redact_blob_path(blob_name)}: {e}")
             return {}
 
     async def get_blob_properties(self, blob_name: str, container_name: str | None = None) -> dict | None:
@@ -338,10 +352,10 @@ class AsyncAzureBlobManager:
                 }
 
         except ResourceNotFoundError:
-            logger.warning(f"Blob not found when getting properties: {container}/{blob_name}")
+            logger.warning(f"Blob not found when getting properties: {container}/{_redact_blob_path(blob_name)}")
             return None
         except Exception as e:
-            logger.error(f"Failed to get properties for blob {container}/{blob_name}: {e}")
+            logger.error(f"Failed to get properties for blob {container}/{_redact_blob_path(blob_name)}: {e}")
             return None
 
     async def set_blob_metadata(
@@ -374,17 +388,17 @@ class AsyncAzureBlobManager:
                 blob_client = blob_service.get_blob_client(container=container, blob=blob_name)
                 await blob_client.set_blob_metadata(metadata=metadata, **_if_match(etag))
 
-            logger.info(f"Successfully set metadata on blob: {container}/{blob_name}")
+            logger.info(f"Successfully set metadata on blob: {container}/{_redact_blob_path(blob_name)}")
 
         except ResourceModifiedError:
-            logger.info(f"Blob changed since it was read, metadata not set: {container}/{blob_name}")
+            logger.info(f"Blob changed since it was read, metadata not set: {container}/{_redact_blob_path(blob_name)}")
             return False
 
         except ResourceNotFoundError:
-            logger.error(f"Blob not found when setting metadata: {container}/{blob_name}")
+            logger.error(f"Blob not found when setting metadata: {container}/{_redact_blob_path(blob_name)}")
             return False
         except Exception as e:
-            logger.error(f"Failed to set metadata on blob {container}/{blob_name}: {e}")
+            logger.error(f"Failed to set metadata on blob {container}/{_redact_blob_path(blob_name)}: {e}")
             return False
         else:
             return True
@@ -419,7 +433,7 @@ class AsyncAzureBlobManager:
 
                 # Check if blob exists first
                 if not await blob_client.exists():
-                    logger.error(f"Blob not found: {container}/{blob_name}")
+                    logger.error(f"Blob not found: {container}/{_redact_blob_path(blob_name)}")
                     error_msg = "Blob not found"
                     raise FileNotFoundError(error_msg)
 
@@ -430,12 +444,12 @@ class AsyncAzureBlobManager:
                 # Write to file
                 file_path.write_bytes(content)
 
-            logger.info(f"Successfully downloaded blob {container}/{blob_name} to {file_path}")
+            logger.info(f"Successfully downloaded blob {container}/{_redact_blob_path(blob_name)} to {file_path}")
 
         except FileNotFoundError:
             raise
         except Exception as e:
-            logger.error(f"Failed to download blob {container}/{blob_name}: {e}")
+            logger.error(f"Failed to download blob {container}/{_redact_blob_path(blob_name)}: {e}")
             return False
         else:
             return True

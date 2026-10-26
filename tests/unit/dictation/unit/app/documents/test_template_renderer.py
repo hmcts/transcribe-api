@@ -66,27 +66,24 @@ def fake_template(tmp_path) -> Path:
 
 
 class TestGenerateOutputFilename:
-    def test_includes_email(self):
-        name = _generate_output_filename("judge@court.com")
-        assert "judge_at_court_com" in name
+    def test_does_not_include_email(self):
+        n1 = _generate_output_filename()
+        n2 = _generate_output_filename()
+        assert "@" not in n1
+        assert "_at_" not in n1
+        assert "@" not in n2
 
     def test_includes_docx_extension(self):
-        name = _generate_output_filename("a@b.com")
-        assert name.endswith(".docx")
+        assert _generate_output_filename().endswith(".docx")
 
     def test_starts_with_hearing_document(self):
-        name = _generate_output_filename("x@y.com")
-        assert name.startswith("hearing_document_")
+        assert _generate_output_filename().startswith("hearing_document_")
 
     def test_different_calls_produce_different_names(self):
-        """Timestamps make filenames unique."""
-        import time
-        n1 = _generate_output_filename("a@b.com")
-        time.sleep(0.01)
-        n2 = _generate_output_filename("a@b.com")
-        # They may be the same if same second, but the format is correct
-        assert n1.endswith(".docx")
-        assert n2.endswith(".docx")
+        """UUIDs make filenames unique across concurrent calls."""
+        n1 = _generate_output_filename()
+        n2 = _generate_output_filename()
+        assert n1 != n2
 
 
 class TestRenderDocument:
@@ -140,7 +137,7 @@ class TestRenderDocument:
 
         call_kwargs = mock_doc.populate_content_controls.call_args[0][0]
         assert "rule 28" in call_kwargs.get("HearingDescription", "").lower()
-        assert "Appellant" in call_kwargs.get("HearingDescription", "")
+        assert "appellant" in call_kwargs.get("HearingDescription", "").lower()
 
     def test_appends_rule_28_for_respondent_non_representation(self, mock_word_doc, fake_template, tmp_path):
         _, mock_doc = mock_word_doc
@@ -152,7 +149,7 @@ class TestRenderDocument:
 
         call_kwargs = mock_doc.populate_content_controls.call_args[0][0]
         assert "rule 28" in call_kwargs.get("HearingDescription", "").lower()
-        assert "Respondent" in call_kwargs.get("HearingDescription", "")
+        assert "respondent" in call_kwargs.get("HearingDescription", "").lower()
 
     def test_legal_issues_looked_up_when_present(self, mock_word_doc, fake_template, tmp_path):
         doc_data = _make_doc_data(legal_issues=["asylum_pre_naba"])

@@ -10,6 +10,7 @@ import httpx
 from azure.storage.blob import BlobSasPermissions, generate_blob_sas
 
 from transcribe_api.domain.models_dictation import DialogueEntry
+from transcribe_api.runtime.blob_dictation import _redact_blob_path
 from transcribe_api.runtime.logger import logger
 from transcribe_api.runtime.log_sanitization import sanitize_for_log
 from transcribe_api.runtime.settings_dictation import get_settings
@@ -36,7 +37,7 @@ def get_file_blob_path(azure_user_id: str, file_name: str) -> str:
     return f"user-uploads/{azure_user_id}/{file_name}"
 
 
-def extract_transcription_id_from_blob_path(blob_path: str, user_identifier: str) -> str | None:
+def extract_transcription_id_from_blob_path(blob_path: str, user_id: str) -> str | None:
     """
     Extract a valid transcription ID from the blob path filename.
 
@@ -45,7 +46,7 @@ def extract_transcription_id_from_blob_path(blob_path: str, user_identifier: str
 
     Args:
         blob_path (str): Full path to the blob (e.g., 'user-uploads/{oid}/uuid.mp4')
-        user_identifier (str): User identifier for logging purposes (OID or email)
+        user_id (str): Internal user UUID for logging (must not be an email address)
 
     Returns:
         str | None: Valid UUID string to use as transcription_id, or None to trigger auto-generation
@@ -58,15 +59,15 @@ def extract_transcription_id_from_blob_path(blob_path: str, user_identifier: str
         # Filename is not a valid UUID, signal to auto-generate one
         logger.warning(
             "User %s: Filename '%s' is not a valid UUID, will auto-generate transcription_id for blob: %s",
-            sanitize_for_log(user_identifier),
+            sanitize_for_log(user_id),
             sanitize_for_log(filename),
-            sanitize_for_log(blob_path),
+            _redact_blob_path(blob_path),
         )
         return None
     else:
         logger.info(
             "User %s: Using filename as transcription_id: %s",
-            sanitize_for_log(user_identifier),
+            sanitize_for_log(user_id),
             sanitize_for_log(filename),
         )
         return filename

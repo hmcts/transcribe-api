@@ -37,12 +37,12 @@ async def edit_minutes_with_ai(
     current_minute_version: MinuteVersion,
     edit_instructions: str,
     transcript: list[DialogueEntry],
-    user_email: str,
+    user_id: str,
     **kwargs,  # noqa: ARG001
 ) -> str:
     current_markdown_minutes = html_to_markdown(current_minute_version.html_content)
     langfuse_context.update_current_trace(
-        user_id=user_email,
+        user_id=user_id,
     )
     prompt = langfuse_client.get_prompt("ai-edit-prompt", type="chat")
     langfuse_context.update_current_observation(
@@ -70,10 +70,10 @@ async def edit_minutes_with_ai(
 @observe(name="generate_meeting_title", as_type="generation")
 async def generate_meeting_title(
     transcript: list[DialogueEntry],
-    user_email: str,
+    user_id: str,
 ) -> str:
     langfuse_context.update_current_trace(
-        user_id=user_email,
+        user_id=user_id,
     )
     prompt = langfuse_client.get_prompt("generate-meeting-title-prompt", type="chat")
     langfuse_context.update_current_observation(
@@ -96,9 +96,9 @@ async def generate_meeting_title(
 
 
 @observe(name="generate_speaker_predictions", as_type="generation")
-async def generate_speaker_predictions(dialogue_entries: list, user_email: str) -> dict:
+async def generate_speaker_predictions(dialogue_entries: list, user_id: str) -> dict:
     langfuse_context.update_current_trace(
-        user_id=user_email,
+        user_id=user_id,
     )
     prompt = langfuse_client.get_prompt("predict-speaker-names", type="chat")
     langfuse_context.update_current_observation(
@@ -128,7 +128,7 @@ async def generate_llm_output_task(
     dialogue_entries: list[DialogueEntry],
     transcription_id: UUID,
     template: TemplateMetadata,
-    user_email: str,
+    user_id: str,
     minute_version_id: UUID | None = None,
 ) -> str:
     # Start a Sentry transaction for the whole function
@@ -151,9 +151,9 @@ async def generate_llm_output_task(
         try:
             # Generate content based on template
             if template.name == TemplateName.GENERAL:
-                llm_output = await generate_general_style_summary(dialogue_entries, user_email)
+                llm_output = await generate_general_style_summary(dialogue_entries, user_id)
             elif template.name == TemplateName.CRISSA:
-                llm_output = await generate_full_crissa(dialogue_entries, user_email)
+                llm_output = await generate_full_crissa(dialogue_entries, user_id)
             else:
                 msg = "Invalid template parameter"
                 raise ValueError(msg)
@@ -184,7 +184,7 @@ async def ai_edit_task(
     new_minute_version_id: UUID,
     edit_instructions: str,
     transcription_id: UUID,
-    user_email: str,
+    user_id: str,
 ) -> str:
     with sentry_sdk.start_transaction(op="task", name="AI Edit Task") as transaction:  # noqa: F841
         # if length of dialogue entries is 0, return empty string
@@ -207,7 +207,7 @@ async def ai_edit_task(
                 current_minutes,
                 edit_instructions,
                 dialogue_entries,
-                user_email,
+                user_id,
                 langfuse_parent_trace_id=current_minutes.trace_id,
             )
 

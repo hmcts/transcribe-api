@@ -35,11 +35,11 @@ from transcribe_api.domain.notify.gov_notify import send_email
 
 
 async def generate_and_save_meeting_title(
-    dialogue_entries: list, transcription: Transcription, user_id: UUID, user_email: str
+    dialogue_entries: list, transcription: Transcription, user_id: UUID
 ) -> Transcription:
     try:
         logger.info(f"Generating meeting title for {len(dialogue_entries)} dialogue entries")
-        provisional_title = await generate_meeting_title(dialogue_entries, user_email)
+        provisional_title = await generate_meeting_title(dialogue_entries, str(user_id))
         existing_transcription = transcription
         existing_transcription.title = provisional_title
         return save_transcription(existing_transcription, user_id)
@@ -110,7 +110,7 @@ async def transcribe_and_generate_llm_output(
 
         try:
             dialogue_entries = await transcribe_audio(user_upload_blob_storage_file_key)
-            updated_dialogue_entries = await process_speakers_and_dialogue_entries(dialogue_entries, user_email)
+            updated_dialogue_entries = await process_speakers_and_dialogue_entries(dialogue_entries, str(user_id))
             saved_job = save_transcription_job(
                 TranscriptionJob(
                     transcription_id=transcription.id,
@@ -133,10 +133,10 @@ async def transcribe_and_generate_llm_output(
 
         # Start all three tasks in parallel
         general_task = generate_llm_output_task(
-            updated_dialogue_entries, transcription.id, general_template, user_email
+            updated_dialogue_entries, transcription.id, general_template, str(user_id)
         )
-        title_task = generate_and_save_meeting_title(updated_dialogue_entries, transcription, user_id, user_email)
-        crissa_task = generate_llm_output_task(updated_dialogue_entries, transcription.id, crissa_template, user_email)
+        title_task = generate_and_save_meeting_title(updated_dialogue_entries, transcription, user_id)
+        crissa_task = generate_llm_output_task(updated_dialogue_entries, transcription.id, crissa_template, str(user_id))
 
         try:
             # Wait for all three tasks including CRISSA before sending email

@@ -17,7 +17,7 @@ from transcribe_api.runtime.markdown import markdown_to_html
 @observe(name="generate_general_style_summary", as_type="generation")
 async def generate_general_style_summary(
     dialogue_entries: list[DialogueEntry],
-    user_email: str,
+    user_id: str,
     prompt_name: str = "general-style-template-prompt",
     prompt_version: int | None = None,
     model_name: str = LLMModel.VERTEX_GEMINI_25_PRO,
@@ -28,7 +28,7 @@ async def generate_general_style_summary(
 
     langfuse_context.update_current_observation(
         prompt=prompt,
-        user_id=user_email,
+        user_id=user_id,
         input={"template": TemplateName.GENERAL, "dialogue_entries": transcript_string},
     )
 
@@ -50,7 +50,7 @@ async def generate_general_style_summary(
         output=output,
     )
     langfuse_context.update_current_trace(
-        user_id=user_email,
+        user_id=user_id,
         input={"template": TemplateName.GENERAL, "dialogue_entries": transcript_string},
         output=output,
     )

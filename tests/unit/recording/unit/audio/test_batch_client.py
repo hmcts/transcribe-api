@@ -122,6 +122,41 @@ class TestSubmitBatchJob:
         assert "diarization" in captured_payload["properties"]
 
     @pytest.mark.asyncio
+    async def test_requests_full_azure_speaker_range_when_diarization_enabled(self):
+        """The submitted speaker range must not cap below what Azure allows.
+
+        `diarizationEnabled` alone only separates two speakers, so the
+        `diarization` block has to carry the range. Azure accepts a
+        `maxCount` "less than 36"; asking for less silently merges the
+        surplus voices into one label instead of failing the job.
+        """
+        from transcribe_api.stt.batch_client import submit_batch_job
+
+        mock_response = _make_response(
+            status_code=201,
+            headers={
+                "Location": "https://eastus.cognitiveservices.azure.com/speechtotext/transcriptions/xyz"
+            },
+        )
+        captured_payload = {}
+
+        async def capture_post(url, headers, json):
+            captured_payload.update(json)
+            return mock_response
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_client.post = capture_post
+
+            await submit_batch_job("https://sas-url", "test-job", enable_diarization=True)
+
+        diarization = captured_payload["properties"]["diarization"]
+        assert diarization["enabled"] is True
+        assert diarization["speakers"] == {"minCount": 1, "maxCount": 35}
+
+    @pytest.mark.asyncio
     async def test_omits_diarization_when_disabled(self):
         from transcribe_api.stt.batch_client import submit_batch_job
 

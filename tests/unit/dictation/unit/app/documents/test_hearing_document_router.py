@@ -73,8 +73,8 @@ def test_build_hearing_document_routes_content_loader_values() -> None:
     assert "Anonymity" in body_texts
     assert "DECISION AND REASONS" in body_texts
     assert (
-        "This is the decision of the Tribunal in the appeal of the Appellant against "
-        "the decision of the Respondent made on 1 December 2025."
+        "This is the decision of the Tribunal in the appeal of the appellant against "
+        "the decision of the respondent made on 1 December 2025."
     ) in body_texts
     assert "Background" in body_texts
     assert "The Hearing" in body_texts
@@ -89,8 +89,7 @@ def test_build_hearing_document_routes_content_loader_values() -> None:
     assert "To the Respondent – Fee Award" in body_texts  # noqa: RUF001
     assert "Fee Award" not in body_texts
     assert "Signature" in body_texts
-    assert "Signed\tDate [not final until dated]" in body_texts
-    assert "[ADD SIGNATURE]" in body_texts
+    assert "[ADD SIGNATURE]\tDate [not final until dated]" in body_texts
     assert "First-tier Tribunal Judge N SONI" in body_texts
     assert any("The hearing took place face to face." in text for text in body_texts)
     assert "Taking the claim at its highest, is there a Convention reason?" in body_texts

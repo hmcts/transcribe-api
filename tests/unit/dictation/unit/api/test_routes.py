@@ -345,7 +345,7 @@ def test_transcript_viewed_log_contains_transcription_id_and_user(client, as_use
     viewed_call = next(c for c in mock_logger.info.call_args_list if "TRANSCRIPT_VIEWED" in c[0][0])
     args = viewed_call[0]
     assert str(transcription_id) in str(args[1])
-    assert user.email in str(args[3])
+    assert str(user.id) in str(args[2])
 
 
 def test_transcript_deleted_logs_audit_event(client, as_user, mocker):
@@ -370,7 +370,7 @@ def test_transcript_deleted_log_contains_transcription_id_and_user(client, as_us
     deleted_call = next(c for c in mock_logger.info.call_args_list if "TRANSCRIPT_DELETED" in c[0][0])
     args = deleted_call[0]
     assert str(transcription_id) in str(args[1])
-    assert user.email in str(args[3])
+    assert str(user.id) in str(args[2])
 
 
 def test_transcript_job_submitted_logs_audit_event(client, as_user, mocker):
@@ -409,7 +409,7 @@ def test_transcript_job_submitted_log_contains_job_id_and_user(client, as_user, 
     submitted_call = next(c for c in mock_logger.info.call_args_list if "TRANSCRIPT_JOB_SUBMITTED" in c[0][0])
     args = submitted_call[0]
     assert str(job_id) in str(args[2])
-    assert user.email in str(args[4])
+    assert str(user.id) in str(args[3])
 
 
 # ---------------------------------------------------------------------------

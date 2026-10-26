@@ -77,7 +77,7 @@ class TestGenerateAndSaveMeetingTitle:
         monkeypatch.setattr("transcribe_api.stt.pipeline.save_transcription", mock_save)
 
         t = Transcription(id=uuid4())
-        result = await generate_and_save_meeting_title([], t, uuid4(), "user@example.com")
+        result = await generate_and_save_meeting_title([], t, uuid4())
         assert result.title == "Generated Title"
 
     async def test_returns_original_transcription_on_error(self, monkeypatch):
@@ -88,7 +88,7 @@ class TestGenerateAndSaveMeetingTitle:
         )
 
         t = Transcription(id=uuid4())
-        result = await generate_and_save_meeting_title([], t, uuid4(), "user@example.com")
+        result = await generate_and_save_meeting_title([], t, uuid4())
         assert result is t
 
 
