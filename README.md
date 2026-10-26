@@ -61,6 +61,10 @@ injects a mock identity with **all** roles. Never deploy with it.
 Background pollers do not run in the API process. Set `RUN_WORKERS=true`, or
 run `python -m transcribe_api.worker` as a separate workload.
 
+Uploads are converted with `ffmpeg` and probed with `ffprobe`, which the image
+provides (Dockerfile). Install both to exercise uploads locally; deployed pods
+refuse to start without them.
+
 ## Database migrations
 
 One Alembic history in `alembic/`. Its first revision, `0001_baseline`, replaced

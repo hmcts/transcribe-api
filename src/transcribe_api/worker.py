@@ -11,12 +11,19 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from transcribe_api.api.app import start_background_workers, stop_background_workers
+from transcribe_api.api.app import (
+    ensure_ffmpeg_tools,
+    start_background_workers,
+    stop_background_workers,
+)
+from transcribe_api.runtime.settings_dictation import get_settings
 
 log = logging.getLogger("worker")
 
 
 async def main() -> None:
+    # The pollers convert and probe audio with ffmpeg/ffprobe.
+    await ensure_ffmpeg_tools(get_settings().ENVIRONMENT)
     tasks = await start_background_workers()
     log.info("Worker running; press Ctrl-C to stop")
     try:

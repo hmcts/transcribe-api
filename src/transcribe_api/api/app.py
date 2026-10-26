@@ -32,6 +32,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from transcribe_api.runtime.settings_dictation import get_settings
+from transcribe_api.stt.preprocessing import FFMPEG_TOOLS, missing_ffmpeg_tools
 
 log = logging.getLogger("uvicorn")
 
@@ -54,6 +55,27 @@ def _run_migrations_at_startup() -> bool:
     deployed chart sets RUN_MIGRATIONS=true. See runtime/migrations.py.
     """
     return os.environ.get("RUN_MIGRATIONS", "").lower() in ("1", "true", "yes")
+
+
+async def ensure_ffmpeg_tools(environment: str) -> None:
+    """Refuse to start a deployed process without ffmpeg and ffprobe.
+
+    The API transcodes every recording upload with ffmpeg and the worker probes
+    audio with ffprobe. Without them the pod looks healthy and every upload
+    fails, so fail at startup instead. Not checked locally or in tests, where
+    developers may not have ffmpeg installed.
+    """
+    if environment in ("local", "test"):
+        return
+    missing = await missing_ffmpeg_tools()
+    if missing:
+        message = (
+            f"Required audio tools not found on PATH: {', '.join(missing)}. "
+            "They are installed in the container image (Dockerfile); this image was built without them."
+        )
+        log.error(message)
+        raise RuntimeError(message)
+    log.info("%s are available", " and ".join(FFMPEG_TOOLS))
 
 
 def _json_safe(obj: Any) -> Any:
@@ -131,6 +153,9 @@ async def lifespan(app: FastAPI):
     # dictation service skipped it locally so developers are not blocked.
     if settings.ENVIRONMENT not in ("local", "test"):
         validate_approles_config()
+
+    # Before serving: without these every recording upload fails.
+    await ensure_ffmpeg_tools(settings.ENVIRONMENT)
 
     # Before anything touches the database. A failed migration stops startup,
     # so the pod never serves against a schema it does not match.

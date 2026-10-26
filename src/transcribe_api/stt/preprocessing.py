@@ -116,16 +116,31 @@ async def normalize_to_wav(input_path: Path, output_path: Path) -> None:
         )
 
 
+# Uploads are transcoded with ffmpeg (above); the worker probes and converts
+# audio with ffprobe and ffmpeg (stt/utils.py). Both come from the image.
+FFMPEG_TOOLS = ("ffmpeg", "ffprobe")
+
+
+async def missing_ffmpeg_tools() -> list[str]:
+    """Return the FFMPEG_TOOLS that are not installed or do not run, in order."""
+    missing = []
+    for tool in FFMPEG_TOOLS:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                tool,
+                "-version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+        except OSError:
+            missing.append(tool)
+        else:
+            if proc.returncode != 0:
+                missing.append(tool)
+    return missing
+
+
 async def is_ffmpeg_available() -> bool:
-    """Return True if ffmpeg is installed and callable."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg",
-            "-version",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.communicate()
-        return proc.returncode == 0
-    except FileNotFoundError:
-        return False
+    """Return True if ffmpeg and ffprobe are installed and callable."""
+    return not await missing_ffmpeg_tools()

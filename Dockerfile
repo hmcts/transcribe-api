@@ -7,6 +7,15 @@
 # `az acr build --build-arg`; the default lets the image build locally.
 ARG REGISTRY_NAME=hmctsprod
 
+# ---- ffmpeg: static ffmpeg + ffprobe for the runtime image ----
+# Uploads are transcoded with ffmpeg and audio probed with ffprobe; the API and
+# worker refuse to start without them. Fully static binaries, so they run on
+# distroless. GPLv3 build (mwader/static-ffmpeg). Pinned by digest, pulled from
+# Docker Hub for now: this moves to
+# ${REGISTRY_NAME}.azurecr.io/imported/mwader/static-ffmpeg once the
+# hmcts/acr-base-importer cache rule for it is merged.
+FROM mwader/static-ffmpeg:9.0.2-1@sha256:f5d100184884eb3e82b0eb14bb5ebf98da99826ac824989720297fb9ef21c822 AS ffmpeg
+
 # ---- Builder: resolve and stage dependencies ----
 FROM ${REGISTRY_NAME}.azurecr.io/imported/slim/python:3.13-slim-trixie AS builder
 
@@ -36,6 +45,7 @@ RUN uv sync \
 FROM ${REGISTRY_NAME}.azurecr.io/base/python:3.13-distroless
 
 COPY --from=builder /opt/deps /opt/deps
+COPY --from=ffmpeg /ffmpeg /ffprobe /usr/local/bin/
 
 # The project itself is not pip-installed (--no-install-project above); its
 # source is laid down directly and reached through PYTHONPATH. The Alembic
