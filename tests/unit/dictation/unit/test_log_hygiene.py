@@ -334,6 +334,25 @@ def _safe_transform_name(node: ast.Call) -> str | None:
     )
 
 
+def _args_left_carrying_pii(node: ast.Call) -> list[ast.expr] | None:
+    """The arguments whose PII a call's result may still embed, or None for an opaque call.
+
+    A safe transform removes PII only from what it is meant for: _redact_blob_path
+    redacts a blob path and returns any other string unchanged, so it neutralises a
+    bare blob-path variable and nothing else. _redact_blob_path(download_filename), or
+    _redact_blob_path(alias) for any alias, keeps the argument's PII.
+    """
+    name = _safe_transform_name(node)
+    args = [*node.args, *(kw.value for kw in node.keywords)]
+    if name == "_redact_blob_path":
+        return [a for a in args if not (isinstance(a, ast.Name) and a.id in _BLOB_PATH_VARIABLE_NAMES)]
+    if name in _SAFE_PII_TRANSFORMS:
+        return []
+    if name not in _PII_PRESERVING_CALLS:
+        return None
+    return args
+
+
 def _carries_pii(node: ast.expr, tainted: frozenset[str] = frozenset()) -> bool:
     """True when an expression's VALUE embeds PII: a known PII variable, an
     email attribute/variable, or a currently-tainted alias.
@@ -342,8 +361,9 @@ def _carries_pii(node: ast.expr, tainted: frozenset[str] = frozenset()) -> bool:
       * a non-email attribute projection (user.id, payload.role) is SAFE — an
         Attribute node is judged only by _contains_email_attribute and is never
         descended into, so tainting the object 'user' does not taint 'user.id';
-      * a safe transform (_SAFE_PII_TRANSFORMS) neutralises its arguments, so
-        _redact_blob_path(blob_path) and the transcription-id extractor are clean;
+      * a safe transform (_SAFE_PII_TRANSFORMS) neutralises only what it redacts, so
+        _redact_blob_path(blob_path) and the transcription-id extractor are clean but
+        _redact_blob_path(download_filename) still carries PII;
       * a PII-preserving call (_PII_PRESERVING_CALLS: str/repr/sanitize_for_log) is
         descended, so sanitize_for_log(blob_name) still carries the email segment;
       * any OTHER call is OPAQUE — its result is not assumed to embed its arguments
@@ -356,12 +376,8 @@ def _carries_pii(node: ast.expr, tainted: frozenset[str] = frozenset()) -> bool:
     if isinstance(node, ast.Attribute):
         return _contains_email_attribute(node)
     if isinstance(node, ast.Call):
-        name = _safe_transform_name(node)
-        if name in _SAFE_PII_TRANSFORMS or name not in _PII_PRESERVING_CALLS:
-            return False
-        return any(_carries_pii(a, tainted) for a in node.args) or any(
-            _carries_pii(kw.value, tainted) for kw in node.keywords
-        )
+        args = _args_left_carrying_pii(node)
+        return args is not None and any(_carries_pii(a, tainted) for a in args)
     if isinstance(node, ast.JoinedStr):
         return any(
             isinstance(part, ast.FormattedValue) and _carries_pii(part.value, tainted)
@@ -390,10 +406,10 @@ def _tainted_names_used(node: ast.expr, tainted: frozenset[str]) -> frozenset[st
     if isinstance(node, ast.Attribute):
         return frozenset()
     if isinstance(node, ast.Call):
-        name = _safe_transform_name(node)
-        if name in _SAFE_PII_TRANSFORMS or name not in _PII_PRESERVING_CALLS:
-            return frozenset()  # safe transform, or opaque call — arguments do not escape
-        children: list[ast.expr] = [*node.args, *(kw.value for kw in node.keywords)]
+        args = _args_left_carrying_pii(node)
+        if args is None:
+            return frozenset()  # opaque call — arguments do not escape
+        children: list[ast.expr] = args
     elif isinstance(node, ast.JoinedStr):
         children = [p.value for p in node.values if isinstance(p, ast.FormattedValue)]
     else:
@@ -1057,3 +1073,32 @@ def test_string_format_and_join_carry_pii():
     assert not _carries_pii(
         _expr('"count={}".format(total)'), frozenset()
     ), '"count={}".format(total) must not carry PII — total is not a PII variable'
+
+
+def test_blob_path_redaction_only_neutralises_blob_paths():
+    """Regression (PR #12 review): _redact_blob_path returns non-blob strings unchanged,
+    so it must not clear taint from other PII, directly or through an alias."""
+
+    def _flagged_lines(src: str) -> set[int]:
+        return {call.lineno for call, _ in _tainted_logger_arg_refs(ast.parse(src).body[0])}
+
+    filename_via_alias = (
+        "def f():\n"
+        "    safe = _redact_blob_path(download_filename)\n"
+        "    logger.info(safe)\n"
+    )
+    assert _flagged_lines(filename_via_alias) == {3}
+
+    tainted_alias = (
+        "def f():\n"
+        "    name = current_user.email\n"
+        "    logger.info(_redact_blob_path(name))\n"
+    )
+    assert _flagged_lines(tainted_alias) == {3}
+
+    blob_path_alias = (
+        "def f():\n"
+        "    safe = _redact_blob_path(blob_path)\n"
+        "    logger.info(safe)\n"
+    )
+    assert _flagged_lines(blob_path_alias) == set()
