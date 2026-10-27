@@ -20,16 +20,17 @@ def _sanitize_for_log(value: object) -> str:
 
 
 def _redact_blob_path(blob_path: str) -> str:
-    """Replace the user-email segment in a blob path with [redacted].
+    """Replace the user segment of a user-uploads blob path with [redacted].
 
-    Legacy paths follow user-uploads/{email}/{filename}; the email at
-    segment index 1 is the PII that must not appear in logs.
+    Legacy paths follow user-uploads/{email}/{filename}; the email is the PII that
+    must not appear in logs. An email's local part may itself contain "/", so
+    everything between user-uploads/ and the last component (the filename or
+    filename prefix) is redacted, not only the second segment.
     Safe to call on any blob path — non-matching paths are returned unchanged.
     """
     parts = blob_path.split("/")
     if len(parts) >= 3 and parts[0] == "user-uploads":  # noqa: PLR2004
-        parts[1] = "[redacted]"
-        return _sanitize_for_log("/".join(parts))
+        return _sanitize_for_log(f"user-uploads/[redacted]/{parts[-1]}")
     return _sanitize_for_log(blob_path)
 
 

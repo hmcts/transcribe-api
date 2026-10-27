@@ -12,7 +12,7 @@ import pytest
 from azure.core.exceptions import ResourceNotFoundError
 
 from transcribe_api.domain.models_dictation import User
-from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager
+from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager, _redact_blob_path
 from transcribe_api.stt.work_poller import TranscriptionPollingService
 
 EMAIL = "judge.sentinel@example.test"
@@ -22,6 +22,27 @@ BLOB = f"user-uploads/{EMAIL}/audio.mp3"
 def _assert_email_not_logged(caplog: pytest.LogCaptureFixture) -> None:
     assert caplog.records, "expected the path under test to log"
     assert EMAIL not in caplog.text
+
+
+# _redact_blob_path ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        (BLOB, "user-uploads/[redacted]/audio.mp3"),
+        # An email's local part may contain "/" (RFC 5322), splitting it over segments.
+        ("user-uploads/first/last@example.test/audio.mp3", "user-uploads/[redacted]/audio.mp3"),
+        (
+            "user-uploads/a/b/c@example.test/live-transcription-submission-",
+            "user-uploads/[redacted]/live-transcription-submission-",
+        ),
+        ("user-uploads/3f2a9c1e-oid/audio.mp3", "user-uploads/[redacted]/audio.mp3"),
+        ("uploads/3f2a9c1e-oid/audio.mp3", "uploads/3f2a9c1e-oid/audio.mp3"),
+    ],
+)
+def test_redact_blob_path_removes_every_user_segment(path: str, expected: str) -> None:
+    assert _redact_blob_path(path) == expected
 
 
 # _resolve_user ----------------------------------------------------------------------
