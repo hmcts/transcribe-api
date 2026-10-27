@@ -9,9 +9,9 @@ def component = "api"
 // Runtime secrets are mounted from Key Vault by the Helm chart (see
 // charts/transcribe-api/values.yaml). This block is the separate, build-time
 // mechanism: it pulls a secret into the Jenkins environment so it can be
-// substituted into values.{env}.template.yaml. Only App Insights needs it —
-// the OpenTelemetry distro in the HMCTS base image reads the connection string
-// from the environment, not from a mounted file.
+// substituted into values.{env}.template.yaml. Only App Insights uses it. The
+// chart also mounts the same secret from Key Vault (values.yaml), which is how
+// the worker gets it; hmcts-otel reads either from the environment.
 def secrets = [
   'transcribe-${env}': [
     secret('AppInsightsConnectionString', 'APP_INSIGHTS_CONNECTION_STRING'),
