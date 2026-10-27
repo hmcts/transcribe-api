@@ -33,6 +33,12 @@ dependencies = [
     "azure-monitor-opentelemetry>=1.8.7",
     "opentelemetry-instrumentation-fastapi>=0.61b0",
 
+    # --- telemetry (DIAAT-205) ---
+    # Logging, tracing, metrics, redaction and the event schema. Resolved from git
+    # like hmcts-fastapi-azure-auth. DRAFT PIN: the head of hmcts/hmcts-otel PR #4,
+    # until that merges to main and is tagged; this PR must not merge on a SHA.
+    "hmcts-otel[fastapi] @ git+https://github.com/hmcts/hmcts-otel@0917e4b74849ff8efda77fc221d5ddb044508e45",
+
     # --- auth ---
     # Resolved from git rather than vendored as a committed wheel, and at v0.3.0
     # rather than the 0.2.0 the dictation service had pinned. See architecture 11.

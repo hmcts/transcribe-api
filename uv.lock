@@ -1341,6 +1341,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "hmcts-otel"
+version = "0.2.2"
+source = { git = "https://github.com/hmcts/hmcts-otel?rev=0917e4b74849ff8efda77fc221d5ddb044508e45#0917e4b74849ff8efda77fc221d5ddb044508e45" }
+dependencies = [
+    { name = "azure-monitor-opentelemetry" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-sdk" },
+    { name = "pydantic-settings" },
+]
+
+[package.optional-dependencies]
+fastapi = [
+    { name = "fastapi" },
+]
+
+[[package]]
 name = "html2text"
 version = "2025.4.15"
 source = { registry = "https://pypi.org/simple" }
@@ -3546,6 +3562,7 @@ dependencies = [
     { name = "ffmpeg-python" },
     { name = "google-auth" },
     { name = "hmcts-fastapi-azure-auth" },
+    { name = "hmcts-otel", extra = ["fastapi"] },
     { name = "html2text" },
     { name = "httpx" },
     { name = "langfuse" },
@@ -3604,6 +3621,7 @@ requires-dist = [
     { name = "ffmpeg-python", specifier = ">=0.2.0" },
     { name = "google-auth", specifier = ">=2.52.0" },
     { name = "hmcts-fastapi-azure-auth", git = "https://github.com/hmcts/hmcts-fastapi-azure-auth?rev=v0.3.0" },
+    { name = "hmcts-otel", extras = ["fastapi"], git = "https://github.com/hmcts/hmcts-otel?rev=0917e4b74849ff8efda77fc221d5ddb044508e45" },
     { name = "html2text", specifier = ">=2025.4.15" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "langfuse", specifier = "==2.60.10" },

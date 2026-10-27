@@ -17,6 +17,7 @@ from transcribe_api.api.app import (
     stop_background_workers,
 )
 from transcribe_api.runtime.settings_dictation import get_settings
+from transcribe_api.runtime.telemetry import SERVICE_NAME_WORKER, configure_telemetry
 
 log = logging.getLogger("worker")
 
@@ -35,7 +36,9 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    # Logging, tracing and metrics as transcribe-api-worker (DIAAT-205), so the
+    # pollers' telemetry is told apart from the API's in Application Insights.
+    configure_telemetry(SERVICE_NAME_WORKER)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

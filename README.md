@@ -69,6 +69,18 @@ Uploads are converted with `ffmpeg` and probed with `ffprobe`, which the image
 provides (Dockerfile). Install both to exercise uploads locally; deployed pods
 refuse to start without them.
 
+## Telemetry
+
+Logging, tracing and metrics come from [hmcts-otel](https://github.com/hmcts/hmcts-otel), set up once per
+process by `runtime/telemetry.py`: logs are JSON and redacted (emails, tokens, appeal references, recording upload
+file names), every request gets an `X-Request-Id`, and health probes are not traced.
+
+- `APPLICATIONINSIGHTS_CONNECTION_STRING` exports to Application Insights; unset, telemetry goes to stdout only.
+  Deployed, it is mounted from Key Vault (`AppInsightsConnectionString`) for the API and the worker.
+- `OTEL_SERVICE_NAME` is `transcribe-api` for the API and `transcribe-api-worker` for the worker.
+- There is no Sentry: errors go to Application Insights. `SENTRY_DSN` is ignored.
+- The base image's `/opt/otel` distro is kept off `PYTHONPATH` (Dockerfile), so Azure Monitor is configured once.
+
 ## Database migrations
 
 One Alembic history in `alembic/`. Its first revision, `0001_baseline`, replaced

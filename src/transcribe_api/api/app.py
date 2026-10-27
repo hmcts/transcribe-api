@@ -178,22 +178,14 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     settings = get_settings()
 
-    if settings.SENTRY_DSN:
-        import sentry_sdk
+    # Logging, tracing and metrics (hmcts-otel, DIAAT-205). Before the app exists, so
+    # its instrumentation finds the providers. No Sentry on CNP: errors go to
+    # Application Insights.
+    from transcribe_api.runtime.telemetry import SERVICE_NAME_API, configure_telemetry
 
-        sentry_sdk.init(
-            dsn=settings.SENTRY_DSN,
-            environment=settings.ENVIRONMENT,
-            send_default_pii=False,
-            traces_sample_rate=1.0,
-            profile_session_sample_rate=1.0,
-            profile_lifecycle="trace",
-        )
-
-    if os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING"):
-        from azure.monitor.opentelemetry import configure_azure_monitor
-
-        configure_azure_monitor()
+    configure_telemetry(SERVICE_NAME_API)
+    if not os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+        log.warning("APPLICATIONINSIGHTS_CONNECTION_STRING not configured; telemetry goes to stdout only")
 
     from transcribe_api.runtime.version import APP_VERSION
 
@@ -207,10 +199,17 @@ def create_app() -> FastAPI:
         redoc_url=None,
     )
 
-    if not getattr(settings, "DISABLE_FASTAPI_INSTRUMENTATION", False):
-        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    from hmcts_otel.fastapi import RequestIdMiddleware, UvicornLoggingGuard, instrument_fastapi, request_id_for
 
-        FastAPIInstrumentor.instrument_app(app)
+    if settings.DISABLE_FASTAPI_INSTRUMENTATION:
+        # instrument_fastapi would have added this: keep uvicorn's loggers routed
+        # through the redacting handlers even when uvicorn reconfigures logging.
+        app.add_middleware(UvicornLoggingGuard)
+    else:
+        # Request spans and metrics, health probes excluded. request_id=False: the
+        # request-ID middleware is added below, also when instrumentation is disabled
+        # (tests), because responses and error bodies carry the ID.
+        instrument_fastapi(app, request_id=False)
 
     # --- middleware ---
     origins = build_cors_origins(settings)
@@ -222,9 +221,10 @@ def create_app() -> FastAPI:
         allow_headers=["Authorization", "Content-Type"],
     )
 
-    from transcribe_api.runtime.middleware import add_request_id
-
-    app.middleware("http")(add_request_id)
+    # X-Request-Id: accepted only as a canonical UUID or 32 hex (anything else is
+    # replaced), returned on every response and attached to every log line, span and
+    # event. Added last, so outermost.
+    app.add_middleware(RequestIdMiddleware)
 
     # --- exception handlers ---
     from transcribe_api.runtime.exception_handlers import (
@@ -232,23 +232,29 @@ def create_app() -> FastAPI:
         unhandled_exception_handler,
     )
 
-    # MERGE NOTE: these two handlers take (exc) only, not (request, exc). The
+    # MERGE NOTE: these two handlers take (exc, request_id), not (request, exc). The
     # dictation app wrapped them so it could record the exception on the current
     # OpenTelemetry span before delegating. Registering them bare gives
     # "takes 1 positional argument but 2 were given" on every error path.
     from opentelemetry import trace
 
     async def _http_exception_wrapper(request: Request, exc: FastAPIHTTPException):
-        span = trace.get_current_span()
-        span.record_exception(exc)
-        span.set_status(trace.StatusCode.ERROR, str(exc))
-        return await http_exception_handler(exc)
+        # 4xx are expected outcomes (not found, forbidden, validation); only server
+        # errors fail the span. The status carries the type only: messages can
+        # include content.
+        if exc.status_code >= 500:  # noqa: PLR2004
+            span = trace.get_current_span()
+            span.record_exception(exc)
+            span.set_status(trace.StatusCode.ERROR, type(exc).__name__)
+        return await http_exception_handler(exc, request_id_for(request))
 
     async def _unhandled_exception_wrapper(request: Request, exc: Exception):
         span = trace.get_current_span()
         span.record_exception(exc)
-        span.set_status(trace.StatusCode.ERROR, str(exc))
-        return await unhandled_exception_handler(exc)
+        span.set_status(trace.StatusCode.ERROR, type(exc).__name__)
+        # Runs in Starlette's ServerErrorMiddleware, outside the request-ID
+        # middleware: request_id_for reads the ID from the request scope.
+        return await unhandled_exception_handler(exc, request_id_for(request))
 
     app.add_exception_handler(FastAPIHTTPException, _http_exception_wrapper)
     app.add_exception_handler(Exception, _unhandled_exception_wrapper)

@@ -4,10 +4,8 @@ import sentry_sdk
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from fastapi.responses import JSONResponse
 
-from .middleware import request_id_ctx
 
-
-async def http_exception_handler(exc: FastAPIHTTPException) -> JSONResponse:
+async def http_exception_handler(exc: FastAPIHTTPException, request_id: str | None = None) -> JSONResponse:
     """Handle expected HTTP exceptions (4xx, 5xx status codes).
 
     This handler processes HTTP exceptions that are explicitly raised by the
@@ -44,7 +42,7 @@ async def http_exception_handler(exc: FastAPIHTTPException) -> JSONResponse:
     >>> response.headers["X-Request-Id"]
     '<request_id>'
     """
-    rid = request_id_ctx.get()
+    rid = request_id or ""
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail, "request_id": rid},
@@ -56,7 +54,7 @@ async def http_exception_handler(exc: FastAPIHTTPException) -> JSONResponse:
     )
 
 
-async def unhandled_exception_handler(exc: Exception) -> JSONResponse:
+async def unhandled_exception_handler(exc: Exception, request_id: str | None = None) -> JSONResponse:
     """Handle unexpected exceptions (unhandled errors, bugs, etc.).
 
     This handler processes unhandled exceptions that occur during request
@@ -95,7 +93,7 @@ async def unhandled_exception_handler(exc: Exception) -> JSONResponse:
     >>> response.headers["X-Request-Id"]
     'request_id'
     """
-    rid = request_id_ctx.get()
+    rid = request_id or ""
     with contextlib.suppress(Exception):
         # If Sentry fails, continue with error handling: tests disallow sockets
         sentry_sdk.capture_exception(exc)
