@@ -998,6 +998,34 @@ async def get_sectioned_transcript_route(
     )
 
 
+# Renders still running after their request was cancelled; kept so they are not
+# garbage-collected before their output is deleted.
+_abandoned_renders: set[asyncio.Future] = set()
+
+
+def _delete_abandoned_render(render: asyncio.Future) -> None:
+    _abandoned_renders.discard(render)
+    if render.cancelled() or render.exception() is not None:
+        return
+    render.result().unlink(missing_ok=True)
+
+
+async def _render_hearing_document_off_loop(**kwargs) -> Path:
+    """Render the hearing document in a worker thread, leaving no file behind on cancellation.
+
+    A thread cannot be stopped. If the request is cancelled while rendering, the caller's
+    cleanup never learns the output path, so the document (transcript and judicial notes)
+    is deleted here once the thread finishes.
+    """
+    render = asyncio.ensure_future(asyncio.to_thread(render_hearing_document, **kwargs))
+    try:
+        return await asyncio.shield(render)
+    except asyncio.CancelledError:
+        _abandoned_renders.add(render)
+        render.add_done_callback(_delete_abandoned_render)
+        raise
+
+
 @router.post("/live-transcription/submission", response_model=LiveTranscriptionSubmissionResponse)
 async def save_live_transcription_submission(  # noqa: PLR0915
     request: LiveTranscriptionSubmissionRequest,
@@ -1055,8 +1083,7 @@ async def save_live_transcription_submission(  # noqa: PLR0915
 
             # Generate Word document from template
             temp_output_dir = Path(tempfile.gettempdir()) / "hearing_documents"
-            temp_doc_path = await asyncio.to_thread(
-                render_hearing_document,
+            temp_doc_path = await _render_hearing_document_off_loop(
                 request=request,
                 output_dir=temp_output_dir,
                 user_email=current_user.email,
