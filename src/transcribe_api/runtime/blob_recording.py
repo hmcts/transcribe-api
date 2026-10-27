@@ -74,17 +74,18 @@ class AsyncAzureBlobManager:
             logger.warning(f"Error closing credential: {e}")
 
     def build_blob_url(self, blob_name: str, container_name: str | None = None) -> str:
-        """Return a plain (no-SAS) blob URL for Azure Speech Batch.
+        """Return a plain (no-SAS) blob URL for Azure Speech batch transcription.
 
-        Speech's batch backend authenticates directly against this storage
-        account via its own system-assigned managed identity, under Azure's
-        "trusted Azure services" mechanism (a storage network_rules
-        resource-instance exception plus a Storage Blob Data Reader role
-        grant on the Speech resource — see the infra repo's storage.tf).
-        Microsoft's docs are explicit that a SAS token alongside
-        managed-identity auth makes the request fail, so this must stay
-        SAS-free — unlike generate_read_sas_url, which is for callers
-        without a trusted-service grant.
+        Speech fetches this URL itself and reads the blob as its own
+        system-assigned managed identity. hmcts/transcribe-shared-infrastructure
+        makes that possible: ai-services.tf puts this storage account's blob host
+        in the Speech account's outbound FQDN allowlist (outbound access is
+        restricted by Azure Policy), and storage.tf grants the Speech identity
+        Storage Blob Data Reader on the account, which the storage firewall's
+        "trusted Azure services" bypass then lets through. Keep this SAS-free:
+        Microsoft's docs say a SAS alongside managed-identity access makes the
+        request fail. The user-delegation SAS helpers in stt/utils.py are for
+        browser uploads and downloads, not for Speech.
         """
         container = container_name or self.container_name
         return f"{self.account_url}/{container}/{quote(blob_name, safe='/')}"
