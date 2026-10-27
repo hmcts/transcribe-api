@@ -32,6 +32,12 @@ async def submit_and_queue_batch_job(
 
     Creates a SpeechBatchJob with status PENDING, submits to Azure,
     then updates the record to SUBMITTED. On failure, saves error state.
+
+    When Speech rejects the submission or cannot be authenticated to, the job
+    never reached Speech, so its idempotency key is released: a retry with the
+    same key creates a new job instead of getting this failed one back. The
+    upload blob stays on the failed job (audio_blob_path), as it does for a
+    batch job that fails later, because a retry may resubmit the same blob.
     """
     job = SpeechBatchJob(
         caller_id=caller_id,
@@ -75,6 +81,7 @@ async def submit_and_queue_batch_job(
         # Store only the high-level message — full Azure error detail (which
         # may contain endpoint URLs or subscription IDs) goes to Sentry only.
         job.error_message = "Azure batch transcription submission failed"
+        job.idempotency_key = None
         job = save_job(session, job)
         raise
     except SpeechAuthError as exc:
@@ -86,9 +93,13 @@ async def submit_and_queue_batch_job(
         sentry_sdk.capture_exception(exc)
         job.status = JobStatus.FAILED
         job.error_message = "Could not authenticate to Azure Speech"
+        job.idempotency_key = None
         job = save_job(session, job)
         raise
     except Exception as exc:
+        # The key is kept: after a timeout, or a failure once Speech accepted
+        # the job, Speech may be transcribing, and a same-key retry must not
+        # start a second transcription.
         logger.error("Unexpected error submitting job %s: %s", job.id, exc)
         import sentry_sdk
 
