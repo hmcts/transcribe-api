@@ -1,6 +1,7 @@
 import asyncio
 import json
 import tempfile
+import threading
 import urllib.parse
 import uuid
 from datetime import UTC, datetime
@@ -998,31 +999,49 @@ async def get_sectioned_transcript_route(
     )
 
 
-# Renders still running after their request was cancelled; kept so they are not
-# garbage-collected before their output is deleted.
-_abandoned_renders: set[asyncio.Future] = set()
+class _RenderHandoff:
+    """Who owns a rendered hearing document: the request, or nobody.
 
+    A worker thread cannot be stopped. Whichever of the worker (finishing) and the
+    request (being cancelled) comes second deletes the document, under the lock,
+    so it is cleaned up even when the event loop is cancelled or closed at
+    shutdown and no asyncio callback would run.
+    """
 
-def _delete_abandoned_render(render: asyncio.Future) -> None:
-    _abandoned_renders.discard(render)
-    if render.cancelled() or render.exception() is not None:
-        return
-    render.result().unlink(missing_ok=True)
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.abandoned = False
+        self.path: Path | None = None
+
+    def render(self, **kwargs) -> Path:
+        path = render_hearing_document(**kwargs)
+        with self.lock:
+            if self.abandoned:
+                path.unlink(missing_ok=True)
+            else:
+                self.path = path
+        return path
+
+    def abandon(self) -> None:
+        with self.lock:
+            self.abandoned = True
+            if self.path is not None:
+                # Rendered, but the request was cancelled before it received the path.
+                self.path.unlink(missing_ok=True)
 
 
 async def _render_hearing_document_off_loop(**kwargs) -> Path:
     """Render the hearing document in a worker thread, leaving no file behind on cancellation.
 
-    A thread cannot be stopped. If the request is cancelled while rendering, the caller's
-    cleanup never learns the output path, so the document (transcript and judicial notes)
-    is deleted here once the thread finishes.
+    If the request is cancelled while rendering (including at shutdown), the caller's
+    cleanup never learns the output path, so the document (transcript and judicial
+    notes) is deleted by whichever side finishes last; see _RenderHandoff.
     """
-    render = asyncio.ensure_future(asyncio.to_thread(render_hearing_document, **kwargs))
+    handoff = _RenderHandoff()
     try:
-        return await asyncio.shield(render)
+        return await asyncio.to_thread(handoff.render, **kwargs)
     except asyncio.CancelledError:
-        _abandoned_renders.add(render)
-        render.add_done_callback(_delete_abandoned_render)
+        handoff.abandon()
         raise
 
 
