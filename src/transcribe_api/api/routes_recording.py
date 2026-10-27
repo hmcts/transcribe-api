@@ -34,8 +34,9 @@ from sqlmodel import Session
 from transcribe_api.stt import local_storage
 from transcribe_api.stt.accuracy import DEFAULT_CONFIDENCE_THRESHOLD, compute_accuracy
 from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
-from transcribe_api.stt.batch_client import delete_batch_job
+from transcribe_api.stt.batch_client import BatchSubmissionError, delete_batch_job
 from transcribe_api.stt.preprocessing import AudioDecodeError, normalize_to_wav
+from transcribe_api.stt.speech_auth import SpeechAuthError
 from transcribe_api.stt.submission import submit_and_queue_batch_job
 from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.runtime.db_recording import get_session
@@ -711,6 +712,14 @@ async def submit_job(
                 return _to_response(existing)
         raise HTTPException(
             status_code=409, detail="Concurrent submission conflict; retry"
+        ) from None
+    except (BatchSubmissionError, SpeechAuthError):
+        # Speech rejected the job or could not be authenticated to. The job is
+        # already FAILED with its idempotency key released, and the cause is
+        # logged and sent to Sentry (stt/submission.py), so no traceback here.
+        raise HTTPException(
+            status_code=503,
+            detail="The transcription service is unavailable. Please try again later.",
         ) from None
 
     return _to_response(job)

@@ -644,6 +644,49 @@ class TestSubmitJob:
         )
         assert response.status_code in (401, 422)
 
+    @pytest.mark.parametrize(
+        "error",
+        [
+            # What AAT saw on 2026-10-27: Speech resolved to its public
+            # endpoint, which has public access disabled.
+            "batch_403",
+            "speech_auth",
+        ],
+    )
+    def test_speech_submission_failure_returns_503_with_json_error(
+        self, client, as_current_user, mocker, caplog, error
+    ):
+        from transcribe_api.stt.batch_client import BatchSubmissionError
+        from transcribe_api.stt.speech_auth import SpeechAuthError
+
+        exc = (
+            BatchSubmissionError("Batch job submission failed: HTTP 403 — Public access is disabled")
+            if error == "batch_403"
+            else SpeechAuthError("no federated token")
+        )
+        mocker.patch(
+            "transcribe_api.api.routes_recording.submit_and_queue_batch_job",
+            side_effect=exc,
+        )
+        mocker.patch(
+            "transcribe_api.api.routes_recording.get_job_by_idempotency_key_for_user", return_value=None
+        )
+
+        response = client.post(
+            "/api/v1/jobs",
+            json={"audio_url": "https://storage.example.com/audio.wav?sig=token"},
+        )
+
+        assert response.status_code == 503
+        body = response.json()
+        assert set(body) == {"detail", "request_id"}
+        assert "transcription service" in body["detail"].lower()
+        # Azure's error text (endpoints, resource names) stays server-side.
+        assert "403" not in body["detail"]
+        assert "federated" not in body["detail"]
+        # The cause is logged once, in stt/submission.py; the route adds no traceback.
+        assert not [r for r in caplog.records if r.exc_info]
+
     def test_accepts_blob_name_under_callers_own_prefix(self, client, as_current_user, mocker):
         job = _make_job()
         submit_mock = mocker.patch(
