@@ -496,7 +496,7 @@ class TestAsyncAzureBlobManager:
         assert result is True, "set_blob_metadata should return True on success"
         mock_blob_client.set_blob_metadata.assert_awaited_once_with(metadata=metadata)
         mock_logger.info.assert_called_once_with(
-            "Successfully set metadata on blob: test_container/user-uploads/test@example.com/file.mp4"
+            "Successfully set metadata on blob: test_container/user-uploads/[redacted]/file.mp4"
         )
 
     @patch("transcribe_api.runtime.blob_dictation.AsyncBlobServiceClient")

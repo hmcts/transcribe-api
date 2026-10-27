@@ -84,7 +84,7 @@ def add_speaker_labels_to_dialogue_entries(
 
 async def process_speakers_and_dialogue_entries(
     dialogue_entries: list[DialogueEntry],
-    user_email: str,
+    user_id: str,
 ) -> list[DialogueEntry]:
     try:
         # Step 1: Group similar speakers together
@@ -109,7 +109,7 @@ async def process_speakers_and_dialogue_entries(
 
     try:
         # Step 4: Get speaker predictions
-        speaker_predictions = await generate_speaker_predictions(labelled_dialogue_entries, user_email)
+        speaker_predictions = await generate_speaker_predictions(labelled_dialogue_entries, user_id)
     except Exception as e:
         sentry_sdk.capture_exception(e)
         return labelled_dialogue_entries

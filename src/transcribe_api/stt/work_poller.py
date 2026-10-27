@@ -17,7 +17,7 @@ from transcribe_api.domain.blob_ownership import (
     blob_owner_segment,
     resolve_blob_owner,
 )
-from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager
+from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager, _redact_blob_path
 from transcribe_api.stt.pipeline import transcribe_and_generate_llm_output
 from transcribe_api.stt.utils import extract_transcription_id_from_blob_path
 from transcribe_api.runtime.db_dictation import engine
@@ -137,7 +137,7 @@ class TranscriptionPollingService:
         # "reset_from_stale" ones (written by earlier versions) or stale claims.
         refusal = self._claim_refusal(blob.get("metadata", {}), blob.get("last_modified"))
         if refusal:
-            logger.debug(f"Skipping blob ({refusal}): {blob_name}")
+            logger.debug(f"Skipping blob ({refusal}): {_redact_blob_path(blob_name)}")
             return True
         return False
 
@@ -171,7 +171,7 @@ class TranscriptionPollingService:
                 retry_count = int(metadata.get("retry_count", "0"))
                 if retry_count >= self.max_retry_attempts:
                     logger.warning(
-                        f"Blob {blob['name']} has exceeded max retries "
+                        f"Blob {_redact_blob_path(blob['name'])} has exceeded max retries "
                         f"({retry_count}/{self.max_retry_attempts}), marking as permanently failed"
                     )
                     await self._mark_blob_permanently_failed(blob["name"], metadata)
@@ -239,14 +239,14 @@ class TranscriptionPollingService:
             True if processing was successful, False otherwise.
         """
         blob_path = blob_info["name"]
-        logger.info(f"Processing discovered audio file: {blob_path}")
+        logger.info(f"Processing discovered audio file: {_redact_blob_path(blob_path)}")
 
         try:
             # Claim the blob first. If this returns False another worker holds (or has
             # finished) it, or it could not be claimed; either way it is not ours to process.
             marked = await self._mark_blob_in_progress(blob_path)
             if not marked:
-                logger.info(f"Blob not claimed, skipping: {blob_path}")
+                logger.info(f"Blob not claimed, skipping: {_redact_blob_path(blob_path)}")
                 return False
 
             try:
@@ -267,7 +267,7 @@ class TranscriptionPollingService:
             # Trigger transcription processing
             transcription_id = extract_transcription_id_from_blob_path(blob_path, str(user.id))
 
-            logger.info(f"Starting transcription for blob: {blob_path} (user_id: {user.id})")
+            logger.info("Starting transcription id=%s user_id=%s", transcription_id, user.id)
 
             await transcribe_and_generate_llm_output(
                 user_upload_blob_storage_file_key=blob_path,
@@ -280,11 +280,10 @@ class TranscriptionPollingService:
             # Mark blob as processed
             await self._mark_blob_as_processed_and_soft_delete(blob_path)
 
-            logger.info(f"Successfully processed audio file: {blob_path} (user_id: {user.id})")
+            logger.info("Successfully processed transcription id=%s user_id=%s", transcription_id, user.id)
 
         except Exception as e:
-            error_msg = f"Error processing audio file {blob_path}: {e}"
-            logger.error(error_msg)
+            logger.error("Error processing audio file %s: %s", _redact_blob_path(blob_path), e)
             await self._mark_blob_with_error(blob_path, str(e))
             return False
         else:
@@ -313,18 +312,18 @@ class TranscriptionPollingService:
         try:
             current = await self.azure_blob_manager.get_blob_properties(blob_path)
             if current is None:
-                logger.warning(f"Blob could not be read, not claiming: {blob_path}")
+                logger.warning(f"Blob could not be read, not claiming: {_redact_blob_path(blob_path)}")
                 return False
 
             current_metadata = current["metadata"]
             refusal = self._claim_refusal(current_metadata, current["last_modified"])
             if refusal:
-                logger.info(f"Not claiming blob ({refusal}): {blob_path}")
+                logger.info(f"Not claiming blob ({refusal}): {_redact_blob_path(blob_path)}")
                 return False
             if current_metadata.get("status") == "in_progress":
                 logger.warning(
                     f"Reclaiming stale claim (started_at={current_metadata.get('started_at')}, "
-                    f"retry_count={current_metadata.get('retry_count', '0')}): {blob_path}"
+                    f"retry_count={current_metadata.get('retry_count', '0')}): {_redact_blob_path(blob_path)}"
                 )
 
             metadata = {
@@ -337,14 +336,14 @@ class TranscriptionPollingService:
                 blob_name=blob_path, metadata=metadata, etag=current["etag"]
             )
             if success:
-                logger.info(f"Marked blob as in_progress: {blob_path}")
+                logger.info(f"Marked blob as in_progress: {_redact_blob_path(blob_path)}")
                 return True
             else:
-                logger.info(f"Claim not written (blob changed by another worker, or write failed): {blob_path}")
+                logger.info(f"Claim not written (blob changed by another worker, or write failed): {_redact_blob_path(blob_path)}")
                 return False
 
         except Exception as e:
-            logger.error(f"Error marking blob as in_progress {blob_path}: {e}")
+            logger.error(f"Error marking blob as in_progress {_redact_blob_path(blob_path)}: {e}")
             return False
 
     async def _mark_blob_as_processed_and_soft_delete(self, blob_path: str) -> None:
@@ -364,12 +363,12 @@ class TranscriptionPollingService:
             }
             success = await self.azure_blob_manager.set_blob_metadata(blob_name=blob_path, metadata=metadata)
             if success:
-                logger.info(f"Marked blob as processed: {blob_path}")
+                logger.info(f"Marked blob as processed: {_redact_blob_path(blob_path)}")
             else:
-                logger.warning(f"Failed to mark blob as processed: {blob_path}")
+                logger.warning(f"Failed to mark blob as processed: {_redact_blob_path(blob_path)}")
 
         except Exception as e:
-            logger.error(f"Error marking blob as processed {blob_path}: {e}")
+            logger.error(f"Error marking blob as processed {_redact_blob_path(blob_path)}: {e}")
 
     async def _mark_blob_with_error(self, blob_path: str, error_message: str) -> None:
         """
@@ -396,9 +395,9 @@ class TranscriptionPollingService:
                 "status": "retrying",  # Will be retried on next poll
             }
             await self.azure_blob_manager.set_blob_metadata(blob_name=blob_path, metadata=metadata)
-            logger.info(f"Marked blob with error (attempt {new_retry_count}): {blob_path}")
+            logger.info(f"Marked blob with error (attempt {new_retry_count}): {_redact_blob_path(blob_path)}")
         except Exception as e:
-            logger.error(f"Error marking blob with error {blob_path}: {e}")
+            logger.error(f"Error marking blob with error {_redact_blob_path(blob_path)}: {e}")
 
     async def _mark_blob_permanently_failed(self, blob_path: str, current_metadata: dict) -> None:
         """
@@ -423,10 +422,10 @@ class TranscriptionPollingService:
             await self.azure_blob_manager.set_blob_metadata(blob_name=blob_path, metadata=metadata)
             logger.error(
                 f"Marked blob as permanently failed after "
-                f"{current_metadata.get('retry_count', 0)} attempts: {blob_path}"
+                f"{current_metadata.get('retry_count', 0)} attempts: {_redact_blob_path(blob_path)}"
             )
         except Exception as e:
-            logger.error(f"Error marking blob as permanently failed {blob_path}: {e}")
+            logger.error(f"Error marking blob as permanently failed {_redact_blob_path(blob_path)}: {e}")
 
     def _should_delete_old_blob(self, metadata: dict) -> tuple[bool, str]:
         """
@@ -508,7 +507,7 @@ class TranscriptionPollingService:
                 if should_delete:
                     processed_blobs.append(blob)
                 else:
-                    logger.info(f"Keeping blob ({reason}): {blob['name']}")
+                    logger.info(f"Keeping blob ({reason}): {_redact_blob_path(blob['name'])}")
 
             if not processed_blobs:
                 logger.info("No processed audio uploads to delete")
@@ -522,11 +521,11 @@ class TranscriptionPollingService:
                     # listing, it is no longer known to be processed and is kept.
                     if await self.azure_blob_manager.delete_blob(blob_name, etag=blob.get("etag")):
                         deleted += 1
-                        logger.info(f"Deleted processed audio upload: {blob_name}")
+                        logger.info(f"Deleted processed audio upload: {_redact_blob_path(blob_name)}")
                     else:
-                        logger.warning(f"Did not delete processed audio upload: {blob_name}")
+                        logger.warning(f"Did not delete processed audio upload: {_redact_blob_path(blob_name)}")
                 except Exception as e:
-                    logger.error(f"Error deleting processed audio upload {blob_name}: {e}")
+                    logger.error(f"Error deleting processed audio upload {_redact_blob_path(blob_name)}: {e}")
 
             logger.info(f"Startup cleanup complete - deleted {deleted} of {len(processed_blobs)} processed upload(s)")
 
@@ -558,10 +557,10 @@ class TranscriptionPollingService:
 
                 try:
                     # Process the blob
-                    logger.info(f"Worker {worker_id} processing blob: {blob_info['name']}")
+                    logger.info(f"Worker {worker_id} processing blob: {_redact_blob_path(blob_info['name'])}")
                     await self.process_discovered_audio(blob_info)
                 except Exception as e:
-                    logger.error(f"Worker {worker_id} error processing blob {blob_info.get('name', 'unknown')}: {e}")
+                    logger.error(f"Worker {worker_id} error processing blob {_redact_blob_path(blob_info.get('name', 'unknown'))}: {e}")
                 finally:
                     # Mark task as done
                     self.blob_queue.task_done()
@@ -608,7 +607,7 @@ class TranscriptionPollingService:
                     # Add discovered files to queue for workers to process
                     for blob_info in unprocessed_files:
                         await self.blob_queue.put(blob_info)
-                        logger.debug(f"Added blob to queue: {blob_info['name']}")
+                        logger.debug(f"Added blob to queue: {_redact_blob_path(blob_info['name'])}")
 
                 except Exception as e:
                     logger.error(f"Error in polling loop: {e}")

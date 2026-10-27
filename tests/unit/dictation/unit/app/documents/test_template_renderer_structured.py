@@ -284,8 +284,7 @@ def test_render_structured_document_does_not_number_signature_section(tmp_path: 
             anonymity=[Heading(text="DECISION AND REASONS", level=1)],
             signature=[
                 Heading(text="Signature", level=2, bold=True),
-                Paragraph(text="Signed\tDate [not final until dated]", right_tab=True),
-                Paragraph(text="[ADD SIGNATURE]", italic=True),
+                Paragraph(text="[ADD SIGNATURE]\tDate [not final until dated]", right_tab=True),
                 Paragraph(text="First-tier Tribunal Judge N SONI"),
             ],
         ),
@@ -298,7 +297,7 @@ def test_render_structured_document_does_not_number_signature_section(tmp_path: 
     signature_paragraphs = [
         p
         for p in generated.paragraphs
-        if p.text in {"Signed\tDate [not final until dated]", "[ADD SIGNATURE]", "First-tier Tribunal Judge N SONI"}
+        if p.text in {"[ADD SIGNATURE]\tDate [not final until dated]", "First-tier Tribunal Judge N SONI"}
     ]
     assert signature_paragraphs
     for para in signature_paragraphs:
@@ -384,6 +383,41 @@ def test_render_structured_document_does_not_number_fee_award_section(tmp_path: 
     for para in fee_award_paragraphs:
         assert para.style.name != "NumNormal"
         assert not _has_word_numbering(para), f"Did not expect numbering on fee award paragraph: {para.text}"
+
+
+def test_render_structured_document_does_not_number_notice_of_decision_section(tmp_path: Path) -> None:
+    frontmatter = Frontmatter(
+        appeal_number="TST-123",
+        hearing_location="Manchester",
+        hearing_date="23 January 2026",
+        judge_name="N SONI",
+        appellant_name="ELLIOTT",
+    )
+    hearing_document = HearingDocument(
+        frontmatter=frontmatter,
+        body=IACTemplate(
+            anonymity=[Heading(text="DECISION AND REASONS", level=1)],
+            notice_of_decision=[
+                Heading(text="Notice of Decision", level=1, bold=True),
+                Paragraph(text="Notice of Decision paragraph one", alignment="justify"),
+                Paragraph(text="Notice of Decision paragraph two", alignment="justify"),
+            ],
+        ),
+    )
+    output_path = tmp_path / "notice_of_decision_not_numbered.docx"
+
+    render_structured_document(hearing_document, output_path)
+
+    generated = Document(str(output_path))
+    notice_paragraphs = [
+        p
+        for p in generated.paragraphs
+        if p.text in {"Notice of Decision paragraph one", "Notice of Decision paragraph two"}
+    ]
+    assert notice_paragraphs
+    for para in notice_paragraphs:
+        assert para.style.name != "NumNormal"
+        assert not _has_word_numbering(para), f"Did not expect numbering on notice of decision paragraph: {para.text}"
 
 
 def test_render_structured_document_quotation_applies_2cm_base_indent(tmp_path: Path) -> None:

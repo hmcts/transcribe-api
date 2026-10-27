@@ -1,6 +1,7 @@
 import asyncio
 import json
 import tempfile
+import threading
 import urllib.parse
 import uuid
 from datetime import UTC, datetime
@@ -14,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.responses import JSONResponse, StreamingResponse
 
 from transcribe_api.api.document_content_models import DocumentContentResponse
-from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager, _sanitize_for_log
+from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager, _redact_blob_path, _sanitize_for_log
 from transcribe_api.stt.utils import (
     generate_blob_download_url,
     generate_blob_upload_url,
@@ -107,10 +108,9 @@ def _validate_blob_ownership(blob_path: str, current_user: "User", request: Requ
 
     if not segment_belongs_to_user(segment, current_user):
         logger.warning(
-            "UNAUTHORISED_ACCESS_ATTEMPT user_id=%s user_email=%s "
+            "UNAUTHORISED_ACCESS_ATTEMPT user_id=%s "
             "reason=blob_ownership_mismatch attempted_resource=%s",
             _sanitize_for_log(current_user.id),
-            _sanitize_for_log(current_user.email),
             _sanitize_for_log(f"{request.method} {request.url.path}"),
         )
         raise HTTPException(status_code=403, detail="Access denied")
@@ -186,7 +186,7 @@ async def get_onboarding_status(
     safe_roles = [_sanitize_for_log(r) for r in roles]
     logger.info(
         "App role check for user %s: roles=%s, is_allowlisted=%s",
-        _sanitize_for_log(current_user.email),
+        _sanitize_for_log(current_user.id),
         safe_roles,
         is_allowlisted,
     )
@@ -437,7 +437,6 @@ async def generate_or_edit_minutes(
         400 if edit_instructions missing for edit action
     """
     user_id = current_user.id
-    user_email = current_user.email
 
     # Validate and get dialogue entries (raises HTTPException if invalid)
     dialogue_entries = _validate_transcription_for_minutes(request.transcription_id, user_id)
@@ -458,7 +457,7 @@ async def generate_or_edit_minutes(
                 dialogue_entries,
                 request.transcription_id,
                 request.template,
-                user_email,
+                str(user_id),
                 minute_version_id=new_minute_version_id,
             )
         elif request.action_type == "edit":
@@ -468,7 +467,7 @@ async def generate_or_edit_minutes(
                 new_minute_version_id,
                 request.edit_instructions,
                 request.transcription_id,
-                user_email,
+                str(user_id),
             )
 
     asyncio.create_task(process_request())  # noqa: RUF006 - fire-and-forget background task
@@ -515,10 +514,9 @@ async def get_transcription(
 
     transcription = get_transcription_by_id(transcription_id, current_user.id, tz)
     logger.info(
-        "TRANSCRIPT_VIEWED transcription_id=%s user_id=%s user_email=%s",
+        "TRANSCRIPT_VIEWED transcription_id=%s user_id=%s",
         _sanitize_for_log(transcription_id),
         _sanitize_for_log(current_user.id),
-        _sanitize_for_log(current_user.email),
     )
     return transcription
 
@@ -586,7 +584,7 @@ async def get_document_download_url(
     logger.info(
         "Generated fresh download URL for transcription %s (document: %s)",
         str(transcription_id),
-        _sanitize_for_log(blob_path),
+        _redact_blob_path(blob_path),
     )
 
     return {"download_url": download_url}
@@ -620,10 +618,9 @@ async def download_document(  # noqa: C901
 
     _validate_blob_ownership(blob_path, current_user, request)
     logger.info(
-        "TRANSCRIPT_DOWNLOADED transcription_id=%s user_id=%s user_email=%s type=document",
+        "TRANSCRIPT_DOWNLOADED transcription_id=%s user_id=%s type=document",
         _sanitize_for_log(transcription_id),
         _sanitize_for_log(current_user.id),
-        _sanitize_for_log(current_user.email),
     )
 
     title = transcription.title or "hearing-document"
@@ -671,10 +668,9 @@ async def delete_transcription(
     """Delete a specific transcription by ID."""
     delete_transcription_by_id(transcription_id, current_user.id)
     logger.info(
-        "TRANSCRIPT_DELETED transcription_id=%s user_id=%s user_email=%s",
+        "TRANSCRIPT_DELETED transcription_id=%s user_id=%s",
         _sanitize_for_log(transcription_id),
         _sanitize_for_log(current_user.id),
-        _sanitize_for_log(current_user.email),
     )
 
 
@@ -760,11 +756,10 @@ async def save_transcription_job_route(
 
     job = save_transcription_job(job=job_data)
     logger.info(
-        "TRANSCRIPT_JOB_SUBMITTED transcription_id=%s job_id=%s user_id=%s user_email=%s",
+        "TRANSCRIPT_JOB_SUBMITTED transcription_id=%s job_id=%s user_id=%s",
         _sanitize_for_log(transcription_id),
         _sanitize_for_log(job.id),
         _sanitize_for_log(current_user.id),
-        _sanitize_for_log(current_user.email),
     )
     return job
 
@@ -812,11 +807,10 @@ async def stream_audio(  # noqa: C901
 
     _validate_blob_ownership(blob_path, current_user, request)
     logger.info(
-        "TRANSCRIPT_DOWNLOADED transcription_id=%s job_id=%s user_id=%s user_email=%s type=audio",
+        "TRANSCRIPT_DOWNLOADED transcription_id=%s job_id=%s user_id=%s type=audio",
         _sanitize_for_log(transcription_id),
         _sanitize_for_log(job_id),
         _sanitize_for_log(current_user.id),
-        _sanitize_for_log(current_user.email),
     )
 
     _audio_settings = get_settings()
@@ -1005,13 +999,60 @@ async def get_sectioned_transcript_route(
     )
 
 
+class _RenderHandoff:
+    """Who owns a rendered hearing document: the request, or nobody.
+
+    A worker thread cannot be stopped. Whichever of the worker (finishing) and the
+    request (being cancelled) comes second deletes the document, under the lock,
+    so it is cleaned up even when the event loop is cancelled or closed at
+    shutdown and no asyncio callback would run.
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.abandoned = False
+        self.path: Path | None = None
+
+    def render(self, **kwargs) -> Path:
+        path = render_hearing_document(**kwargs)
+        with self.lock:
+            if self.abandoned:
+                path.unlink(missing_ok=True)
+            else:
+                self.path = path
+        return path
+
+    def abandon(self) -> None:
+        with self.lock:
+            self.abandoned = True
+            if self.path is not None:
+                # Rendered, but the request was cancelled before it received the path.
+                self.path.unlink(missing_ok=True)
+
+
+async def _render_hearing_document_off_loop(**kwargs) -> Path:
+    """Render the hearing document in a worker thread, leaving no file behind on cancellation.
+
+    If the request is cancelled while rendering (including at shutdown), the caller's
+    cleanup never learns the output path, so the document (transcript and judicial
+    notes) is deleted by whichever side finishes last; see _RenderHandoff.
+    """
+    handoff = _RenderHandoff()
+    try:
+        return await asyncio.to_thread(handoff.render, **kwargs)
+    except asyncio.CancelledError:
+        handoff.abandon()
+        raise
+
+
 @router.post("/live-transcription/submission", response_model=LiveTranscriptionSubmissionResponse)
 async def save_live_transcription_submission(  # noqa: PLR0915
     request: LiveTranscriptionSubmissionRequest,
     current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
 ) -> LiveTranscriptionSubmissionResponse:
     """Persist live transcription form and transcript data as JSON in the audio uploads bucket."""
-    blob_filename = f"live-transcription-submission-{uuid.uuid4()}.json"
+    submission_id = uuid.uuid4()
+    blob_filename = f"live-transcription-submission-{submission_id}.json"
     blob_path = get_file_blob_path(str(current_user.azure_user_id), blob_filename)
 
     # Get sectioned messages (handles both sectioned and legacy flat formats)
@@ -1032,9 +1073,11 @@ async def save_live_transcription_submission(  # noqa: PLR0915
         "azure_user_id": str(current_user.azure_user_id),
     }
 
-    # Log the JSON payload to the terminal
-    logger.info("=== Live transcription submission received ===")
-    logger.info("JSON payload:\n%s", json.dumps(payload, indent=2))
+    logger.info(
+        "live transcription submission received submission_id=%s user_id=%s",
+        _sanitize_for_log(submission_id),
+        _sanitize_for_log(current_user.id),
+    )
 
     temp_json_path: Path | None = None
     temp_doc_path: Path | None = None
@@ -1042,38 +1085,36 @@ async def save_live_transcription_submission(  # noqa: PLR0915
     try:
         # Save JSON payload to blob storage
         with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json", encoding="utf-8") as tmp_file:
-            temp_path = Path(tmp_file.name)
+            temp_json_path = Path(tmp_file.name)
             json.dump(payload, tmp_file)
 
         async with AsyncAzureBlobManager() as blob_manager:
-            upload_success = await blob_manager.create_blob_from_file(temp_path, blob_path)
+            upload_success = await blob_manager.create_blob_from_file(temp_json_path, blob_path)
 
             if not upload_success:
                 raise HTTPException(status_code=500, detail="Failed to save submission data")
 
             logger.info(
                 "Live transcription submission saved to blob %s for user %s",
-                _sanitize_for_log(blob_path),
-                _sanitize_for_log(current_user.email),
+                _redact_blob_path(blob_path),
+                _sanitize_for_log(current_user.id),
             )
 
             # Generate Word document from template
             temp_output_dir = Path(tempfile.gettempdir()) / "hearing_documents"
-            temp_doc_path = render_hearing_document(
+            temp_doc_path = await _render_hearing_document_off_loop(
                 request=request,
                 output_dir=temp_output_dir,
                 user_email=current_user.email,
             )
 
             logger.info(
-                "Rendered hearing document to %s for user %s",
-                _sanitize_for_log(str(temp_doc_path)),
-                _sanitize_for_log(current_user.email),
+                "Rendered hearing document for user %s",
+                _sanitize_for_log(current_user.id),
             )
 
             # Upload the Word document to blob storage
-            timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-            doc_blob_filename = f"hearing-document-{timestamp}.docx"
+            doc_blob_filename = f"hearing-document-{submission_id}.docx"
             doc_blob_path = get_file_blob_path(str(current_user.azure_user_id), doc_blob_filename)
 
             doc_upload_success = await blob_manager.create_blob_from_file(temp_doc_path, doc_blob_path)
@@ -1082,8 +1123,8 @@ async def save_live_transcription_submission(  # noqa: PLR0915
 
             logger.info(
                 "Uploaded hearing document to blob %s for user %s",
-                _sanitize_for_log(doc_blob_path),
-                _sanitize_for_log(current_user.email),
+                _redact_blob_path(doc_blob_path),
+                _sanitize_for_log(current_user.id),
             )
 
         # Generate a user-friendly download filename
@@ -1118,9 +1159,11 @@ async def save_live_transcription_submission(  # noqa: PLR0915
                 expiry_hours=_settings.DOWNLOAD_URL_TTL_MINUTES / 60,
                 download_filename=download_filename,
             )
+            # The download filename is built from the party names and hearing
+            # date, so it is case-identifying and must not be logged.
             logger.info(
-                "Generated download URL for hearing document '%s' (expires in %d minutes)",
-                _sanitize_for_log(download_filename),
+                "Generated download URL for hearing document %s (expires in %d minutes)",
+                _redact_blob_path(doc_blob_path),
                 _settings.DOWNLOAD_URL_TTL_MINUTES,
             )
         else:
@@ -1159,7 +1202,7 @@ async def save_live_transcription_submission(  # noqa: PLR0915
         if not metadata_success:
             logger.warning(
                 "Failed to attach transcription metadata to live submission blob %s",
-                _sanitize_for_log(blob_path),
+                _redact_blob_path(blob_path),
             )
 
         logger.info(
@@ -1179,7 +1222,7 @@ async def save_live_transcription_submission(  # noqa: PLR0915
     except Exception:
         logger.exception(
             "Error saving live transcription submission for user %s",
-            _sanitize_for_log(current_user.email),
+            _sanitize_for_log(current_user.id),
         )
         raise HTTPException(status_code=500, detail="Failed to save submission data") from None
     finally:
@@ -1272,14 +1315,14 @@ async def submit_langfuse_trace(
             metadata=request.metadata or {},
             input=request.input_data,
             output=request.output_data,
-            user_id=current_user.email,
+            user_id=str(current_user.id),
         )
 
         logger.info(
             "Langfuse trace '%s' submitted for trace %s by user %s",
             _sanitize_for_log(request.name),
             _sanitize_for_log(request.trace_id),
-            _sanitize_for_log(current_user.email),
+            _sanitize_for_log(current_user.id),
         )
 
     except Exception as e:
@@ -1303,13 +1346,13 @@ async def submit_langfuse_score(
             name=request.name,
             value=request.value,
             comment=request.comment,
-            user_id=current_user.email,
+            user_id=str(current_user.id),
         )
 
         logger.info(
             "Langfuse score submitted for trace %s by user %s",
             _sanitize_for_log(request.trace_id),
-            _sanitize_for_log(current_user.email),
+            _sanitize_for_log(current_user.id),
         )
 
     except Exception as e:
@@ -1345,7 +1388,7 @@ async def get_speech_token(
             async with DefaultAzureCredential() as credential:
                 token_response = await credential.get_token("https://cognitiveservices.azure.com/.default")
             token = f"aad#{settings.AZURE_SPEECH_RESOURCE_ID}#{token_response.token}"
-            logger.info("Speech token (AAD/Managed Identity) generated for user %s", _sanitize_for_log(current_user.email))
+            logger.info("Speech token (AAD/Managed Identity) generated for user %s", _sanitize_for_log(current_user.id))
         elif settings.AZURE_SPEECH_KEY:
             # API key STS path — requires public network access to the Speech endpoint.
             fetch_token_url = f"{settings.AZURE_SPEECH_ENDPOINT.rstrip('/')}/sts/v1.0/issueToken"
@@ -1354,7 +1397,7 @@ async def get_speech_token(
                 response = await client.post(fetch_token_url, headers=headers)
                 response.raise_for_status()
             token = response.text
-            logger.info("Speech token (API key/STS) generated for user %s", _sanitize_for_log(current_user.email))
+            logger.info("Speech token (API key/STS) generated for user %s", _sanitize_for_log(current_user.id))
         else:
             raise HTTPException(
                 status_code=500,
@@ -1385,7 +1428,7 @@ async def generate_realtime_summary_endpoint(
     try:
         logger.info(
             "Generating realtime summary for user %s with %d entries",
-            _sanitize_for_log(current_user.email),
+            _sanitize_for_log(current_user.id),
             len(request.transcript_entries),
         )
 
@@ -1397,7 +1440,7 @@ async def generate_realtime_summary_endpoint(
             transcript_entries=transcript_dicts, existing_summary=request.existing_summary
         )
 
-        logger.info("Realtime summary generated successfully for user %s", _sanitize_for_log(current_user.email))
+        logger.info("Realtime summary generated successfully for user %s", _sanitize_for_log(current_user.id))
 
         return GenerateSummaryResponse(summary=summary)
 

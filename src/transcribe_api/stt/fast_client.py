@@ -14,7 +14,7 @@ from tenacity import (
 )
 from uwotm8 import convert_american_to_british_spelling
 
-from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager
+from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager, _redact_blob_path
 from transcribe_api.stt.utils import (
     cleanup_files,
     convert_input_dialogue_entries_to_dialogue_entries,
@@ -67,7 +67,7 @@ async def download_audio_blob_with_retry(user_upload_blob_path: str) -> Path:
         with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
             temp_file_path = Path(temp_file.name)
 
-        logger.info(f"Downloading file from Azure Blob Storage: {user_upload_blob_path} to {temp_file_path}")
+        logger.info(f"Downloading file from Azure Blob Storage: {_redact_blob_path(user_upload_blob_path)} to {temp_file_path}")
 
         # Use AsyncAzureBlobManager with Managed Identity (DefaultAzureCredential)
         async with AsyncAzureBlobManager() as blob_manager:
@@ -76,7 +76,7 @@ async def download_audio_blob_with_retry(user_upload_blob_path: str) -> Path:
                 file_path=temp_file_path,
             )
             if not success:
-                error_msg = f"Failed to download blob: {user_upload_blob_path}"
+                error_msg = f"Failed to download blob: {_redact_blob_path(user_upload_blob_path)}"
                 raise RuntimeError(error_msg)
 
         logger.info(f"Successfully downloaded blob to {temp_file_path}")

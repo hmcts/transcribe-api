@@ -36,6 +36,26 @@ ISSUES_INTRO_TEXT = (
     "IT MUST BE TAILORED TO THE ACTUAL ISSUES AGREED AT THE HEARING]"
 )
 
+APPELLANT_RULE_28_TEXT = (
+    "\n\nThe appellant failed to attend the hearing. "
+    "I considered rule 28 of the Tribunal Procedure (First-tier Tribunal) "
+    "(Immigration and Asylum Chamber) Rules 2014. "
+    "I was satisfied that [the appellant had actual notice of the hearing / "
+    "reasonable steps had been taken to notify the appellant of the hearing] "
+    "because [REASONS]. It was in the interests of justice to proceed "
+    "without the appellant because [REASONS]."
+)
+
+RESPONDENT_RULE_28_TEXT = (
+    "\n\nThe respondent was not represented at the hearing. "
+    "I considered rule 28 of the Tribunal Procedure (First-tier Tribunal) "
+    "(Immigration and Asylum Chamber) Rules 2014. "
+    "I was satisfied that [the respondent had actual notice of the hearing / "
+    "reasonable steps had been taken to notify the respondent of the hearing] "
+    "because [REASONS]. It was in the interests of justice to proceed "
+    "without the respondent because [REASONS]."
+)
+
 
 def _as_content_blocks(paragraphs: list[Paragraph]) -> list[ContentBlock]:
     return [*paragraphs]
@@ -47,26 +67,10 @@ def _build_hearing_description_blocks(document_data: DocumentData) -> list[Conte
     hearing_md = get_hearing_description(form_data.hearing_type)
 
     if form_data.requires_appellant_rule_28_text():
-        hearing_md += (
-            "\n\nThe Appellant failed to attend the hearing. "
-            "I considered rule 28 of the Tribunal Procedure (First-tier Tribunal) "
-            "(Immigration and Asylum Chamber) Rules 2014. "
-            "I was satisfied that [the Appellant had actual notice of the hearing / "
-            "reasonable steps had been taken to notify the Appellant of the hearing] "
-            "because [REASONS]. It was in the interests of justice to proceed "
-            "without the Appellant because [REASONS]."
-        )
+        hearing_md += APPELLANT_RULE_28_TEXT
 
     if form_data.requires_respondent_rule_28_text():
-        hearing_md += (
-            "\n\nThe Respondent was not represented at the hearing. "
-            "I considered rule 28 of the Tribunal Procedure (First-tier Tribunal) "
-            "(Immigration and Asylum Chamber) Rules 2014. "
-            "I was satisfied that [the Respondent had actual notice of the hearing / "
-            "reasonable steps had been taken to notify the Respondent of the hearing] "
-            "because [REASONS]. It was in the interests of justice to proceed "
-            "without the Respondent because [REASONS]."
-        )
+        hearing_md += RESPONDENT_RULE_28_TEXT
 
     return markdown_to_blocks(hearing_md)
 
@@ -188,8 +192,8 @@ def build_hearing_document_from_document_data(document_data: DocumentData) -> He
         )
         + paragraph_blocks(
             (
-                "This is the decision of the Tribunal in the appeal of the Appellant against "
-                f"the decision of the Respondent made on {decision_date_text}."
+                "This is the decision of the Tribunal in the appeal of the appellant against "
+                f"the decision of the respondent made on {decision_date_text}."
             ),
             alignment="justify",
         )
@@ -221,13 +225,11 @@ def build_hearing_document_from_document_data(document_data: DocumentData) -> He
         notice_of_decision=section_heading_blocks("Notice of Decision", level=1, bold=True, underline=True)
         + paragraph_blocks("[Notice of Decision]", alignment="justify"),
         anonymity_order=anonymity_order_blocks,
-        to_the_respondent=section_heading_blocks("To the Respondent – Fee Award", level=1, bold=True, underline=True)  # noqa: RUF001
-        + paragraph_blocks("[To the Respondent]", alignment="justify"),
+        to_the_respondent=section_heading_blocks("To the Respondent – Fee Award", level=1, bold=True, underline=True),  # noqa: RUF001
         fee_award=paragraph_blocks("[Fee award to be determined]", alignment="justify"),
         signature=[
             *section_heading_blocks("Signature", level=1, bold=True),
-            Paragraph(text="Signed\tDate [not final until dated]", right_tab=True),
-            Paragraph(text="[ADD SIGNATURE]", italic=True),
+            Paragraph(text="[ADD SIGNATURE]\tDate [not final until dated]", right_tab=True),
             Paragraph(text=f"First-tier Tribunal Judge {form_data.judge_name}"),
         ],
     )

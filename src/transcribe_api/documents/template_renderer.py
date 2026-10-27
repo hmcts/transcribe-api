@@ -6,6 +6,7 @@ templates using hearing form data and transcription content.
 
 from __future__ import annotations
 
+import uuid as _uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,7 +28,11 @@ from transcribe_api.documents.content_loader import (
     get_legal_framework_content,
     get_legal_issues_display,
 )
-from transcribe_api.documents.hearing_document_router import build_hearing_document_from_document_data
+from transcribe_api.documents.hearing_document_router import (
+    APPELLANT_RULE_28_TEXT,
+    RESPONDENT_RULE_28_TEXT,
+    build_hearing_document_from_document_data,
+)
 from transcribe_api.documents.models import DocumentData, HearingFormData, TranscriptMessage
 from transcribe_api.documents.styles import (
     INDENT_INCREMENT_CM,
@@ -77,11 +82,9 @@ SCOTTISH_CREST_PATH = TEMPLATE_DIR / "scottish-judicial-decision-crest.png"
 SCOTTISH_LOCATIONS: set[str] = {"Glasgow"}
 
 
-def _generate_output_filename(user_email: str) -> str:
-    """Generate a unique filename for the output document."""
-    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-    safe_email = user_email.replace("@", "_at_").replace(".", "_")
-    return f"hearing_document_{safe_email}_{timestamp}.docx"
+def _generate_output_filename() -> str:
+    """Generate a unique filename for the output document using a UUID (no PII in path)."""
+    return f"hearing_document_{_uuid.uuid4()}.docx"
 
 
 # Controls that should be deleted entirely if no data is provided
@@ -239,8 +242,9 @@ def _append_paragraph_block(
         if section_name in ("signature", "fee_award"):
             resolved_style = STYLE_NORMAL
         else:
+            fallback = STYLE_NORMAL if section_name == "notice_of_decision" else STYLE_NUM_NORMAL
             resolved_style = (
-                STYLE_QUOTATION if block.italic and indent_level >= MIN_QUOTE_INDENT_LEVEL else STYLE_NUM_NORMAL
+                STYLE_QUOTATION if block.italic and indent_level >= MIN_QUOTE_INDENT_LEVEL else fallback
             )
 
     resolved_style = resolve_style_name(document, resolved_style, fallback=STYLE_NORMAL)
@@ -469,30 +473,12 @@ def render_document(  # noqa: C901, PLR0912, PLR0915
 
             # Append Rule 28 text for appellant non-attendance
             if form_data.requires_appellant_rule_28_text():
-                appellant_rule_28_text = (
-                    "\n\nThe Appellant failed to attend the hearing. "
-                    "I considered rule 28 of the Tribunal Procedure (First-tier Tribunal) "
-                    "(Immigration and Asylum Chamber) Rules 2014. "
-                    "I was satisfied that [the Appellant had actual notice of the hearing / "
-                    "reasonable steps had been taken to notify the Appellant of the hearing] "
-                    "because [REASONS]. It was in the interests of justice to proceed "
-                    "without the Appellant because [REASONS]."
-                )
-                hearing_description += appellant_rule_28_text
+                hearing_description += APPELLANT_RULE_28_TEXT
                 logger.info("Added Rule 28 text for appellant non-attendance")
 
             # Append Rule 28 text for respondent non-representation
             if form_data.requires_respondent_rule_28_text():
-                respondent_rule_28_text = (
-                    "\n\nThe Respondent was not represented at the hearing. "
-                    "I considered rule 28 of the Tribunal Procedure (First-tier Tribunal) "
-                    "(Immigration and Asylum Chamber) Rules 2014. "
-                    "I was satisfied that [the Respondent had actual notice of the hearing / "
-                    "reasonable steps had been taken to notify the Respondent of the hearing] "
-                    "because [REASONS]. It was in the interests of justice to proceed "
-                    "without the Respondent because [REASONS]."
-                )
-                hearing_description += respondent_rule_28_text
+                hearing_description += RESPONDENT_RULE_28_TEXT
                 logger.info("Added Rule 28 text for respondent non-representation")
 
             template_data["HearingDescription"] = markdown_to_plain_text(hearing_description)
@@ -646,7 +632,7 @@ def render_hearing_document_structured(
     hearing_document = build_hearing_document_from_document_data(document_data)
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / _generate_output_filename(user_email)
+    output_path = output_dir / _generate_output_filename()
     return render_document(hearing_document, output_path)
 
 

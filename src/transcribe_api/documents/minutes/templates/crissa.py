@@ -30,7 +30,7 @@ CRISSA_SECTIONS = [
 async def generate_crissa_section(
     transcript_string: str,
     previous_outputs: list[str],
-    user_email: str,
+    user_id: str,
     section: str,
     today_date_readable: str,
     model_name: str,
@@ -40,13 +40,13 @@ async def generate_crissa_section(
     trace_id = langfuse_context.get_current_trace_id()
 
     langfuse_context.update_current_trace(
-        user_id=user_email,
+        user_id=user_id,
     )
 
     prompt = langfuse_client.get_prompt("crissa-prompt", version=prompt_version, type="chat")
     langfuse_context.update_current_observation(
         prompt=prompt,
-        user_id=user_email,
+        user_id=user_id,
     )
 
     compiled_chat_prompt = prompt.compile(
@@ -73,7 +73,7 @@ async def generate_crissa_section(
 @observe(name="generate_full_crissa", as_type="generation")
 async def generate_full_crissa(
     dialogue_entries: list[DialogueEntry],
-    user_email: str,
+    user_id: str,
     prompt_version: int | None = None,
     model_name: str = LLMModel.VERTEX_GEMINI_25_PRO,
     temperature: float = 0.1,
@@ -90,7 +90,7 @@ async def generate_full_crissa(
         section_output, current_trace_id = await generate_crissa_section(
             transcript_string=transcript_string,
             previous_outputs=all_sections,  # Pass all previously generated sections
-            user_email=user_email,
+            user_id=user_id,
             section=section,
             today_date_readable=today_date_readable,
             prompt_version=prompt_version,
@@ -105,12 +105,12 @@ async def generate_full_crissa(
     combined_html = "\n\n".join(all_sections)
 
     langfuse_context.update_current_observation(
-        user_id=user_email,
+        user_id=user_id,
         input={"template": TemplateName.CRISSA, "dialogue_entries": transcript_string},
         output=html_to_markdown(combined_html),
     )
     langfuse_context.update_current_trace(
-        user_id=user_email,
+        user_id=user_id,
         input={"template": TemplateName.CRISSA, "dialogue_entries": transcript_string},
         output=html_to_markdown(combined_html),
     )
