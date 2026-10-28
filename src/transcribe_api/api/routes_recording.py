@@ -27,6 +27,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import StreamingResponse
+from hmcts_otel import StageHandle, journey, stage
 from pydantic import BaseModel, Field, field_validator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -56,6 +57,7 @@ from transcribe_api.domain.models_recording import (
     SpeechBatchJob,
     WordCorrection,
 )
+from transcribe_api.runtime.telemetry import JOURNEY_UPLOAD
 from transcribe_api.domain.auth.approles_recording import get_valid_roles
 from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
 from transcribe_api.domain.auth.dependencies_recording import get_current_user
@@ -580,17 +582,29 @@ async def upload_audio(
     file: UploadFile = File(...),
     current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> UploadResponse:
+    # DIAAT-276: the upload is its own journey, identified by the UUID that also goes
+    # into the blob name; the job created from it carries that ID as its parent.
+    upload_id = uuid4()
+    with journey(JOURNEY_UPLOAD, str(upload_id)), stage("upload") as upload_stage:
+        return await _upload_audio(file, current_user, upload_id, upload_stage)
+
+
+async def _upload_audio(
+    file: UploadFile, current_user: AuthenticatedUser, upload_id: UUID, upload_stage: StageHandle
+) -> UploadResponse:
     extension = PurePosixPath(file.filename or "").suffix.lower()
     if extension not in _ALLOWED_AUDIO_EXTENSIONS:
+        upload_stage.fail("upload.unsupported_format")
         raise HTTPException(
             status_code=422,
             detail=f"Unsupported file type '{extension}'. "
             f"Allowed: {', '.join(sorted(_ALLOWED_AUDIO_EXTENSIONS))}",
         )
+    upload_stage.set_attribute("audio.format", extension.lstrip("."))
 
     safe_filename = _sanitize_filename(file.filename or "audio")
     wav_filename = f"{PurePosixPath(safe_filename).stem}.wav"
-    blob_name = f"uploads/{current_user.id}/{uuid4()}-{wav_filename}"
+    blob_name = f"uploads/{current_user.id}/{upload_id}-{wav_filename}"
 
     # The upload and its WAV live in temp files and the WAV is streamed to
     # storage: the WAV is about 115 MB per hour of audio, and holding both in
@@ -599,7 +613,11 @@ async def upload_audio(
         # The input keeps its extension so ffmpeg can sniff the source format.
         input_path = Path(tmpdir) / f"input{extension}"
         wav_path = Path(tmpdir) / "output.wav"
-        await _save_upload_capped(file, _MAX_UPLOAD_BYTES, input_path)
+        try:
+            await _save_upload_capped(file, _MAX_UPLOAD_BYTES, input_path)
+        except HTTPException:
+            upload_stage.fail("upload.too_large")  # the only HTTPException it raises (413)
+            raise
 
         # Transcode every accepted upload to 16 kHz mono PCM WAV — the format
         # Azure Speech handles most reliably — before storing. A file that
@@ -609,6 +627,7 @@ async def upload_audio(
         try:
             await normalize_to_wav(input_path, wav_path)
         except AudioDecodeError as exc:
+            upload_stage.fail("upload.undecodable")
             raise HTTPException(
                 status_code=422,
                 detail=(
@@ -620,6 +639,7 @@ async def upload_audio(
             # ffmpeg is not installed: the server is misconfigured, the upload
             # is fine. Deployed pods check for it at startup (api/app.py), so
             # this should not happen; if it does, say so rather than 500.
+            upload_stage.error("upload.transcoder_unavailable")  # server-side: counts as an error
             logger.error("Cannot transcode upload, ffmpeg is not available: %s", exc)
             raise HTTPException(
                 status_code=503,
@@ -640,6 +660,7 @@ async def upload_audio(
         async with AsyncAzureBlobManager() as blob_manager:
             uploaded = await blob_manager.create_blob_from_file(wav_path, blob_name)
             if not uploaded:
+                upload_stage.error("storage.write_failed")  # server-side: counts as an error
                 raise HTTPException(status_code=502, detail="Failed to store audio file")
             audio_url = blob_manager.build_blob_url(blob_name)
 

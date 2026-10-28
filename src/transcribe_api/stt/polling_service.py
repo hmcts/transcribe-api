@@ -20,6 +20,8 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 import sentry_sdk
+from hmcts_otel import StageHandle, journey, record_event, stage
+from hmcts_otel import conventions as c
 from sqlmodel import Session
 
 from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
@@ -42,6 +44,7 @@ from transcribe_api.domain.interface_recording import (
     update_job_batch_status,
 )
 from transcribe_api.domain.models_recording import BatchJobStatus
+from transcribe_api.runtime.telemetry import JOURNEY_JOB, batch_job_id_from_url, upload_id_from_blob
 from transcribe_api.domain.webhook import dispatch
 
 logger = logging.getLogger(__name__)
@@ -58,6 +61,7 @@ class _PendingJob:
     caller_id: UUID | None
     metadata_: dict
     webhook_secret: str | None = None
+    trace_parent: str | None = None
     audio_blob_path: str | None = None
     locale: str = "en-GB"
     created_datetime: datetime | None = None
@@ -145,7 +149,7 @@ async def _resolve_model_display_name(model_identifier: str) -> str | None:
     try:
         model_details = await get_model_details(model_identifier)
     except Exception as exc:
-        logger.warning("Could not resolve model display name from %s: %s", model_identifier, exc)
+        logger.warning("Could not resolve model display name (%s)", type(exc).__name__)
         return None
     return _compose_model_display_name(model_details)
 
@@ -183,6 +187,17 @@ def _extract_transcription_duration_seconds(
     return None
 
 
+def _job_finished_with_error(error_code: str) -> None:
+    """job.finished for a job whose FAILED state is stored.
+
+    Emitted only after the write: when it fails, the job is polled again and the next
+    poll finishes it, so a job is finished once. These are Azure Speech (dependency)
+    failures, so they count as errors (rule: client-caused rejections use fail(),
+    server and dependency failures use error()).
+    """
+    record_event("job.finished", {c.OUTCOME: "error", c.ERROR_CODE: error_code})
+
+
 class BatchPollingService:
     """Background service that polls Azure Batch Transcription job status."""
 
@@ -211,7 +226,9 @@ class BatchPollingService:
                 try:
                     await self._poll_once()
                 except Exception as exc:
-                    logger.error("Unexpected error in polling loop: %s", exc)
+                    logger.error(
+                        "Unexpected error in polling loop (%s)", type(exc).__name__, exc_info=exc
+                    )
                     sentry_sdk.capture_exception(exc)
                 await asyncio.sleep(self.settings.BATCH_POLL_INTERVAL_SECONDS)
         except asyncio.CancelledError:
@@ -271,44 +288,66 @@ class BatchPollingService:
                         audio_blob_path=row.audio_blob_path,
                         locale=row.locale,
                         created_datetime=row.created_datetime,
+                        trace_parent=row.trace_parent,
                     )
                 )
             return result
 
     async def _process_job(self, job: _PendingJob) -> None:
-        try:
-            status_data = await get_batch_job_status(job.batch_job_url)
-            azure_status = status_data.get("status", "")
+        # DIAAT-276: everything emitted while handling this job carries its journey.
+        with journey(JOURNEY_JOB, str(job.id), parent_id=upload_id_from_blob(job.audio_blob_path)):
+            try:
+                status_data = await get_batch_job_status(job.batch_job_url)
+                azure_status = status_data.get("status", "")
+                speech_ref = {c.DEPENDENCY_REF: batch_job_id_from_url(job.batch_job_url)}
 
-            if azure_status == BatchJobStatus.RUNNING:
-                if job.batch_job_status == BatchJobStatus.NOT_STARTED:
-                    await asyncio.to_thread(self._update_status, job.id, BatchJobStatus.RUNNING)
-            elif azure_status == BatchJobStatus.SUCCEEDED:
-                await self._handle_succeeded(job, status_data)
-            elif azure_status == BatchJobStatus.FAILED:
-                await self._handle_failed(job, status_data)
+                if azure_status == BatchJobStatus.RUNNING:
+                    if job.batch_job_status == BatchJobStatus.NOT_STARTED:
+                        await asyncio.to_thread(self._update_status, job.id, BatchJobStatus.RUNNING)
+                        record_event("speech.job_running", speech_ref)
+                elif azure_status == BatchJobStatus.SUCCEEDED:
+                    with stage(
+                        "result_processing", attributes=speech_ref, link_from=job.trace_parent
+                    ) as processing:
+                        await self._handle_succeeded(job, status_data, processing)
+                elif azure_status == BatchJobStatus.FAILED:
+                    await self._handle_failed(job, status_data, speech_ref)
 
-        except Exception as exc:
-            logger.error("Error polling batch job %s: %s", job.id, exc)
-            sentry_sdk.capture_exception(exc)
+            except Exception as exc:
+                logger.error(
+                    "Error polling batch job %s (%s)", job.id, type(exc).__name__, exc_info=exc
+                )
+                sentry_sdk.capture_exception(exc)
 
     def _update_status(self, job_id: UUID, status: BatchJobStatus) -> None:
         with Session(get_engine()) as session:
             update_job_batch_status(session, job_id, status)
 
-    async def _handle_succeeded(self, job: _PendingJob, status_data: dict) -> None:
+    async def _handle_succeeded(
+        self, job: _PendingJob, status_data: dict, processing: StageHandle | None = None
+    ) -> None:
         try:
             dialogue_entries = await get_batch_results(
                 job.batch_job_url, transcription_job_id=job.id
             )
         except BatchResultError as exc:
-            logger.error("Failed to retrieve batch results for job %s: %s", job.id, exc)
+            logger.error(
+                "Failed to retrieve batch results for job %s (%s)", job.id, type(exc).__name__
+            )
+            if processing is not None:
+                processing.error("speech.results_unavailable")  # each attempt's code
             await asyncio.to_thread(self._record_error, job.id, str(exc))
+            _job_finished_with_error("speech.results_unavailable")
             await self._dispatch_failure(job, str(exc))
             return
         except Exception as exc:
-            logger.error("Failed to retrieve batch results for job %s: %s", job.id, exc)
+            logger.error(
+                "Failed to retrieve batch results for job %s (%s)", job.id, type(exc).__name__
+            )
+            if processing is not None:
+                processing.error("speech.results_error")  # each attempt's code
             await asyncio.to_thread(self._record_error, job.id, str(exc))
+            _job_finished_with_error("speech.results_error")
             await self._dispatch_failure(job, str(exc))
             return
 
@@ -329,23 +368,32 @@ class BatchPollingService:
             model_identifier,
             model_display_name,
         )
+        record_event("transcript.available")
+        record_event("job.finished", {c.OUTCOME: "success"})
 
         await self._dispatch_success(job, processed_entries)
 
         try:
             await delete_batch_job(job.batch_job_url)
         except Exception as exc:
-            logger.warning("Could not delete batch job %s: %s", job.batch_job_url, exc)
+            logger.warning("Could not delete batch job for job %s (%s)", job.id, type(exc).__name__)
             await asyncio.to_thread(self._record_cleanup_failure, job.id, str(exc))
 
-    async def _handle_failed(self, job: _PendingJob, status_data: dict) -> None:
+    async def _handle_failed(
+        self, job: _PendingJob, status_data: dict, speech_ref: dict | None = None
+    ) -> None:
         error_msg = (
             status_data.get("properties", {})
             .get("error", {})
             .get("message", "Azure Batch Transcription failed")
         )
-        logger.error("Batch job %s failed: %s", job.id, error_msg)
+        # The Azure error text is stored on the job (shown in the UI), never logged.
+        logger.error("Batch job %s failed in Azure Speech", job.id)
         await asyncio.to_thread(self._record_error, job.id, error_msg)
+        # After the FAILED state is stored, so a job is finished once. Azure's error
+        # text is stored on the job, never exported in telemetry.
+        record_event("speech.job_failed", {**(speech_ref or {}), c.ERROR_CODE: "speech.job_failed"})
+        _job_finished_with_error("speech.job_failed")
 
         if job.audio_blob_path:
             try:
@@ -360,14 +408,16 @@ class BatchPollingService:
                         },
                     )
             except Exception as exc:
-                logger.warning("Could not mark blob %s as failed: %s", job.audio_blob_path, exc)
+                logger.warning(
+                    "Could not mark blob as failed for job %s (%s)", job.id, type(exc).__name__
+                )
 
         await self._dispatch_failure(job, error_msg)
 
         try:
             await delete_batch_job(job.batch_job_url)
         except Exception as exc:
-            logger.warning("Could not delete batch job %s: %s", job.batch_job_url, exc)
+            logger.warning("Could not delete batch job for job %s (%s)", job.id, type(exc).__name__)
             await asyncio.to_thread(self._record_cleanup_failure, job.id, str(exc))
 
     def _save_results(
