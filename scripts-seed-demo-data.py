@@ -37,7 +37,6 @@ os.environ.setdefault("ENVIRONMENT", "local")
 
 from sqlmodel import Session, col, create_engine, select  # noqa: E402
 from sqlalchemy import cast, String  # noqa: E402
-from sqlalchemy.engine import make_url  # noqa: E402
 
 from transcribe_api.domain.models_recording import (  # noqa: E402
     BatchJobStatus,
@@ -51,13 +50,11 @@ from transcribe_api.domain.models_recording import (  # noqa: E402
     WordInfo,
 )
 from transcribe_api.domain.models_dictation import User  # noqa: E402
-from transcribe_api.runtime.settings_recording import get_settings  # noqa: E402
+from transcribe_api.runtime.local_dev_database import (  # noqa: E402
+    UnsafeDatabaseURLError,
+    local_dev_database_url,
+)
 from transcribe_api.stt import local_storage  # noqa: E402
-
-# This script deletes and inserts rows unconditionally on every run (see
-# main()) -- it must never be able to touch anything but a developer's own
-# local Postgres, regardless of what a misconfigured .env might resolve to.
-_SAFE_LOCAL_DB_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 MOCK_USER_AZURE_ID = "local-dev-user-123"
 SEED_AUDIO_SOURCE = Path(__file__).parent / "scripts-seed-demo-audio.wav"
@@ -317,20 +314,10 @@ def main() -> int:
         print("Install ffmpeg (required for local dev regardless, see README) and retry.")
         return 1
 
-    # Via settings, not a bare env var: the running API resolves this through
-    # pydantic-settings' env_file=".env" (settings_recording.Settings), so a
-    # developer who only sets DATABASE_CONNECTION_STRING in .env -- not as an
-    # exported shell var -- would otherwise have this script silently fall
-    # back to the hardcoded default and seed a different database.
-    database_url = get_settings().DATABASE_CONNECTION_STRING
-    db_host = make_url(database_url).host
-    if db_host not in _SAFE_LOCAL_DB_HOSTS:
-        print(
-            f"Refusing to run: DATABASE_CONNECTION_STRING resolves to host {db_host!r}, "
-            f"not one of {sorted(_SAFE_LOCAL_DB_HOSTS)}. This script deletes and seeds "
-            "rows unconditionally and must never run against a shared or deployed "
-            "database -- check your .env."
-        )
+    try:
+        database_url = local_dev_database_url()
+    except UnsafeDatabaseURLError as exc:
+        print(f"Refusing to run against DATABASE_CONNECTION_STRING: {exc}. Check your .env.")
         return 1
     engine = create_engine(database_url)
 
