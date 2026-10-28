@@ -22,6 +22,7 @@ from transcribe_api.domain.models_dictation import (
     User,
 )
 from transcribe_api.documents.minutes.types import TranscriptionMetadata
+from transcribe_api.runtime.security_events import READ, REASSIGN, TRANSCRIPTION, WRITE, record_ownership_violation, resource_type_of
 
 
 @event.listens_for(Session, "before_flush")
@@ -45,7 +46,23 @@ def _ensure_owner_unchanged(session: Session, owner_column, record_id: UUID | No
         select(owner_column).where(model.id == record_id).with_for_update(key_share=True)
     ).first()
     if existing_owner is not None and str(existing_owner) != str(owner):
-        raise OwnershipConflictError(model.__name__)
+        raise _ownership_conflict(model.__name__)
+
+
+def _ownership_conflict(record_type: str) -> OwnershipConflictError:
+    """The SEC-1 refusal, recorded as a blocked security event (DIAAT-285) where it is raised."""
+    record_ownership_violation(resource_type_of(record_type), REASSIGN)
+    return OwnershipConflictError(record_type)
+
+
+def _blocked_if_not_owner(transcription: Transcription | None, user_id: UUID, action: str) -> None:
+    """404 unless the caller owns it. Another user's row is also recorded (DIAAT-285), from
+    the row already loaded: no extra query, and the same 404 as for an unknown ID."""
+    if transcription is None:
+        raise HTTPException(status_code=404, detail="Transcription not found")
+    if transcription.user_id != user_id:
+        record_ownership_violation(TRANSCRIPTION, action)
+        raise HTTPException(status_code=404, detail="Transcription not found")
 
 
 def get_transcription_owner(transcription_id: UUID) -> UUID | None:
@@ -67,7 +84,7 @@ def load_or_create_transcription(transcription_id: str | UUID | None, user_id: U
             existing = session.get(Transcription, record_id)
             if existing is not None:
                 if str(existing.user_id) != str(user_id):
-                    raise OwnershipConflictError(Transcription.__name__)
+                    raise _ownership_conflict(Transcription.__name__)
                 return existing
     return save_transcription(Transcription(id=record_id), user_id)
 
@@ -466,8 +483,7 @@ def get_tags_for_transcription(transcription_id: UUID, user_id: UUID) -> list[Ta
     with Session(engine) as session:
         # Verify transcription exists and belongs to user
         transcription = session.get(Transcription, transcription_id)
-        if not transcription or transcription.user_id != user_id:
-            raise HTTPException(status_code=404, detail="Transcription not found")
+        _blocked_if_not_owner(transcription, user_id, READ)
 
         # Load tags with selectinload
         statement = (
@@ -506,8 +522,7 @@ def add_tag_to_transcription(transcription_id: UUID, tag_name: str, user_id: UUI
     with Session(engine) as session:
         # Verify transcription exists and belongs to user
         transcription = session.get(Transcription, transcription_id)
-        if not transcription or transcription.user_id != user_id:
-            raise HTTPException(status_code=404, detail="Transcription not found")
+        _blocked_if_not_owner(transcription, user_id, WRITE)
 
         # Get or create the tag
         tag = get_or_create_tag(tag_name)
@@ -536,8 +551,7 @@ def remove_tag_from_transcription(transcription_id: UUID, tag_name: str, user_id
     with Session(engine) as session:
         # Verify transcription exists and belongs to user
         transcription = session.get(Transcription, transcription_id)
-        if not transcription or transcription.user_id != user_id:
-            raise HTTPException(status_code=404, detail="Transcription not found")
+        _blocked_if_not_owner(transcription, user_id, WRITE)
 
         # Normalize tag name
         normalized_name = tag_name.strip().lower()

@@ -81,6 +81,16 @@ from transcribe_api.documents.minutes.types import (
     UploadUrlRequest,
     UploadUrlResponse,
 )
+from transcribe_api.runtime.security_events import (
+    AUDIO,
+    DOCUMENT,
+    READ,
+    TEST,
+    TRANSCRIPTION,
+    WRITE,
+    owner_matches,
+    record_ownership_violation,
+)
 from transcribe_api.runtime.telemetry import JOURNEY_SUBMISSION, transcription_id_from_key, transcription_journey
 from transcribe_api.domain.auth.approles_dictation import get_role, has_any_role
 from transcribe_api.domain.auth.dependencies_dictation import get_allowlisted_user, get_current_user
@@ -91,6 +101,7 @@ from transcribe_api.documents.llm.langfuse_models import (
 from transcribe_api.runtime.browser_telemetry import telemetry_relay_router
 from transcribe_api.runtime.dependency_health import get_dependency_checker, health_response
 from transcribe_api.runtime.settings_dictation import get_settings
+from transcribe_api.runtime.settings_recording import get_settings as get_recording_settings
 from transcribe_api.runtime.version import APP_VERSION
 
 router = APIRouter()
@@ -110,7 +121,9 @@ router.include_router(
 )
 
 
-def _validate_blob_ownership(blob_path: str, current_user: "User", request: Request) -> None:
+def _validate_blob_ownership(
+    blob_path: str, current_user: "User", request: Request, *, resource_type: str = DOCUMENT, action: str = READ
+) -> None:
     """Validate that a blob path's ownership segment belongs to the requesting user.
 
     Accepts both new OID-based paths (user-uploads/{azure_user_id}/...) and legacy
@@ -135,7 +148,17 @@ def _validate_blob_ownership(blob_path: str, current_user: "User", request: Requ
             _sanitize_for_log(current_user.id),
             _sanitize_for_log(f"{request.method} {request.url.path}"),
         )
+        record_ownership_violation(resource_type, action)
         raise HTTPException(status_code=403, detail="Access denied")
+
+
+def _assert_owned(transcription: Transcription, current_user: User, resource_type: str) -> None:
+    """Post-authorisation assertion (DIAAT-285): the record about to be returned is the
+    caller's. The lookup already filters by owner, so this never fires with correct
+    code; if it does, the request gets the same 404 as an unknown ID and Security is
+    alerted (security.ownership_violation, outcome "detected")."""
+    if not owner_matches(transcription.user_id, current_user.id, resource_type=resource_type):
+        raise HTTPException(status_code=404, detail="Transcription not found")
 
 
 # Azure Blob Storage configuration is handled through get_settings()
@@ -160,6 +183,36 @@ async def dependency_health_check():
     """
     status_code, body = health_response(get_dependency_checker().statuses())
     return JSONResponse(status_code=status_code, content=body, headers={"Cache-Control": "no-store"})
+
+
+# The controlled alert test may run only here, and only with
+# SECURITY_ALERT_TEST_TRIGGER_ENABLED: never in a deployed CNP environment (aat,
+# perftest, ithc, demo, prod) unless this list is changed on purpose.
+SECURITY_ALERT_TEST_ENVIRONMENTS = frozenset({"local", "dev", "test"})
+
+
+def security_alert_test_allowed() -> bool:
+    settings = get_recording_settings()
+    return (
+        settings.SECURITY_ALERT_TEST_TRIGGER_ENABLED
+        and settings.ENVIRONMENT.strip().lower() in SECURITY_ALERT_TEST_ENVIRONMENTS
+    )
+
+
+@router.post("/security/alert-test", status_code=202)
+async def security_alert_test(
+    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("SystemAdministrator")])),  # noqa: ARG001, B008
+) -> dict:
+    """Controlled test of the Security alert route (DIAAT-285 AC2, ALERTS.md).
+
+    Records one synthetic security.ownership_violation with outcome "test": no record
+    is touched, nothing about the caller is recorded. SystemAdministrator only, and
+    404 (as for an unknown path) unless security_alert_test_allowed().
+    """
+    if not security_alert_test_allowed():
+        raise HTTPException(status_code=404, detail="Not Found")
+    record_ownership_violation(TRANSCRIPTION, READ, TEST)
+    return {"event": "security.ownership_violation", "outcome": "test"}
 
 
 @router.get("/healthcheck")
@@ -389,6 +442,7 @@ async def _verified_upload_transcription_id(key: str, current_user: User) -> str
             "UNAUTHORISED_ACCESS_ATTEMPT user_id=%s reason=upload_key_names_other_users_transcription",
             _sanitize_for_log(current_user.id),
         )
+        record_ownership_violation(TRANSCRIPTION, WRITE)
         raise HTTPException(status_code=403, detail="Access denied")
     return transcription_id
 
@@ -410,7 +464,7 @@ async def upload_audio_proxy(
     try:
         if not key.startswith("user-uploads/"):
             raise HTTPException(status_code=400, detail="Invalid upload key")
-        _validate_blob_ownership(key, current_user, request)
+        _validate_blob_ownership(key, current_user, request, resource_type=AUDIO, action=WRITE)
         # Only a verified ID (new, or the caller's own transcription) names the journey.
         transcription_id = await _verified_upload_transcription_id(key, current_user)
     except HTTPException as exc:
@@ -603,6 +657,7 @@ async def get_transcription(
         tz = UK_TIMEZONE
 
     transcription = get_transcription_by_id(transcription_id, current_user.id, tz)
+    _assert_owned(transcription, current_user, TRANSCRIPTION)
     logger.info(
         "TRANSCRIPT_VIEWED transcription_id=%s user_id=%s",
         _sanitize_for_log(transcription_id),
@@ -642,6 +697,7 @@ async def get_document_download_url(
         transcription = get_transcription_by_id(transcription_id, current_user.id, tz)
     except Exception:
         raise HTTPException(status_code=404, detail="Transcription not found")  # noqa: B904
+    _assert_owned(transcription, current_user, DOCUMENT)
 
     # Get the blob path from the transcription job
     blob_path: str | None = None
@@ -695,6 +751,7 @@ async def download_document(  # noqa: C901
         transcription = get_transcription_by_id(transcription_id, current_user.id, UK_TIMEZONE)
     except Exception:
         raise HTTPException(status_code=404, detail="Transcription not found")  # noqa: B904
+    _assert_owned(transcription, current_user, DOCUMENT)
 
     blob_path: str | None = None
     if transcription.transcription_jobs:
@@ -710,7 +767,7 @@ async def download_document(  # noqa: C901
             raise HTTPException(status_code=500, detail="Stored document URL is malformed")
         blob_path = path_parts[1]
 
-    _validate_blob_ownership(blob_path, current_user, request)
+    _validate_blob_ownership(blob_path, current_user, request, resource_type=DOCUMENT)
     logger.info(
         "TRANSCRIPT_DOWNLOADED transcription_id=%s user_id=%s type=document",
         _sanitize_for_log(transcription_id),
@@ -899,7 +956,7 @@ async def stream_audio(
     else:
         blob_path = stored_url
 
-    _validate_blob_ownership(blob_path, current_user, request)
+    _validate_blob_ownership(blob_path, current_user, request, resource_type=AUDIO)
     logger.info(
         "TRANSCRIPT_DOWNLOADED transcription_id=%s job_id=%s user_id=%s type=audio",
         _sanitize_for_log(transcription_id),
@@ -1056,6 +1113,7 @@ async def get_sectioned_transcript_route(
     transcription = get_transcription_by_id(transcription_id, current_user.id, UK_TIMEZONE)
     if not transcription:
         raise HTTPException(status_code=404, detail="Transcription not found")
+    _assert_owned(transcription, current_user, TRANSCRIPTION)
 
     oid_prefix = get_file_blob_path(str(current_user.azure_user_id), "live-transcription-submission-")
     email_prefix = get_file_blob_path(current_user.email, "live-transcription-submission-")

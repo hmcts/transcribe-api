@@ -110,8 +110,22 @@ class Settings(BaseSettings):
 
     # Observability
     SENTRY_DSN: str | None = None
+    # DIAAT-285: enables POST /api/security/alert-test (SystemAdministrator), which
+    # emits a security.ownership_violation event with outcome "test" to prove the
+    # Security alert route. No effect unless ENVIRONMENT is in
+    # SECURITY_ALERT_TEST_ENVIRONMENTS (routes_dictation.py: local, dev, test), so it
+    # cannot be turned on in a deployed CNP environment. Leave false except during a
+    # controlled test.
+    SECURITY_ALERT_TEST_TRIGGER_ENABLED: bool = False
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @field_validator("SECURITY_ALERT_TEST_TRIGGER_ENABLED", mode="before")
+    @classmethod
+    def blank_security_alert_trigger_is_disabled(cls, v: object) -> object:
+        if isinstance(v, str) and not v.strip():
+            return False
+        return v
 
     @field_validator("BATCH_TRANSCRIPTION_THRESHOLD_HOURS")
     @classmethod
