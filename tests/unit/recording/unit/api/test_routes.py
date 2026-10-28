@@ -1,6 +1,9 @@
 """Unit tests for API routes."""
 
+import asyncio
+import sys
 import uuid
+from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import pytest
@@ -579,7 +582,8 @@ class TestGetJobAudio:
         assert response.content == b"partial-bytes"
         assert response.headers["content-range"] == "bytes 10-30/100"
         manager.stream_blob_range.assert_called_once_with("uploads/x/hearing.wav", 10, 21)
-        manager.close.assert_awaited_once()
+        # One manager for the size lookup, one held open for the stream.
+        assert manager.__aexit__.await_count == 2
 
     def test_returns_404_when_azure_blob_missing(self, client, as_current_user, mocker):
         job = _make_job()
@@ -596,6 +600,140 @@ class TestGetJobAudio:
         response = client.get(f"/api/v1/jobs/{job.id}/audio")
 
         assert response.status_code == 404
+
+
+async def _asgi_get_audio(
+    app, job_id, *, range_header: str | None = None, disconnect_after_first_chunk=False, slow_client=False
+) -> list[dict]:
+    """Drive GET /jobs/{id}/audio through the ASGI app the way uvicorn does.
+
+    TestClient can't model a client going away partway through a body, which
+    is what a browser's audio player does with most of its range requests.
+    ASGI spec 2.3 (what uvicorn's HTTP protocols report) is the path where
+    Starlette watches receive() for http.disconnect and cancels the stream.
+    Like uvicorn, send() is a silent no-op once the client has gone.
+    """
+    disconnected = asyncio.Event()
+    request_delivered = False
+    messages: list[dict] = []
+    headers = [(b"host", b"testserver")]
+    if range_header:
+        headers.append((b"range", range_header.encode()))
+    path = f"/api/v1/jobs/{job_id}/audio"
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "root_path": "",
+        "query_string": b"",
+        "headers": headers,
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+
+    async def receive():
+        nonlocal request_delivered
+        if not request_delivered:
+            request_delivered = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await disconnected.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if disconnected.is_set():
+            return
+        messages.append(message)
+        if disconnect_after_first_chunk and message["type"] == "http.response.body" and message.get("body"):
+            disconnected.set()
+            if slow_client:
+                # The first chunk is still being written out when the client
+                # goes, so the app is blocked handing over the next one.
+                await asyncio.sleep(0.05)
+
+    await app(scope, receive, send)
+    return messages
+
+
+@contextmanager
+def _no_gc_asyncgen_cleanup():
+    """Stop asyncio closing abandoned async generators when they're collected.
+
+    Otherwise a stream left suspended by a disconnect may still get closed by
+    the garbage collector, by luck of timing; cleanup must not depend on it.
+    Must be entered inside the running test coroutine: the event loop installs
+    its own hooks when it starts running, replacing any set before that (e.g.
+    by a fixture). Yields the replacement finalizer so a test can check it's
+    still the active one.
+    """
+    old_hooks = sys.get_asyncgen_hooks()
+    abandoned = []
+    finalizer = abandoned.append
+    sys.set_asyncgen_hooks(firstiter=old_hooks.firstiter, finalizer=finalizer)
+    try:
+        yield finalizer
+    finally:
+        sys.set_asyncgen_hooks(*old_hooks)
+
+
+class TestGetJobAudioClosesBlobClients:
+    """GET /jobs/{id}/audio closes its blob clients and credential however the stream ends.
+
+    In AAT the pod logged aiohttp "Unclosed client session" / "Unclosed
+    connector" (to the storage account) after the browser's audio player
+    made range requests that each returned 206.
+    """
+
+    @pytest.fixture
+    def job(self, mocker):
+        job = _make_job()
+        job.audio_blob_path = "uploads/x/hearing.wav"
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        return job
+
+    @pytest.mark.asyncio
+    async def test_after_a_full_206_stream(self, client, as_current_user, job, fake_blob_storage):
+        last = fake_blob_storage.size - 1
+        messages = await _asgi_get_audio(client.app, job.id, range_header=f"bytes=0-{last}")
+
+        assert messages[0]["status"] == 206
+        assert b"".join(m.get("body", b"") for m in messages[1:]) == b"".join(fake_blob_storage.chunks)
+        assert fake_blob_storage.service_clients
+        assert fake_blob_storage.credentials
+        assert fake_blob_storage.all_closed
+
+    @pytest.mark.asyncio
+    async def test_when_the_client_disconnects_mid_read(self, client, as_current_user, job, fake_blob_storage):
+        fake_blob_storage.stall_after = 1
+
+        with _no_gc_asyncgen_cleanup() as gc_finalizer:
+            messages = await _asgi_get_audio(
+                client.app, job.id, range_header="bytes=0-", disconnect_after_first_chunk=True
+            )
+            assert sys.get_asyncgen_hooks().finalizer is gc_finalizer
+
+        assert messages[0]["status"] == 206
+        assert fake_blob_storage.service_clients
+        assert fake_blob_storage.credentials
+        assert fake_blob_storage.all_closed
+
+    @pytest.mark.asyncio
+    async def test_when_the_client_disconnects_while_a_chunk_is_being_sent(
+        self, client, as_current_user, job, fake_blob_storage
+    ):
+        with _no_gc_asyncgen_cleanup() as gc_finalizer:
+            messages = await _asgi_get_audio(
+                client.app, job.id, range_header="bytes=0-", disconnect_after_first_chunk=True, slow_client=True
+            )
+            assert sys.get_asyncgen_hooks().finalizer is gc_finalizer
+
+        assert messages[0]["status"] == 206
+        assert fake_blob_storage.service_clients
+        assert fake_blob_storage.credentials
+        assert fake_blob_storage.all_closed
 
 
 class TestSubmitJob:
