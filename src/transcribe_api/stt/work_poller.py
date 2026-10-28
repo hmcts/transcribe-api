@@ -24,6 +24,7 @@ from transcribe_api.stt.utils import extract_transcription_id_from_blob_path
 from transcribe_api.runtime.db_dictation import engine
 from transcribe_api.domain.models_dictation import User
 from transcribe_api.runtime.logger import logger
+from transcribe_api.runtime.telemetry import transcription_id_from_key, transcription_journey
 from transcribe_api.runtime.settings_dictation import get_settings
 
 # A claim (status=in_progress) older than this is taken to be abandoned by a worker that
@@ -240,6 +241,12 @@ class TranscriptionPollingService:
             True if processing was successful, False otherwise.
         """
         blob_path = blob_info["name"]
+        # DIAAT-276: everything below, including the error handling, runs in the
+        # transcription journey (the ID is the blob's UUID, as for the upload).
+        with transcription_journey(transcription_id_from_key(blob_path)):
+            return await self._process_blob(blob_path)
+
+    async def _process_blob(self, blob_path: str) -> bool:
         logger.info(f"Processing discovered audio file: {_redact_blob_path(blob_path)}")
 
         try:
@@ -292,8 +299,10 @@ class TranscriptionPollingService:
             await self._mark_blob_permanently_failed(blob_path, {"last_error": "OwnershipConflictError"})
             return False
         except Exception as e:
-            logger.error("Error processing audio file %s: %s", _redact_blob_path(blob_path), e)
-            await self._mark_blob_with_error(blob_path, str(e))
+            # Type and stack only: exception text can carry content.
+            logger.error("Error processing audio file %s (%s)", _redact_blob_path(blob_path), type(e).__name__, exc_info=e)
+            # Type only in blob metadata too: the message can carry content.
+            await self._mark_blob_with_error(blob_path, type(e).__name__)
             return False
         else:
             return True

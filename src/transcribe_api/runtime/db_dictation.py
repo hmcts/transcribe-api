@@ -4,13 +4,15 @@ from collections.abc import Generator
 from dotenv import load_dotenv
 from sqlmodel import Session, create_engine, select
 
+# Redacted logging for processes that import this module directly (DB scripts): the
+# same bootstrap as every app module, defined once in runtime/logger.py (and replaced
+# by the full setup when the API or worker starts).
+import transcribe_api.runtime.logger  # noqa: F401
 from transcribe_api.runtime.settings_dictation import get_settings
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Database URL from environment variable

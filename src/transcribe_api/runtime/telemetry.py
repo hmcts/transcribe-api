@@ -9,7 +9,12 @@ from __future__ import annotations
 import logging
 import os
 
-from hmcts_otel import TelemetrySettings, default_redactor, setup_telemetry
+import contextlib
+from contextlib import AbstractContextManager
+from pathlib import PurePosixPath
+from uuid import UUID
+
+from hmcts_otel import Journey, TelemetrySettings, current_journey, default_redactor, journey, setup_telemetry
 
 from transcribe_api.runtime.settings_dictation import get_settings
 from transcribe_api.runtime.telemetry_schema import register_schema
@@ -17,6 +22,59 @@ from transcribe_api.runtime.version import APP_VERSION
 
 SERVICE_NAME_API = "transcribe-api"
 SERVICE_NAME_WORKER = "transcribe-api-worker"
+
+# Every app attribute and event, at import: modules that emit events import this one,
+# so the schema is in place before they emit, in tests (strict) as in the services.
+register_schema()
+
+# Journey types (DIAAT-276). Query one identifier in App Insights:
+#   customEvents | where customDimensions["hmcts.journey.id"] == "<id>"
+# Uploaded audio: the UUID in the uploaded file's name is also the transcription ID,
+# so one ID runs from upload through transcription, minutes, document and email.
+JOURNEY_TRANSCRIPTION = "dictation.transcription"
+# Live dictation submission: id is the submission ID; the transcription created from
+# it is related on the transcript.available event.
+JOURNEY_SUBMISSION = "dictation.submission"
+
+
+def register_minutes_schema() -> None:
+    """Register ``minutes.template``: now part of the merged schema. Idempotent."""
+    register_schema()
+
+
+def transcription_id_from_key(blob_key: str | None) -> str | None:
+    """The transcription ID in ``user-uploads/{user}/{uuid}.{ext}``, canonical form.
+
+    The single parser for this convention: the upload, the poller and the database
+    all use the same ID, so the journey joins up. Any form ``UUID()`` accepts
+    (upper case, 32 hex, braces) is normalised to lower-case hyphenated.
+    """
+    if not blob_key:
+        return None
+    try:
+        return str(UUID(PurePosixPath(blob_key).stem))
+    except ValueError:
+        return None
+
+
+def transcription_journey(transcription_id: str | UUID | None) -> AbstractContextManager[Journey | None]:
+    """The transcription journey, or no journey when the ID is unknown.
+
+    Guards the call sites: ``journey(type, None)`` would stringify to "None" and merge
+    unrelated jobs into one journey. The ID is normalised to the canonical UUID form,
+    and re-entering the current journey is a no-op.
+    """
+    if transcription_id is None:
+        return contextlib.nullcontext()
+    try:
+        journey_id = str(UUID(str(transcription_id)))  # one form for every caller
+    except ValueError:
+        journey_id = str(transcription_id)  # rejected by journey() as not an ID
+    current = current_journey()
+    if current is not None and current.type == JOURNEY_TRANSCRIPTION and current.id == journey_id:
+        return contextlib.nullcontext(current)  # already in it (e.g. the poller opened it)
+    return journey(JOURNEY_TRANSCRIPTION, journey_id)
+
 
 # Immigration and Asylum Chamber appeal references, e.g. PA/50123/2024. Uploaded file
 # names carry the same reference with underscores (PA_50123_2024.mp3). "_" is a word

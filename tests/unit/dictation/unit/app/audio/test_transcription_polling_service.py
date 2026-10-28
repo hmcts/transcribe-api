@@ -126,7 +126,6 @@ class TestShouldSkipBlob:
         blob = make_blob("user-uploads/user@example.com/audio.mp3")
         assert service._should_skip_blob(blob) is False
 
-
     def test_not_user_uploads_prefix_skipped(self, service):
         blob = make_blob("other-container/user@example.com/audio.mp3")
         assert service._should_skip_blob(blob) is True
@@ -160,6 +159,7 @@ class TestShouldSkipBlob:
 class TestPollForNewAudioFiles:
     async def test_returns_unprocessed_blobs(self, service):
         from unittest.mock import AsyncMock
+
         blobs = [
             {"name": "user-uploads/user@example.com/audio.mp3", "metadata": {}, "last_modified": None, "size": 100},
         ]
@@ -169,8 +169,14 @@ class TestPollForNewAudioFiles:
 
     async def test_skips_processed_blobs(self, service):
         from unittest.mock import AsyncMock
+
         blobs = [
-            {"name": "user-uploads/user@example.com/audio.mp3", "metadata": {"processed": "true"}, "last_modified": None, "size": 100},
+            {
+                "name": "user-uploads/user@example.com/audio.mp3",
+                "metadata": {"processed": "true"},
+                "last_modified": None,
+                "size": 100,
+            },
         ]
         service.azure_blob_manager.list_blobs_in_prefix = AsyncMock(return_value=blobs)
         result = await service.poll_for_new_audio_files()
@@ -178,8 +184,14 @@ class TestPollForNewAudioFiles:
 
     async def test_marks_permanently_failed_when_max_retries_exceeded(self, service):
         from unittest.mock import AsyncMock
+
         blobs = [
-            {"name": "user-uploads/user@example.com/audio.mp3", "metadata": {"retry_count": "2"}, "last_modified": None, "size": 100},
+            {
+                "name": "user-uploads/user@example.com/audio.mp3",
+                "metadata": {"retry_count": "2"},
+                "last_modified": None,
+                "size": 100,
+            },
         ]
         service.azure_blob_manager.list_blobs_in_prefix = AsyncMock(return_value=blobs)
         service.azure_blob_manager._mark_blob_permanently_failed = AsyncMock()
@@ -189,6 +201,7 @@ class TestPollForNewAudioFiles:
 
     async def test_returns_empty_on_exception(self, service):
         from unittest.mock import AsyncMock
+
         service.azure_blob_manager.list_blobs_in_prefix = AsyncMock(side_effect=RuntimeError("network error"))
         result = await service.poll_for_new_audio_files()
         assert result == []
@@ -238,3 +251,33 @@ class TestMarkBlobInProgress:
         service.azure_blob_manager.get_blob_properties = AsyncMock(side_effect=RuntimeError("network"))
         result = await service._mark_blob_in_progress("user-uploads/user/audio.mp3")
         assert result is False
+
+
+class TestJourney:
+    """DIAAT-276: processing runs in the transcription journey (same ID as the upload)."""
+
+    @pytest.mark.asyncio
+    async def test_pipeline_runs_in_the_transcription_journey(self, service):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from hmcts_otel import current_journey
+
+        from transcribe_api.runtime.telemetry import JOURNEY_TRANSCRIPTION
+
+        tid = "6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f"
+        seen = {}
+
+        async def fake_pipeline(**kwargs):
+            seen["journey"] = current_journey()
+
+        user = MagicMock(id="11111111-1111-1111-1111-111111111111", email="j@x.com", azure_user_id="oid")
+        with (
+            patch.object(service, "_mark_blob_in_progress", AsyncMock(return_value=True)),
+            patch.object(service, "resolve_blob_owner_from_path", return_value=user),
+            patch.object(service, "_mark_blob_as_processed_and_soft_delete", AsyncMock()),
+            patch("transcribe_api.stt.work_poller.extract_transcription_id_from_blob_path", return_value=tid),
+            patch("transcribe_api.stt.work_poller.transcribe_and_generate_llm_output", fake_pipeline),
+        ):
+            assert await service.process_discovered_audio(make_blob(f"user-uploads/oid/{tid}.mp4"))
+        assert seen["journey"].type == JOURNEY_TRANSCRIPTION
+        assert seen["journey"].id == tid

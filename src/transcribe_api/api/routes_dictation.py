@@ -5,12 +5,14 @@ import threading
 import urllib.parse
 import uuid
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from uuid import UUID
 
 import httpx
 import pytz
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from hmcts_otel import StageHandle, background_span, journey, record_event, stage
+from hmcts_otel import conventions as c
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.responses import JSONResponse, StreamingResponse
 
@@ -78,6 +80,7 @@ from transcribe_api.documents.minutes.types import (
     UploadUrlRequest,
     UploadUrlResponse,
 )
+from transcribe_api.runtime.telemetry import JOURNEY_SUBMISSION, transcription_id_from_key, transcription_journey
 from transcribe_api.domain.auth.approles_dictation import get_role, has_any_role
 from transcribe_api.domain.auth.dependencies_dictation import get_allowlisted_user, get_current_user
 from transcribe_api.documents.llm.langfuse_models import (
@@ -307,18 +310,25 @@ async def get_upload_url(
     so the upload flows through the app domain.
     """
     settings = get_settings()
-    file_name = f"{uuid.uuid4()}.{request.file_extension}"
+    # The file's UUID becomes the transcription ID: one journey ID (DIAAT-276) from
+    # upload through transcription, minutes, document and notification.
+    upload_id = uuid.uuid4()
+    file_name = f"{upload_id}.{request.file_extension}"
     user_upload_blob_path = get_file_blob_path(str(current_user.azure_user_id), file_name)
 
-    if settings.DIRECT_SDK_ACCESS:
-        upload_url = await generate_blob_upload_url(
-            container_name=settings.AZURE_STORAGE_CONTAINER_NAME,
-            blob_name=user_upload_blob_path,
-            expiry_hours=settings.UPLOAD_URL_TTL_MINUTES / 60,
-        )
-    else:
-        encoded_key = urllib.parse.quote(user_upload_blob_path, safe="")
-        upload_url = f"{settings.APP_URL.rstrip('/')}/api/upload-audio?key={encoded_key}"
+    # The journey covers URL generation, so a failure here is correlated too; the
+    # event is recorded only once the client really has a URL.
+    with transcription_journey(upload_id):
+        if settings.DIRECT_SDK_ACCESS:
+            upload_url = await generate_blob_upload_url(
+                container_name=settings.AZURE_STORAGE_CONTAINER_NAME,
+                blob_name=user_upload_blob_path,
+                expiry_hours=settings.UPLOAD_URL_TTL_MINUTES / 60,
+            )
+        else:
+            encoded_key = urllib.parse.quote(user_upload_blob_path, safe="")
+            upload_url = f"{settings.APP_URL.rstrip('/')}/api/upload-audio?key={encoded_key}"
+        record_event("upload.url_issued", {"upload.method": "direct" if settings.DIRECT_SDK_ACCESS else "proxy"})
 
     return UploadUrlResponse(
         upload_url=upload_url,
@@ -326,29 +336,30 @@ async def get_upload_url(
     )
 
 
-async def _reject_upload_naming_another_users_transcription(key: str, current_user: User) -> None:
+async def _verified_upload_transcription_id(key: str, current_user: User) -> str | None:
     """SEC-1: the file name's UUID becomes the transcription ID, and the key is client
     input. Refuse a key naming another user's transcription before storing anything.
 
     Early rejection only: the authoritative check is in the save itself
     (OwnershipConflictError), so a failed lookup here does not block the upload.
+    Returns the key's transcription ID once verified (new, or the caller's own), so
+    it may be used as a journey ID; otherwise None.
     """
-    stem = PurePosixPath(key).stem
+    transcription_id = transcription_id_from_key(key)
+    if transcription_id is None:
+        return None  # not a UUID name: a new ID is generated on save
     try:
-        transcription_id = UUID(stem)
-    except ValueError:
-        return  # not a UUID name: a new ID is generated on save
-    try:
-        owner = await asyncio.to_thread(get_transcription_owner, transcription_id)
+        owner = await asyncio.to_thread(get_transcription_owner, UUID(transcription_id))
     except Exception as exc:
         logger.warning("Upload key owner lookup failed (%s); relying on the save check", type(exc).__name__)
-        return
+        return None
     if owner is not None and owner != current_user.id:
         logger.warning(
             "UNAUTHORISED_ACCESS_ATTEMPT user_id=%s reason=upload_key_names_other_users_transcription",
             _sanitize_for_log(current_user.id),
         )
         raise HTTPException(status_code=403, detail="Access denied")
+    return transcription_id
 
 
 @router.put("/upload-audio")
@@ -362,18 +373,31 @@ async def upload_audio_proxy(
     Used when DIRECT_SDK_ACCESS is disabled — the frontend PUTs the file here
     rather than directly to Azure Blob Storage.
     """
-    if not key.startswith("user-uploads/"):
-        raise HTTPException(status_code=400, detail="Invalid upload key")
+    # Validate the key and its owner BEFORE attaching any journey: the key is client
+    # input, and a rejected request must not write events into another user's journey.
+    # Rejections are client errors: recorded as a handled failure without a journey.
+    try:
+        if not key.startswith("user-uploads/"):
+            raise HTTPException(status_code=400, detail="Invalid upload key")
+        _validate_blob_ownership(key, current_user, request)
+        # Only a verified ID (new, or the caller's own transcription) names the journey.
+        transcription_id = await _verified_upload_transcription_id(key, current_user)
+    except HTTPException as exc:
+        code = "upload.forbidden" if exc.status_code == 403 else "upload.invalid_key"  # noqa: PLR2004
+        record_event("upload.rejected", {c.OUTCOME: "failure", c.ERROR_CODE: code})
+        raise
 
-    _validate_blob_ownership(key, current_user, request)
-    await _reject_upload_naming_another_users_transcription(key, current_user)
+    with (
+        transcription_journey(transcription_id),
+        stage("upload", attributes={"upload.method": "proxy"}) as upload_stage,
+    ):
+        body = await request.body()
+        async with AsyncAzureBlobManager() as blob_manager:
+            success = await blob_manager.create_blob_from_bytes(body, key)
 
-    body = await request.body()
-    async with AsyncAzureBlobManager() as blob_manager:
-        success = await blob_manager.create_blob_from_bytes(body, key)
-
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to upload file to storage")
+        if not success:
+            upload_stage.error("storage.write_failed")  # server-side: counts as an error
+            raise HTTPException(status_code=500, detail="Failed to upload file to storage")
 
     return Response(status_code=200)
 
@@ -480,6 +504,13 @@ async def generate_or_edit_minutes(
     new_minute_version_id = str(uuid.uuid4())
 
     async def process_request():
+        # DIAAT-276: minutes are part of the transcription's journey, and this
+        # fire-and-forget task gets its own trace linked to this request (the request's
+        # span ends as soon as the response is sent).
+        with transcription_journey(request.transcription_id), background_span("Minutes Task", tracer_name=__name__):
+            await _run_minutes_request()
+
+    async def _run_minutes_request():
         if request.action_type == "generate":
             await generate_llm_output_task(
                 dialogue_entries,
@@ -1087,12 +1118,36 @@ async def _render_hearing_document_off_loop(**kwargs) -> Path:
 
 
 @router.post("/live-transcription/submission", response_model=LiveTranscriptionSubmissionResponse)
-async def save_live_transcription_submission(  # noqa: PLR0915
+async def save_live_transcription_submission(
     request: LiveTranscriptionSubmissionRequest,
     current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
 ) -> LiveTranscriptionSubmissionResponse:
     """Persist live transcription form and transcript data as JSON in the audio uploads bucket."""
+    # DIAAT-276: the submission is a journey; the transcription it creates is related
+    # on the transcript.available event.
     submission_id = uuid.uuid4()
+    with journey(JOURNEY_SUBMISSION, str(submission_id)):
+        try:
+            # The stage sees the original exception (one exception event, its real
+            # type as the code); it is turned into the client's generic 500 outside.
+            with stage("submission") as submission_stage:
+                return await _save_live_transcription_submission(request, current_user, submission_id, submission_stage)
+        except HTTPException:
+            raise
+        except Exception:
+            logger.exception(
+                "Error saving live transcription submission for user %s",
+                _sanitize_for_log(current_user.id),
+            )
+            raise HTTPException(status_code=500, detail="Failed to save submission data") from None
+
+
+async def _save_live_transcription_submission(  # noqa: PLR0915
+    request: LiveTranscriptionSubmissionRequest,
+    current_user: User,
+    submission_id: uuid.UUID,
+    submission_stage: StageHandle,
+) -> LiveTranscriptionSubmissionResponse:
     blob_filename = f"live-transcription-submission-{submission_id}.json"
     blob_path = get_file_blob_path(str(current_user.azure_user_id), blob_filename)
 
@@ -1133,6 +1188,7 @@ async def save_live_transcription_submission(  # noqa: PLR0915
             upload_success = await blob_manager.create_blob_from_file(temp_json_path, blob_path)
 
             if not upload_success:
+                submission_stage.error("storage.write_failed")  # server-side: counts as an error
                 raise HTTPException(status_code=500, detail="Failed to save submission data")
 
             logger.info(
@@ -1143,11 +1199,12 @@ async def save_live_transcription_submission(  # noqa: PLR0915
 
             # Generate Word document from template
             temp_output_dir = Path(tempfile.gettempdir()) / "hearing_documents"
-            temp_doc_path = await _render_hearing_document_off_loop(
-                request=request,
-                output_dir=temp_output_dir,
-                user_email=current_user.email,
-            )
+            with stage("document_generation"):
+                temp_doc_path = await _render_hearing_document_off_loop(
+                    request=request,
+                    output_dir=temp_output_dir,
+                    user_email=current_user.email,
+                )
 
             logger.info(
                 "Rendered hearing document for user %s",
@@ -1160,6 +1217,7 @@ async def save_live_transcription_submission(  # noqa: PLR0915
 
             doc_upload_success = await blob_manager.create_blob_from_file(temp_doc_path, doc_blob_path)
             if not doc_upload_success:
+                submission_stage.error("storage.write_failed")  # server-side: counts as an error
                 raise HTTPException(status_code=500, detail="Failed to upload document to storage")
 
             logger.info(
@@ -1250,6 +1308,8 @@ async def save_live_transcription_submission(  # noqa: PLR0915
             "Created transcription record %s for hearing submission",
             str(saved_transcription.id),
         )
+        # Only now is the transcription usable (its job and document are saved).
+        record_event("transcript.available", {"dictation.transcription_id": str(saved_transcription.id)})
 
         return LiveTranscriptionSubmissionResponse(
             blob_path=blob_path,
@@ -1258,14 +1318,6 @@ async def save_live_transcription_submission(  # noqa: PLR0915
             transcription_id=str(saved_transcription.id),
             message="Submission data saved and document generated",
         )
-    except HTTPException:
-        raise
-    except Exception:
-        logger.exception(
-            "Error saving live transcription submission for user %s",
-            _sanitize_for_log(current_user.id),
-        )
-        raise HTTPException(status_code=500, detail="Failed to save submission data") from None
     finally:
         # Clean up temporary files
         if temp_json_path and temp_json_path.exists():
