@@ -458,3 +458,10 @@ def test_a_long_file_name_is_redacted_whole_and_quickly():
     hostile = ("/" + USER_ID) * 2000 + "-" + "y" * 20_000
     default_redactor.redact(hostile + f"/{USER_ID}/{upload}-" + "z" * 50_000)
     assert time.perf_counter() - started < 1.0
+
+
+@pytest.mark.parametrize("padding", ["", " ", " " * 40])
+def test_a_padded_hearing_id_is_normalised_whatever_the_padding(padding):
+    from transcribe_api.api.routes_recording import _hearing_id
+
+    assert _hearing_id(f"{padding}{HEARING_ID}{padding}") == str(UUID(HEARING_ID))

@@ -1,3 +1,4 @@
+import asyncio
 import ipaddress
 import json
 import logging
@@ -586,10 +587,11 @@ async def _save_upload_capped(file: UploadFile, max_bytes: int, target: Path) ->
 
 def _hearing_id(raw: str | None) -> str | None:
     """A UUID from X-Hearing-Id, normalised; anything else is ignored (never exported)."""
+    raw = (raw or "").strip()
     if not raw or len(raw) > 64:
         return None
     try:
-        return str(UUID(raw.strip()))
+        return str(UUID(raw))
     except ValueError:
         return None
 
@@ -724,7 +726,7 @@ async def _upload_audio(
                     "Please try again later or contact support."
                 ),
             ) from exc
-        duration = _wav_duration_seconds(wav_path)
+        duration = await asyncio.to_thread(_wav_duration_seconds, wav_path)
         if duration is not None:
             upload_stage.set_attribute("audio.duration_seconds", duration)
 
