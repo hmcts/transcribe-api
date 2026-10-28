@@ -578,6 +578,20 @@ async def test_a_rename_made_while_the_job_ran_is_kept(monkeypatch):
     assert transcription.title == "Judge's name"
 
 
+@pytest.mark.asyncio
+async def test_a_title_cleared_while_the_job_ran_is_kept(monkeypatch):
+    """An empty stored title is the user's choice, not a missing transcription."""
+    from transcribe_api.stt.pipeline import _generate_and_save_title
+    from transcribe_api.domain.models_dictation import Transcription
+
+    monkeypatch.setattr("transcribe_api.stt.pipeline.generate_meeting_title", AsyncMock(return_value="Generated"))
+    monkeypatch.setattr("transcribe_api.stt.pipeline.save_transcription_title", MagicMock(return_value=False))
+    monkeypatch.setattr("transcribe_api.stt.pipeline.get_transcription_title", MagicMock(return_value=""))
+    transcription = Transcription(id=uuid4())
+    assert await _generate_and_save_title([], transcription, uuid4()) is True
+    assert transcription.title == ""
+
+
 def test_user_error_messages_tell_permanent_failures_from_transient_ones():
     from fastapi import HTTPException
 

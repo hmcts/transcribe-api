@@ -70,8 +70,8 @@ async def _generate_and_save_title(dialogue_entries: list, transcription: Transc
                 transcription.title = provisional_title
                 return True
             stored = _stored_title(transcription)
-            if stored:
-                transcription.title = stored  # renamed meanwhile: the user's title wins
+            if stored is not None:  # renamed (or cleared) meanwhile: the user's title wins
+                transcription.title = stored
                 return True
             title_stage.error("title.failed")  # the transcription no longer exists
             transcription.title = previous_title

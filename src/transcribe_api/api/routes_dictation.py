@@ -28,7 +28,6 @@ from transcribe_api.domain.blob_ownership import (
     blob_owner_segment,
     segment_belongs_to_user,
 )
-from transcribe_api.runtime.browser_telemetry import telemetry_relay_router
 from transcribe_api.domain.exceptions import OwnershipConflictError
 from transcribe_api.domain.interface_dictation import (
     add_tag_to_transcription,
@@ -88,6 +87,7 @@ from transcribe_api.documents.llm.langfuse_models import (
     LangfuseScoreRequest,
     LangfuseTraceRequest,
 )
+from transcribe_api.runtime.browser_telemetry import telemetry_relay_router
 from transcribe_api.runtime.settings_dictation import get_settings
 from transcribe_api.runtime.version import APP_VERSION
 
