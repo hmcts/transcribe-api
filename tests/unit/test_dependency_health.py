@@ -419,12 +419,28 @@ def test_database_probe_runs_select_1_on_both_pools():
     assert [str(c.execute.call_args.args[0]) for c in connections] == ["SELECT 1", "SELECT 1"]
 
 
-def test_the_speech_check_is_skipped_with_the_mock_backend(monkeypatch):
+@pytest.mark.parametrize(("name", "value"), [("SPEECH_BACKEND", "mock"), ("AZURE_SPEECH_ENDPOINT", "")])
+def test_the_speech_check_is_skipped_without_a_speech_service(monkeypatch, name, value):
     from transcribe_api.runtime.settings_recording import get_settings
 
-    monkeypatch.setenv("SPEECH_BACKEND", "mock")
+    monkeypatch.setenv(name, value)
     get_settings.cache_clear()
     assert [check.name for check in dependency_health.default_checks()] == ["database", "storage"]
+
+
+async def test_stopping_the_checker_closes_the_storage_credential():
+    probe = dependency_health.StorageProbe()
+    manager = MagicMock()
+    manager.check_container = AsyncMock()
+    manager.close = AsyncMock()
+    with patch("transcribe_api.runtime.blob_recording.AsyncAzureBlobManager", return_value=manager):
+        checker = _checker(DependencyCheck("storage", probe))
+        task = asyncio.create_task(checker.run())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    manager.close.assert_awaited_once_with()
 
 
 @pytest.mark.parametrize(

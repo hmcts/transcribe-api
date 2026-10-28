@@ -219,6 +219,18 @@ class DependencyHealthChecker:
             raise
         finally:
             self.close()
+            await self._close_probes()
+
+    async def _close_probes(self) -> None:
+        """Release what probes hold open (e.g. the storage credential's HTTP session)."""
+        for check in self._checks:
+            aclose = getattr(check.probe, "aclose", None)
+            if aclose is None:
+                continue
+            try:
+                await aclose()
+            except Exception as exc:
+                logger.warning("Could not close the %s probe (%s)", check.name, type(exc).__name__)
 
     def close(self) -> None:
         """Release the probe threads (a later run starts new ones)."""
@@ -388,6 +400,11 @@ class StorageProbe:
         await self._manager.check_container(settings.AZURE_STORAGE_CONTAINER_NAME)
         await self._manager.check_container(_transcription_container())
 
+    async def aclose(self) -> None:
+        manager, self._manager = self._manager, None
+        if manager is not None:
+            await manager.close()
+
 
 def _transcription_container() -> str:
     from transcribe_api.runtime.settings_dictation import get_settings as dictation_settings
@@ -406,7 +423,10 @@ def default_checks() -> list[DependencyCheck]:
         DependencyCheck(DATABASE, check_database, blocking=True),
         DependencyCheck(STORAGE, StorageProbe()),
     ]
-    if get_settings().SPEECH_BACKEND != "mock":  # local development: no Speech to check
+    settings = get_settings()
+    # Not with the mock backend or without an endpoint (local development): there is
+    # no Speech to check, and reporting it down would make the endpoint 503 for ever.
+    if settings.SPEECH_BACKEND != "mock" and settings.AZURE_SPEECH_ENDPOINT:
         checks.append(DependencyCheck(SPEECH, check_speech, min_interval_s=SPEECH_MIN_INTERVAL_S))
     return checks
 
