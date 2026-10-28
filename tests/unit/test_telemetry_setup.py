@@ -214,6 +214,47 @@ def test_the_image_keeps_the_base_image_otel_distro_off_the_path() -> None:
         assert "/opt/otel" not in path.split(":")
 
 
+# Version ------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def build_version_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    from transcribe_api.runtime import version
+
+    path = tmp_path / "BUILD_VERSION"
+    monkeypatch.setattr(version, "BUILD_VERSION_FILE", path)
+    monkeypatch.delenv("APP_VERSION", raising=False)
+    return path
+
+
+def test_the_image_reports_the_commit_it_was_built_from(build_version_file: Path) -> None:
+    from transcribe_api.runtime import version
+
+    build_version_file.write_text("95b8beb")
+    assert version.read_version() == "95b8beb"
+
+
+def test_app_version_overrides_the_built_version(build_version_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from transcribe_api.runtime import version
+
+    build_version_file.write_text("95b8beb")
+    monkeypatch.setenv("APP_VERSION", "1.2.3")
+    assert version.read_version() == "1.2.3"
+
+
+def test_a_local_run_reports_the_local_version(build_version_file: Path) -> None:
+    from transcribe_api.runtime import version
+
+    assert version.read_version() == version.LOCAL_VERSION
+
+
+def test_the_pipeline_writes_the_version_where_the_app_reads_it() -> None:
+    from transcribe_api.runtime import version
+
+    written = re.findall(r"writeFile file: '([^']+)'", (ROOT / "Jenkinsfile_CNP").read_text())
+    assert version.BUILD_VERSION_FILE.relative_to(ROOT).as_posix() in written
+
+
 # The app, instrumented ---------------------------------------------------------------
 
 REQUEST_ID = "0f8fad5b-d9cb-469f-a165-70867728950e"
