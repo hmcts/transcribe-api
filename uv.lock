@@ -1342,8 +1342,8 @@ dependencies = [
 
 [[package]]
 name = "hmcts-otel"
-version = "0.2.3"
-source = { git = "https://github.com/hmcts/hmcts-otel?rev=v0.2.3#3f9eb3ff085769126d40909ed162c2b4ac074cb5" }
+version = "0.2.2"
+source = { git = "https://github.com/hmcts/hmcts-otel?rev=v0.2.2#232c93ae33480cfd4c4ce989844053d667f0e0bf" }
 dependencies = [
     { name = "azure-monitor-opentelemetry" },
     { name = "opentelemetry-api" },
@@ -3623,7 +3623,7 @@ requires-dist = [
     { name = "ffmpeg-python", specifier = ">=0.2.0" },
     { name = "google-auth", specifier = ">=2.52.0" },
     { name = "hmcts-fastapi-azure-auth", git = "https://github.com/hmcts/hmcts-fastapi-azure-auth?rev=v0.3.0" },
-    { name = "hmcts-otel", extras = ["fastapi"], git = "https://github.com/hmcts/hmcts-otel?rev=v0.2.3" },
+    { name = "hmcts-otel", extras = ["fastapi"], git = "https://github.com/hmcts/hmcts-otel?rev=v0.2.2" },
     { name = "html2text", specifier = ">=2025.4.15" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "langfuse", specifier = "==2.60.10" },

@@ -9,7 +9,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 
-from transcribe_api.domain.exceptions import UserHasTranscriptionsError, UserNotFoundError
+from transcribe_api.domain.exceptions import OwnershipConflictError, UserHasTranscriptionsError, UserNotFoundError
 from transcribe_api.runtime.db_dictation import engine
 from transcribe_api.domain.models_dictation import (
     BaseTable,
@@ -31,11 +31,53 @@ def before_flush(session, flush_context, instances):  # noqa: ARG001
             obj.updated_datetime = datetime.now(UTC)
 
 
+def _ensure_owner_unchanged(session: Session, owner_column, record_id: UUID | None, owner: UUID | None) -> None:
+    """Refuse to re-parent an existing row (SEC-1). The row is locked until commit.
+
+    FOR NO KEY UPDATE (key_share): enough to stop a concurrent re-parenting, and,
+    unlike FOR UPDATE, it does not block inserts of child rows whose foreign key
+    takes FOR KEY SHARE on this row.
+    """
+    if record_id is None:
+        return
+    model = owner_column.class_
+    existing_owner = session.exec(
+        select(owner_column).where(model.id == record_id).with_for_update(key_share=True)
+    ).first()
+    if existing_owner is not None and str(existing_owner) != str(owner):
+        raise OwnershipConflictError(model.__name__)
+
+
+def get_transcription_owner(transcription_id: UUID) -> UUID | None:
+    """The user who owns this transcription, or None when no such transcription exists."""
+    with Session(engine) as session:
+        return session.exec(select(Transcription.user_id).where(Transcription.id == transcription_id)).first()
+
+
+def load_or_create_transcription(transcription_id: str | UUID | None, user_id: UUID) -> Transcription:
+    """The caller's transcription with this ID, or a new one.
+
+    An upload may name the caller's own existing transcription (a retry): saving a
+    bare ``Transcription(id=...)`` would reset its columns (title...) to defaults,
+    so an existing row is loaded instead. Another user's row is a conflict (SEC-1).
+    """
+    record_id = UUID(str(transcription_id)) if transcription_id is not None else None
+    if record_id is not None:
+        with Session(engine) as session:
+            existing = session.get(Transcription, record_id)
+            if existing is not None:
+                if str(existing.user_id) != str(user_id):
+                    raise OwnershipConflictError(Transcription.__name__)
+                return existing
+    return save_transcription(Transcription(id=record_id), user_id)
+
+
 def save_transcription(
     transcription_data: Transcription,
     user_id: UUID,
 ) -> Transcription:
     with Session(engine) as session:
+        _ensure_owner_unchanged(session, Transcription.user_id, transcription_data.id, user_id)
         transcription_data.user_id = user_id
         merged = session.merge(transcription_data)
         session.commit()
@@ -91,8 +133,14 @@ def create_error_minute_version(
 
 def save_minute_version(
     minute_data: MinuteVersion,
+    *,
+    check_owner: bool = True,
 ) -> MinuteVersion:
+    """``check_owner=False`` only for IDs the server generated itself (SEC-1 guard
+    skipped: no conflict is possible, and it saves a locking query)."""
     with Session(engine) as session:
+        if check_owner:
+            _ensure_owner_unchanged(session, MinuteVersion.transcription_id, minute_data.id, minute_data.transcription_id)
         minute_data.template = (
             minute_data.template.model_dump() if hasattr(minute_data.template, "model_dump") else minute_data.template
         )
@@ -286,8 +334,14 @@ def get_minute_version_by_id(
 
 def save_transcription_job(
     job: TranscriptionJob,
+    *,
+    check_owner: bool = True,
 ) -> TranscriptionJob:
+    """``check_owner=False`` only for IDs the server generated itself (see
+    save_minute_version)."""
     with Session(engine) as session:
+        if check_owner:
+            _ensure_owner_unchanged(session, TranscriptionJob.transcription_id, job.id, job.transcription_id)
         job.dialogue_entries = [
             entry.model_dump() if hasattr(entry, "model_dump") else entry for entry in job.dialogue_entries
         ]
