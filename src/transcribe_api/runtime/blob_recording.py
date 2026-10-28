@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from urllib.parse import quote
 
+import anyio
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from azure.identity.aio import DefaultAzureCredential
 from azure.storage.blob import ContentSettings
@@ -65,26 +66,33 @@ class AsyncAzureBlobManager:
         await self.close()
 
     async def close(self):
-        """Close the credential and clean up resources."""
+        """Close the credential and clean up resources.
+
+        Shielded from cancellation: this often runs as cleanup after a client
+        disconnect, inside a cancel scope that would otherwise cut the close
+        short and leak the credential's aiohttp session.
+        """
         try:
             if self.credential:
-                await self.credential.close()
+                with anyio.CancelScope(shield=True):
+                    await self.credential.close()
                 logger.debug("Closed DefaultAzureCredential for Blob Storage")
         except Exception as e:
             logger.warning(f"Error closing credential: {e}")
 
     def build_blob_url(self, blob_name: str, container_name: str | None = None) -> str:
-        """Return a plain (no-SAS) blob URL for Azure Speech Batch.
+        """Return a plain (no-SAS) blob URL for Azure Speech batch transcription.
 
-        Speech's batch backend authenticates directly against this storage
-        account via its own system-assigned managed identity, under Azure's
-        "trusted Azure services" mechanism (a storage network_rules
-        resource-instance exception plus a Storage Blob Data Reader role
-        grant on the Speech resource — see the infra repo's storage.tf).
-        Microsoft's docs are explicit that a SAS token alongside
-        managed-identity auth makes the request fail, so this must stay
-        SAS-free — unlike generate_read_sas_url, which is for callers
-        without a trusted-service grant.
+        Speech fetches this URL itself and reads the blob as its own
+        system-assigned managed identity. hmcts/transcribe-shared-infrastructure
+        makes that possible: ai-services.tf puts this storage account's blob host
+        in the Speech account's outbound FQDN allowlist (outbound access is
+        restricted by Azure Policy), and storage.tf grants the Speech identity
+        Storage Blob Data Reader on the account, which the storage firewall's
+        "trusted Azure services" bypass then lets through. Keep this SAS-free:
+        Microsoft's docs say a SAS alongside managed-identity access makes the
+        request fail. The user-delegation SAS helpers in stt/utils.py are for
+        browser uploads and downloads, not for Speech.
         """
         container = container_name or self.container_name
         return f"{self.account_url}/{container}/{quote(blob_name, safe='/')}"
@@ -434,11 +442,19 @@ class AsyncAzureBlobManager:
         mid-stream can no longer be turned into a clean 404.
         """
         container = container_name or self.container_name
-        async with self._blob_service_client() as blob_service:
+        # Not `async with`: when a client disconnects, Starlette cancels the
+        # stream through an anyio cancel scope that re-cancels every await
+        # inside it, so an unshielded close is cut short and leaks the
+        # client's aiohttp session and its connections to storage.
+        blob_service = self._blob_service_client()
+        try:
             blob_client = blob_service.get_blob_client(container=container, blob=blob_name)
             download_stream = await blob_client.download_blob(offset=start, length=length)
             async for chunk in download_stream.chunks():
                 yield chunk
+        finally:
+            with anyio.CancelScope(shield=True):
+                await blob_service.close()
 
     async def download_blob_to_file(
         self, blob_name: str, file_path: Path, container_name: str | None = None

@@ -18,6 +18,9 @@ dependencies = [
     "uvicorn[standard]>=0.46.0",
     "python-multipart>=0.0.9",
     "slowapi>=0.1.9",
+    # Starlette's async runtime; imported directly to shield blob-client cleanup
+    # from the cancellation Starlette uses on client disconnect.
+    "anyio>=4.14.2",
 
     # --- data ---
     "sqlmodel>=0.0.38",

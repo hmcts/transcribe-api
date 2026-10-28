@@ -141,12 +141,12 @@ class TestResolveUserConcurrentCreate:
 
         winning_user = User(email="test@example.com", azure_user_id="azure-123", role="Normal")
 
-        # First exec().first() sees no row; after rollback exec().one() returns
+        # First exec().first() sees no row; after rollback exec().first() returns
         # the row inserted by the concurrent winner.
         first_result = MagicMock()
         first_result.first.return_value = None
         second_result = MagicMock()
-        second_result.one.return_value = winning_user
+        second_result.first.return_value = winning_user
 
         mock_session = MagicMock()
         mock_session.exec.side_effect = [first_result, second_result]
@@ -170,7 +170,7 @@ class TestResolveUserConcurrentCreate:
         first_result = MagicMock()
         first_result.first.return_value = None
         second_result = MagicMock()
-        second_result.one.return_value = winning_user
+        second_result.first.return_value = winning_user
 
         mock_session = MagicMock()
         mock_session.exec.side_effect = [first_result, second_result]
