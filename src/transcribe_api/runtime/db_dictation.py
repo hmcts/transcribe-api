@@ -2,15 +2,19 @@ import logging
 from collections.abc import Generator
 
 from dotenv import load_dotenv
+from hmcts_otel import setup_logging
 from sqlmodel import Session, create_engine, select
 
+from transcribe_api.runtime.telemetry import register_redaction_rules
 from transcribe_api.runtime.settings_dictation import get_settings
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Redacted logging for processes that import this module directly (DB scripts);
+# replaced by the full setup when the API or worker starts (see runtime/logger.py).
+register_redaction_rules()
+setup_logging()
 logger = logging.getLogger(__name__)
 
 # Database URL from environment variable

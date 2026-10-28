@@ -2,6 +2,7 @@ from uuid import UUID, uuid4
 
 import sentry_sdk
 from fastapi import HTTPException
+from hmcts_otel import background_span
 from langfuse.decorators import langfuse_context, observe
 from uwotm8 import convert_american_to_british_spelling
 
@@ -133,8 +134,9 @@ async def generate_llm_output_task(
     user_id: str,
     minute_version_id: UUID | None = None,
 ) -> str:
-    # Start a Sentry transaction for the whole function
-    with sentry_sdk.start_transaction(op="task", name="Generate LLM Output Task") as transaction:  # noqa: F841
+    # Own trace for the whole background task, linked to the request that started it
+    # (OpenTelemetry; Sentry is for error triage only).
+    with background_span("Generate LLM Output Task", tracer_name=__name__):
         # Ensure we have a consistent ID through the whole process
         if minute_version_id is None:
             minute_version_id = uuid4()  # Generate a UUID if none provided
@@ -188,7 +190,7 @@ async def ai_edit_task(
     transcription_id: UUID,
     user_id: str,
 ) -> str:
-    with sentry_sdk.start_transaction(op="task", name="AI Edit Task") as transaction:  # noqa: F841
+    with background_span("AI Edit Task", tracer_name=__name__):
         # if length of dialogue entries is 0, return empty string
         if len(dialogue_entries) == 0:
             raise HTTPException(status_code=400, detail="No dialogue entries found")

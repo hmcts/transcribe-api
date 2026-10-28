@@ -266,3 +266,27 @@ def test_submission_logs_submission_id_and_user_id(client, as_user, mocker, capl
     all_log_text = " ".join(r.getMessage() for r in our_records)
     assert "submission_id=" in all_log_text, "Expected submission_id= in application logs"
     assert "user_id=" in all_log_text, "Expected user_id= in application logs"
+
+
+# DIAAT-205: the same sentinels must not reach any exported telemetry (spans, logs,
+# lifecycle events, metrics), not just log records captured by caplog.
+
+
+@pytest.mark.parametrize("direct_sdk_access", [False, True])
+def test_submission_exports_no_pii_in_telemetry(app, client, as_user, mocker, direct_sdk_access):
+    from hmcts_otel.fastapi import instrument_fastapi
+    from hmcts_otel.testing import capture_telemetry
+
+    user = _make_user(roles=["Judge"])
+    as_user(user)
+    _patch_submission_deps(mocker, direct_sdk_access=direct_sdk_access)
+
+    with capture_telemetry() as telemetry:
+        # Instrument inside the capture so request spans go to the capture's provider
+        # (instrumentation binds to the provider active when it is applied).
+        instrument_fastapi(app)
+        response = client.post("/api/live-transcription/submission", json=_MINIMAL_BODY)
+        assert response.status_code == 200, response.text
+        server_spans = [s for s in telemetry.finished_spans() if s.kind.name == "SERVER"]
+        assert server_spans, "no request span captured: the span check would be vacuous"
+        telemetry.assert_no_prohibited_content(*_PII_SENTINELS)

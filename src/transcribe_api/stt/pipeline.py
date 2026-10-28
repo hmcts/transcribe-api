@@ -6,6 +6,7 @@ from uuid import UUID
 
 import sentry_sdk
 from docx import Document as DocxDocument
+from hmcts_otel import background_span
 
 from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager
 from transcribe_api.stt.speakers_dictation import process_speakers_and_dialogue_entries
@@ -104,8 +105,9 @@ async def transcribe_and_generate_llm_output(
     azure_user_id: str,
     transcription_id: str | None = None,
 ):
-    # Start a Sentry transaction for the whole function
-    with sentry_sdk.start_transaction(op="task", name="Transcribe and Generate LLM Output") as transaction:  # noqa: F841
+    # Own trace for the whole background task, linked to whatever started it
+    # (OpenTelemetry).
+    with background_span("Transcribe and Generate LLM Output", tracer_name=__name__):
         # The file name's UUID is client input: another user's transcription is refused
         # (SEC-1, OwnershipConflictError); the caller's own is loaded, not reset (a retry).
         transcription = load_or_create_transcription(transcription_id, user_id)
