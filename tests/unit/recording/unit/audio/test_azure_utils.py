@@ -92,3 +92,84 @@ class TestCreateBlobFromFile:
         assert client.blob_client.uploaded == b"WAVDATA"
         assert client.kwargs["max_single_put_size"] <= 4 * 1024 * 1024
         assert client.kwargs["max_block_size"] <= 4 * 1024 * 1024
+
+
+class TestStreamBlobRange:
+    """stream_blob_range closes its BlobServiceClient however streaming ends.
+
+    GET /jobs/{id}/audio streams through it, and a browser's audio player
+    routinely abandons range requests partway, so the early-exit paths matter
+    as much as running to completion. An unclosed client leaks an aiohttp
+    session and its TLS connections to storage.
+    """
+
+    @pytest.mark.asyncio
+    async def test_closes_service_client_after_full_stream(self, fake_blob_storage):
+        from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
+
+        manager = AsyncAzureBlobManager()
+        chunks = [c async for c in manager.stream_blob_range("a.wav", 0, fake_blob_storage.size)]
+        await manager.close()
+
+        assert chunks == fake_blob_storage.chunks
+        assert len(fake_blob_storage.service_clients) == 1
+        assert fake_blob_storage.all_closed
+
+    @pytest.mark.asyncio
+    async def test_closes_service_client_when_closed_partway(self, fake_blob_storage):
+        from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
+
+        manager = AsyncAzureBlobManager()
+        stream = manager.stream_blob_range("a.wav", 0, fake_blob_storage.size)
+        assert await anext(stream) == b"chunk-0|"
+        await stream.aclose()
+        await manager.close()
+
+        assert fake_blob_storage.all_closed
+
+    @pytest.mark.asyncio
+    async def test_closes_service_client_when_cancelled_mid_read(self, fake_blob_storage):
+        """Starlette cancels a streaming response on client disconnect.
+
+        It does so through an anyio cancel scope, which re-cancels every await
+        made inside it until the scope exits, so cleanup that awaits (closing
+        an aiohttp session does) is cut short unless it is shielded.
+        """
+        import anyio
+
+        from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
+
+        fake_blob_storage.stall_after = 1
+        manager = AsyncAzureBlobManager()
+        received = []
+
+        async def consume():
+            async for chunk in manager.stream_blob_range("a.wav", 0, fake_blob_storage.size):
+                received.append(chunk)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(consume)
+            while not received:
+                await anyio.sleep(0)
+            tg.cancel_scope.cancel()
+
+        assert received == [b"chunk-0|"]
+        (service_client,) = fake_blob_storage.service_clients
+        assert service_client.closed
+
+
+class TestManagerClose:
+    @pytest.mark.asyncio
+    async def test_closes_credential_inside_a_cancelled_scope(self, fake_blob_storage):
+        """close() runs as cleanup after a disconnect, i.e. while being cancelled."""
+        import anyio
+
+        from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
+
+        manager = AsyncAzureBlobManager()
+        with anyio.CancelScope() as scope:
+            scope.cancel()
+            await manager.close()
+
+        (credential,) = fake_blob_storage.credentials
+        assert credential.closed
