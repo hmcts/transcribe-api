@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     JOB_STUCK_WAITING_SECONDS: int = 30 * 60
     JOB_STUCK_RUNNING_SECONDS: int = 3 * 60 * 60
 
+    # DIAAT-277: how often the background checker probes the database, Blob Storage
+    # and Azure Speech (Speech at most once per 300 s whatever this is), and how long
+    # one probe may take before the dependency is reported down (dependency.timeout).
+    DEPENDENCY_HEALTH_INTERVAL_SECONDS: int = 60
+    DEPENDENCY_HEALTH_TIMEOUT_SECONDS: float = 10.0
+
     # Azure AD / JWT authentication
     AZURE_AD_CLIENT_ID: str = ""
     AZURE_AD_TENANT_ID: str = ""
@@ -128,6 +134,22 @@ class Settings(BaseSettings):
     def validate_stuck_threshold(cls, v: int) -> int:
         if v <= 0:
             raise ValueError("Stuck-job thresholds must be greater than 0 seconds")
+        return v
+
+    @field_validator(
+        "DEPENDENCY_HEALTH_INTERVAL_SECONDS", "DEPENDENCY_HEALTH_TIMEOUT_SECONDS", mode="before"
+    )
+    @classmethod
+    def blank_dependency_health_setting_is_default(cls, v: object, info: ValidationInfo) -> object:
+        if isinstance(v, str) and not v.strip():
+            return cls.model_fields[info.field_name].default
+        return v
+
+    @field_validator("DEPENDENCY_HEALTH_INTERVAL_SECONDS", "DEPENDENCY_HEALTH_TIMEOUT_SECONDS")
+    @classmethod
+    def validate_dependency_health_setting(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("Dependency health interval and timeout must be greater than 0")
         return v
 
     @field_validator("SPEECH_CONCURRENT_JOBS_LIMIT", mode="before")

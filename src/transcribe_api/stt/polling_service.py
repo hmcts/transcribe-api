@@ -290,10 +290,12 @@ class BatchPollingService:
             "BatchPollingService started (interval=%ds)",
             self.settings.BATCH_POLL_INTERVAL_SECONDS,
         )
+        job_telemetry.poller_heartbeat.started()
         try:
             while not self._shutdown:
                 try:
                     await self._poll_once()
+                    job_telemetry.poller_heartbeat.succeeded()
                 except Exception as exc:
                     logger.error(
                         "Unexpected error in polling loop (%s)", type(exc).__name__, exc_info=exc

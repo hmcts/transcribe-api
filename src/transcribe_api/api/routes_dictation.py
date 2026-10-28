@@ -89,6 +89,7 @@ from transcribe_api.documents.llm.langfuse_models import (
     LangfuseTraceRequest,
 )
 from transcribe_api.runtime.browser_telemetry import telemetry_relay_router
+from transcribe_api.runtime.dependency_health import get_dependency_checker, health_response
 from transcribe_api.runtime.settings_dictation import get_settings
 from transcribe_api.runtime.version import APP_VERSION
 
@@ -145,6 +146,20 @@ UK_TIMEZONE = pytz.timezone("Europe/London")
 @router.get("/health")
 async def health_check():
     return JSONResponse(status_code=200, content={"status": "ok", "version": APP_VERSION})
+
+
+@router.get("/health/dependencies")
+async def dependency_health_check():
+    """Last known health of each dependency (DIAAT-277), from the background checker.
+
+    Never runs a check: it reads the cache, so it is cheap and cannot hang. 200 when
+    no dependency is down, 503 when any is ("unknown" until the first check). Not the
+    liveness or readiness probe: those stay /health, so a dependency outage does not
+    restart every pod. Unauthenticated like /health: names and states only. Not
+    traced (hmcts-otel excludes /health paths).
+    """
+    status_code, body = health_response(get_dependency_checker().statuses())
+    return JSONResponse(status_code=status_code, content=body, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/healthcheck")

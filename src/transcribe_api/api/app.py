@@ -171,8 +171,19 @@ async def lifespan(app: FastAPI):
         await run_in_threadpool(migrations.run_migrations)
 
     tasks: list[asyncio.Task] = []
+    if settings.ENVIRONMENT != "test":
+        # DIAAT-277: database, storage and Azure Speech health, checked in the
+        # background of each API pod and read from cache by /api/health/dependencies.
+        # Not in tests: the checks would reach for real dependencies.
+        from transcribe_api.runtime.dependency_health import (
+            get_dependency_checker,
+            register_dependency_gauge,
+        )
+
+        register_dependency_gauge()
+        tasks.append(asyncio.create_task(get_dependency_checker().run()))
     if settings.ENVIRONMENT != "test" and _run_workers_in_web_process():
-        tasks = await start_background_workers()
+        tasks += await start_background_workers()
 
     yield
 
