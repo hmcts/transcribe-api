@@ -2,7 +2,7 @@ import logging
 
 from hmcts_otel import setup_logging
 
-from transcribe_api.runtime.telemetry import register_redaction_rules
+from transcribe_api.runtime.telemetry import quiet_azure_sdk_logging, register_redaction_rules
 
 
 def setup_logger():
@@ -12,10 +12,7 @@ def setup_logger():
     # it would add a second, unredacted handler.
     register_redaction_rules()
     setup_logging()
-
-    # Suppress verbose Azure SDK logging
-    logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
-    logging.getLogger("azure").setLevel(logging.WARNING)
+    quiet_azure_sdk_logging()
 
     return logging.getLogger(__name__)
 
