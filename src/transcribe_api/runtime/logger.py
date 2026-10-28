@@ -6,14 +6,10 @@ from transcribe_api.runtime.telemetry import register_redaction_rules
 
 
 def setup_logger():
-    # Full telemetry (exporters) is configured once per process by
-    # runtime/telemetry.configure_telemetry (api/app.py, worker.py). Processes that
-    # import app modules without either (scripts, one-off jobs) still need redacted
-    # INFO logs: setup_logging() installs logging only, with no exporters or provider
-    # checks, so it is safe at import time, and the later full setup replaces it. If
-    # another component owns logging (e.g. alembic's fileConfig) it only adds redaction
-    # to that component's handlers. Never basicConfig: it would add an unformatted,
-    # unredacted second handler.
+    # Scripts and one-off jobs import app modules without configure_telemetry() and
+    # still need redacted logs. setup_logging() installs logging only (no exporters),
+    # so it is safe at import time; the full setup replaces it later. Not basicConfig:
+    # it would add a second, unredacted handler.
     register_redaction_rules()
     setup_logging()
 

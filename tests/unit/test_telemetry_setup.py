@@ -161,10 +161,6 @@ def test_appeal_references_are_redacted(reference: str) -> None:
 
 
 def test_the_image_keeps_the_base_image_otel_distro_off_the_path() -> None:
-    # The HMCTS base image's /opt/otel/sitecustomize.py runs configure_azure_monitor()
-    # at interpreter start whenever the connection string is set. On PYTHONPATH it
-    # would configure Azure Monitor a second time, beside hmcts-otel, and its older
-    # OpenTelemetry packages would shadow the versions in uv.lock.
     dockerfile = (ROOT / "Dockerfile").read_text()
     paths = re.findall(r"PYTHONPATH=(\S+)", dockerfile)
     assert paths, "Dockerfile sets no PYTHONPATH"

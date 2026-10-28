@@ -178,9 +178,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     settings = get_settings()
 
-    # Logging, tracing and metrics (hmcts-otel, DIAAT-205). Before the app exists, so
-    # its instrumentation finds the providers. No Sentry on CNP: errors go to
-    # Application Insights.
+    # Before the app exists, so its instrumentation finds the providers.
     from transcribe_api.runtime.telemetry import SERVICE_NAME_API, configure_telemetry
 
     configure_telemetry(SERVICE_NAME_API)
@@ -206,9 +204,8 @@ def create_app() -> FastAPI:
         # through the redacting handlers even when uvicorn reconfigures logging.
         app.add_middleware(UvicornLoggingGuard)
     else:
-        # Request spans and metrics, health probes excluded. request_id=False: the
-        # request-ID middleware is added below, also when instrumentation is disabled
-        # (tests), because responses and error bodies carry the ID.
+        # request_id=False: RequestIdMiddleware is added below even when instrumentation
+        # is disabled (tests), because responses and error bodies carry the ID.
         instrument_fastapi(app, request_id=False)
 
     # --- middleware ---
@@ -221,9 +218,7 @@ def create_app() -> FastAPI:
         allow_headers=["Authorization", "Content-Type"],
     )
 
-    # X-Request-Id: accepted only as a canonical UUID or 32 hex (anything else is
-    # replaced), returned on every response and attached to every log line, span and
-    # event. Added last, so outermost.
+    # Added last, so outermost.
     app.add_middleware(RequestIdMiddleware)
 
     # --- exception handlers ---

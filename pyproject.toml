@@ -37,8 +37,6 @@ dependencies = [
     "opentelemetry-instrumentation-fastapi>=0.61b0",
 
     # --- telemetry (DIAAT-205) ---
-    # Logging, tracing, metrics, redaction and the event schema. Resolved from git
-    # at a release tag, like hmcts-fastapi-azure-auth.
     "hmcts-otel[fastapi] @ git+https://github.com/hmcts/hmcts-otel@v0.2.2",
 
     # --- auth ---

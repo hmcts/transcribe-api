@@ -16,7 +16,6 @@ class TestHttpExceptionHandler:
         # Arrange
         exc = FastAPIHTTPException(status_code=404, detail="Not found")
 
-        # The request ID, as the app passes it (request_id_for)
         test_request_id = "test-request-id-123"
         request_id = test_request_id
 
@@ -41,7 +40,6 @@ class TestHttpExceptionHandler:
         # Arrange
         exc = FastAPIHTTPException(status_code=400, detail="Bad request")
 
-        # No request ID
         request_id = ""
 
         # Act
@@ -114,7 +112,6 @@ class TestUnhandledExceptionHandler:
         # Arrange
         exc = RuntimeError("Test runtime error")
 
-        # No request ID
         request_id = ""
 
         # Act

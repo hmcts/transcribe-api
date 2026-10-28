@@ -10,7 +10,7 @@ python:
 
   environment: &environment
     ENVIRONMENT: '{{ .Values.global.environment }}'
-    # Telemetry service name (cloud_RoleName); the worker overrides it below.
+    # cloud_RoleName in Application Insights.
     OTEL_SERVICE_NAME: transcribe-api
     AZURE_STORAGE_CONTAINER_NAME: audio
     AZURE_STORAGE_TRANSCRIPTION_CONTAINER: transcriptions
@@ -47,10 +47,8 @@ python:
         # No key: Azure OpenAI is reached with the workload identity.
         - name: azure-openai-endpoint
           alias: AZURE_OPENAI_ENDPOINT
-        # Telemetry export (runtime/telemetry.py, hmcts-otel), for the API and the
-        # worker alike. Created in every environment by
-        # transcribe-shared-infrastructure (application-insights.tf). Unset, both
-        # log to stdout only.
+        # The worker's only source: Flux runs it outside the Jenkins template, so it
+        # gets no APPLICATIONINSIGHTS_CONNECTION_STRING from values.aat.template.yaml.
         - name: AppInsightsConnectionString
           alias: APPLICATIONINSIGHTS_CONNECTION_STRING
         # google-application-credentials-json and gov-notify-api-key are added

@@ -1,17 +1,7 @@
 """Telemetry for transcribe-api (DIAAT-205), built on hmcts-otel.
 
 Call ``configure_telemetry()`` once per process, before the FastAPI app is created
-(``api.app.create_app``) or the pollers start (``worker``). It sets up logging (JSON,
-redacted), tracing and metrics, exporting to Application Insights when
-``APPLICATIONINSIGHTS_CONNECTION_STRING`` is set and to stdout otherwise.
-
-* ``OTEL_SERVICE_NAME`` overrides the service name (``cloud_RoleName``). Unset, the
-  API is ``transcribe-api`` and the worker ``transcribe-api-worker``.
-* There is no Sentry on CNP: errors go to Application Insights. ``SENTRY_DSN`` is
-  ignored even when set.
-
-The base image's ``/opt/otel`` distro is kept off ``PYTHONPATH`` (Dockerfile): it
-would configure Azure Monitor a second time at interpreter start.
+or the pollers start.
 """
 
 from __future__ import annotations
@@ -65,10 +55,7 @@ def configure_telemetry(service_name: str = SERVICE_NAME_API) -> TelemetrySettin
 
     ``service_name`` is the default for this process; ``OTEL_SERVICE_NAME`` wins.
     """
-    # Checked against the redactor itself, so the rules are present whenever telemetry
-    # is configured, whatever happened to the library state before.
     register_redaction_rules()
-    # Every app attribute and event, once (runtime/telemetry_schema.py).
     register_schema()
     overrides: dict[str, object] = {
         "service_version": APP_VERSION,
