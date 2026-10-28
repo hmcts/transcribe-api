@@ -9,6 +9,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from transcribe_api.stt.job_telemetry import record_retry
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,6 +53,7 @@ async def dispatch(
     }
 
     for attempt in range(max_retries):
+        failure: str | None = None
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(callback_url, content=body, headers=headers)
@@ -68,6 +71,7 @@ async def dispatch(
                     response.status_code,
                     _safe_url(callback_url),
                 )
+                failure = f"webhook.http_{response.status_code}"
         except (httpx.TimeoutException, httpx.ConnectError) as exc:
             logger.warning(
                 "Webhook attempt %d/%d failed (%s): %s",
@@ -76,8 +80,14 @@ async def dispatch(
                 type(exc).__name__,
                 _safe_url(callback_url),
             )
+            failure = (
+                "webhook.timeout"
+                if isinstance(exc, httpx.TimeoutException)
+                else "webhook.connect_error"
+            )
 
         if attempt < max_retries - 1:
+            record_retry("webhook.deliver", attempt + 1, failure or "webhook.unknown")
             await asyncio.sleep(2**attempt)
 
     logger.error(

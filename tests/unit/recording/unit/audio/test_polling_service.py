@@ -301,7 +301,7 @@ class TestProcessJob:
 
         from transcribe_api.domain.models_recording import BatchJobStatus
 
-        mock_update.assert_called_once_with(_JOB_ID, BatchJobStatus.RUNNING)
+        mock_update.assert_called_once_with(_JOB_ID, BatchJobStatus.RUNNING, ANY)
 
     @pytest.mark.asyncio
     async def test_dispatches_to_handle_succeeded(self, service):
@@ -336,7 +336,7 @@ class TestProcessJob:
         ):
             await service._process_job(job)
 
-        mock_failed.assert_awaited_once_with(job, status_data, {"hmcts.dependency.ref": "abc"})
+        mock_failed.assert_awaited_once_with(job, status_data)
 
 
 class TestHandleSucceeded:

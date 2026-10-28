@@ -120,9 +120,13 @@ def build_cors_origins(settings: Any) -> list[str]:
 
 async def start_background_workers() -> list[asyncio.Task]:
     """Start both pollers. Used by the worker entrypoint and, optionally, the web process."""
+    from transcribe_api.stt.job_telemetry import register_job_gauges
     from transcribe_api.stt.polling_service import BatchPollingService
     from transcribe_api.stt.work_poller import TranscriptionPollingService
 
+    # DIAAT-281: waiting/running/stuck recording job gauges, read from the database on
+    # export. With the pollers, so the process that polls also reports the queue.
+    register_job_gauges()
     tasks = [
         asyncio.create_task(BatchPollingService().run_polling_loop()),
         asyncio.create_task(TranscriptionPollingService().run_polling_loop()),
