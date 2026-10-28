@@ -2,7 +2,7 @@ from uuid import UUID, uuid4
 
 import sentry_sdk
 from fastapi import HTTPException
-from hmcts_otel import background_span
+from hmcts_otel import stage
 from langfuse.decorators import langfuse_context, observe
 from uwotm8 import convert_american_to_british_spelling
 
@@ -30,7 +30,10 @@ from transcribe_api.documents.minutes.types import (
     MeetingTitleOutput,
     SpeakerPredictionOutput,
 )
+from transcribe_api.runtime.telemetry import register_minutes_schema
 from transcribe_api.runtime.markdown import html_to_markdown, markdown_to_html
+
+register_minutes_schema()  # minutes.template is emitted by the stages below
 
 
 @observe(name="edit_minutes_with_ai", as_type="generation")
@@ -134,9 +137,9 @@ async def generate_llm_output_task(
     user_id: str,
     minute_version_id: UUID | None = None,
 ) -> str:
-    # Own trace for the whole background task, linked to the request that started it
-    # (OpenTelemetry; Sentry is for error triage only).
-    with background_span("Generate LLM Output Task", tracer_name=__name__):
+    # A stage, not a new trace: the caller decides the trace (the route's background
+    # task, or the transcription pipeline when minutes are generated after upload).
+    with stage("minutes_generation", attributes={"minutes.template": str(template.name)}):
         # Ensure we have a consistent ID through the whole process
         if minute_version_id is None:
             minute_version_id = uuid4()  # Generate a UUID if none provided
@@ -190,9 +193,10 @@ async def ai_edit_task(
     transcription_id: UUID,
     user_id: str,
 ) -> str:
-    with background_span("AI Edit Task", tracer_name=__name__):
+    with stage("minutes_edit") as edit_stage:
         # if length of dialogue entries is 0, return empty string
         if len(dialogue_entries) == 0:
+            edit_stage.fail("minutes.no_dialogue")  # client-side: nothing to edit
             raise HTTPException(status_code=400, detail="No dialogue entries found")
 
         current_minutes = get_minute_version_by_id(current_minute_version_id, transcription_id)

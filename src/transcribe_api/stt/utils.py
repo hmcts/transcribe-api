@@ -9,9 +9,10 @@ import ffmpeg
 import httpx
 from azure.storage.blob import BlobSasPermissions, generate_blob_sas
 
-from transcribe_api.domain.models_dictation import DialogueEntry
 from transcribe_api.runtime.blob_dictation import _redact_blob_path
+from transcribe_api.domain.models_dictation import DialogueEntry
 from transcribe_api.runtime.logger import logger
+from transcribe_api.runtime.telemetry import transcription_id_from_key
 from transcribe_api.runtime.log_sanitization import sanitize_for_log
 from transcribe_api.runtime.settings_dictation import get_settings
 
@@ -52,10 +53,10 @@ def extract_transcription_id_from_blob_path(blob_path: str, user_id: str) -> str
         str | None: Valid UUID string to use as transcription_id, or None to trigger auto-generation
     """
     filename = Path(blob_path).stem  # Gets filename without extension
-
-    try:
-        UUID(filename)  # Validate UUID format
-    except ValueError:
+    # One parser for the convention (also used for the upload's journey ID): returns
+    # the canonical form, so the upload, the poller and the database agree.
+    transcription_id = transcription_id_from_key(blob_path)
+    if transcription_id is None:
         # Filename is not a valid UUID, signal to auto-generate one
         logger.warning(
             "User %s: Filename '%s' is not a valid UUID, will auto-generate transcription_id for blob: %s",
@@ -64,13 +65,12 @@ def extract_transcription_id_from_blob_path(blob_path: str, user_id: str) -> str
             _redact_blob_path(blob_path),
         )
         return None
-    else:
-        logger.info(
-            "User %s: Using filename as transcription_id: %s",
-            sanitize_for_log(user_id),
-            sanitize_for_log(filename),
-        )
-        return filename
+    logger.info(
+        "User %s: Using filename as transcription_id: %s",
+        sanitize_for_log(user_id),
+        sanitize_for_log(transcription_id),
+    )
+    return transcription_id
 
 
 async def generate_blob_upload_url(container_name: str, blob_name: str, expiry_hours: int = 1) -> str:
