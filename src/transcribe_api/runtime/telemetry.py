@@ -54,7 +54,9 @@ def register_redaction_rules() -> None:
 # The Azure Monitor exporter logs every upload at INFO, as does the HTTP logging policy
 # of the pipeline it uploads with. Exported, each of those records causes another
 # upload, which logs again: a feedback loop. Named as well as "azure", so raising the
-# SDK's verbosity for debugging cannot restart it.
+# SDK's verbosity for debugging cannot restart it. hmcts-otel 0.2.3 also keeps these
+# loggers off the exporting handler whatever their level; this stays as a second guard
+# and to keep the SDK's INFO lines out of stdout.
 EXPORT_LOOP_LOGGERS = ("azure.monitor.opentelemetry.exporter", "azure.core.pipeline.policies.http_logging_policy")
 
 
