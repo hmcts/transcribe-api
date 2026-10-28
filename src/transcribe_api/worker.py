@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
+
+from hmcts_otel import shutdown_telemetry
 
 from transcribe_api.api.app import (
     ensure_ffmpeg_tools,
@@ -26,6 +29,13 @@ async def main() -> None:
     # The pollers convert and probe audio with ffmpeg/ffprobe.
     await ensure_ffmpeg_tools(get_settings().ENVIRONMENT)
     tasks = await start_background_workers()
+    # Kubernetes stops the pod with SIGTERM. Python's default is to exit at once,
+    # skipping the finally below (poller cleanup) and hmcts-otel's flush, so telemetry
+    # still queued for export would be lost on every rollout. Cancel instead, so
+    # shutdown runs as for Ctrl-C.
+    main_task = asyncio.current_task()
+    if main_task is not None:
+        asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, main_task.cancel)
     log.info("Worker running; press Ctrl-C to stop")
     try:
         await asyncio.gather(*tasks)
@@ -43,3 +53,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         log.info("Worker stopped")
+    finally:
+        # Flush queued telemetry within a time budget (idempotent; atexit would too).
+        shutdown_telemetry()

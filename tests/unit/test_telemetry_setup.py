@@ -68,6 +68,60 @@ def test_the_worker_entrypoint_configures_telemetry_as_the_worker(monkeypatch: p
     run.call_args.args[0].close()  # the main() coroutine, never awaited here
 
 
+def test_the_worker_flushes_telemetry_when_it_exits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delitem(sys.modules, "transcribe_api.worker", raising=False)
+    with (
+        patch("transcribe_api.runtime.telemetry.configure_telemetry"),
+        patch("asyncio.run", side_effect=lambda coro: coro.close()),
+        patch("hmcts_otel.shutdown_telemetry") as shutdown,
+    ):
+        runpy.run_module("transcribe_api.worker", run_name="__main__")
+    shutdown.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_sigterm_stops_the_pollers_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kubernetes stops the worker with SIGTERM. The handler must cancel the main task,
+    so the pollers are stopped and telemetry flushed, rather than the process dying.
+    The handler is captured and called, not a real signal: without it, a real SIGTERM
+    would kill the test run."""
+    import asyncio
+    import signal
+
+    from transcribe_api import worker
+
+    handlers: dict[int, object] = {}
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "add_signal_handler", lambda sig, callback: handlers.__setitem__(sig, callback))
+    stopped: list[list] = []
+
+    async def start():
+        return [asyncio.create_task(asyncio.sleep(3600))]
+
+    async def stop(tasks):
+        for task in tasks:
+            task.cancel()
+        stopped.append(tasks)
+
+    monkeypatch.setattr(worker, "ensure_ffmpeg_tools", lambda _env: asyncio.sleep(0))
+    monkeypatch.setattr(worker, "start_background_workers", start)
+    monkeypatch.setattr(worker, "stop_background_workers", stop)
+
+    running = asyncio.create_task(worker.main())
+    for _ in range(100):  # until main() is running and has registered its handler
+        if signal.SIGTERM in handlers:
+            break
+        await asyncio.sleep(0)
+    if signal.SIGTERM not in handlers:
+        running.cancel()
+        pytest.fail("worker.main() registered no SIGTERM handler")
+    handlers[signal.SIGTERM]()  # what the event loop does on SIGTERM
+    await asyncio.wait_for(running, timeout=5)
+
+    assert len(stopped) == 1
+    assert running.done() and not running.cancelled()
+
+
 # Redaction ----------------------------------------------------------------------------
 
 UPLOAD_ID = "3f2a9c1e-8b7d-4e6f-9a1b-2c3d4e5f6a7b"
