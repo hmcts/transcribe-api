@@ -5,7 +5,6 @@ from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from fastapi.responses import JSONResponse
 
 from transcribe_api.runtime.exception_handlers import http_exception_handler, unhandled_exception_handler
-from transcribe_api.runtime.middleware import request_id_ctx
 
 
 class TestHttpExceptionHandler:
@@ -13,16 +12,15 @@ class TestHttpExceptionHandler:
 
     @pytest.mark.asyncio
     async def test_handles_http_exception_with_request_id(self):
-        """Test that HTTP exceptions are handled with request ID from context."""
+        """Test that HTTP exceptions are handled with the request ID passed in."""
         # Arrange
         exc = FastAPIHTTPException(status_code=404, detail="Not found")
 
-        # Set context variable
         test_request_id = "test-request-id-123"
-        request_id_ctx.set(test_request_id)
+        request_id = test_request_id
 
         # Act
-        response = await http_exception_handler(exc)
+        response = await http_exception_handler(exc, request_id)
 
         # Assert
         assert isinstance(response, JSONResponse), "Response should be a JSONResponse instance"
@@ -38,15 +36,14 @@ class TestHttpExceptionHandler:
 
     @pytest.mark.asyncio
     async def test_handles_http_exception_without_request_id(self):
-        """Test that HTTP exceptions are handled when no request ID in context."""
+        """Test that HTTP exceptions are handled when there is no request ID."""
         # Arrange
         exc = FastAPIHTTPException(status_code=400, detail="Bad request")
 
-        # Clear context variable
-        request_id_ctx.set("")
+        request_id = ""
 
         # Act
-        response = await http_exception_handler(exc)
+        response = await http_exception_handler(exc, request_id)
 
         # Assert
         assert isinstance(response, JSONResponse), "Response should be a JSONResponse instance"
@@ -66,10 +63,10 @@ class TestHttpExceptionHandler:
         test_detail = "Custom error message with special characters: !@#$%^&*()"
         exc = FastAPIHTTPException(status_code=422, detail=test_detail)
 
-        request_id_ctx.set("test-request-id")
+        request_id = "test-request-id"
 
         # Act
-        response = await http_exception_handler(exc)
+        response = await http_exception_handler(exc, request_id)
 
         # Assert
         assert response.status_code == 422, f"Status code should be 422, got {response.status_code}"
@@ -88,10 +85,10 @@ class TestUnhandledExceptionHandler:
         exc = ValueError("Test unhandled exception")
 
         test_request_id = "test-request-id-456"
-        request_id_ctx.set(test_request_id)
+        request_id = test_request_id
 
         # Act
-        response = await unhandled_exception_handler(exc)
+        response = await unhandled_exception_handler(exc, request_id)
 
         # Assert
         assert isinstance(response, JSONResponse), "Response should be a JSONResponse instance"
@@ -111,15 +108,14 @@ class TestUnhandledExceptionHandler:
     @pytest.mark.asyncio
     @patch("transcribe_api.runtime.exception_handlers.sentry_sdk.capture_exception")
     async def test_handles_unhandled_exception_without_request_id(self, mock_capture_exception):
-        """Test that unhandled exceptions are handled when no request ID in context."""
+        """Test that unhandled exceptions are handled when there is no request ID."""
         # Arrange
         exc = RuntimeError("Test runtime error")
 
-        # Clear context variable
-        request_id_ctx.set("")
+        request_id = ""
 
         # Act
-        response = await unhandled_exception_handler(exc)
+        response = await unhandled_exception_handler(exc, request_id)
 
         # Assert
         assert isinstance(response, JSONResponse), "Response should be a JSONResponse instance"
@@ -141,10 +137,10 @@ class TestUnhandledExceptionHandler:
         # Make Sentry capture fail
         mock_capture_exception.side_effect = Exception("Sentry failure")
 
-        request_id_ctx.set("test-request-id")
+        request_id = "test-request-id"
 
         # Act
-        response = await unhandled_exception_handler(exc)
+        response = await unhandled_exception_handler(exc, request_id)
 
         # Assert
         assert isinstance(response, JSONResponse), "Response should be a JSONResponse instance"

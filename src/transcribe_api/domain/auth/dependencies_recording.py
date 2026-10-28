@@ -15,12 +15,12 @@ from hmcts_azure_auth.audit import AuditWriter
 from hmcts_azure_auth.roles import get_valid_roles
 
 from transcribe_api.domain.auth.token_auth import build_token_user_dep
-from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from transcribe_api.runtime.db_recording import get_engine
 from transcribe_api.domain.models_recording import User
 from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
+from transcribe_api.domain.auth.user_creation import insert_user_or_load_existing
 
 logger = logging.getLogger(__name__)
 
@@ -47,25 +47,14 @@ def _resolve_user(azure_user_id: str, email: str, roles: list[str]) -> Authentic
         user = session.exec(statement).first()
 
         if not user:
-            try:
-                user = User(
+            user = insert_user_or_load_existing(
+                session,
+                User(
                     email=email,
                     azure_user_id=azure_user_id,
                     role=primary_role or valid_roles.get("Normal"),
-                )
-                session.add(user)
-                session.commit()
-                session.refresh(user)
-                logger.info("Created new user for azure_user_id=%s", azure_user_id)
-            except IntegrityError:
-                # Two concurrent first-time requests raced; the other request
-                # won the insert. Roll back and load the row it created.
-                session.rollback()
-                user = session.exec(statement).one()
-                logger.info(
-                    "Concurrent user creation for azure_user_id=%s; loaded existing row",
-                    azure_user_id,
-                )
+                ),
+            )
         else:
             if primary_role and user.role != primary_role:
                 logger.info(

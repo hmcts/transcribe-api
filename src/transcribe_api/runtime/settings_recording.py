@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     LOCAL_AUDIO_STORAGE_DIR: str = "/tmp/local-audio"  # noqa: S108  # nosec B108
     LOCAL_AUDIO_BASE_URL: str = ""
 
+    # Batch transcription backend (dev only — never set in deployed envs).
+    # "mock" skips every Azure Speech Batch REST call in stt/batch_client.py
+    # and returns a fixed canned transcript instead, so the full upload ->
+    # submit -> poll -> review pipeline can be exercised with no Speech
+    # resource and no network access at all.
+    SPEECH_BACKEND: Literal["azure", "mock"] = "azure"
+
     # Polling
     BATCH_POLL_INTERVAL_SECONDS: int = 30
     BATCH_TRANSCRIPTION_THRESHOLD_HOURS: float = 2.0

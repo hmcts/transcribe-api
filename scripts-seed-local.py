@@ -10,6 +10,7 @@ the frontend's /api/jobs route handler fails with
 Prints the plaintext key to put in transcribe-web/.env.local.
 Local development only.
 """
+
 from __future__ import annotations
 
 import os
@@ -21,6 +22,10 @@ os.environ.setdefault("ENVIRONMENT", "local")
 from sqlmodel import Session, create_engine, select  # noqa: E402
 
 from transcribe_api.domain.models_recording import Caller  # noqa: E402
+from transcribe_api.runtime.local_dev_database import (  # noqa: E402
+    UnsafeDatabaseURLError,
+    local_dev_database_url,
+)
 from transcribe_api.runtime.security import (  # noqa: E402
     compute_key_lookup_hash,
     encrypt_webhook_secret,
@@ -31,10 +36,11 @@ NAME = "local-dev-frontend"
 
 
 def main() -> int:
-    url = os.environ.get(
-        "DATABASE_CONNECTION_STRING",
-        "postgresql://transcribe:transcribe@localhost:5432/transcribe",
-    )
+    try:
+        url = local_dev_database_url()
+    except UnsafeDatabaseURLError as exc:
+        print(f"Refusing to run against DATABASE_CONNECTION_STRING: {exc}. Check your .env.")
+        return 1
     engine = create_engine(url)
     with Session(engine) as session:
         existing = session.exec(select(Caller).where(Caller.name == NAME)).first()

@@ -1,118 +1,90 @@
-import uuid
-from unittest.mock import AsyncMock, Mock
+"""X-Request-Id handling (hmcts-otel RequestIdMiddleware) with this app's exception handlers."""
 
 import pytest
-from fastapi import Request
-from fastapi.responses import Response
+from fastapi import FastAPI
+from fastapi.exceptions import HTTPException as FastAPIHTTPException
+from fastapi.testclient import TestClient
+from hmcts_otel import get_request_id
+from hmcts_otel.fastapi import RequestIdMiddleware, request_id_for
 
-from transcribe_api.runtime.middleware import add_request_id, request_id_ctx
+from transcribe_api.runtime.exception_handlers import http_exception_handler
+
+UUID = "0f8fad5b-d9cb-469f-a165-70867728950e"
 
 
-class TestAddRequestId:
-    """Test cases for the add_request_id middleware function."""
+@pytest.fixture
+def client():
+    app = FastAPI()
+    seen = {}
 
-    @pytest.mark.asyncio
-    async def test_adds_request_id_when_not_present(self):
-        """Test that a new request ID is generated when not present in headers."""
-        # Arrange
-        request = Mock(spec=Request)
-        request.headers = {}
+    @app.get("/ok")
+    def ok():
+        seen["rid"] = get_request_id()
+        return {"ok": True}
 
-        call_next = AsyncMock()
-        call_next.return_value = Response()
+    @app.get("/missing")
+    def missing():
+        raise FastAPIHTTPException(status_code=404, detail="Not found")
 
-        # Act
-        response = await add_request_id(request, call_next)
+    @app.exception_handler(FastAPIHTTPException)
+    async def handle(request, exc):
+        return await http_exception_handler(exc, request_id_for(request))
 
-        # Assert
-        call_next.assert_called_once_with(request)
-        assert "X-Request-Id" in response.headers, "X-Request-Id header should be added to response"
-        assert response.headers["X-Request-Id"] is not None, "Request ID should not be None"
-        assert len(response.headers["X-Request-Id"]) == 36, (
-            f"Request ID should be 36 characters (UUID length), got {len(response.headers['X-Request-Id'])}"
-        )
+    app.add_middleware(RequestIdMiddleware)
+    test_client = TestClient(app)
+    test_client.seen = seen
+    return test_client
 
-        # Verify context variable was set
-        context_value = request_id_ctx.get()
-        assert context_value == response.headers["X-Request-Id"], "Context variable should match response header"
 
-    @pytest.mark.asyncio
-    async def test_uses_existing_request_id_from_headers(self):
-        """Test that existing request ID from headers is used."""
-        # Arrange
-        existing_id = "existing-request-id-123"
-        request = Mock(spec=Request)
-        request.headers = {"X-Request-Id": existing_id}
+def test_generates_request_id_when_absent(client):
+    response = client.get("/ok")
+    rid = response.headers["X-Request-Id"]
+    assert len(rid) == 32
+    assert client.seen["rid"] == rid
 
-        call_next = AsyncMock()
-        call_next.return_value = Response()
 
-        # Act
-        response = await add_request_id(request, call_next)
+def test_uses_canonical_request_id_from_client(client):
+    response = client.get("/ok", headers={"X-Request-Id": UUID})
+    assert response.headers["X-Request-Id"] == UUID
+    assert client.seen["rid"] == UUID
 
-        # Assert
-        assert response.headers["X-Request-Id"] == existing_id, (
-            f"Should use existing request ID '{existing_id}', got '{response.headers['X-Request-Id']}'"
-        )
 
-        # Verify context variable was set
-        context_value = request_id_ctx.get()
-        assert context_value == existing_id, "Context variable should match existing request ID"
+@pytest.mark.parametrize(
+    "supplied",
+    ["Jane.Smith.AB12345", "PA/50123/2024", "07700900123", "12345678901234567890", "ABCDE12345", "x" * 100],
+)
+def test_free_form_or_numeric_request_ids_are_replaced(client, supplied):
+    response = client.get("/ok", headers={"X-Request-Id": supplied})
+    assert response.headers["X-Request-Id"] != supplied
+    assert client.seen["rid"] == response.headers["X-Request-Id"]
 
-    @pytest.mark.asyncio
-    async def test_preserves_existing_response_headers(self):
-        """Test that existing response headers are preserved."""
-        # Arrange
-        request = Mock(spec=Request)
-        request.headers = {}
 
-        response = Response()
-        response.headers["Content-Type"] = "application/json"
-        response.headers["Cache-Control"] = "no-cache"
+def test_error_body_carries_the_request_id(client):
+    response = client.get("/missing", headers={"X-Request-Id": UUID})
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Not found", "request_id": UUID}
+    assert response.headers["X-Request-Id"] == UUID
 
-        call_next = AsyncMock()
-        call_next.return_value = response
 
-        # Act
-        result = await add_request_id(request, call_next)
+def test_merged_app_returns_the_request_id_on_errors():
+    """Both handlers of the merged app, including the one for unhandled exceptions,
+    which runs in ServerErrorMiddleware, outside RequestIdMiddleware."""
+    from transcribe_api.api.app import create_app
 
-        # Assert
-        assert result.headers["Content-Type"] == "application/json", "Content-Type header should be preserved"
-        assert result.headers["Cache-Control"] == "no-cache", "Cache-Control header should be preserved"
-        assert "X-Request-Id" in result.headers, "X-Request-Id header should be added"
+    app = create_app()
 
-    @pytest.mark.asyncio
-    async def test_generates_valid_uuid_format(self):
-        """Test that generated request IDs are valid UUIDs."""
-        # Arrange
-        request = Mock(spec=Request)
-        request.headers = {}
+    @app.get("/__test_boom")
+    def _boom():
+        message = "boom"
+        raise ValueError(message)
 
-        call_next = AsyncMock()
-        call_next.return_value = Response()
+    client = TestClient(app, raise_server_exceptions=False)
 
-        # Act
-        response = await add_request_id(request, call_next)
+    response = client.get("/__test_boom", headers={"X-Request-Id": UUID})
+    assert response.status_code == 500
+    assert response.headers["X-Request-Id"] == UUID
+    assert response.json() == {"detail": "Internal Server Error", "request_id": UUID}
 
-        # Assert
-        request_id = response.headers["X-Request-Id"]
-
-        # Should be a valid UUID
-        try:
-            uuid.UUID(request_id)
-        except ValueError:
-            pytest.fail(f"Generated request ID '{request_id}' is not a valid UUID")
-
-    @pytest.mark.asyncio
-    async def test_handles_call_next_exception(self):
-        """Test that exceptions from call_next are properly propagated."""
-        # Arrange
-        request = Mock(spec=Request)
-        request.headers = {}
-
-        call_next = AsyncMock()
-        call_next.side_effect = ValueError("Test exception")
-
-        # Act & Assert
-        with pytest.raises(ValueError, match="Test exception"):
-            await add_request_id(request, call_next)
+    response = client.get("/api/v1/jobs/not-a-uuid", headers={"X-Request-Id": UUID})
+    assert response.status_code in (401, 403, 404, 422)
+    assert response.headers["X-Request-Id"] == UUID

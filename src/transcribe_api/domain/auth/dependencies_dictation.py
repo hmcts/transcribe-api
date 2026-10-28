@@ -21,6 +21,7 @@ from hmcts_azure_auth.roles import get_valid_roles
 
 from transcribe_api.domain.auth.token_auth import build_token_user_dep
 from transcribe_api.domain.auth.auth_models_dictation import AuthenticatedUser
+from transcribe_api.domain.auth.user_creation import insert_user_or_load_existing
 
 logger = logging.getLogger(__name__)
 
@@ -102,11 +103,9 @@ def _resolve_user(azure_user_id: str, email: str, roles: list[str]) -> Authentic
         user = session.exec(statement).first()
 
         if not user:
-            user = User(email=email, azure_user_id=azure_user_id, role=primary_role or "Normal")
-            session.add(user)
-            session.commit()
-            session.refresh(user)
-            logger.info("Created new user id=%s", user.id)
+            user = insert_user_or_load_existing(
+                session, User(email=email, azure_user_id=azure_user_id, role=primary_role or "Normal")
+            )
         elif primary_role and user.role != primary_role:
             logger.info(
                 "Syncing User.role from Azure AD for user_id=%s: %s -> %s",
