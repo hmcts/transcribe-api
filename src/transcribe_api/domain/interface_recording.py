@@ -180,6 +180,7 @@ WAITING_STATUSES = (JobStatus.PENDING, JobStatus.SUBMITTED)
 class JobStateCounts:
     waiting: int
     running: int
+    # Creation time of the oldest waiting job not yet reported stuck (see count_job_states).
     oldest_waiting_created: datetime | None
     stuck_waiting: int
     stuck_running: int
@@ -206,6 +207,13 @@ def _stuck_running(cutoff: datetime):
     return and_(_running(), running_since < cutoff)
 
 
+def _waiting_unreported():
+    # A job already reported stuck may never finish (e.g. a PENDING orphan that is never
+    # polled); it stays in the stuck counts until someone clears it, but must not hold
+    # the oldest-waiting age up for good.
+    return and_(_waiting(), col(SpeechBatchJob.stuck_reported_at).is_(None))
+
+
 def _count(condition):
     return func.coalesce(func.sum(case((condition, 1), else_=0)), 0)
 
@@ -213,11 +221,19 @@ def _count(condition):
 def count_job_states(
     session: Session, *, waiting_cutoff: datetime, running_cutoff: datetime
 ) -> JobStateCounts:
-    """Database-wide waiting/running/stuck counts and the oldest waiting job, in one query."""
+    """Database-wide waiting/running/stuck counts and the oldest waiting job, in one query.
+
+    The waiting, running and stuck counts include every job in those states, including
+    jobs already reported stuck (they really are stuck until someone clears them). The
+    oldest waiting job excludes jobs already reported stuck (stuck_reported_at set): they
+    are covered by the stuck counts and ``job.stuck``, and one that can never finish
+    would otherwise keep the oldest-waiting age, and its early-warning alert, high for
+    good, hiding a real backlog behind it.
+    """
     stmt = select(
         _count(_waiting()),
         _count(_running()),
-        func.min(case((_waiting(), SpeechBatchJob.created_datetime), else_=None)),
+        func.min(case((_waiting_unreported(), SpeechBatchJob.created_datetime), else_=None)),
         _count(_stuck_waiting(waiting_cutoff)),
         _count(_stuck_running(running_cutoff)),
     ).where(col(SpeechBatchJob.status).in_([*WAITING_STATUSES, JobStatus.RUNNING]))

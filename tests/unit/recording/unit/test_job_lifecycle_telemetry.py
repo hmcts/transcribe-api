@@ -127,6 +127,33 @@ def test_oldest_waiting_age_is_zero_with_nothing_waiting(tel, engine):
     assert _value(tel, METRIC_JOBS_WAITING) == 0
 
 
+def test_job_reported_stuck_leaves_oldest_waiting_age_but_stays_stuck(tel, engine):
+    # A PENDING orphan (no batch job, never polled) that has already been reported stuck.
+    _add(engine, JobStatus.PENDING, timedelta(days=2), stuck_reported_at=datetime.now(UTC))
+    _add(engine, JobStatus.SUBMITTED, timedelta(minutes=5))
+    JobStateGauges(lambda: Session(engine)).register(get_meter())
+
+    assert 5 * 60 <= _value(tel, METRIC_OLDEST_WAITING_AGE) < 6 * 60
+    assert _value(tel, METRIC_JOBS_STUCK, **{"job.state": "waiting"}) == 1
+    assert _value(tel, METRIC_JOBS_WAITING) == 2
+
+
+def test_old_waiting_job_not_yet_reported_stuck_counts_towards_oldest_waiting_age(engine):
+    now = datetime.now(UTC)
+    _add(engine, JobStatus.PENDING, timedelta(hours=2))  # past the threshold, not yet reported
+    _add(engine, JobStatus.SUBMITTED, timedelta(days=1), stuck_reported_at=now)
+    with Session(engine) as session:
+        counts = count_job_states(
+            session,
+            waiting_cutoff=now - timedelta(minutes=30),
+            running_cutoff=now - timedelta(hours=3),
+        )
+    assert counts.oldest_waiting_created is not None
+    age = now - counts.oldest_waiting_created.replace(tzinfo=UTC)
+    assert timedelta(hours=2, minutes=-1) < age < timedelta(hours=2, minutes=1)
+    assert counts.waiting == 2 and counts.stuck_waiting == 2
+
+
 def test_running_jobs_are_stuck_by_time_since_processing_started(engine):
     now = datetime.now(UTC)
     # Created long ago, but Azure only started it 10 minutes ago: not stuck.

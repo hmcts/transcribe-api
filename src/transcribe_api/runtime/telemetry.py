@@ -108,7 +108,8 @@ POST_SPEECH_STAGES = (STAGE_RESULTS_RETRIEVAL, STAGE_POSTPROCESSING, STAGE_PERSI
 # A speaker-processing step failed and the transcript was saved with the previous
 # step's output (process_speakers never raises).
 EVENT_POSTPROCESS_DEGRADED = "transcript.postprocess_degraded"
-# A database or blob write after Azure Speech finished failed.
+# A database or blob write recording a job's state failed (after Azure Speech finished,
+# or the FAILED state of a submission: DIAAT-281).
 EVENT_STORAGE_FAILED = "job.storage_failed"
 EVENT_WEBHOOK_DELIVERED = "webhook.delivered"
 ATTR_SEGMENT_COUNT = "transcript.segment_count"

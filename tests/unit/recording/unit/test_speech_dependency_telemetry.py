@@ -22,7 +22,7 @@ import pytest
 from hmcts_otel import conventions as c
 from hmcts_otel import get_meter, journey
 from hmcts_otel.testing import TelemetryCapture, capture_telemetry
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from tenacity import Future, RetryError
 
 from transcribe_api.stt import job_telemetry, speech_telemetry, submission
@@ -48,7 +48,7 @@ from transcribe_api.stt.speech_telemetry import (
 )
 from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.domain.interface_recording import JobStateCounts
-from transcribe_api.domain.models_recording import BatchJobStatus
+from transcribe_api.domain.models_recording import BatchJobStatus, JobStatus
 from transcribe_api.runtime.telemetry import JOURNEY_JOB, configure_telemetry
 
 SPEECH_JOB_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
@@ -249,7 +249,7 @@ async def test_database_failure_after_azure_accepted_is_the_applications(tel, mo
         return _response(201, "POST", url, headers={"Location": SPEECH_URL})
 
     def save(_session, job):
-        if job.batch_job_id:
+        if job.status == JobStatus.SUBMITTED:  # FAILED is then stored
             raise OperationalError("update", {}, Exception("db down"))
         return job
 
@@ -259,6 +259,108 @@ async def test_database_failure_after_azure_accepted_is_the_applications(tel, mo
     assert finished[c.ERROR_CODE] == "job.submission_error"
     assert finished["hmcts.failure.source"] == "application"
     assert finished[c.DEPENDENCY_REF] == SPEECH_JOB_ID  # Azure has the job: findable there
+
+
+# DIAAT-281: job.finished only once the FAILED state is stored ---------------------------
+
+
+def _unstored_failed(saved: list):
+    """A save_job whose FAILED write fails; every write attempted is recorded."""
+    db_down = OperationalError("update", {}, Exception("db down"))
+
+    def save(_session, job):
+        saved.append(job.status)
+        if job.status == JobStatus.FAILED:
+            raise db_down
+        return job
+
+    return save, db_down
+
+
+def _stage_outcome(tel) -> dict:
+    """The speech_submission stage's end event (completed, failed or errored)."""
+    (ended,) = [
+        event
+        for event in tel.events()
+        if event[c.CUSTOM_EVENT_NAME].startswith("speech_submission.")
+        and event[c.CUSTOM_EVENT_NAME] != "speech_submission.started"
+    ]
+    return ended
+
+
+async def test_rejection_whose_failed_state_is_not_stored_does_not_finish_the_job(tel, mocker):
+    async def post(self, url, **_kwargs):
+        return _response(400, "POST", url, json={"code": "InvalidPayload"})
+
+    saved: list = []
+    save, db_down = _unstored_failed(saved)
+    with pytest.raises(OperationalError) as raised:
+        await _submit(mocker, post, save)
+
+    assert raised.value is db_down  # propagates to the caller exactly as before
+    assert isinstance(raised.value.__context__, BatchSubmissionError)
+    assert saved == [JobStatus.PENDING, JobStatus.FAILED]
+    assert tel.events("job.finished") == []
+    assert _points(tel, METRIC_JOBS_FINISHED) == []
+    (storage,) = tel.events("job.storage_failed")
+    assert storage["storage.operation"] == "job.mark_failed"
+    assert storage[c.ERROR_CODE] == "storage.db_unavailable"
+    assert storage["hmcts.failure.source"] == "application"
+    # The submission stage keeps Azure's rejection, not the write's failure.
+    ended = _stage_outcome(tel)
+    assert ended[c.OUTCOME] == "error"
+    assert ended[c.ERROR_CODE] == "speech.submission_rejected"
+
+
+async def test_accepted_job_whose_submitted_and_failed_saves_fail_does_not_finish(tel, mocker):
+    async def post(self, url, **_kwargs):
+        return _response(201, "POST", url, headers={"Location": SPEECH_URL})
+
+    saved: list = []
+    _save, db_down = _unstored_failed(saved)
+
+    def save(session, job):
+        if job.status == JobStatus.SUBMITTED:
+            saved.append(job.status)
+            raise IntegrityError("update", {}, Exception("conflict"))
+        return _save(session, job)
+
+    with pytest.raises(OperationalError) as raised:
+        await _submit(mocker, post, save)
+
+    assert raised.value is db_down
+    assert saved == [JobStatus.PENDING, JobStatus.SUBMITTED, JobStatus.FAILED]
+    assert tel.events("job.finished") == []
+    assert _points(tel, METRIC_JOBS_FINISHED) == []
+    (storage,) = tel.events("job.storage_failed")
+    assert storage["storage.operation"] == "job.mark_failed"
+    # The stage records the submission's own failure (the SUBMITTED write), not the
+    # FAILED write's.
+    ended = _stage_outcome(tel)
+    assert ended[c.OUTCOME] == "error"
+    assert ended[c.ERROR_CODE] == "unhandled.IntegrityError"
+
+
+async def test_rejection_whose_failed_state_is_stored_finishes_the_job_once(tel, mocker):
+    async def post(self, url, **_kwargs):
+        return _response(400, "POST", url, json={"code": "InvalidPayload"})
+
+    saved: list = []
+
+    def save(_session, job):
+        saved.append(job.status)
+        return job
+
+    with pytest.raises(BatchSubmissionError):
+        await _submit(mocker, post, save)
+
+    assert saved == [JobStatus.PENDING, JobStatus.FAILED]
+    (finished,) = tel.events("job.finished")
+    assert finished[c.OUTCOME] == "error"
+    assert finished[c.ERROR_CODE] == "speech.submission_rejected"
+    (counted,) = _points(tel, METRIC_JOBS_FINISHED)
+    assert counted["value"] == 1
+    assert tel.events("job.storage_failed") == []
 
 
 async def test_speech_timeouts_on_submission_are_the_dependencys(tel, mocker, no_backoff):
@@ -827,3 +929,32 @@ def test_blank_optional_settings_do_not_stop_the_service_starting(monkeypatch, b
     assert settings.SPEECH_CONCURRENT_JOBS_LIMIT is None
     assert settings.JOB_STUCK_WAITING_SECONDS == 30 * 60
     assert settings.JOB_STUCK_RUNNING_SECONDS == 3 * 60 * 60
+
+
+async def test_no_speech_token_finishes_the_job_only_once_failed_is_stored(tel, mocker):
+    """CNP: the workload identity got no Speech token. Like a rejection, the job is
+    finished (speech.auth_failed, our configuration) only once FAILED is stored."""
+    from transcribe_api.stt.speech_auth import SpeechAuthError
+
+    mocker.patch(
+        "transcribe_api.stt.batch_client.speech_auth_headers",
+        new=AsyncMock(side_effect=SpeechAuthError("no federated token")),
+    )
+    saved: list = []
+    save, db_down = _unstored_failed(saved)
+    with pytest.raises(OperationalError) as raised:
+        await _submit(mocker, save=save)
+    assert raised.value is db_down
+    assert saved == [JobStatus.PENDING, JobStatus.FAILED]
+    assert tel.events("job.finished") == []
+    assert _stage_outcome(tel)[c.ERROR_CODE] == "speech.auth_failed"
+
+    tel.clear()
+    stored: list = []
+    with pytest.raises(SpeechAuthError):
+        await _submit(mocker, save=lambda _s, job: stored.append(job) or job)
+    assert stored[-1].status == JobStatus.FAILED
+    assert stored[-1].idempotency_key is None  # never reached Speech: the key is released
+    (finished,) = tel.events("job.finished")
+    assert finished[c.OUTCOME] == "error" and finished[c.ERROR_CODE] == "speech.auth_failed"
+    assert finished["hmcts.failure.source"] == "application"

@@ -423,7 +423,7 @@ def db_failure_code(exc: BaseException) -> str:
 
 
 def record_storage_failure(operation: str, error_code: str, attributes: Mapping[str, object] | None = None) -> None:
-    """job.storage_failed: a database or blob write after Azure Speech finished failed."""
+    """job.storage_failed: a database or blob write recording a job's state failed."""
     record_event(
         EVENT_STORAGE_FAILED,
         {
@@ -760,7 +760,7 @@ class JobStateGauges:
             METRIC_OLDEST_WAITING_AGE,
             callbacks=[self._observations(self._oldest_waiting_age)],
             unit="s",
-            description="Age of the oldest waiting job (0 when none are waiting)",
+            description="Age of the oldest waiting job not yet reported stuck (0 when none are waiting)",
         )
         meter.create_observable_gauge(
             METRIC_JOBS_STUCK,
@@ -787,6 +787,12 @@ class JobStateGauges:
 
     @staticmethod
     def _oldest_waiting_age(counts: JobStateCounts) -> list[Observation]:
+        """Seconds since the oldest waiting job not yet reported stuck was created.
+
+        Jobs already reported stuck are left out: ``transcription.jobs.stuck`` and
+        ``job.stuck`` cover them, and one that never finishes would otherwise hold this
+        early-warning gauge high for good.
+        """
         age = seconds_between(counts.oldest_waiting_created, datetime.now(UTC))
         return [Observation(age or 0.0)]
 
