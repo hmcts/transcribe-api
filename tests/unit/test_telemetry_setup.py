@@ -76,7 +76,11 @@ def exported_logs(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         telemetry,
         "setup_telemetry",
-        lambda settings: setup_telemetry(settings, log_exporter=exporter, set_global_providers=False),
+        lambda settings: setup_telemetry(
+            settings.model_copy(update={"connection_string": None}),  # else the Azure exporter wins
+            log_exporter=exporter,
+            set_global_providers=False,
+        ),
     )
     try:
         yield exporter
