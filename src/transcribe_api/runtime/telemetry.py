@@ -42,6 +42,9 @@ JOURNEY_UPLOAD = "recording.upload"
 JOURNEY_JOB = "recording.job"
 
 _UPLOAD_ID = re.compile(r"^uploads/[^/]+/([0-9a-fA-F-]{36})-")
+# DIAAT-280: a recording upload's file check failed; emitted before the stage's
+# upload.failed, with the same error code.
+EVENT_UPLOAD_VALIDATION_FAILED = "upload.validation_failed"
 
 
 def register_minutes_schema() -> None:
