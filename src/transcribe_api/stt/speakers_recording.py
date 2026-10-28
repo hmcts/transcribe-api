@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import logging
 
+from hmcts_otel import record_event
+
 from transcribe_api.domain.models_recording import DialogueEntry, PhraseAlternatives
+from transcribe_api.runtime.telemetry import ATTR_POSTPROCESS_STEP, EVENT_POSTPROCESS_DEGRADED
 
 logger = logging.getLogger(__name__)
 
@@ -207,22 +210,30 @@ def process_speakers(entries: list[DialogueEntry]) -> list[DialogueEntry]:
     """Group, normalise, and label speaker entries.
 
     Each step degrades gracefully: on failure the previous step's output
-    is returned rather than raising.
+    is returned rather than raising. DIAAT-283: transcript.postprocess_degraded
+    names the step that failed.
     """
     try:
         grouped = group_dialogue_entries_by_speaker(entries)
     except Exception:
         logger.exception("Speaker grouping failed; returning original entries")
+        _degraded("speaker_grouping")
         return entries
 
     try:
         normalised = normalize_speaker_labels(grouped)
     except Exception:
         logger.exception("Speaker normalisation failed; returning grouped entries")
+        _degraded("speaker_normalisation")
         return grouped
 
     try:
         return add_speaker_labels(normalised)
     except Exception:
         logger.exception("Speaker labelling failed; returning normalised entries")
+        _degraded("speaker_labelling")
         return normalised
+
+
+def _degraded(step: str) -> None:
+    record_event(EVENT_POSTPROCESS_DEGRADED, {ATTR_POSTPROCESS_STEP: step})

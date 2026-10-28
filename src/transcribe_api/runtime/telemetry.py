@@ -47,6 +47,94 @@ _UPLOAD_ID = re.compile(r"^uploads/[^/]+/([0-9a-fA-F-]{36})-")
 EVENT_UPLOAD_VALIDATION_FAILED = "upload.validation_failed"
 
 
+# Recording job lifecycle, Azure Speech and post-processing (DIAAT-281/282/283): the
+# names the code emits. They are registered, with their descriptions, in the merged
+# schema (runtime/telemetry_schema.py).
+# DIAAT-281: job lifecycle. Each event carries the job journey (hmcts.journey.id = job
+# id, parent = upload id). States: job.created -> job.queued (Azure accepted) ->
+# speech.job_running (processing started) -> job.finished (completed or failed).
+EVENT_JOB_CREATED = "job.created"
+EVENT_JOB_QUEUED = "job.queued"
+EVENT_JOB_RUNNING = "speech.job_running"
+EVENT_JOB_FAILED_IN_SPEECH = "speech.job_failed"
+EVENT_TRANSCRIPT_AVAILABLE = "transcript.available"
+EVENT_JOB_FINISHED = "job.finished"
+EVENT_JOB_RETRIED = "job.retried"
+EVENT_JOB_POLL_FAILED = "job.poll_failed"
+EVENT_JOB_STUCK = "job.stuck"
+EVENT_WEBHOOK_DELIVERY_FAILED = "webhook.delivery_failed"
+ATTR_JOB_STATE = "job.state"
+ATTR_QUEUE_WAIT_MS = "job.queue_wait_ms"
+ATTR_PROCESSING_MS = "job.processing_ms"
+ATTR_RETRY_OPERATION = "job.retry.operation"
+ATTR_RETRY_ATTEMPT = "job.retry.attempt"
+# DIAAT-282: Azure Speech as an external dependency.
+# Where a failure came from: our code or database, the job queue, or Azure Speech.
+ATTR_FAILURE_SOURCE = "hmcts.failure.source"
+FAILURE_SOURCES = ("application", "queue", "dependency")
+# Azure's own error code (properties.error.code of a failed job, or the "code" of an
+# HTTP error body), e.g. InvalidData. Never Azure's free-text message.
+ATTR_SPEECH_ERROR_CODE = "speech.error_code"
+ATTR_HTTP_STATUS = "http.response.status_code"
+ATTR_RETRY_AFTER_S = "speech.retry_after_s"
+# Configuration reference: what the job was sent to and with.
+ATTR_SPEECH_REGION = "speech.region"
+ATTR_SPEECH_LOCALE = "speech.locale"
+ATTR_SPEECH_API_VERSION = "speech.api_version"
+ATTR_SPEECH_MODEL_REF = "speech.model_ref"
+ATTR_SPEECH_DIARIZATION = "speech.diarization"
+SPEECH_FAILURE_ATTRIBUTES = (
+    ATTR_FAILURE_SOURCE,
+    ATTR_SPEECH_ERROR_CODE,
+    ATTR_HTTP_STATUS,
+    ATTR_RETRY_AFTER_S,
+)
+SPEECH_CONFIG_ATTRIBUTES = (
+    ATTR_SPEECH_REGION,
+    ATTR_SPEECH_LOCALE,
+    ATTR_SPEECH_API_VERSION,
+    ATTR_SPEECH_MODEL_REF,
+    ATTR_SPEECH_DIARIZATION,
+)
+# DIAAT-283: after Azure Speech succeeds. Each step is a stage of the job journey
+# (<stage>.started / .completed / .failed, duration on hmcts.stage.duration), nested
+# in result_processing, which stays the umbrella for the whole attempt:
+#   results_retrieval -> transcript_postprocessing -> transcript_persistence
+#   -> transcript.available -> job.finished (-> webhook.delivered / delivery_failed)
+STAGE_RESULTS_RETRIEVAL = "results_retrieval"
+STAGE_POSTPROCESSING = "transcript_postprocessing"
+STAGE_PERSISTENCE = "transcript_persistence"
+POST_SPEECH_STAGES = (STAGE_RESULTS_RETRIEVAL, STAGE_POSTPROCESSING, STAGE_PERSISTENCE)
+# A speaker-processing step failed and the transcript was saved with the previous
+# step's output (process_speakers never raises).
+EVENT_POSTPROCESS_DEGRADED = "transcript.postprocess_degraded"
+# A database or blob write recording a job's state failed (after Azure Speech finished,
+# or the FAILED state of a submission: DIAAT-281).
+EVENT_STORAGE_FAILED = "job.storage_failed"
+EVENT_WEBHOOK_DELIVERED = "webhook.delivered"
+ATTR_SEGMENT_COUNT = "transcript.segment_count"
+ATTR_SPEAKER_COUNT = "transcript.speaker_count"
+ATTR_POSTPROCESS_STEP = "transcript.postprocess_step"
+POSTPROCESS_STEPS = ("speaker_grouping", "speaker_normalisation", "speaker_labelling")
+ATTR_STORAGE_OPERATION = "storage.operation"
+STORAGE_OPERATIONS = (
+    "transcript.save",
+    "job.mark_failed",
+    "job.mark_needs_cleanup",
+    "blob.mark_failed",
+)
+ATTR_WEBHOOK_NOTIFICATION = "webhook.notification"
+WEBHOOK_NOTIFICATIONS = ("succeeded", "failed")
+JOB_STATES = ("waiting", "running")
+RETRY_OPERATIONS = (
+    "speech.submit",
+    "speech.status",
+    "speech.results",
+    "speech.delete",
+    "webhook.deliver",
+)
+
+
 def register_minutes_schema() -> None:
     """Register ``minutes.template``: now part of the merged schema. Idempotent."""
     register_schema()

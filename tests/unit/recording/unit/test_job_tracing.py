@@ -133,6 +133,7 @@ async def test_submission_stores_trace_context_and_relates_the_speech_job(tel, m
         "job.created",
         "speech_submission.started",
         "speech_submission.completed",
+        "job.queued",
     ]
     done = tel.events("speech_submission.completed")[0]
     assert done[c.DEPENDENCY_REF] == SPEECH_JOB_ID
@@ -199,7 +200,15 @@ async def test_whole_lifecycle_is_one_query_and_linked_to_the_request(tel, mocke
         "job.created",
         "speech_submission.started",
         "speech_submission.completed",
+        "job.queued",
         "result_processing.started",
+        # DIAAT-283: each step after Azure Speech succeeded is its own stage.
+        "results_retrieval.started",
+        "results_retrieval.completed",
+        "transcript_postprocessing.started",
+        "transcript_postprocessing.completed",
+        "transcript_persistence.started",
+        "transcript_persistence.completed",
         "transcript.available",
         "job.finished",
         "result_processing.completed",

@@ -1,6 +1,6 @@
 """Unit tests for the batch submission pipeline (stt/submission.py)."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -25,7 +25,7 @@ async def test_speech_credential_failure_marks_the_job_failed_with_a_clear_messa
         patch("transcribe_api.stt.submission.save_job", side_effect=fake_save),
         pytest.raises(SpeechAuthError),
     ):
-        await submit_and_queue_batch_job(session=None, audio_url="https://audio")
+        await submit_and_queue_batch_job(session=MagicMock(), audio_url="https://audio")
 
     status, message = saved[-1]
     assert status == JobStatus.FAILED
@@ -64,7 +64,7 @@ async def test_speech_rejection_releases_the_idempotency_key_and_keeps_the_blob(
         pytest.raises(type(exc)),
     ):
         await submit_and_queue_batch_job(
-            session=None,
+            session=MagicMock(),
             audio_url="https://audio",
             idempotency_key="retry-me",
             audio_blob_path="uploads/u/audio.wav",
@@ -88,6 +88,6 @@ async def test_unexpected_submission_error_keeps_the_idempotency_key():
         patch("transcribe_api.stt.submission.submit_batch_job", side_effect=RuntimeError("boom")),
         pytest.raises(RuntimeError),
     ):
-        await submit_and_queue_batch_job(session=None, audio_url="https://audio", idempotency_key="k")
+        await submit_and_queue_batch_job(session=MagicMock(), audio_url="https://audio", idempotency_key="k")
 
     assert saved[-1][:2] == (JobStatus.FAILED, "k")

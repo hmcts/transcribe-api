@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,6 +24,16 @@ class Settings(BaseSettings):
     AZURE_SPEECH_KEY: str = ""
     AZURE_SPEECH_ENDPOINT: str = ""
     AZURE_SPEECH_RESOURCE_ID: str | None = None
+    # DIAAT-282, telemetry only. The Speech resource's Azure region (e.g. uksouth),
+    # recorded on job events. Needed because a custom-subdomain endpoint
+    # (<name>.cognitiveservices.azure.com) does not name its region; a regional
+    # endpoint (<region>.api.cognitive.microsoft.com) does, and is used when unset.
+    AZURE_SPEECH_REGION: str | None = None
+    # DIAAT-282, telemetry only. The number of jobs Azure Speech may run at once for
+    # this resource, if PlatOps has confirmed one. When set, the
+    # transcription.speech.concurrency.utilisation gauge reports running jobs / limit.
+    # Unset (the default): no utilisation gauge. Nothing is throttled or queued by it.
+    SPEECH_CONCURRENT_JOBS_LIMIT: int | None = None
 
     # Azure Storage
     AZURE_STORAGE_ACCOUNT_NAME: str = ""
@@ -47,6 +57,12 @@ class Settings(BaseSettings):
     # Polling
     BATCH_POLL_INTERVAL_SECONDS: int = 30
     BATCH_TRANSCRIPTION_THRESHOLD_HOURS: float = 2.0
+    # DIAAT-281: a job is reported as stuck (job.stuck event, transcription.jobs.stuck
+    # gauge) once it has waited longer than this since it was created, or run longer
+    # than this since Azure Speech started processing it. Observation only: nothing
+    # is retried or failed automatically.
+    JOB_STUCK_WAITING_SECONDS: int = 30 * 60
+    JOB_STUCK_RUNNING_SECONDS: int = 3 * 60 * 60
 
     # Azure AD / JWT authentication
     AZURE_AD_CLIENT_ID: str = ""
@@ -96,6 +112,37 @@ class Settings(BaseSettings):
     def validate_threshold(cls, v: float) -> float:
         if v <= 0:
             raise ValueError("BATCH_TRANSCRIPTION_THRESHOLD_HOURS must be greater than 0")
+        return v
+
+    @field_validator("JOB_STUCK_WAITING_SECONDS", "JOB_STUCK_RUNNING_SECONDS", mode="before")
+    @classmethod
+    def blank_stuck_threshold_is_default(cls, v: object, info: ValidationInfo) -> object:
+        # An env var set but empty (e.g. by a deployment template) means "use the default",
+        # not an int parsing error that stops the service starting.
+        if isinstance(v, str) and not v.strip():
+            return cls.model_fields[info.field_name].default
+        return v
+
+    @field_validator("JOB_STUCK_WAITING_SECONDS", "JOB_STUCK_RUNNING_SECONDS")
+    @classmethod
+    def validate_stuck_threshold(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("Stuck-job thresholds must be greater than 0 seconds")
+        return v
+
+    @field_validator("SPEECH_CONCURRENT_JOBS_LIMIT", mode="before")
+    @classmethod
+    def blank_concurrent_jobs_limit_is_unset(cls, v: object) -> object:
+        # An env var set but empty means unset, not an int parsing error at start-up.
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+    @field_validator("SPEECH_CONCURRENT_JOBS_LIMIT")
+    @classmethod
+    def validate_concurrent_jobs_limit(cls, v: int | None) -> int | None:
+        if v is not None and v <= 0:
+            raise ValueError("SPEECH_CONCURRENT_JOBS_LIMIT must be greater than 0")
         return v
 
     @field_validator("LOW_CONFIDENCE_THRESHOLD")

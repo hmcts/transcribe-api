@@ -23,7 +23,7 @@ for f in cors_utils exception_handlers middleware log_sanitization version markd
 done
 
 # ---------- stt: capability A + C ----------
-for f in batch_client submission polling_service preprocessing accuracy wer local_storage; do
+for f in batch_client submission polling_service preprocessing accuracy wer local_storage job_telemetry speech_telemetry; do
   cp "$B/audio/$f.py" "$T/stt/$f.py"
 done
 cp "$B/audio/speakers.py"                        "$T/stt/speakers_recording.py"
