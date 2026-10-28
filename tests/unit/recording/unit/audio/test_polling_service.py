@@ -336,7 +336,7 @@ class TestProcessJob:
         ):
             await service._process_job(job)
 
-        mock_failed.assert_awaited_once_with(job, status_data)
+        mock_failed.assert_awaited_once_with(job, status_data, {"hmcts.dependency.ref": "abc"})
 
 
 class TestHandleSucceeded:

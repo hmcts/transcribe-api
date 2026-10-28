@@ -13,7 +13,7 @@ from transcribe_api.stt.batch_client import BatchSubmissionError, submit_batch_j
 from transcribe_api.stt.speech_auth import SpeechAuthError
 from transcribe_api.domain.interface_recording import save_job
 from transcribe_api.domain.models_recording import BatchJobStatus, JobStatus, SpeechBatchJob
-from transcribe_api.runtime.telemetry import JOURNEY_JOB, upload_id_from_blob
+from transcribe_api.runtime.telemetry import JOURNEY_JOB, batch_job_id_from_url, upload_id_from_blob
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +103,7 @@ async def _submit_to_speech(
             enable_diarization=enable_diarization,
         )
 
-        batch_job_id = job_url.rstrip("/").split("/")[-1]
+        batch_job_id = batch_job_id_from_url(job_url)
         # Relates our job ID to the Azure Speech job ID in every later query.
         submission.set_dependency_ref(batch_job_id)
 

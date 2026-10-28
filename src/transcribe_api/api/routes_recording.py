@@ -615,8 +615,8 @@ async def _upload_audio(
         wav_path = Path(tmpdir) / "output.wav"
         try:
             await _save_upload_capped(file, _MAX_UPLOAD_BYTES, input_path)
-        except HTTPException as exc:
-            upload_stage.fail("upload.too_large" if exc.status_code == 413 else "upload.read_failed")
+        except HTTPException:
+            upload_stage.fail("upload.too_large")  # the only HTTPException it raises (413)
             raise
 
         # Transcode every accepted upload to 16 kHz mono PCM WAV — the format

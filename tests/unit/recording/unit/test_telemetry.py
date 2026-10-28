@@ -52,4 +52,3 @@ def test_upload_exports_no_case_reference_or_email(mocker, monkeypatch):
         (server,) = [s for s in telemetry.finished_spans() if s.kind.name == "SERVER"]
         # Route template, not the concrete path: names and IDs in paths are not exported.
         assert server.attributes.get("http.route") == "/api/v1/uploads"
-    settings_dictation.get_settings.cache_clear()

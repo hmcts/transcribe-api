@@ -216,11 +216,13 @@ async def test_whole_lifecycle_is_one_query_and_linked_to_the_request(tel, mocke
 async def test_azure_failure_identifies_the_component_without_its_message(tel):
     pending = _pending(uuid4(), None)
     service = _service()
-    service._handle_failed = AsyncMock()
+    service._dispatch_failure = AsyncMock()
     status = {"status": "Failed", "properties": {"error": {"message": "decode failed: " + SECRET}}}
-    with patch(
-        "transcribe_api.stt.polling_service.get_batch_job_status",
-        new=AsyncMock(return_value=status),
+    base = "transcribe_api.stt.polling_service"
+    with (
+        patch(f"{base}.get_batch_job_status", new=AsyncMock(return_value=status)),
+        patch(f"{base}.AsyncAzureBlobManager"),
+        patch(f"{base}.delete_batch_job", new=AsyncMock()),
     ):
         await service._process_job(pending)
 
@@ -295,3 +297,39 @@ def test_missing_ffmpeg_on_upload_is_an_error(tel, mocker):
     assert response.status_code == 503
     (failed,) = tel.events("upload.failed")
     assert failed[c.OUTCOME] == "error" and failed[c.ERROR_CODE] == "upload.transcoder_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("status", "results_error", "code"),
+    [
+        ("Failed", None, "speech.job_failed"),
+        ("Succeeded", "unavailable", "speech.results_unavailable"),
+        ("Succeeded", "error", "speech.results_error"),
+    ],
+)
+async def test_a_job_is_finished_once_its_failed_state_is_stored(tel, status, results_error, code):
+    """A failed write leaves the job to the next poll, which finishes it: once."""
+    from transcribe_api.stt.batch_client import BatchResultError
+
+    pending = _pending(uuid4(), capture_trace_context())
+    service = _service()
+    service._dispatch_failure = AsyncMock()
+    service._record_error = MagicMock(side_effect=[RuntimeError("database down"), None])
+    error = BatchResultError("x") if results_error == "unavailable" else RuntimeError("x")
+    base = "transcribe_api.stt.polling_service"
+    with (
+        patch(f"{base}.get_batch_job_status", new=AsyncMock(return_value={"status": status})),
+        patch(f"{base}.get_batch_results", new=AsyncMock(side_effect=error)),
+        patch(f"{base}.AsyncAzureBlobManager"),
+        patch(f"{base}.delete_batch_job", new=AsyncMock()),
+    ):
+        await service._process_job(pending)
+        assert tel.events("job.finished") == []
+        assert tel.events("speech.job_failed") == []
+        service._dispatch_failure.assert_not_called()
+
+        await service._process_job(pending)
+
+    (finished,) = tel.events("job.finished")
+    assert finished[c.OUTCOME] == "error" and finished[c.ERROR_CODE] == code
+    assert len(tel.events("speech.job_failed")) == (1 if status == "Failed" else 0)
