@@ -407,6 +407,7 @@ class TestSaveTranscription:
 
         mock_session = MagicMock()
         mock_session.merge.return_value = merged
+        mock_session.exec.return_value.first.return_value = None  # a new transcription (SEC-1 check)
         mock_ctx = MagicMock()
         mock_ctx.__enter__ = MagicMock(return_value=mock_session)
         mock_ctx.__exit__ = MagicMock(return_value=False)

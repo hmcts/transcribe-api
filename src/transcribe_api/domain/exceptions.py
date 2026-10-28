@@ -24,3 +24,16 @@ class UserHasTranscriptionsError(Exception):
             f"Cannot delete user {user_id}: they own {count} transcription(s). "
             "Delete or reassign those transcriptions before removing the user."
         )
+
+
+class OwnershipConflictError(Exception):
+    """A save would move an existing record to a different owner (SEC-1).
+
+    Saves use ``session.merge``, which updates whatever row has the given ID. IDs
+    can come from the client (request bodies, upload file names), so a save must
+    never re-parent an existing row. The message carries no IDs.
+    """
+
+    def __init__(self, record_type: str) -> None:
+        self.record_type = record_type
+        super().__init__(f"{record_type} belongs to a different owner")

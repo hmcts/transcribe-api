@@ -40,6 +40,7 @@ def _patch_external(monkeypatch):
     """Patch all external dependencies for every test in this module."""
     monkeypatch.setattr("transcribe_api.stt.pipeline.sentry_sdk", MagicMock())
     monkeypatch.setattr("transcribe_api.stt.pipeline.save_transcription", MagicMock())
+    monkeypatch.setattr("transcribe_api.stt.pipeline.load_or_create_transcription", MagicMock())
     monkeypatch.setattr("transcribe_api.stt.pipeline.save_transcription_job", MagicMock())
     monkeypatch.setattr("transcribe_api.stt.pipeline.generate_meeting_title", AsyncMock(return_value="Test Title"))
     monkeypatch.setattr("transcribe_api.stt.pipeline.generate_llm_output_task", AsyncMock())

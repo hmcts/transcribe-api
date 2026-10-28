@@ -17,6 +17,7 @@ from transcribe_api.domain.blob_ownership import (
     blob_owner_segment,
     resolve_blob_owner,
 )
+from transcribe_api.domain.exceptions import OwnershipConflictError
 from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager, _redact_blob_path
 from transcribe_api.stt.pipeline import transcribe_and_generate_llm_output
 from transcribe_api.stt.utils import extract_transcription_id_from_blob_path
@@ -282,6 +283,14 @@ class TranscriptionPollingService:
 
             logger.info("Successfully processed transcription id=%s user_id=%s", transcription_id, user.id)
 
+        except OwnershipConflictError:
+            # SEC-1: the file name names another user's transcription. Never retried.
+            logger.warning(
+                "UNAUTHORISED_ACCESS_ATTEMPT reason=upload_names_other_users_transcription blob=%s",
+                _redact_blob_path(blob_path),
+            )
+            await self._mark_blob_permanently_failed(blob_path, {"last_error": "OwnershipConflictError"})
+            return False
         except Exception as e:
             logger.error("Error processing audio file %s: %s", _redact_blob_path(blob_path), e)
             await self._mark_blob_with_error(blob_path, str(e))

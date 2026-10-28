@@ -5,7 +5,7 @@ import threading
 import urllib.parse
 import uuid
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from uuid import UUID
 
 import httpx
@@ -26,6 +26,7 @@ from transcribe_api.domain.blob_ownership import (
     blob_owner_segment,
     segment_belongs_to_user,
 )
+from transcribe_api.domain.exceptions import OwnershipConflictError
 from transcribe_api.domain.interface_dictation import (
     add_tag_to_transcription,
     delete_live_draft,
@@ -37,6 +38,7 @@ from transcribe_api.domain.interface_dictation import (
     get_tags_for_transcription,
     get_transcription_by_id,
     get_transcription_jobs,
+    get_transcription_owner,
     get_user_by_id,
     mark_user_onboarding_complete,
     remove_tag_from_transcription,
@@ -324,6 +326,31 @@ async def get_upload_url(
     )
 
 
+async def _reject_upload_naming_another_users_transcription(key: str, current_user: User) -> None:
+    """SEC-1: the file name's UUID becomes the transcription ID, and the key is client
+    input. Refuse a key naming another user's transcription before storing anything.
+
+    Early rejection only: the authoritative check is in the save itself
+    (OwnershipConflictError), so a failed lookup here does not block the upload.
+    """
+    stem = PurePosixPath(key).stem
+    try:
+        transcription_id = UUID(stem)
+    except ValueError:
+        return  # not a UUID name: a new ID is generated on save
+    try:
+        owner = await asyncio.to_thread(get_transcription_owner, transcription_id)
+    except Exception as exc:
+        logger.warning("Upload key owner lookup failed (%s); relying on the save check", type(exc).__name__)
+        return
+    if owner is not None and owner != current_user.id:
+        logger.warning(
+            "UNAUTHORISED_ACCESS_ATTEMPT user_id=%s reason=upload_key_names_other_users_transcription",
+            _sanitize_for_log(current_user.id),
+        )
+        raise HTTPException(status_code=403, detail="Access denied")
+
+
 @router.put("/upload-audio")
 async def upload_audio_proxy(
     key: str,
@@ -339,6 +366,7 @@ async def upload_audio_proxy(
         raise HTTPException(status_code=400, detail="Invalid upload key")
 
     _validate_blob_ownership(key, current_user, request)
+    await _reject_upload_naming_another_users_transcription(key, current_user)
 
     body = await request.body()
     async with AsyncAzureBlobManager() as blob_manager:
@@ -529,7 +557,11 @@ async def save_transcription_route(
     """Save or update a transcription."""
     logger.info("saving transcription for user %s", _sanitize_for_log(current_user.id))
 
-    return save_transcription(transcription_data, current_user.id)
+    try:
+        return save_transcription(transcription_data, current_user.id)
+    except OwnershipConflictError:
+        # Someone else's transcription: same answer as for an unknown ID.
+        raise HTTPException(status_code=404, detail="Transcription not found") from None
 
 
 @router.get("/transcriptions/{transcription_id}/document-download")
@@ -725,7 +757,11 @@ async def save_minute_version_route(
     minute_data.transcription_id = transcription_id
 
     # Save the minute version first
-    saved_minute = save_minute_version(minute_data)
+    try:
+        saved_minute = save_minute_version(minute_data)
+    except OwnershipConflictError:
+        # The ID belongs to a minute version of another transcription.
+        raise HTTPException(status_code=404, detail="Minute version not found") from None
 
     # Then handle the additional logging if needed
     old_html_content = get_minute_version_by_id(minute_data.id, transcription_id).html_content
@@ -754,7 +790,12 @@ async def save_transcription_job_route(
     if not transcription:
         raise HTTPException(status_code=404, detail="Transcription not found")
 
-    job = save_transcription_job(job=job_data)
+    # The job belongs to the transcription in the path (checked above), whatever the body says.
+    job_data.transcription_id = transcription_id
+    try:
+        job = save_transcription_job(job=job_data)
+    except OwnershipConflictError:
+        raise HTTPException(status_code=404, detail="Transcription job not found") from None
     logger.info(
         "TRANSCRIPT_JOB_SUBMITTED transcription_id=%s job_id=%s user_id=%s",
         _sanitize_for_log(transcription_id),
