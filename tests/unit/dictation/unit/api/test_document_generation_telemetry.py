@@ -13,6 +13,7 @@ available to the user.
 import re
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from hmcts_otel import conventions as c
 from hmcts_otel.testing import capture_telemetry
 
@@ -36,10 +37,10 @@ def _submit(client, session=SESSION):
     return client.post("/api/live-transcription/submission", json=_MINIMAL_BODY, headers=headers)
 
 
-def _failing_document_store(mocker):
+def _failing_document_store(mocker, failure=False):
     blob_manager = AsyncMock()
-    # The submission JSON is stored; the generated document is not.
-    blob_manager.create_blob_from_file = AsyncMock(side_effect=[True, False])
+    # The submission JSON is stored; the generated document is not (False, or raised).
+    blob_manager.create_blob_from_file = AsyncMock(side_effect=[True, failure])
     blob_manager.set_blob_metadata = AsyncMock(return_value=True)
     context = MagicMock()
     context.__aenter__ = AsyncMock(return_value=blob_manager)
@@ -51,6 +52,9 @@ def _failing_document_store(mocker):
 
 
 def test_template_version_tracks_the_renderer_and_the_content_used(monkeypatch):
+    # Restored afterwards: the digest is process-wide.
+    monkeypatch.setattr(content_loader, "_last_used_digest", None)
+    monkeypatch.setattr(content_loader, "_digested", None)
     content_loader._used({"intro": "one"})
     first = versioning.template_version()
     assert re.fullmatch(r"[0-9a-f]{12}", first)
@@ -79,6 +83,26 @@ def test_the_renderer_fingerprint_covers_the_structured_renderer():
     assert used_lib_modules  # the renderer builds documents with lib modules
     assert used_lib_modules <= lib_files  # and every one of them is fingerprinted
     assert all(asset.exists() for asset in versioning._ASSETS)
+
+
+def test_no_source_files_means_an_unknown_version(monkeypatch, tmp_path):
+    """A bytecode-only install: the crests alone would give a version that never changes."""
+    monkeypatch.setattr(versioning, "_PACKAGE_DIR", tmp_path)
+    monkeypatch.setattr(versioning, "_LIB_DIR", tmp_path)
+    assert versioning._compute_renderer_digest() is None
+
+
+def test_the_cached_content_is_hashed_once_per_load(monkeypatch):
+    monkeypatch.setattr(content_loader, "_last_used_digest", None)
+    monkeypatch.setattr(content_loader, "_digested", None)
+    dumps = MagicMock(wraps=content_loader.json.dumps)
+    monkeypatch.setattr(content_loader.json, "dumps", dumps)
+    content = {"intro": "one"}
+    for _ in range(3):  # cache hits hand out the same object
+        content_loader._used(content)
+    assert dumps.call_count == 1
+    content_loader._used({"intro": "two"})  # reloaded after an edit
+    assert dumps.call_count == 2
 
 
 def test_a_failed_fingerprint_is_retried_not_cached(monkeypatch):
@@ -128,10 +152,11 @@ def test_a_rendering_failure_says_where_and_is_traceable(client, as_user, mocker
             telemetry.assert_no_prohibited_content(case_detail)
 
 
-def test_a_document_that_cannot_be_stored_is_a_failed_generation(client, as_user, mocker):
+@pytest.mark.parametrize("failure", [False, ConnectionError("storage down")])
+def test_a_document_that_cannot_be_stored_is_a_failed_generation(client, as_user, mocker, failure):
     as_user(_make_user(roles=["Judge"]))
     _patch_submission_deps(mocker)
-    _failing_document_store(mocker)
+    _failing_document_store(mocker, failure)
     with capture_telemetry() as telemetry:
         assert _submit(client).status_code == 500
         assert telemetry.events("document_generation.completed") == []

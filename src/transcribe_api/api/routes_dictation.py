@@ -1170,7 +1170,7 @@ async def _save_live_transcription_submission(  # noqa: PLR0915
     submission_stage: StageHandle,
 ) -> LiveTranscriptionSubmissionResponse:
     # DIAAT-279: on the document events; the version is added once rendering has
-    # loaded the document content (see app/documents/versioning.py).
+    # loaded the document content (see documents/versioning.py).
     document_attributes: dict[str, str] = {"document.template": DECISION_TEMPLATE}
     blob_filename = f"live-transcription-submission-{submission_id}.json"
     blob_path = get_file_blob_path(str(current_user.azure_user_id), blob_filename)
@@ -1251,7 +1251,12 @@ async def _save_live_transcription_submission(  # noqa: PLR0915
                 doc_blob_filename = f"hearing-document-{submission_id}.docx"
                 doc_blob_path = get_file_blob_path(str(current_user.azure_user_id), doc_blob_filename)
 
-                doc_upload_success = await blob_manager.create_blob_from_file(temp_doc_path, doc_blob_path)
+                try:
+                    doc_upload_success = await blob_manager.create_blob_from_file(temp_doc_path, doc_blob_path)
+                except Exception:  # raised rather than returned False: still not stored
+                    document_stage.error("document.store_failed")
+                    submission_stage.error("document.store_failed")
+                    raise
                 if not doc_upload_success:
                     # Generated but not stored: distinct from the submission JSON's
                     # storage.write_failed, on both the document and submission stages.

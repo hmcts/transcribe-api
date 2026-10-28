@@ -40,9 +40,15 @@ _ASSETS = (
 
 
 def _compute_renderer_digest() -> str | None:
+    sources = [*sorted(_PACKAGE_DIR.glob("*.py")), *sorted(_LIB_DIR.glob("*.py"))]
+    if not sources:
+        # No source files (e.g. a bytecode-only install): a digest of the crests alone
+        # would look valid but never change with the renderer. Report "unknown".
+        logger.warning("Document renderer version could not be computed (no source files)")
+        return None
     try:
         digest = hashlib.sha256()
-        for path in [*sorted(_PACKAGE_DIR.glob("*.py")), *sorted(_LIB_DIR.glob("*.py")), *_ASSETS]:
+        for path in [*sources, *_ASSETS]:
             digest.update(str(path.relative_to(_APP_DIR)).encode())
             digest.update(path.read_bytes())
         return digest.hexdigest()

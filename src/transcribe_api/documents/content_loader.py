@@ -89,15 +89,21 @@ def _load_from_file() -> dict[str, Any]:
 
 _cache: dict[str, Any] = {"content": None, "updated_at": None}
 _last_used_digest: str | None = None
+# The content object last digested: the cached copy is handed out on every call, so it
+# is hashed once per load, not on every cache hit.
+_digested: dict[str, Any] | None = None
 
 
 def _used(content: dict[str, Any]) -> dict[str, Any]:
     """Remember a fingerprint of the content handed to the renderer (DIAAT-279)."""
-    global _last_used_digest  # noqa: PLW0603 - one value per process, like _cache
+    global _last_used_digest, _digested  # noqa: PLW0603 - one value per process, like _cache
+    if content is _digested:
+        return content
     try:
         _last_used_digest = hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
     except (TypeError, ValueError):
         _last_used_digest = None
+    _digested = content
     return content
 
 
