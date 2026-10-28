@@ -90,8 +90,16 @@ def record_ownership_violation(
 
 
 def resource_type_of(model_name: str) -> str:
-    """The resource type for a dictation model name (``OwnershipConflictError.record_type``)."""
-    return _MODEL_RESOURCE_TYPES.get(model_name, TRANSCRIPTION)
+    """The resource type for a dictation model name (``OwnershipConflictError.record_type``).
+
+    An unmapped model is reported as a transcription, and logged, so a new SEC-1 guard
+    without a resource type shows up rather than being silently misreported.
+    """
+    resource_type = _MODEL_RESOURCE_TYPES.get(model_name)
+    if resource_type is None:
+        logger.warning("No security resource type for model %s; reported as transcription", model_name)
+        return TRANSCRIPTION
+    return resource_type
 
 
 def owner_matches(owner_id: object, user_id: object, *, resource_type: str, action: str = READ) -> bool:

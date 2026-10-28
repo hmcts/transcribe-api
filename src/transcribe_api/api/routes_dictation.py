@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import tempfile
 import threading
 import urllib.parse
@@ -186,17 +187,17 @@ async def dependency_health_check():
 
 
 # The controlled alert test may run only here, and only with
-# SECURITY_ALERT_TEST_TRIGGER_ENABLED: never in a deployed CNP environment (aat,
-# perftest, ithc, demo, prod) unless this list is changed on purpose.
-SECURITY_ALERT_TEST_ENVIRONMENTS = frozenset({"local", "dev", "test"})
+# SECURITY_ALERT_TEST_TRIGGER_ENABLED: never in a deployed CNP environment (preview and
+# aat, perftest, ithc, demo, prod) unless this list is changed on purpose.
+SECURITY_ALERT_TEST_ENVIRONMENTS = frozenset({"local", "test"})
 
 
 def security_alert_test_allowed() -> bool:
-    settings = get_recording_settings()
-    return (
-        settings.SECURITY_ALERT_TEST_TRIGGER_ENABLED
-        and settings.ENVIRONMENT.strip().lower() in SECURITY_ALERT_TEST_ENVIRONMENTS
-    )
+    """Fail closed: ENVIRONMENT must be set explicitly to an allowed value. The
+    settings default ("local") does not count, so a pod whose ENVIRONMENT is missing
+    or blank cannot run the test whatever the flag says."""
+    environment = os.environ.get("ENVIRONMENT", "").strip().lower()
+    return get_recording_settings().SECURITY_ALERT_TEST_TRIGGER_ENABLED and environment in SECURITY_ALERT_TEST_ENVIRONMENTS
 
 
 @router.post("/security/alert-test", status_code=202)

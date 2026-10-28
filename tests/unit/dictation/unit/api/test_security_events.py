@@ -7,6 +7,7 @@ same 404 as for an unknown ID.
 """
 
 import logging
+import os
 import uuid
 from unittest.mock import MagicMock
 
@@ -315,9 +316,13 @@ def _admin(as_user):
     return user
 
 
-def _settings(mocker, *, enabled, environment="dev"):
-    settings = MagicMock(SECURITY_ALERT_TEST_TRIGGER_ENABLED=enabled, ENVIRONMENT=environment)
+def _settings(mocker, *, enabled, environment: str | None = "test"):
+    settings = MagicMock(SECURITY_ALERT_TEST_TRIGGER_ENABLED=enabled)
     mocker.patch("transcribe_api.api.routes_dictation.get_recording_settings", return_value=settings)
+    # The guard reads ENVIRONMENT from the process, not the settings default.
+    mocker.patch.dict("os.environ", {} if environment is None else {"ENVIRONMENT": environment})
+    if environment is None:
+        os.environ.pop("ENVIRONMENT", None)
 
 
 def test_the_test_event_is_off_by_default(monkeypatch):
@@ -331,7 +336,10 @@ def test_the_test_event_is_off_by_default(monkeypatch):
 @pytest.mark.parametrize(
     ("enabled", "environment"),
     [
-        (False, "dev"),
+        (False, "test"),
+        (True, None),  # unset: fail closed, whatever the settings default says
+        (True, "dev"),  # no CNP environment is called dev
+        (True, "preview"),
         (True, "aat"),  # CNP's deployed environments are not on the allowlist
         (True, "perftest"),
         (True, "ithc"),
