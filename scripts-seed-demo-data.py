@@ -99,7 +99,7 @@ def _existing_audio_covers_duration() -> bool:
 def _ensure_seed_audio() -> None:
     """Generate the shared seed source file if it's missing or too short.
 
-    Gitignored rather than committed (scripts-demo-seed-audio.wav would be a
+    Gitignored rather than committed (scripts-seed-demo-audio.wav would be a
     generated binary blob in version control for no benefit — ffmpeg is
     already a required local-dev dependency per the README, so regenerating
     it here is simpler than asking a developer to run this by hand). Also

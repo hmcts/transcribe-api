@@ -704,6 +704,37 @@ class TestMockSpeechBackend:
         mock_client.get.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_results_of_a_real_job_url_still_come_from_azure(self):
+        from transcribe_api.stt.batch_client import get_batch_results
+
+        files_data = {"values": [{"kind": "Transcription", "links": {"contentUrl": "https://results-url"}}]}
+        result_data = {
+            "recognizedPhrases": [
+                {
+                    "offsetInTicks": 0,
+                    "durationInTicks": 10_000_000,
+                    "speaker": 3,
+                    "nBest": [{"display": "Real Azure text", "words": []}],
+                }
+            ]
+        }
+
+        def make_response_for(url, **kwargs):
+            if "files" in url:
+                return _make_response(body=files_data)
+            return _make_response(body=result_data)
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_client.get = AsyncMock(side_effect=make_response_for)
+
+            entries = await get_batch_results("https://eastus.cognitiveservices.azure.com/real-job")
+
+        assert [e.text for e in entries] == ["Real Azure text"]
+
+    @pytest.mark.asyncio
     async def test_delete_of_a_real_job_url_still_calls_azure(self):
         from transcribe_api.stt.batch_client import delete_batch_job
 
