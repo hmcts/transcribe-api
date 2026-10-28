@@ -69,6 +69,47 @@ Uploads are converted with `ffmpeg` and probed with `ffprobe`, which the image
 provides (Dockerfile). Install both to exercise uploads locally; deployed pods
 refuse to start without them.
 
+## Testing the recording flow locally without Azure
+
+The recording flow (`/api/v1/*`) can run end to end — upload, submit, poll,
+review, correct, accuracy/WER — with no Azure Speech resource and no real
+Azure Blob Storage at all. Add to `.env` (see `.env.example`):
+
+```bash
+AUDIO_STORAGE_BACKEND=local      # writes uploads to disk instead of Azure Blob
+LOCAL_AUDIO_BASE_URL=http://127.0.0.1:8000
+SPEECH_BACKEND=mock              # skips every Azure Speech Batch call
+RUN_WORKERS=true                 # so this one process also runs the poller
+```
+
+Restart the API, then:
+
+```bash
+.venv/bin/python scripts-seed-local.py       # once: creates the Caller API key
+                                              # transcribe-web's upload button needs
+.venv/bin/python scripts-seed-demo-data.py   # seeds 7 jobs covering every review-UI state
+```
+
+`scripts-seed-demo-data.py` seeds: a clean transcript, one flagged for review,
+one with corrections and history already applied, one with a baseline
+transcript uploaded for WER, a failed job, a job stuck mid-processing, and one
+attributed to the API-key Caller rather than a signed-in user. It's safe to
+re-run — it replaces its own rows (tagged via `metadata.seed_scenario`) rather
+than accumulating duplicates, and refuses to run unless
+`DATABASE_CONNECTION_STRING` resolves to a loopback host, so a misconfigured
+`.env` can't point it at a shared database.
+
+`SPEECH_BACKEND=mock` always returns the same fixed two-speaker transcript —
+it never inspects the actual audio content, only that the upload decodes as
+valid audio. Submitting a *real* job while mock mode is active is safe: the
+mock only completes job URLs it created itself (`mock://batch-jobs/...`); a
+genuine Azure job falls through to the real Azure path regardless of the
+flag.
+
+Dictation (`/api/*`) has no local-only path — it's still hardcoded to real
+Azure Blob Storage. Both `AUDIO_STORAGE_BACKEND` and `SPEECH_BACKEND` default
+to `"azure"` and must never be set in a deployed environment.
+
 ## Database migrations
 
 One Alembic history in `alembic/`. Its first revision, `0001_baseline`, replaced
