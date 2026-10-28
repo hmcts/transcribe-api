@@ -328,6 +328,25 @@ class SpeechBatchJob(BaseTable, table=True):
     needs_cleanup: bool = Field(default=False)
     cleanup_failure_reason: str | None = Field(default=None)
 
+    # W3C traceparent of the request that created the job (DIAAT-276, 0003). The
+    # poller, minutes or hours later and possibly in another replica, links its spans
+    # to it, so the job's whole lifecycle is one linked trace. Not secret: trace and
+    # span IDs only.
+    trace_parent: str | None = Field(default=None, max_length=64)
+
+    # DIAAT-281 (0003): when Azure Speech entered the Running state. Separates queue
+    # wait (created -> here) from processing (here -> finished). NULL until then, and
+    # for jobs that went from NotStarted to finished between two polls.
+    processing_started_datetime: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
+    # Set once, atomically, by the replica that reports the job as stuck, so job.stuck
+    # is emitted once per job rather than on every poll of every replica.
+    stuck_reported_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
+
+    # DIAAT-286 (0003): the configuration that produced the transcript, written with
+    # the results. Configuration only, never content. NULL until the job succeeds.
+    # none_as_null: SQL NULL, not a JSON null, when there is none.
+    provenance: dict | None = Field(default=None, sa_column=Column(JSONB(none_as_null=True), nullable=True))
+
     # Webhook delivery guard — set atomically by the replica that wins the dispatch race.
     # NULL means no webhook has been dispatched yet for this job.
     webhook_dispatched_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))

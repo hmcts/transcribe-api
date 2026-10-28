@@ -134,6 +134,9 @@ class TranscriptionJob(BaseTable, table=True):
     dialogue_entries: list[DialogueEntry] = Field(sa_column=Column(JSONB))
     error_message: str | None = Field(default=None)
     s3_audio_url: str | None = Field(default=None)
+    # DIAAT-286: the configuration that produced this job's output (a decision
+    # document or a transcript). No content. Set by the server only (0003).
+    provenance: dict | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
     # Blob deletion cleanup fields
     needs_cleanup: bool = Field(default=False)
     cleanup_failure_reason: str | None = Field(default=None)
@@ -150,14 +153,27 @@ class AuditLog(SQLModel, table=True):
 
     id: UUID = Field(default_factory=uuid4, primary_key=True, nullable=False)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True, sa_type=DateTime(timezone=True))
+    # The action: an hmcts_azure_auth value (ACCESS_DENIED, ROLE_CHANGE) or an app
+    # action, <object>.<verb> (runtime/telemetry_schema.AUDIT_ACTIONS).
     event_type: str = Field(index=True)
+    # The actor. App rows: the internal user UUID (user.id). Rows from the auth
+    # library: the Azure object ID.
     user_id: str = Field(index=True)
-    email: str
+    # Written by the auth library only; app rows identify the actor by user_id (0003).
+    email: str | None = Field(default=None)
     held_roles: list = Field(sa_column=Column(JSONB, nullable=False))
     required_roles: list = Field(sa_column=Column(JSONB, nullable=False))
     resource: str | None = Field(default=None)
     detail: dict | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
     client_ip: str | None = Field(default=None)
+    # DIAAT-286 (0003): success, denied or failed. NULL on older auth-library rows.
+    outcome: str | None = Field(default=None, max_length=16)
+    # What the action was on: a security resource type, transcript or sectioned_transcript.
+    object_type: str | None = Field(default=None, max_length=32)
+    # A record UUID as text, never a title or file name.
+    object_id: str | None = Field(default=None, max_length=64, index=True)
+    # hmcts.request.id: joins the row to the request's telemetry.
+    request_id: str | None = Field(default=None, max_length=64, index=True)
 
 
 class LiveTranscriptDraft(BaseTable, table=True):

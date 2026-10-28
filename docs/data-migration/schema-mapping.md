@@ -25,6 +25,8 @@ The batch-audio-transcription history runs in order from `001` to `013`.
 
 Update: revision `0002` fixes the two regressions this document describes against `0001`. It restores `timestamp with time zone` on every column that had it in the old schemas, and adds back the three dictation foreign-key indexes. With the target at `0002`, copy the old `timestamptz` columns as they are, with no `AT TIME ZONE 'UTC'`. The rest of this document still describes `0001`.
 
+Update: revision `0003` adds the DIAAT-205 observability columns. See [DIAAT-205 additions (`0003`)](#diaat-205-additions-0003).
+
 ## Summary of differences
 
 - Table names. The two old schemas share only one table name, `user`. The new schema is the union of both: 12 tables. `transcriptionjob` (dictation) and `transcription_job` (recording) are separate tables with different columns, and both still exist.
@@ -564,6 +566,57 @@ The new `user` is the dictation table. Recording users and dictation users load 
 | azure_user_id | REWRITE | REWRITE | Unique and NOT NULL. Must hold the person's oid in the HMCTS tenant. See [User re-keying](#user-re-keying-oid-change). |
 | has_completed_onboarding | as is | none: supply it (NOT NULL, no default) | For recording-only users the choice is `false`, the model default, or `true`. This is a product decision. For a merged person use the dictation value. |
 | role | as is (CHECK already enforced) | `role`, which may be NULL or any string | Must satisfy `ck_user_role_valid` (`Normal`, `Judge`, `LegalTextManager`, `SystemAdministrator`). Map NULL to `'Normal'`, the merged model default. Recording had no CHECK, and the old code stored whatever `AUTH_APPROLES` mapped the role to (by default the same four names). Run `SELECT DISTINCT role` and map anything else. On every sign-in both old and new code overwrite `role` from the token's app roles, so the migrated value only matters until the user's first sign-in. |
+
+## DIAAT-205 additions (`0003`)
+
+Revision `0003` adds the observability columns from the DIAAT-205 branches of both old services. Every new column is nullable with no default.
+
+| Table | Column | Type | From | Meaning |
+|---|---|---|---|---|
+| audit_log | outcome | varchar(16) | dictation `9d1e6b3a4c2f` | `success`, `denied` or `failed`. NULL on rows written before `0003` |
+| audit_log | object_type | varchar(32) | dictation `9d1e6b3a4c2f` | What the action was on (`transcription`, `transcript`, `job`, `upload`...) |
+| audit_log | object_id | varchar(64), indexed | dictation `9d1e6b3a4c2f` | A record UUID as text, never a title or file name |
+| audit_log | request_id | varchar(64), indexed | dictation `9d1e6b3a4c2f` | `hmcts.request.id`: joins the row to the request's telemetry |
+| audit_log | email | now nullable | dictation `9d1e6b3a4c2f` | Only the auth library's rows have it. App rows identify the actor by `user_id` |
+| transcription_job | trace_parent | varchar(64) | recording `014` | W3C traceparent of the request that created the job |
+| transcription_job | processing_started_datetime | timestamptz | recording `015` | When Azure Speech started processing the job |
+| transcription_job | stuck_reported_at | timestamptz | recording `015` | When the job was reported as stuck (once per job) |
+| transcription_job | provenance | jsonb | recording `017` | The configuration that produced the transcript. No content |
+| transcriptionjob | provenance | jsonb | dictation `9d1e6b3a4c2f` | The configuration that produced the job's output. No content |
+
+The recording service's own `audit_log` table (recording `016`) is not created: the recording service writes the shared `audit_log`.
+
+`audit_log.user_id` holds two kinds of identity. Rows written by the app hold the internal user UUID (`user.id`). That covers `USER_DELETED`/`user.delete` and `ROLE_CHANGE` on the old `main`, and every DIAAT-286 row. Rows written by `hmcts_azure_auth` itself, such as `ACCESS_DENIED` on a failed role check, hold the caller's Entra oid.
+
+### Action names
+
+App-written actions become `<object>.<verb>`. `ACCESS_DENIED` and `ROLE_CHANGE` are written by `hmcts_azure_auth` and do not change.
+
+| Old `event_type` | New `event_type` | In old production? |
+|---|---|---|
+| `USER_DELETED` | `user.delete` | Yes: written by the old `main` since DIAAT-20 (`81e6bc7`, released v0.2.14) when an admin deletes a user |
+| `TRANSCRIPT_VIEWED` | `transcript.view` | No: only on the DIAAT-286 branch |
+| `TRANSCRIPT_EXPORTED` | `transcript.export` | No: only on the DIAAT-286 branch |
+| `TRANSCRIPT_DELETED` | `transcript.delete` | No: only on the DIAAT-286 branch |
+
+The ETL maps `USER_DELETED` to `user.delete` unconditionally. That costs less than checking first whether any rows exist.
+
+### If the old DIAAT-205 branches reach production before cut-over
+
+Neither old `main` has these columns: the sources above are at `7f4d1e9c2b8a` and `013`. If either DIAAT-205 branch is released first, copy its columns as follows.
+
+| Old table.column | New table.column | Transform / notes |
+|---|---|---|
+| dictation audit_log.outcome, object_type, object_id, request_id | same | Copy. Map `event_type` as in the table above |
+| dictation transcriptionjob.provenance | transcriptionjob.provenance | Copy |
+| recording transcription_job.trace_parent, processing_started_datetime, stuck_reported_at, provenance | same | Copy |
+| recording audit_log.id, timestamp | audit_log.id, timestamp | Copy. Recording ids are UUIDs and do not collide with dictation ids |
+| recording audit_log.actor_id | audit_log.user_id | uuid -> text. Remap through the user mapping, like `transcription_job.user_id` |
+| recording audit_log.action | audit_log.event_type | Same values (`job.submit`, `transcript.view`, `transcript.edit`, `audio.export`, `job.delete`) |
+| recording audit_log.outcome, object_type, request_id, detail | same | Copy |
+| recording audit_log.object_id | audit_log.object_id | uuid -> text |
+| (none) | audit_log.held_roles, required_roles | `'[]'`. NOT NULL |
+| (none) | audit_log.email, resource, client_ip | NULL |
 
 ## ETL considerations
 
