@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from uuid import UUID
+from datetime import UTC, datetime
+from uuid import UUID, uuid4
 
 import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -17,6 +18,83 @@ from transcribe_api.domain.models_recording import (
     WordInfo,
 )
 
+# A fixed transcript for SPEECH_BACKEND=mock (see settings_recording.py). Two
+# speakers, word-level timing and a low-confidence word so the review UI's
+# highlighting has something to show — not a transcription of anything real.
+_MOCK_DIALOGUE_ENTRIES: list[DialogueEntry] = [
+    DialogueEntry(
+        speaker="1",
+        text="Good morning, this is a locally generated test transcript.",
+        start_time=0.0,
+        end_time=3.2,
+        confidence=0.95,
+        words=[
+            WordInfo(text="Good", start_time=0.0, end_time=0.3, confidence=0.98),
+            WordInfo(text="morning,", start_time=0.3, end_time=0.7, confidence=0.97),
+            WordInfo(text="this", start_time=0.7, end_time=0.9, confidence=0.96),
+            WordInfo(text="is", start_time=0.9, end_time=1.0, confidence=0.96),
+            WordInfo(text="a", start_time=1.0, end_time=1.1, confidence=0.95),
+            WordInfo(text="locally", start_time=1.1, end_time=1.6, confidence=0.6),
+            WordInfo(text="generated", start_time=1.6, end_time=2.2, confidence=0.94),
+            WordInfo(text="test", start_time=2.2, end_time=2.6, confidence=0.95),
+            WordInfo(text="transcript.", start_time=2.6, end_time=3.2, confidence=0.93),
+        ],
+        alternatives=[
+            PhraseAlternatives(
+                start_word_index=0,
+                end_word_index=8,
+                candidates=[
+                    NBestCandidate(
+                        text="Good morning, this is a locally generated test transcript.",
+                        confidence=0.95,
+                        lexical="good morning this is a locally generated test transcript",
+                    )
+                ],
+            )
+        ],
+    ),
+    DialogueEntry(
+        speaker="2",
+        text="No real audio was sent to Azure Speech for this job.",
+        start_time=3.5,
+        end_time=6.4,
+        confidence=0.92,
+        words=[
+            WordInfo(text="No", start_time=3.5, end_time=3.7, confidence=0.97),
+            WordInfo(text="real", start_time=3.7, end_time=3.9, confidence=0.96),
+            WordInfo(text="audio", start_time=3.9, end_time=4.3, confidence=0.95),
+            WordInfo(text="was", start_time=4.3, end_time=4.5, confidence=0.95),
+            WordInfo(text="sent", start_time=4.5, end_time=4.8, confidence=0.94),
+            WordInfo(text="to", start_time=4.8, end_time=4.9, confidence=0.95),
+            WordInfo(text="Azure", start_time=4.9, end_time=5.3, confidence=0.9),
+            WordInfo(text="Speech", start_time=5.3, end_time=5.7, confidence=0.9),
+            WordInfo(text="for", start_time=5.7, end_time=5.9, confidence=0.93),
+            WordInfo(text="this", start_time=5.9, end_time=6.1, confidence=0.94),
+            WordInfo(text="job.", start_time=6.1, end_time=6.4, confidence=0.93),
+        ],
+        alternatives=[
+            PhraseAlternatives(
+                start_word_index=0,
+                end_word_index=10,
+                candidates=[
+                    NBestCandidate(
+                        text="No real audio was sent to Azure Speech for this job.",
+                        confidence=0.92,
+                        lexical="no real audio was sent to azure speech for this job",
+                    )
+                ],
+            )
+        ],
+    ),
+]
+
+# Prefix for job URLs submit_batch_job returns under SPEECH_BACKEND=mock.
+# get_batch_job_status/get_batch_results/delete_batch_job check for it before
+# short-circuiting: SPEECH_BACKEND=mock alone isn't enough, because flipping
+# it on a database that already has real, pending Azure jobs (a non-mock
+# job_url) would otherwise unconditionally mark them Succeeded with the
+# canned transcript on the next poll, without ever consulting Azure.
+_MOCK_JOB_URL_PREFIX = "mock://batch-jobs/"
 _TICKS_PER_SECOND: int = 10_000_000
 # Azure documents the ceiling on `diarization.speakers.maxCount` as "must be
 # less than 36 and more or equal to the minCount property", so 35 is the
@@ -72,6 +150,9 @@ async def submit_batch_job(
     Returns the job URL from the Location response header.
     Raises BatchSubmissionError on non-201 response.
     """
+    if get_settings().SPEECH_BACKEND == "mock":
+        return f"{_MOCK_JOB_URL_PREFIX}{uuid4()}"
+
     payload: dict = {
         "contentUrls": [audio_sas_url],
         "locale": locale,
@@ -114,6 +195,10 @@ async def submit_batch_job(
 @_RETRY_POLICY
 async def get_batch_job_status(job_url: str) -> dict:
     """Return the full Azure batch job status JSON."""
+    if get_settings().SPEECH_BACKEND == "mock" and job_url.startswith(_MOCK_JOB_URL_PREFIX):
+        now = datetime.now(UTC).isoformat()
+        return {"status": "Succeeded", "createdDateTime": now, "lastActionDateTime": now}
+
     headers = await _auth_headers()
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
         response = await client.get(job_url, headers=headers)
@@ -149,6 +234,9 @@ async def get_batch_results(
     transcription_job_id: UUID | None = None,
 ) -> list[DialogueEntry]:
     """Download and parse batch transcription results."""
+    if get_settings().SPEECH_BACKEND == "mock" and job_url.startswith(_MOCK_JOB_URL_PREFIX):
+        return list(_MOCK_DIALOGUE_ENTRIES)
+
     headers = await _auth_headers()
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
         files_response = await client.get(f"{job_url}/files", headers=headers)
@@ -238,6 +326,9 @@ async def get_batch_results(
 @_RETRY_POLICY
 async def delete_batch_job(job_url: str) -> None:
     """Delete a completed batch job from Azure. Non-fatal on HTTP 404."""
+    if get_settings().SPEECH_BACKEND == "mock" and job_url.startswith(_MOCK_JOB_URL_PREFIX):
+        return
+
     headers = await _auth_headers()
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
         response = await client.delete(job_url, headers=headers)
