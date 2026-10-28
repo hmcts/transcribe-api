@@ -3,6 +3,7 @@
 import asyncio
 import sys
 import uuid
+from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import pytest
@@ -657,18 +658,25 @@ async def _asgi_get_audio(
     return messages
 
 
-@pytest.fixture
-def no_gc_asyncgen_cleanup():
+@contextmanager
+def _no_gc_asyncgen_cleanup():
     """Stop asyncio closing abandoned async generators when they're collected.
 
     Otherwise a stream left suspended by a disconnect may still get closed by
     the garbage collector, by luck of timing; cleanup must not depend on it.
+    Must be entered inside the running test coroutine: the event loop installs
+    its own hooks when it starts running, replacing any set before that (e.g.
+    by a fixture). Yields the replacement finalizer so a test can check it's
+    still the active one.
     """
     old_hooks = sys.get_asyncgen_hooks()
     abandoned = []
-    sys.set_asyncgen_hooks(firstiter=old_hooks.firstiter, finalizer=abandoned.append)
-    yield
-    sys.set_asyncgen_hooks(*old_hooks)
+    finalizer = abandoned.append
+    sys.set_asyncgen_hooks(firstiter=old_hooks.firstiter, finalizer=finalizer)
+    try:
+        yield finalizer
+    finally:
+        sys.set_asyncgen_hooks(*old_hooks)
 
 
 class TestGetJobAudioClosesBlobClients:
@@ -698,12 +706,14 @@ class TestGetJobAudioClosesBlobClients:
         assert fake_blob_storage.all_closed
 
     @pytest.mark.asyncio
-    async def test_when_the_client_disconnects_mid_read(
-        self, client, as_current_user, job, fake_blob_storage, no_gc_asyncgen_cleanup
-    ):
+    async def test_when_the_client_disconnects_mid_read(self, client, as_current_user, job, fake_blob_storage):
         fake_blob_storage.stall_after = 1
 
-        messages = await _asgi_get_audio(client.app, job.id, range_header="bytes=0-", disconnect_after_first_chunk=True)
+        with _no_gc_asyncgen_cleanup() as gc_finalizer:
+            messages = await _asgi_get_audio(
+                client.app, job.id, range_header="bytes=0-", disconnect_after_first_chunk=True
+            )
+            assert sys.get_asyncgen_hooks().finalizer is gc_finalizer
 
         assert messages[0]["status"] == 206
         assert fake_blob_storage.service_clients
@@ -712,11 +722,13 @@ class TestGetJobAudioClosesBlobClients:
 
     @pytest.mark.asyncio
     async def test_when_the_client_disconnects_while_a_chunk_is_being_sent(
-        self, client, as_current_user, job, fake_blob_storage, no_gc_asyncgen_cleanup
+        self, client, as_current_user, job, fake_blob_storage
     ):
-        messages = await _asgi_get_audio(
-            client.app, job.id, range_header="bytes=0-", disconnect_after_first_chunk=True, slow_client=True
-        )
+        with _no_gc_asyncgen_cleanup() as gc_finalizer:
+            messages = await _asgi_get_audio(
+                client.app, job.id, range_header="bytes=0-", disconnect_after_first_chunk=True, slow_client=True
+            )
+            assert sys.get_asyncgen_hooks().finalizer is gc_finalizer
 
         assert messages[0]["status"] == 206
         assert fake_blob_storage.service_clients
