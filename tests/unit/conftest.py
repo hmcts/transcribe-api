@@ -44,6 +44,13 @@ TEST_ENV: dict[str, str] = {
     "AZURE_STORAGE_ACCOUNT_NAME": "teststorage",
     "AZURE_STORAGE_CONTAINER_NAME": "test-container",
     "AZURE_STORAGE_TRANSCRIPTION_CONTAINER": "test-transcription-container",
+    # Pinned so a developer's local .env (AUDIO_STORAGE_BACKEND=local,
+    # SPEECH_BACKEND=mock — see runtime/settings_recording.py) can never
+    # change what these tests actually exercise: real env vars outrank
+    # env_file in pydantic-settings, but only for keys this dict sets.
+    "AUDIO_STORAGE_BACKEND": "azure",
+    "SPEECH_BACKEND": "azure",
+    "LOCAL_AUDIO_BASE_URL": "",
     "DATABASE_CONNECTION_STRING": "postgresql://test:test@localhost:5432/test_db",
     "GOOGLE_APPLICATION_CREDENTIALS_JSON_OBJECT": "{}",
     "GOV_NOTIFY_API_KEY": "test-notify-key",
@@ -71,6 +78,19 @@ TEST_ENV: dict[str, str] = {
 # import. Real environment variables outrank env_file in pydantic-settings, so
 # this also keeps the suite independent of whatever a local .env contains.
 os.environ.update(TEST_ENV)
+
+# TEST_ENV only protects keys it lists — a test that does
+# monkeypatch.delenv("SOME_KEY") to exercise the "not configured" branch (e.g.
+# test_local_storage.py's test_raises_when_base_url_not_configured) falls
+# straight through to whatever a developer's own .env has set, since removing
+# the real env var exposes the next-highest-priority source. Disabling
+# env_file here for the whole test session is the only way to make the suite
+# genuinely independent of local .env content rather than independent only
+# for the fields TEST_ENV happens to pin.
+from transcribe_api.runtime import settings_dictation, settings_recording  # noqa: E402
+
+settings_recording.Settings.model_config["env_file"] = None
+settings_dictation.LocalSettings.model_config["env_file"] = None
 
 
 def _clear_settings_caches() -> None:

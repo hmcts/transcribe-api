@@ -622,6 +622,134 @@ class TestDeleteBatchJob:
             await delete_batch_job("https://job-url")
 
 
+class TestMockSpeechBackend:
+    """SPEECH_BACKEND=mock (local dev only, see settings_recording.py).
+
+    Every test here patches httpx.AsyncClient and speech_auth_headers to
+    raise if called at all -- not just asserting the right return value, but
+    proving the mock path never attempts real credentials or network access.
+    """
+
+    @pytest.fixture(autouse=True)
+    def mock_backend(self, monkeypatch):
+        from transcribe_api.runtime.settings_recording import get_settings
+
+        monkeypatch.setenv("SPEECH_BACKEND", "mock")
+        get_settings.cache_clear()
+        yield
+        get_settings.cache_clear()
+
+    @staticmethod
+    def _forbid_network(monkeypatch):
+        def _fail(*args, **kwargs):
+            raise AssertionError("mock backend must not touch the network")
+
+        monkeypatch.setattr("httpx.AsyncClient", _fail)
+        monkeypatch.setattr("transcribe_api.stt.batch_client.speech_auth_headers", AsyncMock(side_effect=_fail))
+
+    @pytest.mark.asyncio
+    async def test_submit_returns_a_mock_job_url(self, monkeypatch):
+        from transcribe_api.stt.batch_client import _MOCK_JOB_URL_PREFIX, submit_batch_job
+
+        self._forbid_network(monkeypatch)
+        job_url = await submit_batch_job("https://sas-url", "test-job")
+        assert job_url.startswith(_MOCK_JOB_URL_PREFIX)
+
+    @pytest.mark.asyncio
+    async def test_status_of_a_mock_job_is_succeeded(self, monkeypatch):
+        from transcribe_api.stt.batch_client import _MOCK_JOB_URL_PREFIX, get_batch_job_status
+
+        self._forbid_network(monkeypatch)
+        status = await get_batch_job_status(f"{_MOCK_JOB_URL_PREFIX}abc-123")
+        assert status["status"] == "Succeeded"
+        assert status["createdDateTime"] and status["lastActionDateTime"]
+
+    @pytest.mark.asyncio
+    async def test_results_of_a_mock_job_are_the_canned_transcript(self, monkeypatch):
+        from transcribe_api.stt.batch_client import _MOCK_JOB_URL_PREFIX, get_batch_results
+
+        self._forbid_network(monkeypatch)
+        entries = await get_batch_results(f"{_MOCK_JOB_URL_PREFIX}abc-123")
+        assert len(entries) == 2
+        assert {e.speaker for e in entries} == {"1", "2"}
+        assert all(e.text and e.words for e in entries)
+
+    @pytest.mark.asyncio
+    async def test_delete_of_a_mock_job_is_a_noop(self, monkeypatch):
+        from transcribe_api.stt.batch_client import _MOCK_JOB_URL_PREFIX, delete_batch_job
+
+        self._forbid_network(monkeypatch)
+        await delete_batch_job(f"{_MOCK_JOB_URL_PREFIX}abc-123")  # no exception
+
+    # A database can hold real, pending Azure jobs (a non-mock job_url) from
+    # before SPEECH_BACKEND was switched to mock, e.g. a developer flipping
+    # it on a shared/staging database. These regression-test that such a job
+    # falls through to the real Azure path regardless -- SPEECH_BACKEND=mock
+    # must never unconditionally complete it with the canned transcript.
+
+    @pytest.mark.asyncio
+    async def test_status_of_a_real_job_url_still_calls_azure(self):
+        from transcribe_api.stt.batch_client import get_batch_job_status
+
+        mock_response = _make_response(body={"status": "Running"})
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_client.get = AsyncMock(return_value=mock_response)
+
+            status = await get_batch_job_status("https://eastus.cognitiveservices.azure.com/real-job")
+
+        assert status["status"] == "Running"  # not the mock's "Succeeded"
+        mock_client.get.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_results_of_a_real_job_url_still_come_from_azure(self):
+        from transcribe_api.stt.batch_client import get_batch_results
+
+        files_data = {"values": [{"kind": "Transcription", "links": {"contentUrl": "https://results-url"}}]}
+        result_data = {
+            "recognizedPhrases": [
+                {
+                    "offsetInTicks": 0,
+                    "durationInTicks": 10_000_000,
+                    "speaker": 3,
+                    "nBest": [{"display": "Real Azure text", "words": []}],
+                }
+            ]
+        }
+
+        def make_response_for(url, **kwargs):
+            if "files" in url:
+                return _make_response(body=files_data)
+            return _make_response(body=result_data)
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_client.get = AsyncMock(side_effect=make_response_for)
+
+            entries = await get_batch_results("https://eastus.cognitiveservices.azure.com/real-job")
+
+        assert [e.text for e in entries] == ["Real Azure text"]
+
+    @pytest.mark.asyncio
+    async def test_delete_of_a_real_job_url_still_calls_azure(self):
+        from transcribe_api.stt.batch_client import delete_batch_job
+
+        mock_response = _make_response(status_code=204)
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_client.delete = AsyncMock(return_value=mock_response)
+
+            await delete_batch_job("https://eastus.cognitiveservices.azure.com/real-job")
+
+        mock_client.delete.assert_called_once()
+
+
 class TestWorkloadIdentityAuth:
     """No Speech key (AKS): every Speech REST call carries an Entra bearer token."""
 
