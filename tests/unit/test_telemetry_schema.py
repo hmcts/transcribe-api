@@ -113,8 +113,12 @@ def test_setup_registers_the_schema() -> None:
 
     from transcribe_api.runtime import telemetry
 
-    with patch.object(telemetry, "setup_telemetry"):
+    with (
+        patch.object(telemetry, "setup_telemetry"),
+        patch.object(telemetry, "register_schema", wraps=register_schema) as register,
+    ):
         telemetry.configure_telemetry()
+    register.assert_called_once_with()
     assert default_schema.get_event("upload.file_rejected") is not None
 
 
