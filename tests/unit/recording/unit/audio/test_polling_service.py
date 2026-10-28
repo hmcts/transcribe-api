@@ -1,7 +1,7 @@
 """Unit tests for BatchPollingService."""
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from uuid import UUID
 
 import pytest
@@ -318,7 +318,8 @@ class TestProcessJob:
         ):
             await service._process_job(job)
 
-        mock_succeeded.assert_awaited_once_with(job, status_data)
+        # Third argument: the result_processing stage handle (DIAAT-276).
+        mock_succeeded.assert_awaited_once_with(job, status_data, ANY)
 
     @pytest.mark.asyncio
     async def test_dispatches_to_handle_failed(self, service):

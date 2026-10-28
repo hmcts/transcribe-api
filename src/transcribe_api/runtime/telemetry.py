@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
 import contextlib
 from contextlib import AbstractContextManager
@@ -35,6 +36,12 @@ JOURNEY_TRANSCRIPTION = "dictation.transcription"
 # Live dictation submission: id is the submission ID; the transcription created from
 # it is related on the transcript.available event.
 JOURNEY_SUBMISSION = "dictation.submission"
+# Recording uploads: id is the UUID in the uploaded blob's name.
+JOURNEY_UPLOAD = "recording.upload"
+# Recording batch jobs: id is SpeechBatchJob.id; parent is the upload's id.
+JOURNEY_JOB = "recording.job"
+
+_UPLOAD_ID = re.compile(r"^uploads/[^/]+/([0-9a-fA-F-]{36})-")
 
 
 def register_minutes_schema() -> None:
@@ -74,6 +81,17 @@ def transcription_journey(transcription_id: str | UUID | None) -> AbstractContex
     if current is not None and current.type == JOURNEY_TRANSCRIPTION and current.id == journey_id:
         return contextlib.nullcontext(current)  # already in it (e.g. the poller opened it)
     return journey(JOURNEY_TRANSCRIPTION, journey_id)
+
+
+def upload_id_from_blob(blob_name: str | None) -> str | None:
+    """The recording upload's journey ID (the UUID in ``uploads/{user}/{uuid}-{stem}.wav``)."""
+    match = _UPLOAD_ID.match(blob_name or "")
+    return match.group(1) if match else None
+
+
+def batch_job_id_from_url(batch_job_url: str | None) -> str | None:
+    """Azure Speech batch job ID, related to our job ID as ``hmcts.dependency.ref``."""
+    return batch_job_url.rstrip("/").rsplit("/", 1)[-1] if batch_job_url else None
 
 
 # Immigration and Asylum Chamber appeal references, e.g. PA/50123/2024. Uploaded file
