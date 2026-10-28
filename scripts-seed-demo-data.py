@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import wave
 from pathlib import Path
 from uuid import uuid4
 
@@ -48,11 +49,17 @@ from transcribe_api.domain.models_recording import (  # noqa: E402
     WordInfo,
 )
 from transcribe_api.domain.models_dictation import User  # noqa: E402
+from transcribe_api.runtime.settings_recording import get_settings  # noqa: E402
 from transcribe_api.stt import local_storage  # noqa: E402
 
 MOCK_USER_AZURE_ID = "local-dev-user-123"
 SEED_AUDIO_SOURCE = Path(__file__).parent / "scripts-seed-demo-audio.wav"
-_AUDIO_DURATION_SECONDS = 3.0
+# Every seeded job shares this one file and reports this as its duration, so
+# it must cover the latest timestamp used by ANY scenario below (currently
+# needs_review's last segment, ending at 9.9s) -- otherwise seeking to a
+# later segment goes past the end of the audio and playback/word-timing
+# highlighting can't be exercised there.
+_AUDIO_DURATION_SECONDS = 10.0
 
 
 def _entry(speaker: str, text: str, start: float, end: float, confidence: float, **kw) -> DialogueEntry:
@@ -75,17 +82,27 @@ def _entry(speaker: str, text: str, start: float, end: float, confidence: float,
     )
 
 
+def _existing_audio_covers_duration() -> bool:
+    if not SEED_AUDIO_SOURCE.exists():
+        return False
+    with wave.open(str(SEED_AUDIO_SOURCE), "rb") as f:
+        return f.getnframes() / f.getframerate() >= _AUDIO_DURATION_SECONDS
+
+
 def _ensure_seed_audio() -> None:
-    """Generate the shared seed source file if it's missing.
+    """Generate the shared seed source file if it's missing or too short.
 
     Gitignored rather than committed (scripts-demo-seed-audio.wav would be a
     generated binary blob in version control for no benefit — ffmpeg is
     already a required local-dev dependency per the README, so regenerating
-    it here is simpler than asking a developer to run this by hand).
+    it here is simpler than asking a developer to run this by hand). Also
+    regenerates an existing file left over from before
+    _AUDIO_DURATION_SECONDS was increased, rather than silently reusing one
+    too short to cover every scenario's timestamps.
     """
-    if SEED_AUDIO_SOURCE.exists():
+    if _existing_audio_covers_duration():
         return
-    print(f"Generating {SEED_AUDIO_SOURCE.name} (silent, 3s, 16kHz mono)...")
+    print(f"Generating {SEED_AUDIO_SOURCE.name} (silent, {_AUDIO_DURATION_SECONDS:g}s, 16kHz mono)...")
     subprocess.run(
         [
             "ffmpeg",
@@ -94,7 +111,7 @@ def _ensure_seed_audio() -> None:
             "-i",
             "anullsrc=r=16000:cl=mono",
             "-t",
-            "3",
+            str(_AUDIO_DURATION_SECONDS),
             "-y",
             str(SEED_AUDIO_SOURCE),
         ],
@@ -198,15 +215,17 @@ def _scenario_corrected(user_id) -> SpeechBatchJob:
     ]
 
     word_range_edit = _entry("Speaker 1", "Counsel for the appellant may call there first witness.", 2.5, 5.8, 0.6)
-    word_range_edit.word_corrections = [WordCorrection(start_word_index=7, end_word_index=7, text="their")]
+    # Zero-indexed word list: Counsel(0) for(1) the(2) appellant(3) may(4)
+    # call(5) there(6) first(7) witness.(8) -- "there" is index 6, not 7.
+    word_range_edit.word_corrections = [WordCorrection(start_word_index=6, end_word_index=6, text="their")]
     word_range_edit.correction_history = [
         CorrectionEntry(
             timestamp="2026-10-20T09:16:30+00:00",
             kind="word_range",
             previous_text="Counsel for the appellant may call there first witness.",
             new_text="Counsel for the appellant may call their first witness.",
-            start_word_index=7,
-            end_word_index=7,
+            start_word_index=6,
+            end_word_index=6,
             previous_phrase="there",
             new_phrase="their",
         )
@@ -291,11 +310,12 @@ def main() -> int:
         print("Install ffmpeg (required for local dev regardless, see README) and retry.")
         return 1
 
-    url = os.environ.get(
-        "DATABASE_CONNECTION_STRING",
-        "postgresql://transcribe:transcribe@localhost:5432/transcribe",
-    )
-    engine = create_engine(url)
+    # Via settings, not a bare env var: the running API resolves this through
+    # pydantic-settings' env_file=".env" (settings_recording.Settings), so a
+    # developer who only sets DATABASE_CONNECTION_STRING in .env -- not as an
+    # exported shell var -- would otherwise have this script silently fall
+    # back to the hardcoded default and seed a different database.
+    engine = create_engine(get_settings().DATABASE_CONNECTION_STRING)
 
     with Session(engine) as session:
         user = session.exec(select(User).where(User.azure_user_id == MOCK_USER_AZURE_ID)).first()
