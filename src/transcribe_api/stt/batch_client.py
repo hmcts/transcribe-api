@@ -88,6 +88,13 @@ _MOCK_DIALOGUE_ENTRIES: list[DialogueEntry] = [
     ),
 ]
 
+# Prefix for job URLs submit_batch_job returns under SPEECH_BACKEND=mock.
+# get_batch_job_status/get_batch_results/delete_batch_job check for it before
+# short-circuiting: SPEECH_BACKEND=mock alone isn't enough, because flipping
+# it on a database that already has real, pending Azure jobs (a non-mock
+# job_url) would otherwise unconditionally mark them Succeeded with the
+# canned transcript on the next poll, without ever consulting Azure.
+_MOCK_JOB_URL_PREFIX = "mock://batch-jobs/"
 _TICKS_PER_SECOND: int = 10_000_000
 # Azure documents the ceiling on `diarization.speakers.maxCount` as "must be
 # less than 36 and more or equal to the minCount property", so 35 is the
@@ -144,7 +151,7 @@ async def submit_batch_job(
     Raises BatchSubmissionError on non-201 response.
     """
     if get_settings().SPEECH_BACKEND == "mock":
-        return f"mock://batch-jobs/{uuid4()}"
+        return f"{_MOCK_JOB_URL_PREFIX}{uuid4()}"
 
     payload: dict = {
         "contentUrls": [audio_sas_url],
@@ -188,7 +195,7 @@ async def submit_batch_job(
 @_RETRY_POLICY
 async def get_batch_job_status(job_url: str) -> dict:
     """Return the full Azure batch job status JSON."""
-    if get_settings().SPEECH_BACKEND == "mock":
+    if get_settings().SPEECH_BACKEND == "mock" and job_url.startswith(_MOCK_JOB_URL_PREFIX):
         now = datetime.now(UTC).isoformat()
         return {"status": "Succeeded", "createdDateTime": now, "lastActionDateTime": now}
 
@@ -227,7 +234,7 @@ async def get_batch_results(
     transcription_job_id: UUID | None = None,
 ) -> list[DialogueEntry]:
     """Download and parse batch transcription results."""
-    if get_settings().SPEECH_BACKEND == "mock":
+    if get_settings().SPEECH_BACKEND == "mock" and job_url.startswith(_MOCK_JOB_URL_PREFIX):
         return list(_MOCK_DIALOGUE_ENTRIES)
 
     headers = await _auth_headers()
@@ -319,7 +326,7 @@ async def get_batch_results(
 @_RETRY_POLICY
 async def delete_batch_job(job_url: str) -> None:
     """Delete a completed batch job from Azure. Non-fatal on HTTP 404."""
-    if get_settings().SPEECH_BACKEND == "mock":
+    if get_settings().SPEECH_BACKEND == "mock" and job_url.startswith(_MOCK_JOB_URL_PREFIX):
         return
 
     headers = await _auth_headers()
