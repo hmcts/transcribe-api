@@ -21,6 +21,7 @@ import os
 from hmcts_otel import TelemetrySettings, default_redactor, setup_telemetry
 
 from transcribe_api.runtime.settings_dictation import get_settings
+from transcribe_api.runtime.telemetry_schema import register_schema
 from transcribe_api.runtime.version import APP_VERSION
 
 SERVICE_NAME_API = "transcribe-api"
@@ -67,6 +68,8 @@ def configure_telemetry(service_name: str = SERVICE_NAME_API) -> TelemetrySettin
     # Checked against the redactor itself, so the rules are present whenever telemetry
     # is configured, whatever happened to the library state before.
     register_redaction_rules()
+    # Every app attribute and event, once (runtime/telemetry_schema.py).
+    register_schema()
     overrides: dict[str, object] = {
         "service_version": APP_VERSION,
         "environment": get_settings().ENVIRONMENT,
