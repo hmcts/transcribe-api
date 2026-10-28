@@ -153,7 +153,6 @@ def _invalid_results(job_url: str, exc: BaseException) -> BatchResultsInvalidErr
     )
 
 
-
 async def _auth_headers() -> dict[str, str]:
     # Workload identity bearer token; the key header only for local dev.
     return await speech_auth_headers(get_settings().AZURE_SPEECH_KEY)

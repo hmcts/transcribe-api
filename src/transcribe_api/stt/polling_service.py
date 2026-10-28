@@ -533,9 +533,7 @@ class BatchPollingService:
         _job_finished(job, status_data, "error", error_code, exc=exc)
         await self._dispatch_failure(job, str(exc))
 
-    async def _handle_failed(
-        self, job: _PendingJob, status_data: dict, speech_ref: dict | None = None
-    ) -> None:
+    async def _handle_failed(self, job: _PendingJob, status_data: dict) -> None:
         error_msg = (
             status_data.get("properties", {})
             .get("error", {})

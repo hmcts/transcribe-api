@@ -958,3 +958,43 @@ async def test_no_speech_token_finishes_the_job_only_once_failed_is_stored(tel, 
     (finished,) = tel.events("job.finished")
     assert finished[c.OUTCOME] == "error" and finished[c.ERROR_CODE] == "speech.auth_failed"
     assert finished["hmcts.failure.source"] == "application"
+
+
+async def test_failed_submitted_commit_is_rolled_back_so_failed_is_stored(tel, mocker):
+    """Azure accepted the job but the SUBMITTED commit failed, leaving the session
+    needing a rollback (SQLAlchemy: PendingRollbackError on the next write). The FAILED
+    write rolls back first, keeps the values set on the job, and the job finishes."""
+    from sqlalchemy.exc import PendingRollbackError
+
+    async def post(self, url, **_kwargs):
+        return _response(201, "POST", url, headers={"Location": SPEECH_URL})
+
+    session = MagicMock(is_active=True)
+    session.rollback.side_effect = lambda: setattr(session, "is_active", True)
+    stored: list = []
+
+    def save(_session, job):
+        if not session.is_active:
+            raise PendingRollbackError("rollback first")
+        if job.status == JobStatus.SUBMITTED:
+            session.is_active = False
+            raise OperationalError("commit", {}, Exception("db down"))
+        stored.append((job.status, job.error_message, job.batch_job_id))
+        return job
+
+    mocker.patch.object(submission, "save_job", side_effect=save)
+    mocker.patch.object(httpx.AsyncClient, "post", post)
+    with pytest.raises(OperationalError):
+        await submission.submit_and_queue_batch_job(
+            session=session, audio_url=AUDIO_SAS_URL, audio_blob_path=BLOB, locale="en-GB"
+        )
+
+    session.rollback.assert_called_once_with()
+    assert stored[-1] == (
+        JobStatus.FAILED,
+        "Job submission failed due to an internal error",
+        SPEECH_JOB_ID,  # Azure's job reference is kept: Speech may be transcribing
+    )
+    (finished,) = tel.events("job.finished")
+    assert finished[c.ERROR_CODE] == "job.submission_error"
+    assert tel.events("job.storage_failed") == []

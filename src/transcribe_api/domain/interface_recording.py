@@ -199,7 +199,7 @@ def _stuck_waiting(cutoff: datetime):
 
 
 def _stuck_running(cutoff: datetime):
-    # Running jobs without a processing start (rows from before migration 015) are
+    # Running jobs without a processing start (rows from before revision 0003) are
     # measured from their creation.
     running_since = func.coalesce(
         SpeechBatchJob.processing_started_datetime, SpeechBatchJob.created_datetime

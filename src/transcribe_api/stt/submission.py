@@ -16,6 +16,7 @@ from hmcts_otel import (
     stage,
 )
 from hmcts_otel import conventions as c
+from sqlalchemy import inspect as sa_inspect
 from sqlmodel import Session
 
 from transcribe_api.stt import job_telemetry
@@ -152,6 +153,7 @@ def _store_failed(session: Session, job: SpeechBatchJob, submission: StageHandle
     """
     try:
         with job_telemetry.storage_write("job.mark_failed"):
+            _recover_session(session, job)
             save_job(session, job)
     except Exception:
         if submission.outcome is Outcome.SUCCESS:  # not already marked by the caller
@@ -161,6 +163,22 @@ def _store_failed(session: Session, job: SpeechBatchJob, submission: StageHandle
             else:
                 submission.error(f"unhandled.{type(exc).__name__}"[:64])
         raise
+
+
+def _recover_session(session: Session, job: SpeechBatchJob) -> None:
+    """Roll back a session that a failed commit (e.g. the SUBMITTED write) left inactive.
+
+    Without it the FAILED write raises PendingRollbackError and the job stays PENDING.
+    The rollback expires the job, so the values set on it since it was last loaded
+    (FAILED, the error message, the Azure job reference) are put back afterwards.
+    """
+    if session.is_active:
+        return
+    columns = {attribute.key for attribute in sa_inspect(SpeechBatchJob).column_attrs}
+    pending = {key: value for key, value in sa_inspect(job).dict.items() if key in columns}
+    session.rollback()
+    for key, value in pending.items():
+        setattr(job, key, value)
 
 
 async def _submit_to_speech(
