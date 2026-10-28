@@ -18,6 +18,9 @@ charts/**/Chart.lock
 **/.terraform/
 **/.terraform.lock.hcl
 
+# Written by Jenkinsfile_CNP before the image build
+src/transcribe_api/runtime/BUILD_VERSION
+
 # Pipeline test output
 test-results/
 coverage.xml

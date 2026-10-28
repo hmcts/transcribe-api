@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import runpy
 import sys
@@ -53,6 +54,55 @@ def test_the_version_and_environment_are_reported(configured: list[TelemetrySett
     telemetry.configure_telemetry()
     assert configured[-1].service_version == telemetry.APP_VERSION
     assert configured[-1].environment == "test"
+
+
+EXPORTER_LOGGER = "azure.monitor.opentelemetry.exporter.export._base"
+HTTP_LOGGING_POLICY_LOGGER = "azure.core.pipeline.policies.http_logging_policy"
+
+
+@pytest.fixture
+def exported_logs(monkeypatch: pytest.MonkeyPatch):
+    """configure_telemetry exporting logs to memory, starting from the logging state of
+    a fresh process: nothing has lowered the Azure SDK loggers yet."""
+    from hmcts_otel import setup_telemetry, shutdown_telemetry
+    from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter
+
+    names = ("azure", "azure.monitor.opentelemetry.exporter", HTTP_LOGGING_POLICY_LOGGER, EXPORTER_LOGGER)
+    levels = {name: logging.getLogger(name).level for name in names}
+    for name in names:
+        logging.getLogger(name).setLevel(logging.NOTSET)
+    shutdown_telemetry()
+    exporter = InMemoryLogRecordExporter()
+    monkeypatch.setattr(
+        telemetry,
+        "setup_telemetry",
+        lambda settings: setup_telemetry(
+            settings.model_copy(update={"connection_string": None}),  # else the Azure exporter wins
+            log_exporter=exporter,
+            set_global_providers=False,
+        ),
+    )
+    try:
+        yield exporter
+    finally:
+        shutdown_telemetry()
+        for name, level in levels.items():
+            logging.getLogger(name).setLevel(level)
+
+
+def test_the_exporter_does_not_export_its_own_upload_logs(exported_logs) -> None:
+    """Exporting the exporter's (and its HTTP pipeline's) per-upload logs triggers
+    another upload, which logs again: a feedback loop."""
+    telemetry.configure_telemetry(telemetry.SERVICE_NAME_WORKER)
+    logging.getLogger("transcribe_api.stt.work_poller").info("poller started")
+    logging.getLogger(EXPORTER_LOGGER).info("Transmission succeeded: Item received: 1. Items accepted: 1")
+    logging.getLogger(HTTP_LOGGING_POLICY_LOGGER).info(
+        "Request URL: 'https://uksouth-1.in.applicationinsights.azure.com/v2.1/track'"
+    )
+
+    bodies = [item.log_record.body for item in exported_logs.get_finished_logs()]
+    assert "poller started" in bodies
+    assert not [body for body in bodies if "Transmission succeeded" in str(body) or "Request URL" in str(body)]
 
 
 def test_the_worker_entrypoint_configures_telemetry_as_the_worker(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -166,6 +216,47 @@ def test_the_image_keeps_the_base_image_otel_distro_off_the_path() -> None:
     assert paths, "Dockerfile sets no PYTHONPATH"
     for path in paths:
         assert "/opt/otel" not in path.split(":")
+
+
+# Version ------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def build_version_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    from transcribe_api.runtime import version
+
+    path = tmp_path / "BUILD_VERSION"
+    monkeypatch.setattr(version, "BUILD_VERSION_FILE", path)
+    monkeypatch.delenv("APP_VERSION", raising=False)
+    return path
+
+
+def test_the_image_reports_the_commit_it_was_built_from(build_version_file: Path) -> None:
+    from transcribe_api.runtime import version
+
+    build_version_file.write_text("95b8beb")
+    assert version.read_version() == "95b8beb"
+
+
+def test_app_version_overrides_the_built_version(build_version_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from transcribe_api.runtime import version
+
+    build_version_file.write_text("95b8beb")
+    monkeypatch.setenv("APP_VERSION", "1.2.3")
+    assert version.read_version() == "1.2.3"
+
+
+def test_a_local_run_reports_the_local_version(build_version_file: Path) -> None:
+    from transcribe_api.runtime import version
+
+    assert version.read_version() == version.LOCAL_VERSION
+
+
+def test_the_pipeline_writes_the_version_where_the_app_reads_it() -> None:
+    from transcribe_api.runtime import version
+
+    written = re.findall(r"writeFile file: '([^']+)'", (ROOT / "Jenkinsfile_CNP").read_text())
+    assert version.BUILD_VERSION_FILE.relative_to(ROOT).as_posix() in written
 
 
 # The app, instrumented ---------------------------------------------------------------

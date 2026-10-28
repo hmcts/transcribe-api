@@ -6,6 +6,7 @@ or the pollers start.
 
 from __future__ import annotations
 
+import logging
 import os
 
 from hmcts_otel import TelemetrySettings, default_redactor, setup_telemetry
@@ -50,6 +51,19 @@ def register_redaction_rules() -> None:
         default_redactor.add_rule("appeal_reference", APPEAL_REFERENCE)
 
 
+# The Azure Monitor exporter logs every upload at INFO, as does the HTTP logging policy
+# of the pipeline it uploads with. Exported, each of those records causes another
+# upload, which logs again: a feedback loop. Named as well as "azure", so raising the
+# SDK's verbosity for debugging cannot restart it.
+EXPORT_LOOP_LOGGERS = ("azure.monitor.opentelemetry.exporter", "azure.core.pipeline.policies.http_logging_policy")
+
+
+def quiet_azure_sdk_logging() -> None:
+    """Keep the Azure SDK's INFO logging out of stdout and the exported logs."""
+    for name in ("azure", *EXPORT_LOOP_LOGGERS):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def configure_telemetry(service_name: str = SERVICE_NAME_API) -> TelemetrySettings:
     """Set up logging, tracing and metrics for this process. Idempotent.
 
@@ -57,6 +71,7 @@ def configure_telemetry(service_name: str = SERVICE_NAME_API) -> TelemetrySettin
     """
     register_redaction_rules()
     register_schema()
+    quiet_azure_sdk_logging()  # before setup_telemetry creates the exporters
     overrides: dict[str, object] = {
         "service_version": APP_VERSION,
         "environment": get_settings().ENVIRONMENT,

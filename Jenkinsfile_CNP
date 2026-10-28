@@ -36,6 +36,12 @@ withPipeline(type, product, component) {
   // AKS only. There is no App Service deployment for this product.
   disableLegacyDeployment()
 
+  // The image's version (runtime/version.py). The pipeline's `az acr build` takes no
+  // build arguments of ours, so the commit goes in as a file beside the source.
+  before('dockerbuild') {
+    writeFile file: 'src/transcribe_api/runtime/BUILD_VERSION', text: env.GIT_COMMIT.substring(0, 7)
+  }
+
   // Keep the long-lived environment branches in step with master so a deploy
   // to demo/ithc/perftest is never built from stale code.
   syncBranchesWithMaster(['demo', 'ithc', 'perftest'])
