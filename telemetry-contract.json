@@ -1,0 +1,1416 @@
+{
+  "attributes": {
+    "audio.duration_seconds": {
+      "allowed_values": null,
+      "description": "Duration of the normalised (16 kHz mono WAV) audio, in seconds.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "float"
+    },
+    "audio.format": {
+      "allowed_values": [
+        "flac",
+        "m4a",
+        "mp3",
+        "mp4",
+        "ogg",
+        "wav"
+      ],
+      "description": "Extension of the uploaded audio file.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "audio.format_category": {
+      "allowed_values": [
+        "audio",
+        "video"
+      ],
+      "description": "Whether the upload was an audio or a video container (.mp4).",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "audit.action": {
+      "allowed_values": [
+        "ACCESS_DENIED",
+        "ROLE_CHANGE",
+        "audio.export",
+        "job.delete",
+        "job.submit",
+        "transcript.delete",
+        "transcript.edit",
+        "transcript.export",
+        "transcript.view",
+        "user.delete"
+      ],
+      "description": "Audited action: an hmcts_azure_auth value (ACCESS_DENIED, ROLE_CHANGE) or an app action, <object>.<verb>.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "dependency.name": {
+      "allowed_values": [
+        "database",
+        "speech",
+        "storage"
+      ],
+      "description": "A critical dependency: database (PostgreSQL), storage (Azure Blob Storage) or speech (Azure Speech batch transcription).",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "dependency.state": {
+      "allowed_values": [
+        "down",
+        "up"
+      ],
+      "description": "up: the last health check succeeded; down: it failed or timed out.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "dictation.autosave_failures": {
+      "allowed_values": null,
+      "description": "Failed autosaves in the dictation session.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "dictation.collapses_in_window": {
+      "allowed_values": null,
+      "description": "Unexpected speech session ends in the health window.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "dictation.elapsed_seconds": {
+      "allowed_values": null,
+      "description": "Seconds recording ran before the warning.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "dictation.end_reason": {
+      "allowed_values": [
+        "left_page",
+        "page_hidden",
+        "submitted"
+      ],
+      "description": "How the dictation session ended.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "dictation.mode": {
+      "allowed_values": [
+        "mic",
+        "screen",
+        "upload"
+      ],
+      "description": "Recording mode.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "dictation.reconnect_attempt": {
+      "allowed_values": null,
+      "description": "Reconnect attempt that started this speech session (0 for a user start).",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "dictation.segments_captured": {
+      "allowed_values": null,
+      "description": "Transcript segments captured.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "dictation.session_index": {
+      "allowed_values": null,
+      "description": "Speech session number within the dictation session (reconnects count).",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "dictation.speech_sessions": {
+      "allowed_values": null,
+      "description": "Speech sessions in the dictation session.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "dictation.transcription_id": {
+      "allowed_values": null,
+      "description": "Transcription created by a submission.",
+      "max_length": 128,
+      "pattern": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+      "type": "str"
+    },
+    "dictation.user_initiated": {
+      "allowed_values": null,
+      "description": "The user asked the session to end.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "bool"
+    },
+    "dictation.window_seconds": {
+      "allowed_values": null,
+      "description": "Health window length.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "document.template": {
+      "allowed_values": [
+        "decision"
+      ],
+      "description": "Document template.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "document.template_version": {
+      "allowed_values": null,
+      "description": "Template version (first 12 hex characters of its SHA-256).",
+      "max_length": 128,
+      "pattern": "[0-9a-f]{12}|unknown",
+      "type": "str"
+    },
+    "file.size_bytes": {
+      "allowed_values": null,
+      "description": "Size of the uploaded file in bytes.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "file.type": {
+      "allowed_values": null,
+      "description": "MIME type, without parameters.",
+      "max_length": 128,
+      "pattern": "[a-z]+/[a-z0-9.+-]{1,60}|unknown",
+      "type": "str"
+    },
+    "hmcts.ai.fallback": {
+      "allowed_values": null,
+      "description": "Whether an AI call was a fallback to another model.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "bool"
+    },
+    "hmcts.ai.feature": {
+      "allowed_values": null,
+      "description": "Product feature an AI call served, e.g. summarise. Defaults to the current stage.",
+      "max_length": 128,
+      "pattern": "[a-z][a-z0-9_.]{0,63}",
+      "type": "str"
+    },
+    "hmcts.dependency.ref": {
+      "allowed_values": null,
+      "description": "Reference in an external system, e.g. Azure Speech job ID.",
+      "max_length": 128,
+      "pattern": "[A-Za-z0-9_.:-]{1,128}",
+      "type": "str"
+    },
+    "hmcts.duration_ms": {
+      "allowed_values": null,
+      "description": "Duration in milliseconds.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "float"
+    },
+    "hmcts.error.code": {
+      "allowed_values": null,
+      "description": "Controlled error code. Never a message.",
+      "max_length": 128,
+      "pattern": "[A-Za-z0-9_.:-]{1,64}",
+      "type": "str"
+    },
+    "hmcts.event.class": {
+      "allowed_values": [
+        "analytics",
+        "operational"
+      ],
+      "description": "operational or analytics.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "hmcts.event.source": {
+      "allowed_values": [
+        "browser",
+        "server"
+      ],
+      "description": "server or browser.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "hmcts.failure.source": {
+      "allowed_values": [
+        "application",
+        "dependency",
+        "queue"
+      ],
+      "description": "Where a failure came from: application (our code or database), queue (the job was never processed) or dependency (Azure Speech).",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "hmcts.journey.id": {
+      "allowed_values": null,
+      "description": "Pseudonymous journey identifier (UUID).",
+      "max_length": 128,
+      "pattern": "[A-Za-z0-9_-]{1,64}",
+      "type": "str"
+    },
+    "hmcts.journey.parent_id": {
+      "allowed_values": null,
+      "description": "Parent journey, e.g. the batch a file belongs to.",
+      "max_length": 128,
+      "pattern": "[A-Za-z0-9_-]{1,64}",
+      "type": "str"
+    },
+    "hmcts.journey.type": {
+      "allowed_values": null,
+      "description": "Kind of journey, e.g. upload.job or user.session.",
+      "max_length": 128,
+      "pattern": "[a-z0-9][a-z0-9_.-]{0,63}",
+      "type": "str"
+    },
+    "hmcts.outcome": {
+      "allowed_values": [
+        "cancelled",
+        "error",
+        "failure",
+        "success"
+      ],
+      "description": "Stage outcome.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "hmcts.request.id": {
+      "allowed_values": null,
+      "description": "Request correlation ID (UUID or 32 hex).",
+      "max_length": 128,
+      "pattern": "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{32}",
+      "type": "str"
+    },
+    "hmcts.speech.mode": {
+      "allowed_values": [
+        "batch",
+        "fast",
+        "realtime"
+      ],
+      "description": "Speech transcription mode.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "hmcts.stage": {
+      "allowed_values": null,
+      "description": "Stage name.",
+      "max_length": 128,
+      "pattern": "[a-z][a-z0-9_.]{0,63}",
+      "type": "str"
+    },
+    "http.response.status_code": {
+      "allowed_values": null,
+      "description": "HTTP status of the failed Azure Speech call.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "job.processing_ms": {
+      "allowed_values": null,
+      "description": "Processing: Azure Speech processing started to finished, in ms.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "float"
+    },
+    "job.queue_wait_ms": {
+      "allowed_values": null,
+      "description": "Queue wait: job created to Azure Speech processing started, in ms.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "float"
+    },
+    "job.retry.attempt": {
+      "allowed_values": null,
+      "description": "Number of the attempt that failed (1 on the first retry).",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "job.retry.operation": {
+      "allowed_values": [
+        "speech.delete",
+        "speech.results",
+        "speech.status",
+        "speech.submit",
+        "webhook.deliver"
+      ],
+      "description": "The call being retried.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "job.state": {
+      "allowed_values": [
+        "running",
+        "waiting"
+      ],
+      "description": "waiting: not yet processed by Azure Speech; running: being processed.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "live_draft.consecutive_failures": {
+      "allowed_values": null,
+      "description": "Consecutive failed autosaves.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "live_draft.failure_kind": {
+      "allowed_values": [
+        "auth",
+        "network",
+        "server"
+      ],
+      "description": "Why an autosave failed.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "live_draft.outage_seconds": {
+      "allowed_values": null,
+      "description": "Length of the autosave outage that ended.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "live_draft.seconds_since_last_save": {
+      "allowed_values": null,
+      "description": "Seconds since the last successful autosave.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "live_draft.trigger": {
+      "allowed_values": [
+        "interval",
+        "late-finalisation",
+        "pause",
+        "retry",
+        "unmount"
+      ],
+      "description": "What triggered the autosave.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "minutes.citation_index": {
+      "allowed_values": null,
+      "description": "Which citation was clicked.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "minutes.content_length": {
+      "allowed_values": null,
+      "description": "Characters copied.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "minutes.rating": {
+      "allowed_values": null,
+      "description": "Minutes rating (1-5).",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "minutes.template": {
+      "allowed_values": [
+        "Crissa",
+        "General"
+      ],
+      "description": "Minutes template.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "onboarding.step": {
+      "allowed_values": null,
+      "description": "Onboarding step number.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "onboarding.step_name": {
+      "allowed_values": [
+        "ready",
+        "review_edit",
+        "transcribe",
+        "unknown",
+        "welcome"
+      ],
+      "description": "Onboarding step.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "page.route": {
+      "allowed_values": null,
+      "description": "Page route, IDs replaced by :id.",
+      "max_length": 128,
+      "pattern": "/[a-z0-9/_:.\\-]{0,100}",
+      "type": "str"
+    },
+    "recording.duration_seconds": {
+      "allowed_values": null,
+      "description": "Recording length.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "recording.mode": {
+      "allowed_values": [
+        "mic",
+        "screen"
+      ],
+      "description": "Recording kind.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "security.action": {
+      "allowed_values": [
+        "delete",
+        "read",
+        "reassign",
+        "submit",
+        "write"
+      ],
+      "description": "What the caller tried to do with the resource: read, write, delete, submit (recording) or reassign (dictation).",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "security.outcome": {
+      "allowed_values": [
+        "blocked",
+        "detected",
+        "test"
+      ],
+      "description": "blocked: refused by the authorisation check; detected: let through by authorisation but caught by the post-authorisation ownership assertion (a defect); test: a controlled test of the alert route.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "security.resource_type": {
+      "allowed_values": [
+        "audio",
+        "document",
+        "draft",
+        "job",
+        "minute_version",
+        "transcript",
+        "transcription",
+        "transcription_job",
+        "upload"
+      ],
+      "description": "Kind of resource the caller does not own. Dictation: transcription, transcription_job, document, audio, draft, minute_version. Recording: job, transcript, audio, upload.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "speakers.segment_seconds": {
+      "allowed_values": null,
+      "description": "Length of the speaker sample played.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "float"
+    },
+    "speech.api_version": {
+      "allowed_values": null,
+      "description": "Speech to text REST API version, e.g. v3.2.",
+      "max_length": 128,
+      "pattern": "v[0-9]{1,2}\\.[0-9]{1,2}(-preview(\\.[0-9]{1,2})?)?",
+      "type": "str"
+    },
+    "speech.audio_duration_s": {
+      "allowed_values": null,
+      "description": "Seconds of audio recorded as Azure Speech usage for the job (OBS-5).",
+      "max_length": 128,
+      "pattern": null,
+      "type": "float"
+    },
+    "speech.audio_duration_source": {
+      "allowed_values": [
+        "azure",
+        "estimate"
+      ],
+      "description": "Where speech.audio_duration_s came from: azure (Azure's results file) or estimate (the duration given when the job was submitted).",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "speech.cancel_reason": {
+      "allowed_values": [
+        "CancelledByUser",
+        "EndOfStream",
+        "Error",
+        "StartFailed",
+        "Unknown"
+      ],
+      "description": "Speech SDK CancellationReason.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "speech.diarization": {
+      "allowed_values": null,
+      "description": "Whether speaker diarization was on.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "bool"
+    },
+    "speech.error_code": {
+      "allowed_values": null,
+      "description": "Azure Speech error code: a Speech SDK CancellationErrorCode name (browser) or a batch REST API code.",
+      "max_length": 128,
+      "pattern": "[A-Za-z][A-Za-z0-9_.]{0,63}",
+      "type": "str"
+    },
+    "speech.locale": {
+      "allowed_values": null,
+      "description": "Locale the job was transcribed in, e.g. en-GB.",
+      "max_length": 128,
+      "pattern": "[a-z]{2,3}-[A-Z]{2}",
+      "type": "str"
+    },
+    "speech.model_ref": {
+      "allowed_values": null,
+      "description": "ID (GUID) of the Speech model Azure used for the job.",
+      "max_length": 128,
+      "pattern": "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+      "type": "str"
+    },
+    "speech.region": {
+      "allowed_values": null,
+      "description": "Azure region of the Speech resource, e.g. uksouth.",
+      "max_length": 128,
+      "pattern": "[a-z0-9]{2,32}",
+      "type": "str"
+    },
+    "speech.retry_after_s": {
+      "allowed_values": null,
+      "description": "Retry-After sent by Azure Speech with a throttled (429) response, in s.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "float"
+    },
+    "speech.session_id": {
+      "allowed_values": null,
+      "description": "Azure Speech SDK session ID.",
+      "max_length": 128,
+      "pattern": "[0-9a-fA-F]{32}",
+      "type": "str"
+    },
+    "speech.stop_reason": {
+      "allowed_values": [
+        "collapsed",
+        "page_exit",
+        "paused",
+        "submitted",
+        "teardown"
+      ],
+      "description": "Why the Speech session stopped.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "storage.operation": {
+      "allowed_values": [
+        "blob.mark_failed",
+        "job.mark_failed",
+        "job.mark_needs_cleanup",
+        "transcript.save"
+      ],
+      "description": "The database or blob write that failed.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "transcript.postprocess_step": {
+      "allowed_values": [
+        "speaker_grouping",
+        "speaker_labelling",
+        "speaker_normalisation"
+      ],
+      "description": "The speaker-processing step that failed.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "transcript.segment_count": {
+      "allowed_values": null,
+      "description": "Number of dialogue entries in the transcript.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "transcript.speaker_count": {
+      "allowed_values": null,
+      "description": "Number of distinct speakers in the transcript.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "transcript.update_type": {
+      "allowed_values": [
+        "all_occurrences",
+        "single_occurrence"
+      ],
+      "description": "Speaker rename scope.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "upload.file_count": {
+      "allowed_values": null,
+      "description": "Number of files uploaded for the hearing (X-Hearing-File-Count).",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "upload.method": {
+      "allowed_values": [
+        "direct",
+        "proxy"
+      ],
+      "description": "How the browser uploads audio.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "upload.retry_attempt": {
+      "allowed_values": null,
+      "description": "Upload attempt number.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "upload.source": {
+      "allowed_values": [
+        "backup_retry",
+        "recording",
+        "upload"
+      ],
+      "description": "Where the audio came from.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "webhook.notification": {
+      "allowed_values": [
+        "failed",
+        "succeeded"
+      ],
+      "description": "Which result the webhook carried: the job succeeded or failed.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    }
+  },
+  "events": {
+    "audit.write_failed": {
+      "attributes": [
+        "audit.action",
+        "hmcts.error.code"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "An audit record could not be written to the database; the request carried on (fail-open). hmcts.error.code: audit.write_failed. Correlate on hmcts.request.id. Never carries the actor, the job or any content."
+    },
+    "auth.token_refresh_failed": {
+      "attributes": [],
+      "browser": true,
+      "class": "operational",
+      "description": "The browser could not obtain a fresh sign-in token."
+    },
+    "dependency.health_changed": {
+      "attributes": [
+        "dependency.name",
+        "dependency.state",
+        "hmcts.error.code"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "A dependency went from up to down or back (or was down on its first check). hmcts.error.code (when down): dependency.timeout, dependency.auth_failed, dependency.unreachable or dependency.error."
+    },
+    "dictation.no_speech_warning": {
+      "attributes": [
+        "dictation.elapsed_seconds"
+      ],
+      "browser": true,
+      "class": "operational",
+      "description": "Recording with no captured speech."
+    },
+    "dictation.paused": {
+      "attributes": [],
+      "browser": true,
+      "class": "operational",
+      "description": "User paused recording."
+    },
+    "dictation.resume_first_result": {
+      "attributes": [],
+      "browser": true,
+      "class": "operational",
+      "description": "First text after a resume (duration: resume to text)."
+    },
+    "dictation.resumed": {
+      "attributes": [],
+      "browser": true,
+      "class": "operational",
+      "description": "User resumed recording."
+    },
+    "dictation.session_ended": {
+      "attributes": [
+        "hmcts.outcome",
+        "hmcts.error.code",
+        "dictation.end_reason",
+        "dictation.segments_captured",
+        "dictation.speech_sessions",
+        "dictation.autosave_failures"
+      ],
+      "browser": true,
+      "class": "operational",
+      "description": "One per dictation session: its overall outcome (duration: session length)."
+    },
+    "dictation.session_requested": {
+      "attributes": [
+        "dictation.session_index",
+        "dictation.reconnect_attempt"
+      ],
+      "browser": true,
+      "class": "operational",
+      "description": "Recording requested (user start or reconnect)."
+    },
+    "dictation.submission_finished": {
+      "attributes": [
+        "hmcts.outcome",
+        "hmcts.error.code",
+        "dictation.mode",
+        "http.response.status_code"
+      ],
+      "browser": true,
+      "class": "operational",
+      "description": "Hearing submission finished (duration: request time)."
+    },
+    "document.available": {
+      "attributes": [
+        "document.template",
+        "document.template_version"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "A generated document is ready to download; which template and version produced it."
+    },
+    "job.created": {
+      "attributes": [],
+      "browser": false,
+      "class": "operational",
+      "description": "Job row created: the upload is complete and the job exists."
+    },
+    "job.finished": {
+      "attributes": [
+        "job.queue_wait_ms",
+        "job.processing_ms",
+        "hmcts.failure.source",
+        "speech.error_code",
+        "http.response.status_code",
+        "speech.retry_after_s",
+        "speech.region",
+        "speech.locale",
+        "speech.api_version",
+        "speech.model_ref",
+        "speech.diarization",
+        "speech.audio_duration_s",
+        "speech.audio_duration_source"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "A job finished, once per job: hmcts.outcome success, error (counts towards the failed-jobs alert), failure (the user's input was rejected) or cancelled; hmcts.error.code says why. Dictation: an uploaded-audio transcription. Recording: a batch Speech job, with queue and processing times and the Speech details."
+    },
+    "job.poll_failed": {
+      "attributes": [
+        "hmcts.failure.source",
+        "speech.error_code",
+        "http.response.status_code",
+        "speech.retry_after_s"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "Polling the job failed; it stays unfinished and is polled again."
+    },
+    "job.queued": {
+      "attributes": [
+        "speech.region",
+        "speech.locale",
+        "speech.api_version",
+        "speech.model_ref",
+        "speech.diarization"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "Azure Speech accepted the job; duration_ms: created to accepted."
+    },
+    "job.retried": {
+      "attributes": [
+        "job.retry.operation",
+        "job.retry.attempt",
+        "hmcts.failure.source",
+        "speech.error_code",
+        "http.response.status_code",
+        "speech.retry_after_s"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "A call for the job failed and is retried; hmcts.error.code says why."
+    },
+    "job.storage_failed": {
+      "attributes": [
+        "storage.operation",
+        "hmcts.failure.source"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "A database or blob write recording a job's state failed; hmcts.error.code says which kind (storage.db_* or storage.blob_failed)."
+    },
+    "job.stuck": {
+      "attributes": [
+        "job.state",
+        "hmcts.failure.source"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "The job has waited or run longer than its threshold. Emitted once per job; duration_ms: time in that state so far."
+    },
+    "live_draft.autosave_stalled": {
+      "attributes": [
+        "live_draft.failure_kind",
+        "live_draft.consecutive_failures",
+        "live_draft.seconds_since_last_save"
+      ],
+      "browser": true,
+      "class": "operational",
+      "description": "Autosave has stopped working."
+    },
+    "live_draft.restore_finished": {
+      "attributes": [
+        "hmcts.outcome",
+        "hmcts.error.code",
+        "live_draft.failure_kind",
+        "http.response.status_code"
+      ],
+      "browser": true,
+      "class": "operational",
+      "description": "Restoring a saved draft finished."
+    },
+    "live_draft.save_failed": {
+      "attributes": [
+        "live_draft.failure_kind",
+        "http.response.status_code",
+        "live_draft.consecutive_failures",
+        "live_draft.seconds_since_last_save",
+        "live_draft.trigger"
+      ],
+      "browser": true,
+      "class": "operational",
+      "description": "An autosave failed."
+    },
+    "live_draft.save_recovered": {
+      "attributes": [
+        "live_draft.consecutive_failures",
+        "live_draft.outage_seconds"
+      ],
+      "browser": true,
+      "class": "operational",
+      "description": "Autosave works again after failures."
+    },
+    "minutes.ai_edit_completed": {
+      "attributes": [
+        "minutes.template"
+      ],
+      "browser": true,
+      "class": "analytics",
+      "description": "An AI edit finished (duration)."
+    },
+    "minutes.ai_edit_failed": {
+      "attributes": [
+        "minutes.template",
+        "hmcts.outcome",
+        "hmcts.error.code"
+      ],
+      "browser": true,
+      "class": "operational",
+      "description": "An AI edit failed (duration)."
+    },
+    "minutes.ai_edit_started": {
+      "attributes": [
+        "minutes.template"
+      ],
+      "browser": true,
+      "class": "analytics",
+      "description": "An AI edit started."
+    },
+    "minutes.citation_clicked": {
+      "attributes": [
+        "minutes.citation_index"
+      ],
+      "browser": true,
+      "class": "analytics",
+      "description": "A citation was clicked."
+    },
+    "minutes.copied": {
+      "attributes": [
+        "minutes.content_length"
+      ],
+      "browser": true,
+      "class": "analytics",
+      "description": "Minutes were copied."
+    },
+    "minutes.generation_completed": {
+      "attributes": [
+        "minutes.template"
+      ],
+      "browser": true,
+      "class": "analytics",
+      "description": "Minutes generated (duration)."
+    },
+    "minutes.generation_failed": {
+      "attributes": [
+        "minutes.template",
+        "hmcts.outcome",
+        "hmcts.error.code"
+      ],
+      "browser": true,
+      "class": "operational",
+      "description": "Minutes generation failed (duration)."
+    },
+    "minutes.generation_started": {
+      "attributes": [
+        "minutes.template"
+      ],
+      "browser": true,
+      "class": "analytics",
+      "description": "Minutes generation started."
+    },
+    "minutes.manual_edit_saved": {
+      "attributes": [],
+      "browser": true,
+      "class": "analytics",
+      "description": "Minutes were edited by hand."
+    },
+    "minutes.rated": {
+      "attributes": [
+        "minutes.rating"
+      ],
+      "browser": true,
+      "class": "analytics",
+      "description": "Minutes were rated."
+    },
+    "onboarding.completed": {
+      "attributes": [],
+      "browser": true,
+      "class": "analytics",
+      "description": "Onboarding was completed."
+    },
+    "onboarding.licence_check_failed": {
+      "attributes": [
+        "onboarding.step",
+        "hmcts.error.code"
+      ],
+      "browser": true,
+      "class": "operational",
+      "description": "The licence check during onboarding failed."
+    },
+    "onboarding.step_viewed": {
+      "attributes": [
+        "onboarding.step",
+        "onboarding.step_name"
+      ],
+      "browser": true,
+      "class": "analytics",
+      "description": "An onboarding step was shown."
+    },
+    "page.viewed": {
+      "attributes": [
+        "page.route"
+      ],
+      "browser": true,
+      "class": "analytics",
+      "description": "A page was viewed."
+    },
+    "recording.completed": {
+      "attributes": [
+        "recording.mode",
+        "recording.duration_seconds",
+        "file.size_bytes",
+        "file.type"
+      ],
+      "browser": true,
+      "class": "analytics",
+      "description": "A recording finished."
+    },
+    "recording.failed": {
+      "attributes": [
+        "recording.mode",
+        "recording.duration_seconds"
+      ],
+      "browser": true,
+      "class": "operational",
+      "description": "A recording failed."
+    },
+    "recording.new_clicked": {
+      "attributes": [
+        "dictation.mode"
+      ],
+      "browser": true,
+      "class": "analytics",
+      "description": "Start new recording was clicked."
+    },
+    "recording.started": {
+      "attributes": [
+        "recording.mode",
+        "file.type"
+      ],
+      "browser": true,
+      "class": "analytics",
+      "description": "A recording started."
+    },
+    "results_retrieval.cancelled": {
+      "attributes": [],
+      "browser": false,
+      "class": "operational",
+      "description": "Downloading the transcript from Azure Speech was cancelled."
+    },
+    "results_retrieval.completed": {
+      "attributes": [],
+      "browser": false,
+      "class": "operational",
+      "description": "Downloading the transcript from Azure Speech completed; duration_ms: its duration."
+    },
+    "results_retrieval.failed": {
+      "attributes": [],
+      "browser": false,
+      "class": "operational",
+      "description": "Downloading the transcript from Azure Speech failed; hmcts.error.code says why, duration_ms: its duration."
+    },
+    "results_retrieval.started": {
+      "attributes": [],
+      "browser": false,
+      "class": "operational",
+      "description": "Downloading the transcript from Azure Speech started."
+    },
+    "security.ownership_violation": {
+      "attributes": [
+        "security.resource_type",
+        "security.action",
+        "security.outcome"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "A caller reached, or tried to reach, a resource they do not own. Correlate on hmcts.request.id; hmcts.journey.id is the target job or upload."
+    },
+    "speakers.sample_played": {
+      "attributes": [
+        "speakers.segment_seconds"
+      ],
+      "browser": true,
+      "class": "analytics",
+      "description": "A speaker sample was played."
+    },
+    "speakers.sample_renamed": {
+      "attributes": [],
+      "browser": true,
+      "class": "analytics",
+      "description": "A speaker was renamed in the sample editor."
+    },
+    "speech.canceled": {
+      "attributes": [
+        "speech.session_id",
+        "dictation.session_index",
+        "speech.cancel_reason",
+        "speech.error_code",
+        "dictation.collapses_in_window"
+      ],
+      "browser": true,
+      "class": "operational",
+      "description": "Speech SDK canceled event."
+    },
+    "speech.first_result": {
+      "attributes": [
+        "speech.session_id",
+        "dictation.session_index"
+      ],
+      "browser": true,
+      "class": "operational",
+      "description": "First transcript text (duration: request to first text)."
+    },
+    "speech.job_failed": {
+      "attributes": [
+        "hmcts.failure.source",
+        "speech.error_code"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "Azure Speech reported the job as failed; speech.error_code is Azure's code."
+    },
+    "speech.job_running": {
+      "attributes": [],
+      "browser": false,
+      "class": "operational",
+      "description": "Azure Speech started processing; duration_ms: the queue wait."
+    },
+    "speech.session_started": {
+      "attributes": [
+        "speech.session_id",
+        "dictation.session_index",
+        "dictation.reconnect_attempt"
+      ],
+      "browser": true,
+      "class": "operational",
+      "description": "Speech SDK sessionStarted (duration: request to ready)."
+    },
+    "speech.session_stopped": {
+      "attributes": [
+        "speech.session_id",
+        "dictation.session_index",
+        "dictation.segments_captured",
+        "dictation.user_initiated",
+        "speech.stop_reason"
+      ],
+      "browser": true,
+      "class": "operational",
+      "description": "Speech session ended (duration: session length)."
+    },
+    "speech.token_fetched": {
+      "attributes": [
+        "hmcts.outcome",
+        "hmcts.error.code"
+      ],
+      "browser": true,
+      "class": "operational",
+      "description": "Speech token request finished (duration: fetch time)."
+    },
+    "speech.unhealthy": {
+      "attributes": [
+        "dictation.collapses_in_window",
+        "dictation.window_seconds",
+        "speech.cancel_reason",
+        "speech.error_code"
+      ],
+      "browser": true,
+      "class": "operational",
+      "description": "Speech sessions collapsing repeatedly."
+    },
+    "support.error_report_copied": {
+      "attributes": [
+        "hmcts.request.id"
+      ],
+      "browser": true,
+      "class": "analytics",
+      "description": "An error report was copied."
+    },
+    "support.error_report_downloaded": {
+      "attributes": [
+        "hmcts.request.id"
+      ],
+      "browser": true,
+      "class": "analytics",
+      "description": "An error report was downloaded."
+    },
+    "transcript.available": {
+      "attributes": [
+        "transcript.segment_count",
+        "transcript.speaker_count",
+        "dictation.transcription_id"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "A transcript was saved and can be opened. Dictation: dictation.transcription_id is the transcription created (live submission). Recording: segment and speaker counts."
+    },
+    "transcript.deleted": {
+      "attributes": [],
+      "browser": true,
+      "class": "analytics",
+      "description": "A transcript was deleted."
+    },
+    "transcript.marked_done": {
+      "attributes": [],
+      "browser": true,
+      "class": "analytics",
+      "description": "A transcript was marked done."
+    },
+    "transcript.opened": {
+      "attributes": [],
+      "browser": true,
+      "class": "analytics",
+      "description": "A transcript was opened."
+    },
+    "transcript.postprocess_degraded": {
+      "attributes": [
+        "transcript.postprocess_step"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "A speaker-processing step failed; the previous step's output is kept."
+    },
+    "transcript.renamed": {
+      "attributes": [],
+      "browser": true,
+      "class": "analytics",
+      "description": "A transcript was renamed."
+    },
+    "transcript.speaker_renamed": {
+      "attributes": [
+        "transcript.update_type"
+      ],
+      "browser": true,
+      "class": "analytics",
+      "description": "A speaker was renamed."
+    },
+    "transcript.unmarked_done": {
+      "attributes": [],
+      "browser": true,
+      "class": "analytics",
+      "description": "A transcript was marked not done."
+    },
+    "transcript_persistence.cancelled": {
+      "attributes": [],
+      "browser": false,
+      "class": "operational",
+      "description": "Saving the transcript to the database was cancelled."
+    },
+    "transcript_persistence.completed": {
+      "attributes": [],
+      "browser": false,
+      "class": "operational",
+      "description": "Saving the transcript to the database completed; duration_ms: its duration."
+    },
+    "transcript_persistence.failed": {
+      "attributes": [],
+      "browser": false,
+      "class": "operational",
+      "description": "Saving the transcript to the database failed; hmcts.error.code says why, duration_ms: its duration."
+    },
+    "transcript_persistence.started": {
+      "attributes": [],
+      "browser": false,
+      "class": "operational",
+      "description": "Saving the transcript to the database started."
+    },
+    "transcript_postprocessing.cancelled": {
+      "attributes": [],
+      "browser": false,
+      "class": "operational",
+      "description": "Speaker processing was cancelled."
+    },
+    "transcript_postprocessing.completed": {
+      "attributes": [],
+      "browser": false,
+      "class": "operational",
+      "description": "Speaker processing completed; duration_ms: its duration."
+    },
+    "transcript_postprocessing.failed": {
+      "attributes": [],
+      "browser": false,
+      "class": "operational",
+      "description": "Speaker processing failed; hmcts.error.code says why, duration_ms: its duration."
+    },
+    "transcript_postprocessing.started": {
+      "attributes": [],
+      "browser": false,
+      "class": "operational",
+      "description": "Speaker processing started."
+    },
+    "upload.file_rejected": {
+      "attributes": [
+        "hmcts.error.code",
+        "file.type",
+        "file.size_bytes"
+      ],
+      "browser": true,
+      "class": "operational",
+      "description": "A file the user picked was rejected in the browser, before upload (count, size or type)."
+    },
+    "upload.file_selected": {
+      "attributes": [
+        "file.type",
+        "file.size_bytes"
+      ],
+      "browser": true,
+      "class": "analytics",
+      "description": "A file was chosen for upload."
+    },
+    "upload.rejected": {
+      "attributes": [],
+      "browser": false,
+      "class": "operational",
+      "description": "The dictation API refused an upload before storing it: the key was invalid (upload.invalid_key) or not the caller's (upload.forbidden). Not upload.validation_failed (recording file checks) or upload.file_rejected (browser)."
+    },
+    "upload.transcription_started": {
+      "attributes": [
+        "upload.source",
+        "file.type",
+        "upload.retry_attempt"
+      ],
+      "browser": true,
+      "class": "analytics",
+      "description": "An upload was sent for transcription."
+    },
+    "upload.url_issued": {
+      "attributes": [
+        "upload.method"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "The API issued an upload target to the browser (direct to storage, or through the API)."
+    },
+    "upload.validation_failed": {
+      "attributes": [
+        "hmcts.stage",
+        "hmcts.error.code",
+        "upload.file_count",
+        "file.size_bytes",
+        "audio.format",
+        "audio.format_category"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "An uploaded file was rejected; hmcts.error.code says why."
+    },
+    "webhook.delivered": {
+      "attributes": [
+        "webhook.notification"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "The caller's webhook was delivered (2xx)."
+    },
+    "webhook.delivery_failed": {
+      "attributes": [
+        "webhook.notification"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "The caller's webhook could not be delivered after all attempts."
+    }
+  }
+}

@@ -36,6 +36,9 @@ dependencies = [
     "azure-monitor-opentelemetry>=1.8.7",
     "opentelemetry-instrumentation-fastapi>=0.61b0",
 
+    # --- telemetry (DIAAT-205) ---
+    "hmcts-otel[fastapi] @ git+https://github.com/hmcts/hmcts-otel@v0.2.2",
+
     # --- auth ---
     # Resolved from git rather than vendored as a committed wheel, and at v0.3.0
     # rather than the 0.2.0 the dictation service had pinned. See architecture 11.
