@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import logging
 
+from hmcts_azure_auth.audit import AuditEvent
 from sqlmodel import Session
 
 from transcribe_api.runtime.db_connection import get_engine
 from transcribe_api.domain.models_dictation import AuditLog
-from hmcts_azure_auth.audit import AuditEvent
 
 logger = logging.getLogger(__name__)
 

@@ -18,10 +18,13 @@ from transcribe_api.stt.utils import (
     get_file_blob_path,
     get_url_for_transcription,
 )
+from transcribe_api.domain.exceptions import OwnershipConflictError
 from transcribe_api.domain.interface_dictation import (
+    get_transcription_title,
     load_or_create_transcription,
-    save_transcription,
     save_transcription_job,
+    save_transcription_title,
+    user_error_message,
 )
 from transcribe_api.domain.models_dictation import (
     Transcription,
@@ -43,15 +46,41 @@ from transcribe_api.domain.notify.gov_notify import send_email
 async def generate_and_save_meeting_title(
     dialogue_entries: list, transcription: Transcription, user_id: UUID
 ) -> Transcription:
+    """Generate and save the title; on failure the transcription is returned as stored."""
+    await _generate_and_save_title(dialogue_entries, transcription, user_id)
+    return transcription
+
+
+async def _generate_and_save_title(dialogue_entries: list, transcription: Transcription, user_id: UUID) -> bool:
+    """True when a title was generated and saved. The job's outcome uses this, so it
+    always agrees with the title_generation stage."""
     with stage("title_generation") as title_stage:
         previous_title = transcription.title
+        provisional_title = None
         try:
             logger.info(f"Generating meeting title for {len(dialogue_entries)} dialogue entries")
             provisional_title = await generate_meeting_title(dialogue_entries, str(user_id))
-            # The pipeline reads the title from this object (document, email, outcome).
-            transcription.title = provisional_title
-            return save_transcription(transcription, user_id)
+            if not (provisional_title and provisional_title.strip()):
+                title_stage.error("title.failed")  # an empty title is not a title
+                return False
+            # Only if the title is unchanged since the job started: the job's copy of
+            # the row may be stale (the user may have renamed it meanwhile).
+            if save_transcription_title(transcription.id, user_id, provisional_title, previous_title):
+                # The pipeline reads the title from this object (document, email, outcome).
+                transcription.title = provisional_title
+                return True
+            stored = _stored_title(transcription)
+            if stored:
+                transcription.title = stored  # renamed meanwhile: the user's title wins
+                return True
+            title_stage.error("title.failed")  # the transcription no longer exists
+            transcription.title = previous_title
+            return False  # noqa: TRY300 - not an exception: nothing was updated
         except Exception as e:
+            if provisional_title and _stored_title(transcription) == provisional_title:
+                # The save committed and only a later step (e.g. the refresh) failed.
+                transcription.title = provisional_title
+                return True
             # Not saved: keep the object as the database has it, so the job reports
             # title.failed and does not use a title that was never stored.
             transcription.title = previous_title
@@ -59,7 +88,14 @@ async def generate_and_save_meeting_title(
             # Type only: LLM and database errors can echo content.
             logger.error("Error generating or saving meeting title (%s)", type(e).__name__)
             sentry_sdk.capture_exception(e)
-            return transcription
+            return False
+
+
+def _stored_title(transcription: Transcription) -> str | None:
+    try:
+        return get_transcription_title(transcription.id)
+    except Exception:
+        return None  # cannot tell: treat as not saved
 
 
 async def _generate_and_upload_transcript_docx(
@@ -147,8 +183,12 @@ async def transcribe_and_generate_llm_output(
             # refused (SEC-1, OwnershipConflictError); the caller's own is loaded, not
             # reset (a retry).
             transcription = load_or_create_transcription(transcription_id, user_id)
+        except OwnershipConflictError:
+            # The file name names another user's transcription (SEC-1): a rejected
+            # request, not a service error. No journey: the owner is not this user.
+            record_event("job.finished", {c.OUTCOME: "failure", c.ERROR_CODE: "job.ownership_conflict"})
+            raise
         except Exception:
-            # The poller's journey (from the blob name) is still current here.
             record_event("job.finished", {c.OUTCOME: "error", c.ERROR_CODE: "job_record.failed"})
             raise
         # The row exists, so the ID is known even for non-UUID file names.
@@ -180,7 +220,7 @@ async def _generate_minutes_and_title(
 ) -> None:
     """Both minutes templates and the title, in parallel. Failures degrade the job."""
     general_task = generate_llm_output_task(dialogue_entries, transcription.id, general_template, str(user_id))
-    title_task = generate_and_save_meeting_title(dialogue_entries, transcription, user_id)
+    title_task = _generate_and_save_title(dialogue_entries, transcription, user_id)
     crissa_task = generate_llm_output_task(dialogue_entries, transcription.id, crissa_template, str(user_id))
 
     # Wait for all three, including after a failure: the title and the other template
@@ -189,6 +229,9 @@ async def _generate_minutes_and_title(
     for result in results:
         if isinstance(result, BaseException) and not isinstance(result, Exception):
             raise result  # cancellation and the like are not task failures
+    # The title step reports its own outcome (True when saved), as its stage does.
+    if results[1] is not True:
+        progress.degraded.append("title.failed")
     minutes_errors = [r for r in (results[0], results[2]) if isinstance(r, Exception)]
     if minutes_errors:
         # The job carries on; the failure is reported on job.finished.
@@ -236,7 +279,7 @@ async def _run_pipeline(
                 transcription_id=transcription.id,
                 dialogue_entries=[],
                 s3_audio_url=user_upload_blob_storage_file_key,
-                error_message=str(e),
+                error_message=user_error_message(e, "Transcription"),
             ),
             check_owner=False,  # a new job: the ID is generated by the server
         )
@@ -246,8 +289,6 @@ async def _run_pipeline(
 
     progress.step = "minutes"
     await _generate_minutes_and_title(updated_dialogue_entries, transcription, user_id, progress)
-    if not transcription.title:
-        progress.degraded.append("title.failed")
 
     # Generate a .docx transcript document and update s3_audio_url so that
     # "Download Transcript" serves the document rather than the raw audio file.

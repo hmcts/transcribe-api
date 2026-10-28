@@ -156,3 +156,20 @@ async def test_poller_never_retries_an_upload_naming_another_users_transcription
     assert await service.process_discovered_audio({"name": blob}) is False
     service._mark_blob_permanently_failed.assert_awaited_once()
     service._mark_blob_with_error.assert_not_awaited()
+
+
+def test_manual_minutes_edit_sends_no_content_to_langfuse(client, as_user, mocker):
+    """Draft minutes are not exported to Langfuse on a manual edit (as on main)."""
+    as_user(_user())
+    mine = uuid.uuid4()
+    mocker.patch("transcribe_api.api.routes_dictation.get_transcription_by_id", return_value=MagicMock())
+    mocker.patch("transcribe_api.api.routes_dictation.save_minute_version", side_effect=lambda minute: minute)
+    event = mocker.patch("transcribe_api.api.routes_dictation.langfuse_client.event")
+    body = {
+        "id": str(uuid.uuid4()),
+        "transcription_id": str(mine),
+        "html_content": "<p>the appellant said</p>",
+        "template": {"name": "General", "description": "d", "category": "c"},
+    }
+    assert client.post(f"/api/transcriptions/{mine}/minute-versions", json=body).status_code == 200
+    event.assert_not_called()

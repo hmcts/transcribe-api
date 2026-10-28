@@ -10,7 +10,7 @@ from uuid import UUID
 
 import httpx
 import pytz
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from hmcts_otel import StageHandle, background_span, journey, record_event, stage
 from hmcts_otel import conventions as c
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -28,6 +28,7 @@ from transcribe_api.domain.blob_ownership import (
     blob_owner_segment,
     segment_belongs_to_user,
 )
+from transcribe_api.runtime.browser_telemetry import telemetry_relay_router
 from transcribe_api.domain.exceptions import OwnershipConflictError
 from transcribe_api.domain.interface_dictation import (
     add_tag_to_transcription,
@@ -91,6 +92,20 @@ from transcribe_api.runtime.settings_dictation import get_settings
 from transcribe_api.runtime.version import APP_VERSION
 
 router = APIRouter()
+
+# OBS-4: browser telemetry relay, POST /api/telemetry (same roles as dictation).
+router.include_router(
+    telemetry_relay_router(
+        get_allowlisted_user(
+            required_roles_any=[
+                get_role("Normal"),
+                get_role("Judge"),
+                get_role("LegalTextManager"),
+                get_role("SystemAdministrator"),
+            ]
+        )
+    )
+)
 
 
 def _validate_blob_ownership(blob_path: str, current_user: "User", request: Request) -> None:
@@ -787,25 +802,16 @@ async def save_minute_version_route(
 
     minute_data.transcription_id = transcription_id
 
-    # Save the minute version first
     try:
         saved_minute = save_minute_version(minute_data)
     except OwnershipConflictError:
         # The ID belongs to a minute version of another transcription.
         raise HTTPException(status_code=404, detail="Minute version not found") from None
 
-    # Then handle the additional logging if needed
-    old_html_content = get_minute_version_by_id(minute_data.id, transcription_id).html_content
-
-    # Only log the event if content has changed
-    if old_html_content != minute_data.html_content:
-        langfuse_client.event(
-            trace_id=minute_data.trace_id,
-            name="user-edit",
-            input=old_html_content,
-            output=minute_data.html_content,
-        )
-
+    # No Langfuse "user-edit" event: it would send the full draft minutes (before
+    # and after) to Langfuse on every manual edit. On main that code never ran (it
+    # compared the content after saving), so no such data flow exists; whether to
+    # add one is a product and privacy decision, not a bug fix.
     return saved_minute
 
 
@@ -851,7 +857,7 @@ async def get_transcription_jobs_route(
 
 
 @router.get("/transcriptions/{transcription_id}/jobs/{job_id}/audio")
-async def stream_audio(  # noqa: C901
+async def stream_audio(
     transcription_id: UUID,
     job_id: UUID,
     request: Request,
@@ -1121,6 +1127,7 @@ async def _render_hearing_document_off_loop(**kwargs) -> Path:
 async def save_live_transcription_submission(
     request: LiveTranscriptionSubmissionRequest,
     current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    dictation_session_id: str | None = Header(default=None, alias="X-Dictation-Session-Id"),
 ) -> LiveTranscriptionSubmissionResponse:
     """Persist live transcription form and transcript data as JSON in the audio uploads bucket."""
     # DIAAT-276: the submission is a journey; the transcription it creates is related
@@ -1130,7 +1137,10 @@ async def save_live_transcription_submission(
         try:
             # The stage sees the original exception (one exception event, its real
             # type as the code); it is turned into the client's generic 500 outside.
-            with stage("submission") as submission_stage:
+            # The browser's dictation session (OBS-4), if sent: a malformed value is
+            # dropped by the schema.
+            session = {"dictation.session_id": dictation_session_id} if dictation_session_id else None
+            with stage("submission", attributes=session) as submission_stage:
                 return await _save_live_transcription_submission(request, current_user, submission_id, submission_stage)
         except HTTPException:
             raise
@@ -1469,38 +1479,43 @@ async def get_speech_token(
     """
     settings = get_settings()
 
-    if not settings.AZURE_SPEECH_ENDPOINT:
-        logger.error("Azure Speech credentials not configured")
-        raise HTTPException(status_code=500, detail="Azure Speech Services not configured")
-
-    try:
-        if settings.AZURE_SPEECH_RESOURCE_ID:
-            # Managed Identity path — required when public network access is disabled.
-            # Returns an AAD token in the format the Speech SDK expects for Entra auth.
-            from azure.identity.aio import DefaultAzureCredential
-            async with DefaultAzureCredential() as credential:
-                token_response = await credential.get_token("https://cognitiveservices.azure.com/.default")
-            token = f"aad#{settings.AZURE_SPEECH_RESOURCE_ID}#{token_response.token}"
-            logger.info("Speech token (AAD/Managed Identity) generated for user %s", _sanitize_for_log(current_user.id))
-        elif settings.AZURE_SPEECH_KEY:
-            # API key STS path — requires public network access to the Speech endpoint.
-            fetch_token_url = f"{settings.AZURE_SPEECH_ENDPOINT.rstrip('/')}/sts/v1.0/issueToken"
-            headers = {"Ocp-Apim-Subscription-Key": settings.AZURE_SPEECH_KEY}
-            async with httpx.AsyncClient() as client:
-                response = await client.post(fetch_token_url, headers=headers)
-                response.raise_for_status()
-            token = response.text
-            logger.info("Speech token (API key/STS) generated for user %s", _sanitize_for_log(current_user.id))
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail="Azure Speech Services not configured: set AZURE_SPEECH_KEY or AZURE_SPEECH_RESOURCE_ID",
+    # OBS-4: token-mint latency and failures are an SLI for starting dictation.
+    with stage("speech_token") as token_stage:
+        # Configuration first, in one place (same responses as before).
+        if not settings.AZURE_SPEECH_ENDPOINT or not (settings.AZURE_SPEECH_RESOURCE_ID or settings.AZURE_SPEECH_KEY):
+            logger.error("Azure Speech credentials not configured")
+            token_stage.error("speech_token.not_configured")
+            detail = (
+                "Azure Speech Services not configured"
+                if not settings.AZURE_SPEECH_ENDPOINT
+                else "Azure Speech Services not configured: set AZURE_SPEECH_KEY or AZURE_SPEECH_RESOURCE_ID"
             )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("Failed to fetch speech token: %s", e)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch speech token: {e!s}") from e
+            raise HTTPException(status_code=500, detail=detail)
+
+        try:
+            if settings.AZURE_SPEECH_RESOURCE_ID:
+                # Managed Identity path — required when public network access is disabled.
+                # Returns an AAD token in the format the Speech SDK expects for Entra auth.
+                from azure.identity.aio import DefaultAzureCredential
+                async with DefaultAzureCredential() as credential:
+                    token_response = await credential.get_token("https://cognitiveservices.azure.com/.default")
+                token = f"aad#{settings.AZURE_SPEECH_RESOURCE_ID}#{token_response.token}"
+                logger.info("Speech token (AAD/Managed Identity) generated for user %s", _sanitize_for_log(current_user.id))
+            else:
+                # API key STS path — requires public network access to the Speech endpoint.
+                fetch_token_url = f"{settings.AZURE_SPEECH_ENDPOINT.rstrip('/')}/sts/v1.0/issueToken"
+                headers = {"Ocp-Apim-Subscription-Key": settings.AZURE_SPEECH_KEY}
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(fetch_token_url, headers=headers)
+                    response.raise_for_status()
+                token = response.text
+                logger.info("Speech token (API key/STS) generated for user %s", _sanitize_for_log(current_user.id))
+        except Exception as e:
+            token_stage.error("speech_token.request_failed")
+            # Type only, to the log and the client: the error text can include the
+            # endpoint, the response body or credential details.
+            logger.error("Failed to fetch speech token (%s)", type(e).__name__)
+            raise HTTPException(status_code=500, detail="Failed to fetch speech token") from e
 
     endpoint = settings.AZURE_SPEECH_ENDPOINT if settings.DIRECT_SDK_ACCESS else settings.APP_URL
     return {"token": token, "endpoint": endpoint}

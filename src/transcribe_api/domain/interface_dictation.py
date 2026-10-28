@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 import pytz
 import sentry_sdk
 from fastapi import HTTPException
-from sqlalchemy import event, func
+from sqlalchemy import event, func, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
@@ -72,6 +72,34 @@ def load_or_create_transcription(transcription_id: str | UUID | None, user_id: U
     return save_transcription(Transcription(id=record_id), user_id)
 
 
+def save_transcription_title(
+    transcription_id: UUID, user_id: UUID, title: str, expected_current: str | None
+) -> bool:
+    """Set the title of the caller's transcription, only if it is still
+    ``expected_current`` (compare-and-set).
+
+    Unlike save_transcription (a merge of a whole copy loaded earlier), this never
+    overwrites a change made meanwhile, e.g. the user renaming the transcription
+    while its job runs. False if nothing was updated (renamed meanwhile, or no such
+    transcription of this user).
+    """
+    current = Transcription.title.is_(None) if expected_current is None else Transcription.title == expected_current
+    with Session(engine) as session:
+        result = session.execute(
+            update(Transcription)
+            .where(Transcription.id == transcription_id, Transcription.user_id == user_id, current)
+            .values(title=title, updated_datetime=datetime.now(UTC))
+        )
+        session.commit()
+        return result.rowcount == 1
+
+
+def get_transcription_title(transcription_id: UUID) -> str | None:
+    """The stored title (None if the transcription does not exist)."""
+    with Session(engine) as session:
+        return session.exec(select(Transcription.title).where(Transcription.id == transcription_id)).first()
+
+
 def save_transcription(
     transcription_data: Transcription,
     user_id: UUID,
@@ -83,6 +111,36 @@ def save_transcription(
         session.commit()
         session.refresh(merged)
         return merged
+
+
+# Fixed, user-facing reasons for client-caused failures (never the exception's text).
+_CLIENT_ERROR_MESSAGES = {
+    ("Transcription", 422): (
+        "Transcription failed: the speech service could not process this audio. Check that the file "
+        "is a supported audio format and not too long; if it is, contact support. Retrying the same "
+        "file is unlikely to help."
+    ),
+    ("Minutes generation", 400): "Minutes generation failed: there is no transcript to generate minutes from.",
+}
+
+
+def user_error_message(error: BaseException, what: str) -> str:
+    """The error text stored on a job or minute version and shown to the user.
+
+    Never the exception's own text: it can quote transcript, prompts or a service
+    response (as logs, blob metadata and Sentry already avoid). A client-caused
+    failure (HTTP 4xx) gets a fixed reason that says retrying will not help;
+    anything else is reported as transient, with the type so support can tell
+    failures apart.
+    """
+    status = error.status_code if isinstance(error, HTTPException) else None
+    if isinstance(status, int) and 400 <= status < 500:  # noqa: PLR2004
+        return _CLIENT_ERROR_MESSAGES.get(
+            (what, status),
+            f"{what} failed: the request could not be processed (error {status}). "
+            "Retrying is unlikely to help; please contact support.",
+        )
+    return f"{what} failed ({type(error).__name__}). Please try again, or contact support if it keeps happening."
 
 
 def create_error_minute_version(
@@ -121,7 +179,7 @@ def create_error_minute_version(
         "transcription_id": transcription_id,
         "html_content": "",
         "is_generating": False,
-        "error_message": str(error),
+        "error_message": user_error_message(error, "Minutes generation"),
     }
     if template is not None:
         kwargs["template"] = template

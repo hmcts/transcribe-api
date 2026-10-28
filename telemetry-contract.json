@@ -127,6 +127,13 @@
       "pattern": null,
       "type": "int"
     },
+    "dictation.session_id": {
+      "allowed_values": null,
+      "description": "Browser dictation session that made this submission (set by the server from X-Dictation-Session-Id).",
+      "max_length": 128,
+      "pattern": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+      "type": "str"
+    },
     "dictation.session_index": {
       "allowed_values": null,
       "description": "Speech session number within the dictation session (reconnects count).",

@@ -25,6 +25,18 @@ from transcribe_api.runtime.settings_dictation import get_settings
 from transcribe_api.stt.speech_auth import SpeechAuthError, speech_auth_headers
 
 TOO_MANY_REQUESTS = 429
+# Azure statuses where the service, not the audio, failed: authentication,
+# permissions/quota and throttling.
+_SERVICE_SIDE_CLIENT_ERRORS = frozenset({401, 403, TOO_MANY_REQUESTS})
+
+
+def _azure_error_status(response_status: int) -> int:
+    """422 (the audio or request was rejected) only for Azure's own client errors;
+    502 (a dependency failure, worth retrying) for auth, quota, throttling, outages
+    and anything else. The user-facing message depends on this (user_error_message)."""
+    if 400 <= response_status < 500 and response_status not in _SERVICE_SIDE_CLIENT_ERRORS:  # noqa: PLR2004
+        return 422
+    return 502
 # Azure batch transcription profanity options are: Masked, Removed, None.
 # Use "None" to preserve profanity exactly as spoken (verbatim output).
 VERBATIM_PROFANITY_FILTER_MODE = "None"
@@ -208,13 +220,13 @@ async def transcribe_audio_with_azure(audio_file_path: Path):
             if "error" in full_response and isinstance(full_response["error"], dict):
                 error_message = full_response["error"].get("message", "Unknown error occurred")
                 logger.error(f"Azure API error (nested): {error_message}")
-                raise HTTPException(status_code=422, detail=error_message)
+                raise HTTPException(status_code=_azure_error_status(response.status_code), detail=error_message)
 
             # Check for top-level error response: {"code": "...", "message": "..."}
             if "code" in full_response:
                 error_message = full_response.get("message", "Unknown error occurred")
                 logger.error(f"Azure API error: {error_message}")
-                raise HTTPException(status_code=422, detail=error_message)
+                raise HTTPException(status_code=_azure_error_status(response.status_code), detail=error_message)
 
             # If no error, proceed with phrases extraction
             phrases = full_response.get("phrases")

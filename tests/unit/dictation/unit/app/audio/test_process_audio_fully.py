@@ -39,8 +39,9 @@ _gs.cache_clear()
 def _patch_external(monkeypatch):
     """Patch all external dependencies for every test in this module."""
     monkeypatch.setattr("transcribe_api.stt.pipeline.sentry_sdk", MagicMock())
-    monkeypatch.setattr("transcribe_api.stt.pipeline.save_transcription", MagicMock())
     monkeypatch.setattr("transcribe_api.stt.pipeline.load_or_create_transcription", MagicMock())
+    monkeypatch.setattr("transcribe_api.stt.pipeline.get_transcription_title", MagicMock(return_value=None))
+    monkeypatch.setattr("transcribe_api.stt.pipeline.save_transcription_title", MagicMock(return_value=True))
     monkeypatch.setattr("transcribe_api.stt.pipeline.save_transcription_job", MagicMock())
     monkeypatch.setattr("transcribe_api.stt.pipeline.generate_meeting_title", AsyncMock(return_value="Test Title"))
     monkeypatch.setattr("transcribe_api.stt.pipeline.generate_llm_output_task", AsyncMock())
@@ -76,7 +77,7 @@ class TestGenerateAndSaveMeetingTitle:
         updated = MagicMock()
         updated.title = "Generated Title"
         mock_save.return_value = updated
-        monkeypatch.setattr("transcribe_api.stt.pipeline.save_transcription", mock_save)
+        monkeypatch.setattr("transcribe_api.stt.pipeline.load_or_create_transcription", mock_save)
 
         t = Transcription(id=uuid4())
         result = await generate_and_save_meeting_title([], t, uuid4())
@@ -126,7 +127,9 @@ class TestTranscribeAndGenerateLlmOutput:
         # save_transcription_job called with error_message
         mock_save_job.assert_called_once()
         job_arg = mock_save_job.call_args[0][0]
-        assert job_arg.error_message == "Azure error"
+        # The user sees the type, never the exception text (it can quote the response).
+        assert job_arg.error_message.startswith("Transcription failed (RuntimeError)")
+        assert "Azure error" not in job_arg.error_message
 
     async def test_sends_email_after_completion(self, monkeypatch):
         mock_email = MagicMock()
@@ -396,9 +399,11 @@ class TestTerminalOutcome:
         from hmcts_otel.testing import capture_telemetry
 
         saved = MagicMock(id=self.TID, title=None)
-        # The record is created (load_or_create_transcription); the title save fails.
         monkeypatch.setattr("transcribe_api.stt.pipeline.load_or_create_transcription", MagicMock(return_value=saved))
-        monkeypatch.setattr("transcribe_api.stt.pipeline.save_transcription", MagicMock(side_effect=RuntimeError("db")))
+        # The record is created; the title update fails.
+        monkeypatch.setattr(
+            "transcribe_api.stt.pipeline.save_transcription_title", MagicMock(side_effect=RuntimeError("db"))
+        )
         docx = AsyncMock(return_value="user-uploads/oid/transcript.docx")
         monkeypatch.setattr("transcribe_api.stt.pipeline._generate_and_upload_transcript_docx", docx)
         with capture_telemetry() as telemetry:
@@ -441,3 +446,154 @@ class TestTerminalOutcome:
             with pytest.raises(HTTPException):
                 await self._run(self.TID)
             assert self._finished(telemetry) == ("failure", "speaker_naming.failed")
+
+
+@pytest.mark.asyncio
+async def test_job_error_message_never_holds_the_exception_text(monkeypatch):
+    """Shown to the user and stored: the exception text can quote transcript or an
+    Azure response, so only its type is kept (as in logs and blob metadata)."""
+    secret = "the appellant " + "said X"
+    saved_jobs = []
+    monkeypatch.setattr(
+        "transcribe_api.stt.pipeline.load_or_create_transcription",
+        MagicMock(return_value=MagicMock(id=uuid4(), title=None)),
+    )
+    monkeypatch.setattr("transcribe_api.stt.pipeline.save_transcription_job", lambda job, **_: saved_jobs.append(job))
+    monkeypatch.setattr("transcribe_api.stt.pipeline.transcribe_audio", AsyncMock(side_effect=RuntimeError(secret)))
+    with pytest.raises(RuntimeError):
+        await transcribe_and_generate_llm_output(
+            user_upload_blob_storage_file_key="user-uploads/oid/x.mp4",
+            user_id=uuid4(),
+            user_email="judge@justice.gov.uk",
+            azure_user_id="oid",
+        )
+    (job,) = saved_jobs
+    assert secret not in job.error_message
+    assert "RuntimeError" in job.error_message
+
+
+def test_minutes_error_message_never_holds_the_exception_text():
+    from transcribe_api.domain.interface_dictation import create_error_minute_version
+
+    version = create_error_minute_version(str(uuid4()), uuid4(), ValueError("prompt said: the appellant"))
+    assert "appellant" not in version.error_message
+    assert "ValueError" in version.error_message
+
+
+@pytest.mark.asyncio
+async def test_an_ownership_conflict_is_a_failure_outside_any_journey(monkeypatch):
+    """SEC-1 x DIAAT-276: a file name naming another user's transcription is rejected
+    (outcome failure, its own code) and never written into that user's journey."""
+    from hmcts_otel import conventions as c
+    from hmcts_otel.testing import capture_telemetry
+
+    from transcribe_api.domain.exceptions import OwnershipConflictError
+
+    victim = "6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f"
+    monkeypatch.setattr(
+        "transcribe_api.stt.pipeline.load_or_create_transcription",
+        MagicMock(side_effect=OwnershipConflictError("Transcription")),
+    )
+    with capture_telemetry() as telemetry:
+        with pytest.raises(OwnershipConflictError):
+            await transcribe_and_generate_llm_output(
+                user_upload_blob_storage_file_key=f"user-uploads/oid/{victim}.mp4",
+                user_id=uuid4(),
+                user_email="judge@justice.gov.uk",
+                azure_user_id="oid",
+                transcription_id=victim,
+            )
+        (finished,) = telemetry.events("job.finished")
+        assert finished[c.OUTCOME] == "failure"
+        assert finished[c.ERROR_CODE] == "job.ownership_conflict"
+        assert not [e for e in telemetry.events() if e.get(c.JOURNEY_ID) == victim]
+
+
+@pytest.mark.asyncio
+async def test_a_title_saved_before_a_later_error_counts_as_saved(monkeypatch):
+    """The commit succeeded and only the refresh failed: the title is kept and the
+    job does not report title.failed (stage and job agree)."""
+    from hmcts_otel.testing import capture_telemetry
+
+    from transcribe_api.stt.pipeline import _generate_and_save_title
+    from transcribe_api.domain.models_dictation import Transcription
+
+    monkeypatch.setattr("transcribe_api.stt.pipeline.generate_meeting_title", AsyncMock(return_value="Bail hearing"))
+    monkeypatch.setattr(
+        "transcribe_api.stt.pipeline.save_transcription_title", MagicMock(side_effect=RuntimeError("after commit"))
+    )
+    monkeypatch.setattr("transcribe_api.stt.pipeline.get_transcription_title", MagicMock(return_value="Bail hearing"))
+    transcription = Transcription(id=uuid4())
+    with capture_telemetry() as telemetry:
+        assert await _generate_and_save_title([], transcription, uuid4()) is True
+        assert telemetry.events("title_generation.completed")
+    assert transcription.title == "Bail hearing"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_title_is_a_title_failure_in_stage_and_job(monkeypatch):
+    from hmcts_otel import conventions as c
+    from hmcts_otel.testing import capture_telemetry
+
+    from transcribe_api.stt.pipeline import _generate_and_save_title
+    from transcribe_api.domain.models_dictation import Transcription
+
+    monkeypatch.setattr("transcribe_api.stt.pipeline.generate_meeting_title", AsyncMock(return_value="  "))
+    save = MagicMock()
+    monkeypatch.setattr("transcribe_api.stt.pipeline.load_or_create_transcription", save)
+    with capture_telemetry() as telemetry:
+        assert await _generate_and_save_title([], Transcription(id=uuid4()), uuid4()) is False
+        assert telemetry.events("title_generation.failed")[0][c.ERROR_CODE] == "title.failed"
+    save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_the_title_update_writes_only_the_title(monkeypatch):
+    """The job's copy of the row may be stale (the user may have changed it while
+    the job ran): only the title column is updated, for this user's transcription."""
+    from transcribe_api.stt.pipeline import _generate_and_save_title
+    from transcribe_api.domain.models_dictation import Transcription
+
+    monkeypatch.setattr("transcribe_api.stt.pipeline.generate_meeting_title", AsyncMock(return_value="Bail hearing"))
+    whole_row_save = MagicMock()
+    monkeypatch.setattr("transcribe_api.stt.pipeline.load_or_create_transcription", whole_row_save)
+    title_only = MagicMock(return_value=True)
+    monkeypatch.setattr("transcribe_api.stt.pipeline.save_transcription_title", title_only)
+    transcription, user_id = Transcription(id=uuid4()), uuid4()
+    assert await _generate_and_save_title([], transcription, user_id) is True
+    title_only.assert_called_once_with(transcription.id, user_id, "Bail hearing", None)
+    whole_row_save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_rename_made_while_the_job_ran_is_kept(monkeypatch):
+    from transcribe_api.stt.pipeline import _generate_and_save_title
+    from transcribe_api.domain.models_dictation import Transcription
+
+    monkeypatch.setattr("transcribe_api.stt.pipeline.generate_meeting_title", AsyncMock(return_value="Generated"))
+    monkeypatch.setattr("transcribe_api.stt.pipeline.save_transcription_title", MagicMock(return_value=False))
+    monkeypatch.setattr("transcribe_api.stt.pipeline.get_transcription_title", MagicMock(return_value="Judge's name"))
+    transcription = Transcription(id=uuid4())
+    assert await _generate_and_save_title([], transcription, uuid4()) is True
+    assert transcription.title == "Judge's name"
+
+
+def test_user_error_messages_tell_permanent_failures_from_transient_ones():
+    from fastapi import HTTPException
+
+    from transcribe_api.domain.interface_dictation import user_error_message
+
+    azure = user_error_message(HTTPException(status_code=422, detail="Azure: the appellant said"), "Transcription")
+    assert "supported audio format" in azure
+    assert "unlikely to help" in azure
+    assert "appellant" not in azure  # never the exception's text
+
+    other_client = user_error_message(HTTPException(status_code=413, detail="x"), "Transcription")
+    assert "error 413" in other_client
+    assert "unlikely to help" in other_client
+
+    transient = user_error_message(TimeoutError("db"), "Transcription")
+    assert transient.startswith("Transcription failed (TimeoutError). Please try again")
+
+    no_dialogue = user_error_message(HTTPException(status_code=400), "Minutes generation")
+    assert "no transcript" in no_dialogue

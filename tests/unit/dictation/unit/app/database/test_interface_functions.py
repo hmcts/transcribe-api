@@ -328,7 +328,7 @@ class TestCreateErrorMinuteVersionFunction:
         tid = uuid4()
         template = TemplateMetadata(name=TemplateName.GENERAL, description="d", category="common")
         result = create_error_minute_version(str(mid), tid, ValueError("oops"), template=template, trace_id="trace-123")
-        assert result.error_message == "oops"
+        assert result.error_message.startswith("Minutes generation failed (ValueError)")
         assert result.template == template
         assert result.trace_id == "trace-123"
         assert result.is_generating is False
@@ -338,7 +338,7 @@ class TestCreateErrorMinuteVersionFunction:
         mid = uuid4()
         tid = uuid4()
         result = create_error_minute_version(str(mid), tid, RuntimeError("fail"))
-        assert result.error_message == "fail"
+        assert result.error_message.startswith("Minutes generation failed (RuntimeError)")
         assert not hasattr(result, "template") or result.template is None
 
     def test_creates_without_trace_id_when_not_provided(self):

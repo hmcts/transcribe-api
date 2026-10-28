@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from hmcts_azure_auth.audit import AuditEvent, AuditEventType
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
@@ -23,10 +24,9 @@ from transcribe_api.api.document_content_models import (
     LegalFrameworkPayload,
 )
 from transcribe_api.stt.utils import generate_blob_download_url
-from transcribe_api.runtime.db_connection import get_engine
 from transcribe_api.domain.audit import write_audit_event
+from transcribe_api.runtime.db_connection import get_engine
 from transcribe_api.domain.exceptions import UserHasTranscriptionsError, UserNotFoundError
-from hmcts_azure_auth.audit import AuditEvent, AuditEventType
 from transcribe_api.domain.interface_dictation import (
     admin_delete_user,
     admin_fetch_all_transcriptions,
@@ -35,12 +35,11 @@ from transcribe_api.domain.interface_dictation import (
     get_user_by_id,
     update_user,
 )
-from transcribe_api.domain.auth.approles_dictation import get_valid_roles
 from transcribe_api.domain.models_dictation import DocumentContent, Transcription
 from transcribe_api.documents.content_loader import clear_cache as clear_content_cache
 from transcribe_api.documents.content_loader import get_document_content as load_document_content
 from transcribe_api.documents.minutes.types import AdminTranscriptionListResponse, AdminTranscriptionRecord
-from transcribe_api.domain.auth.approles_dictation import get_role
+from transcribe_api.domain.auth.approles_dictation import get_role, get_valid_roles
 from transcribe_api.domain.auth.dependencies_dictation import get_allowlisted_user
 from transcribe_api.runtime.log_sanitization import sanitize_for_log
 from transcribe_api.runtime.settings_dictation import get_settings
