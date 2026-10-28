@@ -6,6 +6,8 @@ import mimetypes
 import re
 import socket
 import tempfile
+from collections.abc import AsyncGenerator
+from contextlib import aclosing
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Annotated
@@ -30,6 +32,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
+from starlette.background import BackgroundTask
 
 from transcribe_api.stt import local_storage
 from transcribe_api.stt.accuracy import DEFAULT_CONFIDENCE_THRESHOLD, compute_accuracy
@@ -1321,25 +1324,38 @@ async def get_job_audio(
     # can no longer be turned into a clean 404 (headers are already sent),
     # same limitation any streaming file server has.
     #
-    # The blob manager can't be closed via `async with` in this function —
-    # its credential must stay alive for as long as the response is still
-    # streaming, which outlives this handler returning. _stream_and_close
-    # keeps it open across the whole generator and closes it once done.
-    blob_manager = AsyncAzureBlobManager()
-    chunk_iter = _stream_and_close(blob_manager, job.audio_blob_path, start, length)
+    # The background task closes the stream if a client disconnect left it
+    # suspended mid-body (Starlette stops iterating but never closes it),
+    # rather than leaving its blob client and credential to the garbage
+    # collector. Closing a stream that already finished is a no-op.
+    chunk_iter = _stream_blob_range(job.audio_blob_path, start, length)
     return StreamingResponse(
-        chunk_iter, media_type=media_type, status_code=status_code, headers=headers
+        chunk_iter,
+        media_type=media_type,
+        status_code=status_code,
+        headers=headers,
+        background=BackgroundTask(_close_stream, chunk_iter),
     )
 
 
-async def _stream_and_close(
-    blob_manager: AsyncAzureBlobManager, blob_name: str, start: int, length: int
-):
-    try:
-        async for chunk in blob_manager.stream_blob_range(blob_name, start, length):
+async def _stream_blob_range(blob_name: str, start: int, length: int) -> AsyncGenerator[bytes]:
+    # The blob manager (and so its credential) is opened here rather than in
+    # the handler, which returns before the body streams, so it lives exactly
+    # as long as the stream. aclosing() closes stream_blob_range's own blob
+    # client when this generator is closed early, since `async for` doesn't.
+    async with (
+        AsyncAzureBlobManager() as blob_manager,
+        aclosing(blob_manager.stream_blob_range(blob_name, start, length)) as chunks,
+    ):
+        async for chunk in chunks:
             yield chunk
-    finally:
-        await blob_manager.close()
+
+
+async def _close_stream(stream: AsyncGenerator[bytes]) -> None:
+    # A plain coroutine function, not stream.aclose itself: BackgroundTask
+    # doesn't recognise that builtin method as async, so would call it in a
+    # worker thread and never await the result.
+    await stream.aclose()
 
 
 @router.delete("/jobs/{job_id}", status_code=204)
