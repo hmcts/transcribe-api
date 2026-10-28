@@ -6,6 +6,7 @@ import mimetypes
 import re
 import socket
 import tempfile
+import wave
 from collections.abc import AsyncGenerator
 from contextlib import aclosing
 from datetime import UTC, datetime
@@ -20,6 +21,7 @@ from fastapi import (
     Body,
     Depends,
     File,
+    Header,
     HTTPException,
     Query,
     Request,
@@ -27,7 +29,8 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import StreamingResponse
-from hmcts_otel import StageHandle, journey, stage
+from hmcts_otel import StageHandle, journey, record_event, stage
+from hmcts_otel import conventions as c
 from pydantic import BaseModel, Field, field_validator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -57,7 +60,7 @@ from transcribe_api.domain.models_recording import (
     SpeechBatchJob,
     WordCorrection,
 )
-from transcribe_api.runtime.telemetry import JOURNEY_UPLOAD
+from transcribe_api.runtime.telemetry import EVENT_UPLOAD_VALIDATION_FAILED, JOURNEY_UPLOAD
 from transcribe_api.domain.auth.approles_recording import get_valid_roles
 from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
 from transcribe_api.domain.auth.dependencies_recording import get_current_user
@@ -73,6 +76,11 @@ _METADATA_MAX_BYTES = 4096
 _MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 _ALLOWED_AUDIO_EXTENSIONS = {".mp3", ".wav", ".mp4", ".m4a", ".ogg", ".flac"}
+_VIDEO_EXTENSIONS = {".mp4"}
+# DIAAT-280: the frontend sends one X-Hearing-Id for every file of a hearing, and the
+# number of files, so multi-file uploads can be related in telemetry.
+_MAX_HEARING_FILES = 50
+_FILE_COUNT_RE = re.compile(r"^[0-9]{1,2}$")
 _UNSAFE_FILENAME_CHARS_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 # A plain-text reference transcript for even a multi-hour hearing is at most
 # a few hundred KB; 5MB is generous headroom without allowing an abusive upload.
@@ -557,12 +565,12 @@ async def _read_upload_capped(
     return b"".join(chunks)
 
 
-async def _save_upload_capped(file: UploadFile, max_bytes: int, target: Path) -> None:
+async def _save_upload_capped(file: UploadFile, max_bytes: int, target: Path) -> int:
     """Write the upload to ``target`` in chunks, aborting once max_bytes is exceeded.
 
     The audio upload goes to disk rather than memory: ffmpeg reads it from a
     file anyway, and up to 200 MB per request would otherwise sit in the API's
-    memory alongside the decoded WAV.
+    memory alongside the decoded WAV. Returns the number of bytes written.
     """
     total = 0
     async with aiofiles.open(target, "wb") as out:
@@ -573,6 +581,61 @@ async def _save_upload_capped(file: UploadFile, max_bytes: int, target: Path) ->
                     status_code=413, detail="Audio file exceeds the maximum upload size"
                 )
             await out.write(chunk)
+    return total
+
+
+def _hearing_id(raw: str | None) -> str | None:
+    """A UUID from X-Hearing-Id, normalised; anything else is ignored (never exported)."""
+    if not raw or len(raw) > 64:
+        return None
+    try:
+        return str(UUID(raw.strip()))
+    except ValueError:
+        return None
+
+
+def _hearing_file_count(raw: str | None) -> int | None:
+    """X-Hearing-File-Count when it is an integer in 1..50, else None (not recorded)."""
+    if raw and _FILE_COUNT_RE.fullmatch(raw) and 1 <= int(raw) <= _MAX_HEARING_FILES:
+        return int(raw)
+    return None
+
+
+def _wav_duration_seconds(path: Path) -> float | None:
+    """Duration of a PCM WAV file, or None if it cannot be read (telemetry only)."""
+    try:
+        with wave.open(str(path), "rb") as wav:
+            frames, rate = wav.getnframes(), wav.getframerate()
+    except Exception:  # a malformed header must never fail the upload
+        return None
+    return round(frames / rate, 3) if rate > 0 else None
+
+
+def _upload_metadata(file: UploadFile, extension: str, file_count: int | None) -> dict[str, object]:
+    """Safe technical metadata for the upload stage events. Never the file name."""
+    attributes: dict[str, object] = {}
+    if file_count is not None:
+        attributes["upload.file_count"] = file_count
+    if isinstance(file.size, int):
+        attributes["file.size_bytes"] = file.size  # bytes received
+    if extension in _ALLOWED_AUDIO_EXTENSIONS:
+        attributes["audio.format"] = extension.lstrip(".")
+        attributes["audio.format_category"] = "video" if extension in _VIDEO_EXTENSIONS else "audio"
+    return attributes
+
+
+def _reject(upload_stage: StageHandle, error_code: str) -> None:
+    """Record a validation failure: its own event, then the stage's upload.failed."""
+    upload_stage.fail(error_code)
+    record_event(
+        EVENT_UPLOAD_VALIDATION_FAILED,
+        # The stage's validated code, so this event and upload.failed always agree.
+        {
+            c.STAGE: upload_stage.name,
+            c.ERROR_CODE: upload_stage.error_code,
+            **upload_stage.attributes,
+        },
+    )
 
 
 @router.post("/uploads", status_code=201, response_model=UploadResponse)
@@ -581,26 +644,37 @@ async def upload_audio(
     request: Request,
     file: UploadFile = File(...),
     current_user: AuthenticatedUser = Depends(get_current_user),
+    x_hearing_id: Annotated[str | None, Header()] = None,
+    x_hearing_file_count: Annotated[str | None, Header()] = None,
 ) -> UploadResponse:
     # DIAAT-276: the upload is its own journey, identified by the UUID that also goes
     # into the blob name; the job created from it carries that ID as its parent.
+    # DIAAT-280: the hearing (X-Hearing-Id) is the upload's parent, relating the files
+    # of a multi-file hearing.
     upload_id = uuid4()
-    with journey(JOURNEY_UPLOAD, str(upload_id)), stage("upload") as upload_stage:
-        return await _upload_audio(file, current_user, upload_id, upload_stage)
+    extension = PurePosixPath(file.filename or "").suffix.lower()
+    metadata = _upload_metadata(file, extension, _hearing_file_count(x_hearing_file_count))
+    with (
+        journey(JOURNEY_UPLOAD, str(upload_id), parent_id=_hearing_id(x_hearing_id)),
+        stage("upload", attributes=metadata) as upload_stage,
+    ):
+        return await _upload_audio(file, extension, current_user, upload_id, upload_stage)
 
 
 async def _upload_audio(
-    file: UploadFile, current_user: AuthenticatedUser, upload_id: UUID, upload_stage: StageHandle
+    file: UploadFile,
+    extension: str,
+    current_user: AuthenticatedUser,
+    upload_id: UUID,
+    upload_stage: StageHandle,
 ) -> UploadResponse:
-    extension = PurePosixPath(file.filename or "").suffix.lower()
     if extension not in _ALLOWED_AUDIO_EXTENSIONS:
-        upload_stage.fail("upload.unsupported_format")
+        _reject(upload_stage, "upload.unsupported_format")
         raise HTTPException(
             status_code=422,
             detail=f"Unsupported file type '{extension}'. "
             f"Allowed: {', '.join(sorted(_ALLOWED_AUDIO_EXTENSIONS))}",
         )
-    upload_stage.set_attribute("audio.format", extension.lstrip("."))
 
     safe_filename = _sanitize_filename(file.filename or "audio")
     wav_filename = f"{PurePosixPath(safe_filename).stem}.wav"
@@ -614,10 +688,12 @@ async def _upload_audio(
         input_path = Path(tmpdir) / f"input{extension}"
         wav_path = Path(tmpdir) / "output.wav"
         try:
-            await _save_upload_capped(file, _MAX_UPLOAD_BYTES, input_path)
-        except HTTPException:
-            upload_stage.fail("upload.too_large")  # the only HTTPException it raises (413)
+            size = await _save_upload_capped(file, _MAX_UPLOAD_BYTES, input_path)
+        except HTTPException:  # _save_upload_capped raises only 413 (over the size limit)
+            _reject(upload_stage, "upload.too_large")
             raise
+        if "file.size_bytes" not in upload_stage.attributes:
+            upload_stage.set_attribute("file.size_bytes", size)
 
         # Transcode every accepted upload to 16 kHz mono PCM WAV — the format
         # Azure Speech handles most reliably — before storing. A file that
@@ -627,7 +703,7 @@ async def _upload_audio(
         try:
             await normalize_to_wav(input_path, wav_path)
         except AudioDecodeError as exc:
-            upload_stage.fail("upload.undecodable")
+            _reject(upload_stage, "upload.undecodable")
             raise HTTPException(
                 status_code=422,
                 detail=(
@@ -648,6 +724,9 @@ async def _upload_audio(
                     "Please try again later or contact support."
                 ),
             ) from exc
+        duration = _wav_duration_seconds(wav_path)
+        if duration is not None:
+            upload_stage.set_attribute("audio.duration_seconds", duration)
 
         if get_settings().AUDIO_STORAGE_BACKEND == "local":
             local_storage.save_file(wav_path, blob_name)
