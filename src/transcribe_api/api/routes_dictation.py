@@ -61,6 +61,7 @@ from transcribe_api.domain.models_dictation import (
 from transcribe_api.documents.content_loader import get_document_content
 from transcribe_api.documents.models import DEFAULT_JURISDICTION
 from transcribe_api.documents.template_renderer import render_hearing_document
+from transcribe_api.documents.versioning import DECISION_TEMPLATE, template_version
 from transcribe_api.documents.llm.llm_client import (
     langfuse_client,
 )
@@ -1133,14 +1134,14 @@ async def save_live_transcription_submission(
     # DIAAT-276: the submission is a journey; the transcription it creates is related
     # on the transcript.available event.
     submission_id = uuid.uuid4()
-    with journey(JOURNEY_SUBMISSION, str(submission_id)):
+    # The browser's dictation session (OBS-4) is the journey's parent, so every event
+    # of the submission (stages, document, transcript) carries it as
+    # hmcts.journey.parent_id. Only a UUID is accepted; anything else is ignored.
+    with journey(JOURNEY_SUBMISSION, str(submission_id), parent_id=_dictation_session_id(dictation_session_id)):
         try:
             # The stage sees the original exception (one exception event, its real
             # type as the code); it is turned into the client's generic 500 outside.
-            # The browser's dictation session (OBS-4), if sent: a malformed value is
-            # dropped by the schema.
-            session = {"dictation.session_id": dictation_session_id} if dictation_session_id else None
-            with stage("submission", attributes=session) as submission_stage:
+            with stage("submission") as submission_stage:
                 return await _save_live_transcription_submission(request, current_user, submission_id, submission_stage)
         except HTTPException:
             raise
@@ -1152,12 +1153,25 @@ async def save_live_transcription_submission(
             raise HTTPException(status_code=500, detail="Failed to save submission data") from None
 
 
+def _dictation_session_id(value: str | None) -> str | None:
+    """The X-Dictation-Session-Id header as a canonical UUID, or None."""
+    if not value:
+        return None
+    try:
+        return str(uuid.UUID(value))
+    except ValueError:
+        return None
+
+
 async def _save_live_transcription_submission(  # noqa: PLR0915
     request: LiveTranscriptionSubmissionRequest,
     current_user: User,
     submission_id: uuid.UUID,
     submission_stage: StageHandle,
 ) -> LiveTranscriptionSubmissionResponse:
+    # DIAAT-279: on the document events; the version is added once rendering has
+    # loaded the document content (see app/documents/versioning.py).
+    document_attributes: dict[str, str] = {"document.template": DECISION_TEMPLATE}
     blob_filename = f"live-transcription-submission-{submission_id}.json"
     blob_path = get_file_blob_path(str(current_user.azure_user_id), blob_filename)
 
@@ -1207,34 +1221,49 @@ async def _save_live_transcription_submission(  # noqa: PLR0915
                 _sanitize_for_log(current_user.id),
             )
 
-            # Generate Word document from template
+            # Generate the Word document and store it. DIAAT-279: one stage for both,
+            # so a document that cannot be stored is a failed generation, with the
+            # template, its version and a code saying where it failed.
             temp_output_dir = Path(tempfile.gettempdir()) / "hearing_documents"
-            with stage("document_generation"):
-                temp_doc_path = await _render_hearing_document_off_loop(
-                    request=request,
-                    output_dir=temp_output_dir,
-                    user_email=current_user.email,
+            with stage("document_generation", attributes=document_attributes) as document_stage:
+                try:
+                    # Off the event loop; no file left behind on cancellation.
+                    temp_doc_path = await _render_hearing_document_off_loop(
+                        request=request,
+                        output_dir=temp_output_dir,
+                        user_email=current_user.email,
+                    )
+                except Exception:
+                    document_stage.set_attribute("document.template_version", template_version())
+                    document_stage.error("document.render_failed")
+                    raise
+                document_attributes["document.template_version"] = template_version()
+                document_stage.set_attribute(
+                    "document.template_version", document_attributes["document.template_version"]
                 )
 
-            logger.info(
-                "Rendered hearing document for user %s",
-                _sanitize_for_log(current_user.id),
-            )
+                logger.info(
+                    "Rendered hearing document for user %s",
+                    _sanitize_for_log(current_user.id),
+                )
 
-            # Upload the Word document to blob storage
-            doc_blob_filename = f"hearing-document-{submission_id}.docx"
-            doc_blob_path = get_file_blob_path(str(current_user.azure_user_id), doc_blob_filename)
+                # Upload the Word document to blob storage
+                doc_blob_filename = f"hearing-document-{submission_id}.docx"
+                doc_blob_path = get_file_blob_path(str(current_user.azure_user_id), doc_blob_filename)
 
-            doc_upload_success = await blob_manager.create_blob_from_file(temp_doc_path, doc_blob_path)
-            if not doc_upload_success:
-                submission_stage.error("storage.write_failed")  # server-side: counts as an error
-                raise HTTPException(status_code=500, detail="Failed to upload document to storage")
+                doc_upload_success = await blob_manager.create_blob_from_file(temp_doc_path, doc_blob_path)
+                if not doc_upload_success:
+                    # Generated but not stored: distinct from the submission JSON's
+                    # storage.write_failed, on both the document and submission stages.
+                    document_stage.error("document.store_failed")
+                    submission_stage.error("document.store_failed")
+                    raise HTTPException(status_code=500, detail="Failed to upload document to storage")
 
-            logger.info(
-                "Uploaded hearing document to blob %s for user %s",
-                _redact_blob_path(doc_blob_path),
-                _sanitize_for_log(current_user.id),
-            )
+                logger.info(
+                    "Uploaded hearing document to blob %s for user %s",
+                    _redact_blob_path(doc_blob_path),
+                    _sanitize_for_log(current_user.id),
+                )
 
         # Generate a user-friendly download filename
         # Format: "[{date}] {Appellant} v {Respondent}.docx"
@@ -1318,7 +1347,9 @@ async def _save_live_transcription_submission(  # noqa: PLR0915
             "Created transcription record %s for hearing submission",
             str(saved_transcription.id),
         )
-        # Only now is the transcription usable (its job and document are saved).
+        # Only now is the document reachable by the user (stored, its job saved and a
+        # download link issued), and the transcription usable.
+        record_event("document.available", document_attributes)
         record_event("transcript.available", {"dictation.transcription_id": str(saved_transcription.id)})
 
         return LiveTranscriptionSubmissionResponse(

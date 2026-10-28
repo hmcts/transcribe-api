@@ -11,6 +11,7 @@ blocks (for the rendering pipeline).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -87,6 +88,22 @@ def _load_from_file() -> dict[str, Any]:
 
 
 _cache: dict[str, Any] = {"content": None, "updated_at": None}
+_last_used_digest: str | None = None
+
+
+def _used(content: dict[str, Any]) -> dict[str, Any]:
+    """Remember a fingerprint of the content handed to the renderer (DIAAT-279)."""
+    global _last_used_digest  # noqa: PLW0603 - one value per process, like _cache
+    try:
+        _last_used_digest = hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
+    except (TypeError, ValueError):
+        _last_used_digest = None
+    return content
+
+
+def last_used_content_digest() -> str | None:
+    """SHA-256 of the document content most recently used, or None if none yet."""
+    return _last_used_digest
 
 
 def get_document_content() -> dict[str, Any]:
@@ -112,14 +129,14 @@ def get_document_content() -> dict[str, Any]:
             ).first()
 
             if ts_row is not None and ts_row == _cache["updated_at"] and _cache["content"] is not None:
-                return _cache["content"]
+                return _used(_cache["content"])
 
             # Timestamp changed or no cache — fetch full content
             row = session.exec(select(DocumentContent).where(DocumentContent.id == 1)).first()
             if row is not None:
                 _cache["content"] = row.content
                 _cache["updated_at"] = row.updated_at
-                return _cache["content"]
+                return _used(_cache["content"])
 
             # No DB row yet — seed from file and persist
             content = _load_from_file()
@@ -134,14 +151,14 @@ def get_document_content() -> dict[str, Any]:
             except Exception as seed_exc:
                 session.rollback()
                 logger.warning("Failed to seed document_content table: %s", seed_exc)
-            return content
+            return _used(content)
     except Exception:
         logger.exception(
             "Database unavailable for document content — falling back to local file. "
             "Reads may be inconsistent across instances.",
         )
 
-    return _load_from_file()
+    return _used(_load_from_file())
 
 
 def get_hearing_types() -> list[dict[str, str]]:
