@@ -73,12 +73,13 @@ def test_health_returns_app_version_from_env(monkeypatch, client):
     import transcribe_api.api.routes_dictation
     import transcribe_api.runtime.version
 
-    monkeypatch.setenv("APP_VERSION", "1.2.3-abc1234")
-    importlib.reload(transcribe_api.runtime.version)
-    importlib.reload(transcribe_api.api.routes_dictation)
     try:
-        assert client.get("/api/health").json() == {"status": "ok", "version": "1.2.3-abc1234"}
-        assert client.get("/api/healthcheck").json() == {"status": "ok", "version": "1.2.3-abc1234"}
+        with monkeypatch.context() as env:
+            env.setenv("APP_VERSION", "1.2.3-abc1234")
+            importlib.reload(transcribe_api.runtime.version)
+            importlib.reload(transcribe_api.api.routes_dictation)
+            assert client.get("/api/health").json() == {"status": "ok", "version": "1.2.3-abc1234"}
+            assert client.get("/api/healthcheck").json() == {"status": "ok", "version": "1.2.3-abc1234"}
     finally:
         importlib.reload(transcribe_api.runtime.version)
         importlib.reload(transcribe_api.api.routes_dictation)

@@ -92,30 +92,41 @@ class TestHealth:
 
 
 class TestVersion:
-    def test_defaults_to_unknown(self, client, monkeypatch):
-        # No GIT_SHA in the environment -> the "unknown" default.
-        monkeypatch.delenv("GIT_SHA", raising=False)
-        from transcribe_api.runtime.settings_recording import get_settings
-
-        get_settings.cache_clear()
+    def test_returns_local_version_without_a_build(self, client, monkeypatch, tmp_path):
+        self._reload_version(monkeypatch, tmp_path, app_version=None, build_version=None)
         response = client.get("/api/v1/version")
         assert response.status_code == 200
-        assert response.json() == {"version": "unknown"}
-        get_settings.cache_clear()
+        assert response.json() == {"version": "0.0.999"}
 
-    def test_returns_baked_git_sha(self, client, monkeypatch):
-        monkeypatch.setenv("GIT_SHA", "abc123def456")
-        from transcribe_api.runtime.settings_recording import get_settings
+    def test_returns_baked_build_version(self, client, monkeypatch, tmp_path):
+        self._reload_version(monkeypatch, tmp_path, app_version=None, build_version="1112c85\n")
+        assert client.get("/api/v1/version").json() == {"version": "1112c85"}
 
-        get_settings.cache_clear()
-        response = client.get("/api/v1/version")
-        assert response.status_code == 200
-        assert response.json() == {"version": "abc123def456"}
-        get_settings.cache_clear()
+    def test_app_version_overrides_build_version(self, client, monkeypatch, tmp_path):
+        self._reload_version(monkeypatch, tmp_path, app_version="1.2.3", build_version="1112c85")
+        assert client.get("/api/v1/version").json() == {"version": "1.2.3"}
+
+    def test_matches_health_version(self, client):
+        assert client.get("/api/v1/version").json()["version"] == client.get("/api/health").json()["version"]
 
     def test_no_auth_required(self, client):
         response = client.get("/api/v1/version")
         assert response.status_code == 200
+
+    @staticmethod
+    def _reload_version(monkeypatch, tmp_path, *, app_version, build_version):
+        import transcribe_api.api.routes_recording as routes_recording
+        from transcribe_api.runtime import version
+
+        build_file = tmp_path / "BUILD_VERSION"
+        if build_version is not None:
+            build_file.write_text(build_version)
+        monkeypatch.setattr(version, "BUILD_VERSION_FILE", build_file)
+        if app_version is None:
+            monkeypatch.delenv("APP_VERSION", raising=False)
+        else:
+            monkeypatch.setenv("APP_VERSION", app_version)
+        monkeypatch.setattr(routes_recording, "APP_VERSION", version.read_version())
 
 
 def _patch_normalize(mocker, wav_bytes=b"WAVDATA"):
