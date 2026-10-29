@@ -123,7 +123,7 @@ class AreaMiddleware:
     would otherwise carry no area. Covers the streamed body and background tasks
     (both run inside the app call), and stamps the request span, which the
     instrumentation started outside. An unhandled exception's 500 handler runs in
-    Starlette's outermost middleware, after this: its span is stamped, its log is not.
+    Starlette's outermost middleware, after this: it sets the area again itself.
     """
 
     def __init__(self, app: Any) -> None:
@@ -332,8 +332,15 @@ def create_app() -> FastAPI:
         span.record_exception(exc)
         span.set_status(trace.StatusCode.ERROR, type(exc).__name__)
         # Runs in Starlette's ServerErrorMiddleware, outside the request-ID
-        # middleware: request_id_for reads the ID from the request scope.
-        return await unhandled_exception_handler(exc, request_id_for(request))
+        # middleware: request_id_for reads the ID from the request scope. Outside
+        # AreaMiddleware too: the request's area is set again for the error's log.
+        name = area_for_path(request.url.path)
+        if name is None:
+            return await unhandled_exception_handler(exc, request_id_for(request))
+        from hmcts_otel import area
+
+        with area(name):
+            return await unhandled_exception_handler(exc, request_id_for(request))
 
     app.add_exception_handler(FastAPIHTTPException, _http_exception_wrapper)
     app.add_exception_handler(Exception, _unhandled_exception_wrapper)

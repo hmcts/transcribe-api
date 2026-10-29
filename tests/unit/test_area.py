@@ -168,3 +168,24 @@ def test_every_route_maps_to_its_routers_area():
     wrong = [(path, area_for_path(path), expected) for path, expected in mounted if area_for_path(path) != expected]
     assert wrong == []
     assert len(mounted) > 40
+
+
+def test_an_unhandled_500s_log_is_in_its_area(tel):
+    """Starlette runs the 500 handler outside every middleware, AreaMiddleware's area
+    included: the handler sets it again (PR review)."""
+    from transcribe_api.api import routes_recording
+    from transcribe_api.api.app import create_app
+
+    async def boom() -> None:
+        raise RuntimeError("unexpected")
+
+    routes_recording.router.add_api_route("/zz-area-boom", boom, methods=["GET"])
+    route = routes_recording.router.routes[-1]
+    try:
+        response = TestClient(create_app(), raise_server_exceptions=False).get("/api/v1/zz-area-boom")
+    finally:
+        routes_recording.router.routes.remove(route)
+
+    assert response.status_code == 500
+    (record,) = [r for r in tel.log_records() if r.body == "Unhandled exception (RuntimeError)"]
+    assert dict(record.attributes or {})[c.AREA] == AREA_RECORDING
