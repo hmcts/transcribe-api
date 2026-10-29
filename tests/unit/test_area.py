@@ -128,3 +128,43 @@ def test_each_poller_is_built_and_runs_in_its_own_area(monkeypatch):
         "batch": (AREA_RECORDING, AREA_RECORDING),
         "transcription": (AREA_DICTATION, AREA_DICTATION),
     }
+
+
+def test_a_malformed_body_is_in_its_area_although_no_route_code_runs(tel, monkeypatch):
+    """FastAPI rejects a malformed body (422) before any dependency or route code:
+    the area comes from the middleware, by path (PR review)."""
+    from transcribe_api.api import app as app_module
+
+    seen: list[str | None] = []
+    original = app_module._validation_exception_handler
+
+    async def recording_handler(request, exc):
+        seen.append(current_area())
+        return await original(request, exc)
+
+    monkeypatch.setattr(app_module, "_validation_exception_handler", recording_handler)
+    client = TestClient(app_module.create_app())
+
+    response = client.post(
+        "/api/v1/jobs", content=b'{"audio_url": "truncated', headers={"content-type": "application/json"}
+    )
+
+    assert response.status_code == 422
+    assert seen == [AREA_RECORDING]
+
+
+def test_every_route_maps_to_its_routers_area():
+    from transcribe_api.api import routes_dictation, routes_dictation_privileged, routes_recording
+    from transcribe_api.api.app import area_for_path
+
+    mounted = [
+        *[(route.path, AREA_RECORDING) for route in routes_recording.router.routes],
+        *[(f"/api{route.path}", AREA_DICTATION) for route in routes_dictation.router.routes],
+        *[(f"/api{route.path}", AREA_DICTATION) for route in routes_dictation_privileged.router.routes],
+        *[(f"/api{route.path}", None) for route in routes_dictation.telemetry_router.routes],
+        ("/health", None),
+        ("/api/openapi.json", None),
+    ]
+    wrong = [(path, area_for_path(path), expected) for path, expected in mounted if area_for_path(path) != expected]
+    assert wrong == []
+    assert len(mounted) > 40

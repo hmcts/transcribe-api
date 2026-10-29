@@ -23,7 +23,7 @@ from collections.abc import Callable, Coroutine
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from fastapi.exceptions import RequestValidationError
@@ -93,6 +93,57 @@ def _json_safe(obj: Any) -> Any:
     if isinstance(obj, (list, tuple)):
         return [_json_safe(v) for v in obj]
     return obj
+
+
+# Shared paths under /api: no hmcts.area (every page sends to the relay; the OpenAPI
+# document describes both areas).
+_SHARED_API_PATHS = frozenset({"/api/telemetry", "/api/openapi.json"})
+
+
+def area_for_path(path: str) -> str | None:
+    """The hmcts.area of a request path: the recording router is mounted at /api/v1,
+    the dictation routers at /api. The top-level /health and the shared paths have
+    none."""
+    from transcribe_api.runtime.telemetry import AREA_DICTATION, AREA_RECORDING
+
+    if path in _SHARED_API_PATHS:
+        return None
+    if path == "/api/v1" or path.startswith("/api/v1/"):
+        return AREA_RECORDING
+    if path.startswith("/api/"):
+        return AREA_DICTATION
+    return None
+
+
+class AreaMiddleware:
+    """Sets hmcts.area (decision 1) for the whole request, from its path.
+
+    A middleware rather than a router dependency: FastAPI parses and validates the
+    body before dependencies run, so a malformed request (a 422), a 404 or a 405
+    would otherwise carry no area. Covers the streamed body and background tasks
+    (both run inside the app call), and stamps the request span, which the
+    instrumentation started outside. An unhandled exception's 500 handler runs in
+    Starlette's outermost middleware, after this: its span is stamped, its log is not.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        name = area_for_path(scope.get("path", "")) if scope.get("type") in ("http", "websocket") else None
+        if name is None:
+            await self.app(scope, receive, send)
+            return
+        from hmcts_otel import area
+        from hmcts_otel import conventions as c
+        from opentelemetry import trace
+
+        with area(name):
+            try:
+                trace.get_current_span().set_attribute(c.AREA, name)
+            except Exception:  # noqa: BLE001 - telemetry never fails the request
+                log.debug("Could not stamp the request span with its area")
+            await self.app(scope, receive, send)
 
 
 async def _validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -248,6 +299,9 @@ def create_app() -> FastAPI:
         allow_headers=["Authorization", "Content-Type"],
     )
 
+    # hmcts.area from the path, before routing and body parsing (AreaMiddleware).
+    app.add_middleware(AreaMiddleware)
+
     # Added last, so outermost.
     app.add_middleware(RequestIdMiddleware)
 
@@ -286,9 +340,6 @@ def create_app() -> FastAPI:
     app.add_exception_handler(RequestValidationError, _validation_exception_handler)
 
     # --- routers ---
-    from hmcts_otel.fastapi import area_dependency
-
-    from transcribe_api.runtime.telemetry import AREA_DICTATION, AREA_RECORDING
     from transcribe_api.api.routes_dictation import router as dictation_router
     from transcribe_api.api.routes_dictation import telemetry_router
     from transcribe_api.api.routes_dictation_privileged import router as dictation_admin_router
@@ -302,16 +353,14 @@ def create_app() -> FastAPI:
     # So the surfaces are /api/v1/* and /api/* (+ /api/admin/*) and do NOT
     # collide — including /health, which exists in both but at different paths.
     #
-    # hmcts.area (decision 1) tells the two areas' telemetry apart: every request of
-    # a router, and the request span, carries its area, including each area's own
-    # health and version routes (and dictation's security alert test). Shared, with
-    # no area: the browser relay (every page sends to it) and the top-level /health.
-    in_dictation = [Depends(area_dependency(AREA_DICTATION))]
-    in_recording = [Depends(area_dependency(AREA_RECORDING))]
-    app.include_router(dictation_router, prefix="/api", dependencies=in_dictation)
-    app.include_router(dictation_admin_router, prefix="/api", dependencies=in_dictation)
+    # hmcts.area comes from these mount points (area_for_path, AreaMiddleware):
+    # /api/v1 is recording, the rest of /api dictation (each area's own health and
+    # version routes, and dictation's security alert test, included). The browser
+    # relay is shared (every page sends to it), as is the top-level /health.
+    app.include_router(dictation_router, prefix="/api")
+    app.include_router(dictation_admin_router, prefix="/api")
     app.include_router(telemetry_router, prefix="/api")
-    app.include_router(recording_router, dependencies=in_recording)
+    app.include_router(recording_router)
 
     # Polled by the CNP pipeline's startup check.
     @app.get("/health", include_in_schema=False)
