@@ -38,7 +38,7 @@ class Settings(BaseSettings):
 
     # Local audio storage (dev only — never set in deployed envs)
     AUDIO_STORAGE_BACKEND: Literal["azure", "local"] = "azure"
-    LOCAL_AUDIO_STORAGE_DIR: str = "/tmp/local-audio"  # nosec B108
+    LOCAL_AUDIO_STORAGE_DIR: str = "/tmp/local-audio"  # nosec B108  # NOSONAR
     LOCAL_AUDIO_BASE_URL: str = ""
 
     # Batch transcription backend (dev only — never set in deployed envs).

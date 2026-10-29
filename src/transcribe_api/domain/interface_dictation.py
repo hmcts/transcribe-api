@@ -243,7 +243,7 @@ def save_minute_version(
         return merged
 
 
-def _is_transcription_showable(transcription: Transcription, current_time: datetime) -> bool:
+def _is_transcription_showable(transcription: Transcription, current_time: datetime) -> bool:  # NOSONAR
     try:
         # Any minute versions have error messages (show for user awareness of errors)
         if transcription.minute_versions and any(

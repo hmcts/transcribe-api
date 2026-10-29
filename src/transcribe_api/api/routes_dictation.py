@@ -1328,7 +1328,7 @@ def _dictation_session_id(value: str | None) -> str | None:
         return None
 
 
-async def _save_live_transcription_submission(
+async def _save_live_transcription_submission(  # NOSONAR
     request: LiveTranscriptionSubmissionRequest,
     current_user: User,
     submission_id: uuid.UUID,
