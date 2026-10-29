@@ -23,7 +23,7 @@ class AuthenticatedUser:
     admin_user.id, etc. without changes.
     """
 
-    db_user: "User"
+    db_user: User
     app_roles: list[str]
 
     def __getattr__(self, name: str) -> Any:

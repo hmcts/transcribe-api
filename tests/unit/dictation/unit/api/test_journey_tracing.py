@@ -37,12 +37,36 @@ def test_live_submission_journey_relates_the_transcription(client, as_user, mock
             "submission.started",
             "document_generation.started",
             "document_generation.completed",
+            "document.available",
             "transcript.available",
             "submission.completed",
         ]
         assert len({e[c.JOURNEY_ID] for e in submission_events}) == 1
         available = telemetry.events("transcript.available")[0]
         assert available["dictation.transcription_id"] == str(saved.id)
+
+
+def test_submission_records_the_browser_dictation_session(client, as_user, mocker):
+    """OBS-4: the browser session is the submission journey's parent (from a header),
+    not a client-claimed transcription ID; a malformed value is ignored."""
+    as_user(_make_user(roles=["Judge"]))
+    _patch_submission_deps(mocker)
+    session_id = "3f2b8c1a-9d4e-4f6a-8b7c-1d2e3f4a5b6c"
+    with capture_telemetry() as telemetry:
+        ok = client.post(
+            "/api/live-transcription/submission",
+            json=_MINIMAL_BODY,
+            headers={"X-Dictation-Session-Id": session_id},
+        )
+        assert ok.status_code == 200, ok.text
+        assert telemetry.events("submission.completed")[0][c.JOURNEY_PARENT_ID] == session_id
+    with capture_telemetry() as telemetry:
+        client.post(
+            "/api/live-transcription/submission",
+            json=_MINIMAL_BODY,
+            headers={"X-Dictation-Session-Id": "PA/50123/2024"},
+        )
+        assert c.JOURNEY_PARENT_ID not in telemetry.events("submission.completed")[0]
 
 
 def test_upload_url_starts_the_transcription_journey(client, as_user, mocker):
