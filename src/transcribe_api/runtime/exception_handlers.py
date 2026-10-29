@@ -1,8 +1,9 @@
-import contextlib
+import logging
 
-import sentry_sdk
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger(__name__)
 
 
 async def http_exception_handler(exc: FastAPIHTTPException, request_id: str | None = None) -> JSONResponse:
@@ -58,9 +59,9 @@ async def unhandled_exception_handler(exc: Exception, request_id: str | None = N
     """Handle unexpected exceptions (unhandled errors, bugs, etc.).
 
     This handler processes unhandled exceptions that occur during request
-    processing. It captures the exception in Sentry for monitoring and
-    debugging, then returns a generic error message to the client to avoid
-    exposing internal implementation details.
+    processing. It logs the exception (type and a stack redacted by hmcts-otel,
+    for App Insights), then returns a generic error message to the client to
+    avoid exposing internal implementation details.
 
     Parameters
     ----------
@@ -81,8 +82,8 @@ async def unhandled_exception_handler(exc: Exception, request_id: str | None = N
     Notes
     -----
     This handler is designed for unexpected errors that should not expose
-    internal details to the client. The full exception details are captured
-    in Sentry for developer debugging.
+    internal details to the client. The exception is logged (type and redacted
+    stack, hmcts-otel) for App Insights; nothing about it is returned.
 
     Examples
     --------
@@ -94,9 +95,7 @@ async def unhandled_exception_handler(exc: Exception, request_id: str | None = N
     'request_id'
     """
     rid = request_id or ""
-    with contextlib.suppress(Exception):
-        # If Sentry fails, continue with error handling: tests disallow sockets
-        sentry_sdk.capture_exception(exc)
+    logger.error("Unhandled exception (%s)", type(exc).__name__, exc_info=exc)
     return JSONResponse(
         status_code=500,
         content={"detail": "Internal Server Error", "request_id": rid},

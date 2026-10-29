@@ -219,8 +219,6 @@ class TestIsTranscriptionShowable:
         assert _is_transcription_showable(t, datetime.now(UTC)) is False
 
     def test_returns_true_on_exception(self):
-        import sentry_sdk
-
         from transcribe_api.domain.interface_dictation import _is_transcription_showable
 
         class BadTranscription:
@@ -229,9 +227,7 @@ class TestIsTranscriptionShowable:
                 msg = "simulated failure"
                 raise AttributeError(msg)
 
-        with patch.object(sentry_sdk, "capture_exception"):
-            result = _is_transcription_showable(BadTranscription(), datetime.now(UTC))
-        assert result is True
+        assert _is_transcription_showable(BadTranscription(), datetime.now(UTC)) is True
 
     def test_aware_datetime_used_directly(self):
         from transcribe_api.domain.interface_dictation import _is_transcription_showable

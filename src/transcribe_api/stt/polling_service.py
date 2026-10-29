@@ -19,7 +19,6 @@ from datetime import UTC, datetime
 from urllib.parse import urlparse
 from uuid import UUID
 
-import sentry_sdk
 from hmcts_otel import StageHandle, journey, record_event, stage
 from hmcts_otel import conventions as c
 from sqlmodel import Session
@@ -304,7 +303,6 @@ class BatchPollingService:
                     logger.error(
                         "Unexpected error in polling loop (%s)", type(exc).__name__, exc_info=exc
                     )
-                    sentry_sdk.capture_exception(exc)
                 await self._report_stuck_jobs()
                 await asyncio.sleep(self.settings.BATCH_POLL_INTERVAL_SECONDS)
         except asyncio.CancelledError:
@@ -356,12 +354,12 @@ class BatchPollingService:
                             webhook_secret = self._resolve_webhook_secret(row.caller_id)
                         except Exception as exc:
                             logger.error(
-                                "Cannot resolve webhook secret for caller %s (job %s skipped): %s",
+                                "Cannot resolve webhook secret for caller %s (job %s skipped) (%s)",
                                 row.caller_id,
                                 row.id,
-                                exc,
+                                type(exc).__name__,
+                                exc_info=exc,
                             )
-                            sentry_sdk.capture_exception(exc)
                             continue
                 result.append(
                     _PendingJob(
@@ -416,7 +414,6 @@ class BatchPollingService:
                 logger.error(
                     "Error polling batch job %s (%s)", job.id, type(exc).__name__, exc_info=exc
                 )
-                sentry_sdk.capture_exception(exc)
                 # DIAAT-281: the job stays unfinished and is polled again next interval.
                 # DIAAT-282: where it failed (Azure Speech, or our code/database) and
                 # what Azure said.

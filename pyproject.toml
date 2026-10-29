@@ -76,7 +76,6 @@ dependencies = [
 
     # --- misc ---
     "notifications-python-client>=10.0.1",
-    "sentry-sdk[fastapi]>=2.59.0",
     "uwotm8>=0.1.6",
     "pyprojroot>=0.3.0",
     "pandas>=3.0.2",

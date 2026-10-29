@@ -108,8 +108,6 @@ class Settings(BaseSettings):
     # stays off so no real transcript content is silently captured.
     CORRECTIONS_DATASET_EXPORT_ENABLED: bool = False
 
-    # Observability
-    SENTRY_DSN: str | None = None
     # DIAAT-285: enables POST /api/security/alert-test (SystemAdministrator), which
     # emits a security.ownership_violation event with outcome "test" to prove the
     # Security alert route. No effect unless ENVIRONMENT is in

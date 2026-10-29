@@ -382,7 +382,6 @@ class TestClientFailuresAreNotRetried:
         monkeypatch.setattr(
             "transcribe_api.stt.pipeline.save_transcription_job", lambda job, **_: saved_jobs.append(job)
         )
-        monkeypatch.setattr("transcribe_api.stt.pipeline.sentry_sdk", MagicMock())
 
         # The real transcription code down to the HTTP call: download, Azure, usage.
         settings = MagicMock(AZURE_SPEECH_KEY="k", AZURE_SPEECH_ENDPOINT="https://uks.example.com")

@@ -864,7 +864,7 @@ async def _submit_job(
     except (BatchSubmissionError, SpeechAuthError):
         # Speech rejected the job or could not be authenticated to. The job is
         # already FAILED with its idempotency key released, and the cause is
-        # logged and sent to Sentry (stt/submission.py), so no traceback here.
+        # logged with its stack (stt/submission.py), so no traceback here.
         raise HTTPException(
             status_code=503,
             detail="The transcription service is unavailable. Please try again later.",

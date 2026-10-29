@@ -38,7 +38,6 @@ _gs.cache_clear()
 @pytest.fixture(autouse=True)
 def _patch_external(monkeypatch):
     """Patch all external dependencies for every test in this module."""
-    monkeypatch.setattr("transcribe_api.stt.pipeline.sentry_sdk", MagicMock())
     monkeypatch.setattr("transcribe_api.stt.pipeline.load_or_create_transcription", MagicMock())
     monkeypatch.setattr("transcribe_api.stt.pipeline.get_transcription_title", MagicMock(return_value=None))
     monkeypatch.setattr("transcribe_api.stt.pipeline.save_transcription_title", MagicMock(return_value=True))

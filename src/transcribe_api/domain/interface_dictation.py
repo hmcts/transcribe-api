@@ -1,8 +1,8 @@
+import logging
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytz
-import sentry_sdk
 from fastapi import HTTPException
 from sqlalchemy import event, func, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -23,6 +23,8 @@ from transcribe_api.domain.models_dictation import (
 )
 from transcribe_api.documents.minutes.types import TranscriptionMetadata
 from transcribe_api.runtime.security_events import READ, REASSIGN, TRANSCRIPTION, WRITE, record_ownership_violation, resource_type_of
+
+logger = logging.getLogger(__name__)
 
 
 @event.listens_for(Session, "before_flush")
@@ -160,7 +162,7 @@ def user_error_message(error: BaseException, what: str) -> str:
     """The error text stored on a job or minute version and shown to the user.
 
     Never the exception's own text: it can quote transcript, prompts or a service
-    response (as logs, blob metadata and Sentry already avoid). A client-caused
+    response (as logs and blob metadata already avoid). A client-caused
     failure (HTTP 4xx) gets a fixed reason that says retrying will not help;
     anything else is reported as transient, with the type so support can tell
     failures apart.
@@ -299,7 +301,7 @@ def _is_transcription_showable(transcription: Transcription, current_time: datet
         return False  # noqa: TRY300
     except Exception as e:
         # If anything goes wrong, default to showing the transcription
-        sentry_sdk.capture_exception(e)
+        logger.warning("Transcription visibility check failed (%s)", type(e).__name__, exc_info=e)
         return True
 
 

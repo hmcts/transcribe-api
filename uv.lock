@@ -3339,11 +3339,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/2b/28/465ad9382be98f2172e691f5836cf87f936773913ad7ab85ba1ba1d6706e/sentry_sdk-2.68.1-py3-none-any.whl", hash = "sha256:775b78871783a0ffd758276ad01b3bb2b1ebcdad8f9d2f0a7723f76b73c99b65", size = 520851, upload-time = "2026-08-24T13:09:36.186Z" },
 ]
 
-[package.optional-dependencies]
-fastapi = [
-    { name = "fastapi" },
-]
-
 [[package]]
 name = "shellingham"
 version = "1.5.4"
@@ -3581,7 +3576,6 @@ dependencies = [
     { name = "python-multipart" },
     { name = "pytz" },
     { name = "rapidfuzz" },
-    { name = "sentry-sdk", extra = ["fastapi"] },
     { name = "slowapi" },
     { name = "sqlalchemy" },
     { name = "sqlmodel" },
@@ -3641,7 +3635,6 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "pytz", specifier = ">=2026.2" },
     { name = "rapidfuzz", specifier = ">=3.14.5" },
-    { name = "sentry-sdk", extras = ["fastapi"], specifier = ">=2.59.0" },
     { name = "slowapi", specifier = ">=0.1.9" },
     { name = "sqlalchemy", specifier = ">=2.0.49" },
     { name = "sqlmodel", specifier = ">=0.0.38" },

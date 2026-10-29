@@ -102,7 +102,7 @@ def _transcription_definition(config: SpeechConfiguration) -> dict[str, Any]:
 
 
 # The detail of an HTTPException raised for an Azure error: never Azure's own message,
-# which can quote the request, and which travels with the exception (Sentry, exception
+# which can quote the request, and which travels with the exception (exception
 # events). The status and Azure's code are logged; user_error_message builds what the
 # user sees from the status.
 _AZURE_REJECTED = "Azure Speech returned an error"

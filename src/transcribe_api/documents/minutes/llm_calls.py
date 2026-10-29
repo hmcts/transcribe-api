@@ -1,6 +1,6 @@
+import logging
 from uuid import UUID, uuid4
 
-import sentry_sdk
 from fastapi import HTTPException
 from hmcts_otel import ai_feature, stage
 from langfuse.decorators import langfuse_context, observe
@@ -32,6 +32,8 @@ from transcribe_api.documents.minutes.types import (
 )
 from transcribe_api.runtime.telemetry import register_minutes_schema
 from transcribe_api.runtime.markdown import html_to_markdown, markdown_to_html
+
+logger = logging.getLogger(__name__)
 
 register_minutes_schema()  # minutes.template is emitted by the stages below
 
@@ -317,8 +319,9 @@ Please generate a structured summary of this conversation."""
                 temperature=0.3,
             )
     except Exception as e:
-        sentry_sdk.capture_exception(e)
-        raise HTTPException(status_code=500, detail=f"Failed to generate realtime summary: {e!s}") from e
+        # Type and redacted stack only; never the LLM's error text, to the log or the client.
+        logger.error("Realtime summary failed (%s)", type(e).__name__, exc_info=e)
+        raise HTTPException(status_code=500, detail="Failed to generate realtime summary") from e
     else:
         summary = response.choices[0].message.content.strip()
 
