@@ -8,21 +8,29 @@ can edit in the database. Neither has a version field, so both are fingerprinted
   structured renderer builds the document with (frontmatter, blocks, typography)
   and the crest images, computed once at import (a failure is logged and retried,
   never cached);
-* the content: SHA-256 of the content the loader handed to the renderer
-  (``content_loader.last_used_content_digest``).
+* the content: SHA-256 of the content the loader handed to the renderer.
 
-``template_version()`` combines the two into 12 hex characters, so it changes when
-either does. It may also change on an edit that does not alter the output, which
-is the safe direction.
+The version combines the two into 12 hex characters, so it changes when either
+does. It may also change on an edit that does not alter the output, which is the
+safe direction.
+
+Use ``track_render()`` around a render: it versions the content used by that render
+only (DIAAT-286, stored as provenance with the document). ``template_version()``
+reads the content last used by any request, which a concurrent request can change.
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from transcribe_api.documents.content_loader import last_used_content_digest
+from transcribe_api.documents.content_loader import last_used_content_digest, track_content_used
+
+if TYPE_CHECKING:
+    from collections.abc import Collection, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -61,12 +69,36 @@ def _compute_renderer_digest() -> str | None:
 _renderer_digest: str | None = _compute_renderer_digest()
 
 
-def template_version() -> str:
-    """12 hex characters identifying the renderer and content in use, or "unknown"."""
+def template_version_for(content_digests: Collection[str]) -> str:
+    """12 hex characters identifying the renderer and this content, or "unknown"."""
     global _renderer_digest  # noqa: PLW0603 - computed once per process
     if _renderer_digest is None:
         _renderer_digest = _compute_renderer_digest()  # retried, not cached as failed
     if _renderer_digest is None:
         return "unknown"
-    content = last_used_content_digest() or "-"
+    content = "+".join(sorted(content_digests)) or "-"
     return hashlib.sha256(f"{_renderer_digest}:{content}".encode()).hexdigest()[:12]
+
+
+def template_version() -> str:
+    """The version for the content last used by any request (see track_render)."""
+    last = last_used_content_digest()
+    return template_version_for([last] if last else [])
+
+
+class RenderVersion:
+    """The template version of one render (track_render)."""
+
+    def __init__(self, content_digests: set[str]) -> None:
+        self._content_digests = content_digests
+
+    @property
+    def version(self) -> str:
+        return template_version_for(self._content_digests)
+
+
+@contextlib.contextmanager
+def track_render() -> Iterator[RenderVersion]:
+    """Version the render in this block from the content it used, and nothing else."""
+    with track_content_used() as used:
+        yield RenderVersion(used)
