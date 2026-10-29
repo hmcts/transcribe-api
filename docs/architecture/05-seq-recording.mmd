@@ -1,0 +1,46 @@
+sequenceDiagram
+  autonumber
+  actor U as User's browser
+  participant W as transcribe-web
+  participant A as transcribe-api
+  participant B as Blob Storage
+  participant D as Postgres
+  participant S as Azure Speech
+  participant K as API worker
+
+  U->>W: Upload recording (Hearing recordings page)
+  W->>A: POST /api/v1/uploads with the user's token
+  A->>A: Check type and size, convert to WAV (ffmpeg)
+  A->>B: Store uploads/user/id.wav
+  A-->>W: Blob name and URL
+  W->>A: POST /api/v1/jobs
+  A->>A: Check the blob belongs to this user
+  A->>D: Save job (pending)
+  A->>S: Create batch transcription for the blob URL
+  S-->>A: Speech job reference
+  A->>D: Job submitted
+  A-->>W: Job
+  W-->>U: Job listed as in progress
+
+  S->>B: Read the audio (Speech's own identity)
+  loop every 30 seconds
+    K->>D: Find unfinished jobs
+    K->>S: Get job status
+    S-->>K: NotStarted, Running, Succeeded or Failed
+    K->>D: Update status
+  end
+  K->>S: Download results (on Succeeded)
+  K->>K: Label speakers, read model and duration
+  K->>D: Save transcript segments, job succeeded
+  K->>S: Delete the Speech job
+
+  loop while the page is open
+    U->>W: Poll the job list or job
+    W->>A: GET /api/v1/jobs
+    A->>D: Read jobs (own jobs, or all for SystemAdministrator)
+    A-->>U: Status and transcript
+  end
+  U->>A: Play audio (GET /api/v1/jobs/id/audio, via web)
+  A->>B: Stream the WAV
+  U->>A: Correct or accept a segment (PATCH or POST, via web)
+  A->>D: Save the edit and its history

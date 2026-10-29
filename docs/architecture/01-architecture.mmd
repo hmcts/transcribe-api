@@ -1,0 +1,73 @@
+---
+config:
+  layout: elk
+---
+flowchart TB
+  user["User's browser"]
+  entra["Entra ID, HMCTS tenant<br/>app registration benchnotes-env<br/>app roles granted through groups"]
+
+  subgraph edge["HMCTS edge, owned by PlatOps"]
+    direction LR
+    afd["Azure Front Door + WAF"] --> fw["Hub firewall"] --> agw["CFT App Gateway"]
+  end
+
+  subgraph aks["CFT AKS cluster, namespace transcribe. Two clusters per environment (00 and 01)"]
+    ingress["Traefik ingress"]
+    subgraph web["transcribe-web pod"]
+      direction LR
+      caddy["Caddy<br/>reverse proxy"] -->|"pages, /auth, /api/jobs, /api/upload, /api/audio"| next["Next.js<br/>pages, sign-in, sessions"]
+    end
+    subgraph backend["transcribe-api image"]
+      direction LR
+      api["API pods<br/>FastAPI"]
+      worker["Worker pod<br/>background pollers<br/>cluster 00 only"]
+    end
+  end
+
+  subgraph azure["Azure resources, created by Terraform"]
+    direction LR
+    redis[("Redis<br/>web sessions")]
+    pg[("Postgres<br/>Flexible Server")]
+    blob[("Blob Storage<br/>audio and documents")]
+    speech["Azure Speech<br/>private endpoint"]
+    openai["Azure OpenAI<br/>gpt-4o, private endpoint<br/>live summaries, fallback"]
+    kv["Key Vault<br/>transcribe-env"]
+    ai["Application Insights"]
+  end
+
+  subgraph external["Services outside Azure"]
+    direction LR
+    gemini["Google Vertex AI, Gemini<br/>minutes, titles, speaker names"]
+    langfuse["Langfuse<br/>prompts and LLM traces"]
+    notify["GOV.UK Notify<br/>email, when configured"]
+  end
+
+  user -->|HTTPS| afd
+  agw --> ingress --> caddy
+  user -. "sign-in redirect" .-> entra
+  next -. "code exchange" .-> entra
+  next --> redis
+  caddy -->|"other /api/* with the user's token"| api
+  next -->|"recordings: /api/v1 with the user's token"| api
+  caddy -->|"live dictation audio (WebSocket)"| speech
+  api -. "checks token signature and roles" .-> entra
+  backend --> pg
+  backend --> blob
+  backend -->|"transcription"| speech
+  backend -->|"LLM calls"| gemini
+  backend -->|"LLM calls"| openai
+  backend --> langfuse
+  backend --> notify
+  speech -->|"reads uploaded audio"| blob
+  kv -. "secrets mounted as files (CSI)" .-> aks
+  aks -. "logs, traces, metrics" .-> ai
+
+  classDef ext fill:#eef2f7,stroke:#5b6b80,color:#172b4d
+  classDef app fill:#e3fcef,stroke:#006644,color:#172b4d
+  classDef data fill:#fff7d6,stroke:#b65c02,color:#172b4d
+  classDef idp fill:#eae6ff,stroke:#403294,color:#172b4d
+  class afd,fw,agw,ingress ext
+  class caddy,next,api,worker app
+  class redis,pg,blob,speech,openai,kv,ai data
+  class entra idp
+  class gemini,langfuse,notify ext

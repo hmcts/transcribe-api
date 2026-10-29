@@ -1,0 +1,35 @@
+---
+config:
+  gitGraph:
+    mainBranchName: master
+    showCommitLabel: true
+    rotateCommitLabel: true
+---
+gitGraph
+  commit id: "release 1"
+  branch demo order: 5
+  commit id: "copy of master"
+  checkout master
+  branch develop order: 1
+  commit id: "develop"
+  branch feature/DIAAT-301 order: 2
+  commit id: "work"
+  commit id: "more work"
+  checkout develop
+  merge feature/DIAAT-301 id: "feature PR" tag: "demo"
+  branch feature/DIAAT-302 order: 3
+  commit id: "work 2"
+  checkout develop
+  merge feature/DIAAT-302 id: "feature PR 2" tag: "demo"
+  checkout master
+  commit id: "migration PR"
+  branch sync/master-to-develop order: 4
+  commit id: "cut from master"
+  checkout develop
+  merge sync/master-to-develop id: "master merged in"
+  branch release/DIAAT-301 order: 6
+  commit id: "cut from develop"
+  checkout master
+  merge release/DIAAT-301 id: "release PR, squashed" tag: "AAT + prod"
+  checkout demo
+  merge master id: "force-synced by Jenkins"

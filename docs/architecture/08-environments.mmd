@@ -1,0 +1,38 @@
+---
+config:
+  layout: elk
+---
+flowchart LR
+  local["Local<br/>developer machine<br/>Docker Postgres + Azurite"]
+
+  subgraph pr["Every pull request"]
+    preview["PR preview<br/>CFT preview cluster<br/>own Postgres, Azurite, mock Speech<br/>sign-in off"]
+  end
+
+  subgraph dev["develop branch"]
+    draft["Permanent draft PR<br/>api#45, web#25<br/>image pr-N-sha-time"]
+  end
+
+  subgraph main["master branch"]
+    staging["Jenkins staging release in AAT<br/>smoke and functional tests"]
+    tag["Image promoted to<br/>prod-sha-time"]
+  end
+
+  demo["Demo<br/>benchnotes.demo.platform.hmcts.net<br/>clusters demo-00, demo-01"]
+  aat["AAT<br/>benchnotes.aat.platform.hmcts.net<br/>clusters aat-00, aat-01"]
+  prod["Prod<br/>benchnotes.platform.hmcts.net<br/>clusters prod-00, prod-01"]
+
+  local -->|"open a PR"| preview
+  preview -->|"feature PR merged"| draft
+  draft -->|"Flux follows pr-N tags"| demo
+  preview -->|"release PR merged"| staging
+  staging -->|"tests pass"| tag
+  tag -->|"Flux follows prod tags"| aat
+  tag -->|"Flux follows prod tags"| prod
+
+  classDef env fill:#e3fcef,stroke:#006644,color:#172b4d
+  classDef live fill:#ffebe6,stroke:#bf2600,color:#172b4d
+  classDef step fill:#eef2f7,stroke:#5b6b80,color:#172b4d
+  class local,preview,demo,aat env
+  class prod live
+  class draft,staging,tag step
