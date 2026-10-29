@@ -11,11 +11,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     # Core
     ENVIRONMENT: str = "local"
-    # Git commit SHA of the deployed build, baked into the container image at
-    # build time (Dockerfile ARG GIT_SHA -> ENV GIT_SHA). Defaults to "unknown"
-    # so local/dev runs without the build arg still work. Exposed via
-    # GET /api/v1/version so post-deploy checks can confirm the live build.
-    GIT_SHA: str = "unknown"
     DATABASE_CONNECTION_STRING: str = (
         "postgresql://dev:devpass@localhost:5432/transcription_svc"  # pragma: allowlist secret
     )

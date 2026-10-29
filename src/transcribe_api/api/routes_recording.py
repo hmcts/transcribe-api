@@ -62,6 +62,7 @@ from transcribe_api.domain.models_recording import (
     WordCorrection,
 )
 from transcribe_api.runtime.telemetry import EVENT_UPLOAD_VALIDATION_FAILED, JOURNEY_UPLOAD
+from transcribe_api.runtime.version import APP_VERSION
 from transcribe_api.domain.auth.approles_recording import get_valid_roles
 from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
 from transcribe_api.domain.auth.dependencies_recording import get_current_user
@@ -536,13 +537,8 @@ async def health() -> dict:
 
 @router.get("/version")
 async def version() -> dict:
-    """Return the git commit SHA baked into the image at build time.
-
-    Used by the post-deploy version-gated check (DIAAT-241) to confirm the
-    newly built container is live before running e2e tests. Returns "unknown"
-    when GIT_SHA was not passed as a build arg (e.g. local development).
-    """
-    return {"version": get_settings().GIT_SHA}
+    """Return the build version (see runtime/version.py), as /api/health does."""
+    return {"version": APP_VERSION}
 
 
 async def _read_upload_capped(
