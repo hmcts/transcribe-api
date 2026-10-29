@@ -11,8 +11,11 @@ blocks (for the rendering pipeline).
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
 import logging
+from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -21,6 +24,8 @@ from transcribe_api.documents.lib.markdown_to_blocks import markdown_to_blocks, 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from transcribe_api.documents.lib.models import ContentBlock
 
 # MERGE NOTE: was three parents up (backend/) under the old layout, which
@@ -87,6 +92,57 @@ def _load_from_file() -> dict[str, Any]:
 
 
 _cache: dict[str, Any] = {"content": None, "updated_at": None}
+_last_used_digest: str | None = None
+# The content object last digested, with its digest: the cached copy is handed out on
+# every call, so it is hashed once per load, not on every cache hit.
+_digested: tuple[dict[str, Any], str | None] | None = None
+# DIAAT-286: the digests of the content used within one render (track_content_used).
+_content_used: ContextVar[set[str] | None] = ContextVar("document_content_used", default=None)
+
+
+def _used(content: dict[str, Any]) -> dict[str, Any]:
+    """Remember a fingerprint of the content handed to the renderer (DIAAT-279): for
+    the render in progress (track_content_used) and, process-wide, as the last used."""
+    global _last_used_digest, _digested  # noqa: PLW0603 - one value per process, like _cache
+    if _digested is not None and _digested[0] is content:
+        digest = _digested[1]
+    else:
+        try:
+            digest = hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
+        except (TypeError, ValueError):
+            digest = None
+        _digested = (content, digest)
+    _last_used_digest = digest
+    used = _content_used.get()
+    if used is not None:
+        used.add(digest or "-")
+    return content
+
+
+def last_used_content_digest() -> str | None:
+    """SHA-256 of the document content most recently used by any request, or None.
+
+    Process-wide: a concurrent request can change it between a render and this call.
+    For the content of one render, use track_content_used.
+    """
+    return _last_used_digest
+
+
+@contextlib.contextmanager
+def track_content_used() -> Iterator[set[str]]:
+    """Collect the digests of the content used by the enclosed render, and only it.
+
+    Context-local, so concurrent requests do not see each other's content. It
+    follows the render into ``asyncio.to_thread`` (which runs in a copy of the
+    context: the copy holds the same set). More than one digest means the content
+    changed during the render.
+    """
+    used: set[str] = set()
+    token = _content_used.set(used)
+    try:
+        yield used
+    finally:
+        _content_used.reset(token)
 
 
 def get_document_content() -> dict[str, Any]:
@@ -112,14 +168,14 @@ def get_document_content() -> dict[str, Any]:
             ).first()
 
             if ts_row is not None and ts_row == _cache["updated_at"] and _cache["content"] is not None:
-                return _cache["content"]
+                return _used(_cache["content"])
 
             # Timestamp changed or no cache — fetch full content
             row = session.exec(select(DocumentContent).where(DocumentContent.id == 1)).first()
             if row is not None:
                 _cache["content"] = row.content
                 _cache["updated_at"] = row.updated_at
-                return _cache["content"]
+                return _used(_cache["content"])
 
             # No DB row yet — seed from file and persist
             content = _load_from_file()
@@ -134,14 +190,14 @@ def get_document_content() -> dict[str, Any]:
             except Exception as seed_exc:
                 session.rollback()
                 logger.warning("Failed to seed document_content table: %s", seed_exc)
-            return content
+            return _used(content)
     except Exception:
         logger.exception(
             "Database unavailable for document content — falling back to local file. "
             "Reads may be inconsistent across instances.",
         )
 
-    return _load_from_file()
+    return _used(_load_from_file())
 
 
 def get_hearing_types() -> list[dict[str, str]]:

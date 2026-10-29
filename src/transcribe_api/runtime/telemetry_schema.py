@@ -169,11 +169,6 @@ def _dictation_attributes(schema: TelemetrySchema) -> None:
     )
     schema.attribute("dictation.segments_captured", int, description="Transcript segments captured.")
     schema.attribute(
-        "dictation.session_id",
-        pattern=r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-        description="Browser dictation session that made this submission (set by the server from X-Dictation-Session-Id).",
-    )
-    schema.attribute(
         "dictation.session_index",
         int,
         description="Speech session number within the dictation session (reconnects count).",

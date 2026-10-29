@@ -80,6 +80,16 @@ class AsyncAzureBlobManager:
         except Exception as e:
             logger.warning(f"Error closing credential: {e}")
 
+    async def check_container(self, container_name: str | None = None) -> None:
+        """Health check (DIAAT-277): read a container's properties; raises on failure.
+
+        The cheapest read-only call that proves the account is reachable, the identity
+        is authorised and the container exists. Not traced: it runs every minute.
+        """
+        async with self._blob_service_client() as blob_service:
+            container = blob_service.get_container_client(container_name or self.container_name)
+            await container.get_container_properties(tracing_options={"enabled": False})
+
     def build_blob_url(self, blob_name: str, container_name: str | None = None) -> str:
         """Return a plain (no-SAS) blob URL for Azure Speech batch transcription.
 

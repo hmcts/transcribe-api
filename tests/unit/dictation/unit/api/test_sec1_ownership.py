@@ -163,7 +163,7 @@ def test_manual_minutes_edit_sends_no_content_to_langfuse(client, as_user, mocke
     as_user(_user())
     mine = uuid.uuid4()
     mocker.patch("transcribe_api.api.routes_dictation.get_transcription_by_id", return_value=MagicMock())
-    mocker.patch("transcribe_api.api.routes_dictation.save_minute_version", side_effect=lambda minute: minute)
+    mocker.patch("transcribe_api.api.routes_dictation.save_minute_version", side_effect=lambda minute, **_: minute)
     event = mocker.patch("transcribe_api.api.routes_dictation.langfuse_client.event")
     body = {
         "id": str(uuid.uuid4()),

@@ -79,6 +79,8 @@ METRIC_JOBS_RUNNING = "transcription.jobs.running"
 METRIC_QUEUE_DEPTH = "transcription.jobs.queue_depth"
 METRIC_OLDEST_WAITING_AGE = "transcription.jobs.oldest_waiting_age"
 METRIC_JOBS_STUCK = "transcription.jobs.stuck"
+# DIAAT-277: seconds since the polling loop last completed a poll (its heartbeat).
+METRIC_POLLER_LAST_SUCCESS_AGE = "transcription.poller.last_success_age"
 # DIAAT-282: running jobs / SPEECH_CONCURRENT_JOBS_LIMIT, only when the limit is set.
 METRIC_SPEECH_UTILISATION = "transcription.speech.concurrency.utilisation"
 
@@ -797,6 +799,49 @@ class JobStateGauges:
         return [Observation(age or 0.0)]
 
 
+class PollerHeartbeat:
+    """DIAAT-277: is the polling loop (the job "queue"'s worker) alive?
+
+    ``transcription.poller.last_success_age``: seconds since the loop last completed a
+    poll without an unexpected error, or since it started if it has not yet. Growing
+    beyond a few poll intervals means the loop is stuck or failing on every poll.
+    Nothing is observed until the loop has started (e.g. in tests). Per replica: each
+    runs its own loop, so aggregate with max (any replica stalled) or min (all).
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._since: float | None = None
+
+    def started(self) -> None:
+        with self._lock:
+            if self._since is None:
+                self._since = self._clock()
+
+    def succeeded(self) -> None:
+        with self._lock:
+            self._since = self._clock()
+
+    def age(self) -> float | None:
+        with self._lock:
+            return None if self._since is None else max(0.0, self._clock() - self._since)
+
+    def _observe(self, _options: CallbackOptions) -> list[Observation]:
+        age = self.age()
+        return [] if age is None else [Observation(age)]
+
+    def register(self, meter: Meter) -> None:
+        meter.create_observable_gauge(
+            METRIC_POLLER_LAST_SUCCESS_AGE,
+            callbacks=[self._observe],
+            unit="s",
+            description="Seconds since the job polling loop last completed a poll",
+        )
+
+
+poller_heartbeat = PollerHeartbeat()
+
 _registered: list[Meter] = []
 
 
@@ -812,5 +857,6 @@ def register_job_gauges(session_factory: Callable[[], Session] | None = None) ->
             return Session(get_engine())
 
     JobStateGauges(session_factory).register(meter)
+    poller_heartbeat.register(meter)
     _registered.append(meter)
     return True
