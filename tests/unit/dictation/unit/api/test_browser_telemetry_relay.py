@@ -265,7 +265,8 @@ def test_a_browser_supplied_journey_parent_is_dropped(client, as_user):
 
 
 def test_the_relay_body_limit_still_applies_without_a_declared_length(client, as_user):
-    """The parent is dropped before the library reads the body: that read is bounded too."""
+    """A body with no declared length is still bounded (hmcts-otel's relay limit, which
+    also drops browser-sent journey parents itself)."""
     _signed_in(as_user)
 
     def chunks():

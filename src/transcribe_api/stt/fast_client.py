@@ -79,6 +79,13 @@ def _transcription_definition(config: SpeechConfiguration) -> dict[str, Any]:
     }
 
 
+# The detail of an HTTPException raised for an Azure error: never Azure's own message,
+# which can quote the request, and which travels with the exception (Sentry, exception
+# events). The status and Azure's code are logged; user_error_message builds what the
+# user sees from the status.
+_AZURE_REJECTED = "Azure Speech returned an error"
+
+
 @retry(
     retry=retry_if_exception_type((Exception,)),  # Retry on any exception during download
     wait=wait_exponential(multiplier=1, min=2, max=10),
@@ -225,7 +232,7 @@ async def transcribe_audio_with_azure(audio_file_path: Path):
     try:
         headers = await speech_auth_headers(settings.AZURE_SPEECH_KEY)
     except SpeechAuthError as exc:
-        logger.error(str(exc))
+        logger.error("Could not authenticate to Azure Speech (%s)", type(exc).__name__)
         raise HTTPException(status_code=500, detail="Could not authenticate to Azure Speech") from exc
     async with aiofiles.open(audio_file_path, "rb") as audio_file:
         audio_content = await audio_file.read()
@@ -250,23 +257,21 @@ async def transcribe_audio_with_azure(audio_file_path: Path):
 
             # Check for nested error response shape: {"error": {"code": "...", "message": "..."}}
             if "error" in full_response and isinstance(full_response["error"], dict):
-                error_message = full_response["error"].get("message", "Unknown error occurred")
                 logger.error(
                     "Azure API error (nested) status=%s code=%s",
                     response.status_code,
                     _loggable_azure_code(full_response["error"].get("code")),
                 )
-                raise HTTPException(status_code=_azure_error_status(response.status_code), detail=error_message)
+                raise HTTPException(status_code=_azure_error_status(response.status_code), detail=_AZURE_REJECTED)
 
             # Check for top-level error response: {"code": "...", "message": "..."}
             if "code" in full_response:
-                error_message = full_response.get("message", "Unknown error occurred")
                 logger.error(
                     "Azure API error status=%s code=%s",
                     response.status_code,
                     _loggable_azure_code(full_response.get("code")),
                 )
-                raise HTTPException(status_code=_azure_error_status(response.status_code), detail=error_message)
+                raise HTTPException(status_code=_azure_error_status(response.status_code), detail=_AZURE_REJECTED)
 
             # If no error, proceed with phrases extraction
             phrases = full_response.get("phrases")

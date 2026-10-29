@@ -583,13 +583,18 @@ class TranscriptionPollingService:
                     logger.info(f"Worker {worker_id} processing blob: {_redact_blob_path(blob_info['name'])}")
                     await self.process_discovered_audio(blob_info)
                 except Exception as e:
-                    logger.error(f"Worker {worker_id} error processing blob {_redact_blob_path(blob_info.get('name', 'unknown'))}: {e}")
+                    logger.error(
+                        "Worker %s error processing blob %s (%s)",
+                        worker_id,
+                        _redact_blob_path(blob_info.get("name", "unknown")),
+                        type(e).__name__,
+                    )
                 finally:
                     # Mark task as done
                     self.blob_queue.task_done()
 
             except Exception as e:
-                logger.error(f"Worker {worker_id} encountered unexpected error: {e}")
+                logger.error("Worker %s encountered unexpected error (%s)", worker_id, type(e).__name__)
 
         logger.info(f"Worker {worker_id} stopped")
 

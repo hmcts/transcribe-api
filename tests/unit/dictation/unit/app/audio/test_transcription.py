@@ -186,7 +186,7 @@ class TestTranscribeAudioWithAzure:
                 await transcribe_audio_with_azure(audio_file)
 
         assert exc.value.status_code == 502
-        assert "Access denied due to invalid subscription key" in exc.value.detail
+        assert "Access denied due to invalid subscription key" not in exc.value.detail  # never Azure\'s text: it travels with the exception
 
     async def test_top_level_error_response_raises_422(self, mock_settings, audio_file, mock_http_response):
         """Azure top-level error shape {'code': '...', 'message': '...'} also surfaces correctly."""
@@ -203,7 +203,7 @@ class TestTranscribeAudioWithAzure:
                 await transcribe_audio_with_azure(audio_file)
 
         assert exc.value.status_code == 422
-        assert "Bad audio format" in exc.value.detail
+        assert "Bad audio format" not in exc.value.detail  # never Azure\'s text: it travels with the exception
 
     @pytest.mark.parametrize(("status", "expected"), [(403, 502), (429, 502), (503, 502), (200, 502), (415, 422)])
     async def test_only_azure_client_rejections_are_422(
