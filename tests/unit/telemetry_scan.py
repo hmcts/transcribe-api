@@ -213,12 +213,17 @@ def scan_items(
     patterns = PATTERNS if patterns is None else patterns
     findings: set[Finding] = set()
     for item in items:
+        safe_key = item.key
+        if any(value and value in safe_key for value in seeded.values()) or any(
+            pattern.search(safe_key) for pattern in patterns.values()
+        ):
+            safe_key = "[REDACTED]"
         for label, value in seeded.items():
             if value and value in item.text:
-                findings.add(Finding("seeded", label, item.where, item.key))
+                findings.add(Finding("seeded", label, item.where, safe_key))
         for name, pattern in patterns.items():
             if pattern.search(item.text):
-                findings.add(Finding("pattern", name, item.where, item.key))
+                findings.add(Finding("pattern", name, item.where, safe_key))
     return sorted(findings, key=lambda f: (f.kind, f.name, f.where, f.key))
 
 
