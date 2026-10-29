@@ -7,6 +7,7 @@ issues on long audio recordings.
 """
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -321,7 +322,13 @@ class TranscriptionPollingService:
                 _redact_blob_path(blob_path),
                 e.status_code,
             )
-            await self._mark_blob_permanently_failed(blob_path, {"last_error": type(e).__name__})
+            try:  # keep the attempts so far (retry_count) in the blob's metadata
+                current = await self.azure_blob_manager.get_blob_metadata(blob_path) or {}
+            except Exception:
+                current = {}
+            await self._mark_blob_permanently_failed(
+                blob_path, {**current, "last_error": type(e).__name__}, client_failure=True
+            )
             return False
         # Type only, no exc_info: a traceback ends with the exception's text, which
         # can carry Azure or LLM error messages (and through them, content).
@@ -445,7 +452,9 @@ class TranscriptionPollingService:
         except Exception as e:
             logger.error(f"Error marking blob with error {_redact_blob_path(blob_path)}: {e}")
 
-    async def _mark_blob_permanently_failed(self, blob_path: str, current_metadata: dict) -> None:
+    async def _mark_blob_permanently_failed(
+        self, blob_path: str, current_metadata: dict, *, client_failure: bool = False
+    ) -> None:
         """
         Mark a blob as permanently failed after exceeding retry limit.
 
@@ -466,9 +475,13 @@ class TranscriptionPollingService:
                 "failed_at": datetime.now(UTC).isoformat(),
             }
             await self.azure_blob_manager.set_blob_metadata(blob_name=blob_path, metadata=metadata)
-            logger.error(
-                f"Marked blob as permanently failed after "
-                f"{current_metadata.get('retry_count', 0)} attempts: {_redact_blob_path(blob_path)}"
+            # A client failure (the user's file) is not the service's error: a warning.
+            logger.log(
+                logging.WARNING if client_failure else logging.ERROR,
+                "Marked blob as permanently failed after %s attempt(s)%s: %s",
+                current_metadata.get("retry_count", 0),
+                " (client failure, not retried)" if client_failure else "",
+                _redact_blob_path(blob_path),
             )
         except Exception as e:
             logger.error(f"Error marking blob as permanently failed {_redact_blob_path(blob_path)}: {e}")

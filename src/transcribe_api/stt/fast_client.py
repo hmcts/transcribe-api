@@ -34,8 +34,10 @@ TOO_MANY_REQUESTS = 429
 # OBS-5: the AI usage feature of uploaded-audio transcription (hmcts.speech.audio.duration).
 UPLOAD_TRANSCRIPTION_FEATURE = "upload_transcription"
 # Azure statuses where the service, not the audio, failed: authentication,
-# permissions/quota and throttling.
-_SERVICE_SIDE_CLIENT_ERRORS = frozenset({401, 403, TOO_MANY_REQUESTS})
+# permissions/quota, throttling, a wrong endpoint or API version (404), a timeout (408)
+# and a conflict (409). These are retried; only the rest of 4xx (the request or the
+# audio rejected) mark the file as failed for good.
+_SERVICE_SIDE_CLIENT_ERRORS = frozenset({401, 403, 404, 408, 409, TOO_MANY_REQUESTS})
 
 
 # Azure error codes are identifiers ("InvalidRequest", "401"); anything else is

@@ -1,5 +1,6 @@
 """Unit tests for TranscriptionPollingService._should_skip_blob."""
 
+import logging
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -422,7 +423,7 @@ class TestClientFailuresAreNotRetried:
         assert post.await_count == 1  # billed once
         assert len(downloads) == 1
         assert store.metadata["status"] == "permanently_failed"
-        assert store.metadata["retry_count"] == "0"
+        assert store.metadata["retry_count"] == "0"  # the attempts so far, kept
         assert [(e[c.OUTCOME], e[c.ERROR_CODE]) for e in finished] == [("failure", "transcription.failed")]
         ((point,),) = [usage]
         assert point.get("value", point.get("sum")) == 30.0  # one 30 s file, recorded once
@@ -442,9 +443,13 @@ class TestClientFailuresAreNotRetried:
         assert usage == []  # not transcribed, not billed
 
     @pytest.mark.asyncio
-    async def test_a_service_error_is_still_retried(self, service, monkeypatch, tmp_path):
+    @pytest.mark.parametrize(
+        "status_code",
+        [500, 404, 408, 409],  # an outage, a wrong endpoint or API version, a timeout, a conflict
+    )
+    async def test_a_service_error_is_still_retried(self, service, monkeypatch, tmp_path, status_code):
         store, saved_jobs, finished, _, post, _ = await self._poll_rounds(
-            service, monkeypatch, tmp_path, 500, {"code": "InternalServerError", "message": "outage"}
+            service, monkeypatch, tmp_path, status_code, {"code": "ServiceError", "message": "outage"}
         )
 
         assert post.await_count == service.max_retry_attempts  # retried up to the limit
@@ -452,3 +457,22 @@ class TestClientFailuresAreNotRetried:
         assert store.metadata["retry_count"] == str(service.max_retry_attempts)
         assert len(finished) == service.max_retry_attempts
         assert len(saved_jobs) == service.max_retry_attempts
+
+
+
+@pytest.mark.asyncio
+async def test_a_client_failure_marks_the_blob_failed_at_warning_keeping_its_attempts(service, caplog):
+    """The user's file, not the service: a warning, and the earlier attempts are kept."""
+    from unittest.mock import AsyncMock
+
+    from fastapi import HTTPException
+
+    service.azure_blob_manager = AsyncMock()
+    service.azure_blob_manager.get_blob_metadata = AsyncMock(return_value={"retry_count": "1"})
+    with caplog.at_level(logging.WARNING, logger="transcribe_api.runtime.logger"):
+        assert await service._handle_failure("user-uploads/oid/x.mp4", HTTPException(status_code=422)) is False
+    (_, kwargs) = service.azure_blob_manager.set_blob_metadata.call_args
+    assert kwargs["metadata"]["status"] == "permanently_failed"
+    assert kwargs["metadata"]["retry_count"] == "1"
+    marked = [r for r in caplog.records if "permanently failed" in r.getMessage()]
+    assert marked and all(r.levelno == logging.WARNING for r in marked)

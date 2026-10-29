@@ -278,7 +278,7 @@ def test_the_relay_body_limit_still_applies_without_a_declared_length(client, as
     assert response.status_code == 413
 
 
-def test_speech_connected_time_is_metered_only_for_accepted_events(client, as_user):  # noqa: F811
+def test_speech_connected_time_is_metered_only_for_accepted_events(client, as_user):
     """OBS-5: real-time Speech usage (live dictation) is the browser-reported Speech
     session length, summed from the unsampled hmcts.event.duration metric by the AI
     usage queries (ai_audio_hours_daily.kql). Only events the relay accepted count."""
@@ -303,11 +303,11 @@ def test_speech_connected_time_is_metered_only_for_accepted_events(client, as_us
         assert point["sum"] == 1800.0  # seconds
 
 
-def _post_raw(client, body: bytes):  # noqa: F811
+def _post_raw(client, body: bytes):
     return client.post("/api/telemetry", content=body, headers={"content-type": "application/json"})
 
 
-def test_a_lone_surrogate_in_a_batch_with_a_parent_is_a_client_error(client, as_user):  # noqa: F811
+def test_a_lone_surrogate_in_a_batch_with_a_parent_is_a_client_error(client, as_user):
     """Removing the parent re-encodes the batch: a lone surrogate (valid JSON, not valid
     UTF-8) must not turn into a 500 that counts toward the server-error alerts."""
     _signed_in(as_user)
@@ -319,7 +319,7 @@ def test_a_lone_surrogate_in_a_batch_with_a_parent_is_a_client_error(client, as_
         assert not [e for e in telemetry.events() if c.JOURNEY_PARENT_ID in e]
 
 
-def test_deeply_nested_json_is_a_client_error(client, as_user):  # noqa: F811
+def test_deeply_nested_json_is_a_client_error(client, as_user):
     """Nesting that fits inside the body limit can still exhaust json.loads' recursion."""
     _signed_in(as_user)
     depth = 16_000
@@ -327,5 +327,3 @@ def test_deeply_nested_json_is_a_client_error(client, as_user):  # noqa: F811
     assert len(body) < 32_768
     response = _post_raw(client, body)
     assert 400 <= response.status_code < 500, response.status_code
-
-
