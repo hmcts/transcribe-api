@@ -17,6 +17,7 @@ def app():
 
     test_app = FastAPI()
     test_app.include_router(transcribe_api.api.routes_dictation.router, prefix="/api")
+    test_app.include_router(transcribe_api.api.routes_dictation.telemetry_router, prefix="/api")
     return test_app
 
 

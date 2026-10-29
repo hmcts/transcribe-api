@@ -15,8 +15,10 @@ areas. Attributes, all controlled values (registered in runtime/telemetry_schema
   be returned: with correct code this never happens; it was blocked too), ``test`` (the
   controlled alert test, ``POST /api/security/alert-test``).
 
-The event carries the journey (the current one, or the target job's or upload's) and
-``hmcts.request.id`` (added by hmcts-otel), and nothing else: no user ID, owner ID,
+The event carries the journey (the current one, or the target job's or upload's),
+``hmcts.request.id`` and, from a dictation or recording route, its ``hmcts.area``
+(added by hmcts-otel; the controlled alert test is a dictation route), and nothing
+else: no user ID, owner ID,
 email, record ID, blob or file name, title or content. Investigators correlate through
 ``hmcts.request.id`` with the audit record (DIAAT-286, ``audit_log.request_id``), which
 says who and what: the same call writes it, in the database, with the actor and record

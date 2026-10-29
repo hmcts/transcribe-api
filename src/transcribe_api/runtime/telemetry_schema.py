@@ -20,9 +20,10 @@ cnp-telemetry-schema.md``):
 * the browser's ``upload.validation_failed`` is renamed ``upload.file_rejected``;
   ``upload.validation_failed`` is the recording API's file checks (decision 3).
 
-Not here yet: ``hmcts.area`` (decision 1), registered with the code that sets it,
-and dictation's stage events, registered with the code that emits them (api-4):
-registered now, without their attribute lists, they would drop those attributes.
+``hmcts.area`` (decision 1) is hmcts-otel's own metadata attribute (0.3.0), set per
+router and poller in api/app.py. Not here yet: dictation's stage events, registered
+with the code that emits them (api-4): registered now, without their attribute lists,
+they would drop those attributes.
 
 ``telemetry-contract.json`` at the repository root is this schema as JSON, for
 transcribe-web and the shared infrastructure's query checks; a unit test fails when

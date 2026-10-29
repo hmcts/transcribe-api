@@ -48,6 +48,13 @@ JOURNEY_UPLOAD = "recording.upload"
 # Recording batch jobs: id is SpeechBatchJob.id; parent is the upload's id.
 JOURNEY_JOB = "recording.job"
 
+# hmcts.area (decision 1): set on each area's routers and pollers (api/app.py), so
+# every signal tells the two areas apart. Unset means shared code (the top-level
+# /health, the browser relay, the background dependency checker). Queries fall back
+# to the journey type's prefix.
+AREA_DICTATION = "dictation"
+AREA_RECORDING = "recording"
+
 _UPLOAD_ID = re.compile(r"^uploads/[^/]+/([0-9a-fA-F-]{36})-")
 # DIAAT-280: a recording upload's file check failed; emitted before the stage's
 # upload.failed, with the same error code.

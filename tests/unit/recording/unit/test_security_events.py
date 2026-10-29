@@ -129,6 +129,7 @@ def _assert_no_pii(tel) -> None:
             c.REQUEST_ID,
             c.JOURNEY_TYPE,
             c.JOURNEY_ID,
+            c.AREA,  # the area of the route (a controlled value, not an identifier)
             c.CUSTOM_EVENT_NAME,
             c.EVENT_CLASS,
             c.EVENT_SOURCE,
@@ -155,6 +156,7 @@ def test_foreign_blob_name_is_blocked_with_the_same_422_and_a_security_event(tel
     _assert_types(event, "upload", "submit", "blocked")
     assert event[c.JOURNEY_TYPE] == JOURNEY_UPLOAD
     assert event[c.JOURNEY_ID] == UPLOAD_ID  # the targeted upload, never its name
+    assert event[c.AREA] == "recording"  # the recording router's area (create_app)
     _assert_no_pii(tel)
 
 

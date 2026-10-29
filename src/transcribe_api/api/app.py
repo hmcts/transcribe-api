@@ -19,10 +19,11 @@ import asyncio
 import logging
 import math
 import os
+from collections.abc import Callable, Coroutine
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from fastapi.exceptions import RequestValidationError
@@ -118,8 +119,18 @@ def build_cors_origins(settings: Any) -> list[str]:
     return LOCAL_DEV_ORIGINS
 
 
+async def _in_area(name: str, start: Callable[[], Coroutine[Any, Any, None]]) -> None:
+    """Build and run a poller loop in its hmcts.area: its construction, its loop and
+    the tasks it starts all carry it."""
+    from hmcts_otel import area
+
+    with area(name):
+        await start()
+
+
 async def start_background_workers() -> list[asyncio.Task]:
     """Start both pollers. Used by the worker entrypoint and, optionally, the web process."""
+    from transcribe_api.runtime.telemetry import AREA_DICTATION, AREA_RECORDING
     from transcribe_api.stt.job_telemetry import register_job_gauges
     from transcribe_api.stt.polling_service import BatchPollingService
     from transcribe_api.stt.work_poller import TranscriptionPollingService
@@ -128,8 +139,8 @@ async def start_background_workers() -> list[asyncio.Task]:
     # export. With the pollers, so the process that polls also reports the queue.
     register_job_gauges()
     tasks = [
-        asyncio.create_task(BatchPollingService().run_polling_loop()),
-        asyncio.create_task(TranscriptionPollingService().run_polling_loop()),
+        asyncio.create_task(_in_area(AREA_RECORDING, lambda: BatchPollingService().run_polling_loop())),
+        asyncio.create_task(_in_area(AREA_DICTATION, lambda: TranscriptionPollingService().run_polling_loop())),
     ]
     log.info("Started %d background poller(s)", len(tasks))
     return tasks
@@ -275,7 +286,11 @@ def create_app() -> FastAPI:
     app.add_exception_handler(RequestValidationError, _validation_exception_handler)
 
     # --- routers ---
+    from hmcts_otel.fastapi import area_dependency
+
+    from transcribe_api.runtime.telemetry import AREA_DICTATION, AREA_RECORDING
     from transcribe_api.api.routes_dictation import router as dictation_router
+    from transcribe_api.api.routes_dictation import telemetry_router
     from transcribe_api.api.routes_dictation_privileged import router as dictation_admin_router
     from transcribe_api.api.routes_recording import limiter
     from transcribe_api.api.routes_recording import router as recording_router
@@ -286,9 +301,17 @@ def create_app() -> FastAPI:
     #   dictation admin declares prefix="/admin", also under "/api"
     # So the surfaces are /api/v1/* and /api/* (+ /api/admin/*) and do NOT
     # collide — including /health, which exists in both but at different paths.
-    app.include_router(dictation_router, prefix="/api")
-    app.include_router(dictation_admin_router, prefix="/api")
-    app.include_router(recording_router)
+    #
+    # hmcts.area (decision 1) tells the two areas' telemetry apart: every request of
+    # a router, and the request span, carries its area, including each area's own
+    # health and version routes (and dictation's security alert test). Shared, with
+    # no area: the browser relay (every page sends to it) and the top-level /health.
+    in_dictation = [Depends(area_dependency(AREA_DICTATION))]
+    in_recording = [Depends(area_dependency(AREA_RECORDING))]
+    app.include_router(dictation_router, prefix="/api", dependencies=in_dictation)
+    app.include_router(dictation_admin_router, prefix="/api", dependencies=in_dictation)
+    app.include_router(telemetry_router, prefix="/api")
+    app.include_router(recording_router, dependencies=in_recording)
 
     # Polled by the CNP pipeline's startup check.
     @app.get("/health", include_in_schema=False)

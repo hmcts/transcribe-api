@@ -99,6 +99,7 @@ def app(production, telemetry):
 
     test_app = FastAPI()
     test_app.include_router(transcribe_api.api.routes_dictation.router, prefix="/api")
+    test_app.include_router(transcribe_api.api.routes_dictation.telemetry_router, prefix="/api")
     instrument_fastapi(test_app, request_id=False)
     test_app.add_middleware(RequestIdMiddleware)
     test_app.add_exception_handler(FastAPIHTTPException, production.exception_handlers[FastAPIHTTPException])
