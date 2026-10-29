@@ -150,16 +150,20 @@ class TestTranscribeAndGenerateLlmOutput:
         assert record.exc_info is None
         assert "exception.stacktrace" not in record.__dict__
 
-    async def test_failed_error_record_save_is_logged_and_the_original_failure_raised(self, monkeypatch, caplog):
-        monkeypatch.setattr(
-            "transcribe_api.stt.pipeline.transcribe_audio",
-            AsyncMock(side_effect=RuntimeError("Azure error")),
-        )
+    async def test_a_failed_error_record_save_is_raised_so_the_poller_retries(self, monkeypatch, caplog):
+        """A 422 (no speech, audio rejected) whose error record cannot be saved must not
+        reach the poller as a 422, which skips the upload for good with no record:
+        the save's failure is raised (retried), chained to the transcription's."""
+        from fastapi import HTTPException
+        from hmcts_otel import client_failure_code
+
+        rejected = HTTPException(status_code=422, detail="No speech detected")
+        monkeypatch.setattr("transcribe_api.stt.pipeline.transcribe_audio", AsyncMock(side_effect=rejected))
         monkeypatch.setattr(
             "transcribe_api.stt.pipeline.save_transcription_job", MagicMock(side_effect=OSError("database down"))
         )
 
-        with caplog.at_level("ERROR"), pytest.raises(RuntimeError, match="Azure error"):
+        with caplog.at_level("ERROR"), pytest.raises(OSError, match="database down") as raised:
             await transcribe_and_generate_llm_output(
                 user_upload_blob_storage_file_key="blob",
                 user_id=uuid4(),
@@ -167,16 +171,13 @@ class TestTranscribeAndGenerateLlmOutput:
                 azure_user_id="a1b2c3d4-e5f6-7890-abcd-ef1234567890",
             )
 
+        assert raised.value.__cause__ is rejected
+        assert client_failure_code(raised.value) is None  # the poller retries it
         (record,) = [
             r for r in caplog.records if r.getMessage() == "The failed transcription job could not be saved (OSError)"
         ]
-        # With its stack: as exc_info, or as the exception attributes hmcts-otel
-        # converts it to once configured.
-        if record.exc_info is not None:
-            assert record.exc_info[0] is OSError
-        else:
-            assert record.__dict__.get("exception.type") == "OSError"
-            assert record.__dict__.get("exception.stacktrace")
+        assert record.exc_info is None
+        assert "exception.stacktrace" not in record.__dict__
 
     async def test_sends_email_after_completion(self, monkeypatch):
         mock_email = MagicMock()
