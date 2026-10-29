@@ -1,0 +1,41 @@
+sequenceDiagram
+  autonumber
+  actor U as User's browser
+  participant A as transcribe-api<br/>(via web)
+  participant B as Blob Storage
+  participant K as API worker
+  participant S as Azure Speech
+  participant L as LLM<br/>(Gemini on Vertex AI,<br/>Azure fallback)
+  participant D as Postgres
+
+  U->>A: POST /api/get-upload-url (file type)
+  A-->>U: Upload link with a new transcription ID
+  U->>A: PUT /api/upload-audio (the file)
+  A->>A: Check the key names this user's own upload folder
+  A->>B: Store user-uploads/user/id.ext
+
+  loop every 30 seconds
+    K->>B: List new files under user-uploads/
+  end
+  K->>B: Claim the file (metadata: in progress)
+  K->>D: Find the owning user
+  K->>B: Download the audio
+  K->>S: Fast transcription of the audio
+  S-->>K: Transcript with speaker labels
+  K->>L: Predict speaker names
+  K->>D: Save transcription and transcript
+  par minutes and title
+    K->>L: Generate minutes (two templates)
+  and
+    K->>L: Generate a title
+  end
+  K->>D: Save minutes and title
+  K->>B: Store a .docx of the transcript
+  K->>K: Email the user (only if GOV.UK Notify is configured)
+  K->>B: Mark processed, delete the audio
+
+  U->>A: Open the transcription, view minutes
+  U->>A: Ask for edited minutes (POST /api/generate-or-edit-minutes)
+  A->>L: Edit minutes with the user's instructions
+  A->>D: Save a new minutes version
+  U->>A: Poll for the new version, then download

@@ -1,0 +1,49 @@
+---
+config:
+  layout: elk
+---
+flowchart TB
+  start(["User chooses one or more recordings<br/>on the Hearing recordings page"])
+  up["Web sends each file to the API<br/>POST /api/v1/uploads"]
+  check{"Allowed type<br/>and under 200 MB?"}
+  conv["API converts it to 16 kHz mono WAV<br/>with ffmpeg"]
+  decode{"Audio<br/>decodable?"}
+  store[("Blob Storage<br/>uploads/user/id.wav")]
+  job["Web creates a job<br/>POST /api/v1/jobs"]
+  own{"File belongs<br/>to this user?"}
+  submit["API saves the job (pending) and submits<br/>an Azure Speech batch transcription"]
+  accepted{"Speech<br/>accepted it?"}
+  queued["Job status: submitted"]
+  speech["Azure Speech fetches the audio from Blob Storage<br/>and transcribes it"]
+  poll["Worker checks every pending job<br/>every 30 seconds"]
+  status{"Speech job<br/>status"}
+  running["Job status: running"]
+  ok["Worker downloads the result, labels speakers,<br/>saves the transcript in Postgres,<br/>deletes the Speech job"]
+  fail["Job status: failed"]
+  view(["User opens the job: reads the transcript,<br/>plays the audio, corrects and accepts segments"])
+  reject(["Rejected with an error message"])
+  unavailable(["Job failed, user sees 'service unavailable'"])
+
+  start --> up --> check
+  check -- no --> reject
+  check -- yes --> conv --> decode
+  decode -- no --> reject
+  decode -- yes --> store --> job --> own
+  own -- no --> reject
+  own -- yes --> submit --> accepted
+  accepted -- no --> unavailable
+  accepted -- yes --> queued --> speech
+  speech --> poll --> status
+  status -- running --> running --> poll
+  status -- not started --> poll
+  status -- succeeded --> ok --> view
+  status -- failed --> fail
+
+  classDef user fill:#eae6ff,stroke:#403294,color:#172b4d
+  classDef step fill:#e3fcef,stroke:#006644,color:#172b4d
+  classDef bad fill:#ffebe6,stroke:#bf2600,color:#172b4d
+  classDef ext fill:#fff7d6,stroke:#b65c02,color:#172b4d
+  class start,view user
+  class up,conv,job,submit,queued,poll,running,ok step
+  class reject,unavailable,fail bad
+  class speech,store ext

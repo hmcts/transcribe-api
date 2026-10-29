@@ -5,6 +5,8 @@ The single HMCTS Transcribe backend — one CNP component (`product: transcribe`
 
 Built per the target architecture: https://tools.hmcts.net/confluence/pages/viewpage.action?pageId=2004000371
 
+Architecture and delivery diagrams: [docs/architecture](docs/architecture/README.md).
+
 ## Provenance
 
 Code is imported from the upstream `main` branches, never edited in place:

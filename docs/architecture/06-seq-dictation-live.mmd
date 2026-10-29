@@ -1,0 +1,36 @@
+sequenceDiagram
+  autonumber
+  actor U as User's browser
+  participant W as transcribe-web<br/>(Caddy)
+  participant A as transcribe-api
+  participant I as Entra ID<br/>(workload identity)
+  participant S as Azure Speech<br/>(private endpoint)
+  participant D as Postgres
+  participant B as Blob Storage
+
+  U->>W: Start dictation (Dictation page)
+  W->>A: GET /api/get-speech-token with the user's token
+  A->>I: Get a token for Cognitive Services as the pod's managed identity
+  I-->>A: Entra token
+  A-->>U: Short-lived Speech token, endpoint = BenchNotes' own address
+  U->>U: Microphone permission
+  U->>W: Open WebSocket /cognitiveservices/... with the Speech token
+  W->>S: Caddy forwards it over the private endpoint
+  loop while dictating
+    U->>S: Audio stream (through Caddy)
+    S-->>U: Interim and final text (en-GB)
+    U->>A: PUT /api/live-draft (autosave, via web)
+    A->>D: Save the in-progress draft
+  end
+
+  U->>A: Submit hearing: POST /api/live-transcription/submission
+  A->>B: Save the submission (form and transcript) as JSON
+  A->>D: Load document content (hearing types, legal frameworks, anonymity)
+  A->>A: Render the Word decision document
+  A->>B: Store the .docx
+  A->>D: Save the transcription record
+  A-->>U: Download link (/api/download)
+  U->>A: GET /api/download (via web)
+  A->>D: Record the export in the audit log
+  A->>B: Read the .docx
+  A-->>U: Word document
