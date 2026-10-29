@@ -19,7 +19,6 @@ from datetime import UTC, datetime
 from urllib.parse import urlparse
 from uuid import UUID
 
-import sentry_sdk
 from hmcts_otel import StageHandle, journey, record_event, stage
 from hmcts_otel import conventions as c
 from sqlmodel import Session
@@ -33,6 +32,7 @@ from transcribe_api.domain.interface_recording import (
     update_job_batch_status,
 )
 from transcribe_api.domain.models_recording import BatchJobStatus
+from transcribe_api.domain.provenance_recording import TranscriptProvenance, build_provenance
 from transcribe_api.domain.webhook import dispatch
 from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
 from transcribe_api.runtime.db_recording import get_engine
@@ -61,7 +61,7 @@ from transcribe_api.stt.batch_client import (
     get_batch_results,
     get_model_details,
 )
-from transcribe_api.stt.speakers_recording import process_speakers
+from transcribe_api.stt.speakers_recording import process_speakers, speaker_step_report
 from transcribe_api.stt.speech_telemetry import speech_config_attributes
 
 logger = logging.getLogger(__name__)
@@ -84,6 +84,9 @@ class _PendingJob:
     created_datetime: datetime | None = None
     processing_started_datetime: datetime | None = None
     enable_diarization: bool | None = None
+    # OBS-5: the duration given when the job was submitted (an estimate), the fallback
+    # for the Speech usage recorded when Azure's results do not carry one.
+    audio_duration_seconds: float | None = None
 
 
 def _extract_model_identifier(status_data: dict, locale: str) -> str:
@@ -300,7 +303,6 @@ class BatchPollingService:
                     logger.error(
                         "Unexpected error in polling loop (%s)", type(exc).__name__, exc_info=exc
                     )
-                    sentry_sdk.capture_exception(exc)
                 await self._report_stuck_jobs()
                 await asyncio.sleep(self.settings.BATCH_POLL_INTERVAL_SECONDS)
         except asyncio.CancelledError:
@@ -352,12 +354,12 @@ class BatchPollingService:
                             webhook_secret = self._resolve_webhook_secret(row.caller_id)
                         except Exception as exc:
                             logger.error(
-                                "Cannot resolve webhook secret for caller %s (job %s skipped): %s",
+                                "Cannot resolve webhook secret for caller %s (job %s skipped) (%s)",
                                 row.caller_id,
                                 row.id,
-                                exc,
+                                type(exc).__name__,
+                                exc_info=exc,
                             )
-                            sentry_sdk.capture_exception(exc)
                             continue
                 result.append(
                     _PendingJob(
@@ -374,6 +376,7 @@ class BatchPollingService:
                         processing_started_datetime=row.processing_started_datetime,
                         enable_diarization=row.enable_diarization,
                         trace_parent=row.trace_parent,
+                        audio_duration_seconds=row.audio_duration_seconds,
                     )
                 )
             return result
@@ -411,7 +414,6 @@ class BatchPollingService:
                 logger.error(
                     "Error polling batch job %s (%s)", job.id, type(exc).__name__, exc_info=exc
                 )
-                sentry_sdk.capture_exception(exc)
                 # DIAAT-281: the job stays unfinished and is polled again next interval.
                 # DIAAT-282: where it failed (Azure Speech, or our code/database) and
                 # what Azure said.
@@ -463,7 +465,8 @@ class BatchPollingService:
                 job_telemetry.CODE_POSTPROCESS_FAILED, stages=(postprocessing, processing)
             ),
         ):
-            processed_entries = process_speakers(dialogue_entries)
+            with speaker_step_report() as speaker_steps:
+                processed_entries = process_speakers(dialogue_entries)
             model_identifier = _extract_model_identifier(status_data, job.locale)
             transcription_duration_seconds = _extract_transcription_duration_seconds(
                 status_data, job.created_datetime
@@ -472,6 +475,15 @@ class BatchPollingService:
         # A call to Azure Speech, not post-processing: never raises (DIAAT-243 AC5) and is
         # measured by the Speech call metrics (DIAAT-282).
         model_display_name = await _resolve_model_display_name(model_identifier)
+        # DIAAT-286: the configuration that produced the transcript, saved with it.
+        provenance = build_provenance(
+            locale=job.locale,
+            diarization=job.enable_diarization,
+            status_data=status_data,
+            batch_job_url=job.batch_job_url,
+            model_display_name=model_display_name,
+            speaker_steps=speaker_steps,
+        )
 
         with (
             stage(STAGE_PERSISTENCE, attributes=speech_ref) as persistence,
@@ -485,11 +497,27 @@ class BatchPollingService:
                 transcription_duration_seconds,
                 model_identifier,
                 model_display_name,
+                provenance,
             )
+        # OBS-5: Azure Speech usage, recorded once the transcript is saved: a save that
+        # fails raises before this, and the next poll records it. Only for succeeded jobs
+        # (whether Azure bills any audio of a failed job is not known, so none is recorded).
+        # A job processed twice (G18) records it twice, like job.finished. Nothing with
+        # the mock Speech backend: no audio went to Azure.
+        usage = (
+            {}
+            if self.settings.SPEECH_BACKEND == "mock"
+            else job_telemetry.record_speech_usage(
+                *job_telemetry.billed_audio_seconds(
+                    getattr(dialogue_entries, "audio_duration_seconds", None),
+                    job.audio_duration_seconds,
+                )
+            )
+        )
         job_telemetry.record_transcript_available(
             processed_entries, job_telemetry.azure_last_action(status_data), polled_at, speech_ref
         )
-        _job_finished(job, status_data, "success")
+        _job_finished(job, status_data, "success", attributes=usage)
 
         await self._dispatch_success(job, processed_entries)
 
@@ -588,6 +616,7 @@ class BatchPollingService:
         transcription_duration_seconds=None,
         model_identifier=None,
         model_display_name=None,
+        provenance: TranscriptProvenance | None = None,
     ) -> None:
         with Session(get_engine()) as session:
             save_job_results(
@@ -598,6 +627,7 @@ class BatchPollingService:
                 transcription_duration_seconds=transcription_duration_seconds,
                 model_identifier=model_identifier,
                 model_display_name=model_display_name,
+                provenance=provenance,
             )
 
     def _record_error(self, job_id, error_msg) -> None:

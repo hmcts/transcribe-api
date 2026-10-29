@@ -422,6 +422,7 @@ class TestHandleSucceeded:
             42.0,
             "https://test.cognitiveservices.azure.com/models/base/abc123",
             "20240614 Base — en-GB",
+            ANY,  # DIAAT-286 provenance: see tests/unit/test_provenance.py
         )
 
     @pytest.mark.asyncio

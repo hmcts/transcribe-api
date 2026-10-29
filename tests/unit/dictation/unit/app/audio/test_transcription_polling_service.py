@@ -1,5 +1,6 @@
 """Unit tests for TranscriptionPollingService._should_skip_blob."""
 
+import logging
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -279,3 +280,198 @@ class TestJourney:
         ):
             assert await service.process_discovered_audio(make_blob(f"user-uploads/oid/{tid}.mp4"))
         assert seen["journey"] is None
+
+
+class TestErrorLogging:
+    @pytest.mark.asyncio
+    async def test_a_pipeline_error_message_is_not_logged(self, service):
+        """The traceback's last line is the exception's text (e.g. Azure's error message
+        in an HTTPException detail): only the type and status are logged.
+
+        The record is read by a handler on the app logger, before the hmcts-otel root
+        handler's filter: that filter drops exc_info only while exception-message
+        capture is off, so the call site must not pass the text at all."""
+        import io
+        import logging
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from fastapi import HTTPException
+
+        from transcribe_api.runtime.logger import logger as app_logger
+
+        sentinel = "SENTINEL-azure-error-detail"
+        tid = "6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f"
+        user = MagicMock(id="11111111-1111-1111-1111-111111111111", email="j@x.com", azure_user_id="oid")
+        raw = io.StringIO()
+        handler = logging.StreamHandler(raw)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        app_logger.addHandler(handler)
+        try:
+            with (
+                patch.object(service, "_mark_blob_in_progress", AsyncMock(return_value=True)),
+                patch.object(service, "resolve_blob_owner_from_path", return_value=user),  # CNP: by OID
+                patch.object(service, "_mark_blob_with_error", AsyncMock()) as mark_error,
+                patch.object(service, "_mark_blob_permanently_failed", AsyncMock()) as mark_failed,
+                patch(
+                    "transcribe_api.stt.work_poller.extract_transcription_id_from_blob_path",
+                    return_value=tid,
+                ),
+                patch(
+                    "transcribe_api.stt.work_poller.transcribe_and_generate_llm_output",
+                    AsyncMock(side_effect=HTTPException(status_code=422, detail=sentinel)),
+                ),
+            ):
+                assert not await service.process_discovered_audio(make_blob(f"user-uploads/oid/{tid}.mp4"))
+        finally:
+            app_logger.removeHandler(handler)
+
+        assert sentinel not in raw.getvalue()
+        assert "HTTPException, status=422" in raw.getvalue()
+        assert sentinel not in str(mark_error.await_args)
+        mark_failed.assert_awaited_once()  # a 422 is the file's: not retried
+        assert sentinel not in str(mark_failed.await_args)
+
+
+class _FakeBlobStore:
+    """In-memory blob metadata, as the poller reads and writes it."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self.metadata: dict = {}
+        self.version = 0  # the ETag: CNP claims a blob with a conditional write
+
+    async def list_blobs_in_prefix(self, prefix, include_metadata=True):
+        return [{"name": self.name, "metadata": dict(self.metadata)}]
+
+    async def get_blob_metadata(self, blob_name, container_name=None):
+        return dict(self.metadata)
+
+    async def get_blob_properties(self, blob_name, container_name=None):
+        return {"name": self.name, "metadata": dict(self.metadata), "etag": str(self.version), "last_modified": None}
+
+    async def set_blob_metadata(self, blob_name, metadata, container_name=None, etag=None):
+        if etag is not None and etag != str(self.version):
+            return False  # changed since it was read: as a real conditional write
+        self.metadata = dict(metadata)
+        self.version += 1
+        return True
+
+
+class TestClientFailuresAreNotRetried:
+    """A client-caused failure (no speech in the recording, Azure rejected the audio)
+    is the file's: a retry re-downloads it, re-bills Azure, records usage again and
+    saves another error job and job.finished. Only service errors are retried."""
+
+    TID = "6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f"
+
+    async def _poll_rounds(self, service, monkeypatch, tmp_path, status_code, body, rounds=4):
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import UUID
+
+        from hmcts_otel.testing import capture_telemetry
+
+        blob = f"user-uploads/oid/{self.TID}.mp4"
+        store = _FakeBlobStore(blob)
+        service.azure_blob_manager = store
+        user = MagicMock(id=UUID("11111111-1111-1111-1111-111111111111"), email="j@x.com", azure_user_id="oid")
+        monkeypatch.setattr(service, "resolve_blob_owner_from_path", lambda _: user)  # CNP: by OID
+
+        transcription = MagicMock(id=UUID(self.TID), title=None)
+        saved_jobs: list = []
+        monkeypatch.setattr("transcribe_api.stt.pipeline.load_or_create_transcription", lambda *_: transcription)
+        monkeypatch.setattr(
+            "transcribe_api.stt.pipeline.save_transcription_job", lambda job, **_: saved_jobs.append(job)
+        )
+
+        # The real transcription code down to the HTTP call: download, Azure, usage.
+        settings = MagicMock(AZURE_SPEECH_KEY="k", AZURE_SPEECH_ENDPOINT="https://uks.example.com")
+        monkeypatch.setattr("transcribe_api.stt.fast_client.get_settings", lambda: settings)
+        downloads = []
+
+        async def download(_path):
+            f = tmp_path / f"audio-{len(downloads)}.mp4"
+            f.write_bytes(b"audio")
+            downloads.append(f)
+            return f
+
+        monkeypatch.setattr("transcribe_api.stt.fast_client.download_audio_blob_with_retry", download)
+        response = MagicMock(status_code=status_code)
+        response.json.return_value = body
+        client = AsyncMock()
+        client.post = AsyncMock(return_value=response)
+        client_class = MagicMock()
+        client_class.return_value.__aenter__.return_value = client
+        monkeypatch.setattr("transcribe_api.stt.fast_client.httpx.AsyncClient", client_class)
+
+        with capture_telemetry() as telemetry:
+            for _ in range(rounds):
+                for found in await service.poll_for_new_audio_files():
+                    await service.process_discovered_audio(found)
+            finished = telemetry.events("job.finished")
+            usage = telemetry.metric_points("hmcts.speech.audio.duration")
+        return store, saved_jobs, finished, usage, client.post, downloads
+
+    @pytest.mark.asyncio
+    async def test_a_silent_file_is_processed_once_and_marked_permanently_failed(self, service, monkeypatch, tmp_path):
+        from hmcts_otel import conventions as c
+
+        store, saved_jobs, finished, usage, post, downloads = await self._poll_rounds(
+            service, monkeypatch, tmp_path, 200, {"durationMilliseconds": 30000, "phrases": []}
+        )
+
+        assert post.await_count == 1  # billed once
+        assert len(downloads) == 1
+        assert store.metadata["status"] == "permanently_failed"
+        assert store.metadata["retry_count"] == "0"  # the attempts so far, kept
+        assert [(e[c.OUTCOME], e[c.ERROR_CODE]) for e in finished] == [("failure", "transcription.failed")]
+        ((point,),) = [usage]
+        assert point.get("value", point.get("sum")) == 30.0  # one 30 s file, recorded once
+        (job,) = saved_jobs
+        assert "no speech was detected" in job.error_message  # the user-facing message is kept
+
+    @pytest.mark.asyncio
+    async def test_an_azure_rejection_is_not_retried(self, service, monkeypatch, tmp_path):
+        store, saved_jobs, finished, usage, post, _ = await self._poll_rounds(
+            service, monkeypatch, tmp_path, 400, {"code": "InvalidRequest", "message": "bad audio"}
+        )
+
+        assert post.await_count == 1
+        assert store.metadata["status"] == "permanently_failed"
+        assert len(finished) == 1
+        assert len(saved_jobs) == 1
+        assert usage == []  # not transcribed, not billed
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "status_code",
+        [500, 404, 408, 409],  # an outage, a wrong endpoint or API version, a timeout, a conflict
+    )
+    async def test_a_service_error_is_still_retried(self, service, monkeypatch, tmp_path, status_code):
+        store, saved_jobs, finished, _, post, _ = await self._poll_rounds(
+            service, monkeypatch, tmp_path, status_code, {"code": "ServiceError", "message": "outage"}
+        )
+
+        assert post.await_count == service.max_retry_attempts  # retried up to the limit
+        assert store.metadata["status"] == "permanently_failed"
+        assert store.metadata["retry_count"] == str(service.max_retry_attempts)
+        assert len(finished) == service.max_retry_attempts
+        assert len(saved_jobs) == service.max_retry_attempts
+
+
+
+@pytest.mark.asyncio
+async def test_a_client_failure_marks_the_blob_failed_at_warning_keeping_its_attempts(service, caplog):
+    """The user's file, not the service: a warning, and the earlier attempts are kept."""
+    from unittest.mock import AsyncMock
+
+    from fastapi import HTTPException
+
+    service.azure_blob_manager = AsyncMock()
+    service.azure_blob_manager.get_blob_metadata = AsyncMock(return_value={"retry_count": "1"})
+    with caplog.at_level(logging.WARNING, logger="transcribe_api.runtime.logger"):
+        assert await service._handle_failure("user-uploads/oid/x.mp4", HTTPException(status_code=422)) is False
+    (_, kwargs) = service.azure_blob_manager.set_blob_metadata.call_args
+    assert kwargs["metadata"]["status"] == "permanently_failed"
+    assert kwargs["metadata"]["retry_count"] == "1"
+    marked = [r for r in caplog.records if "permanently failed" in r.getMessage()]
+    assert marked and all(r.levelno == logging.WARNING for r in marked)

@@ -112,3 +112,30 @@ def fake_blob_storage(monkeypatch):
     monkeypatch.setattr(blob_recording, "AsyncBlobServiceClient", FakeServiceClient)
     monkeypatch.setattr(blob_recording, "DefaultAzureCredential", FakeCredential)
     return storage
+
+
+class AuditCapture:
+    """The audit inserts a test made: one list of rows per INSERT."""
+
+    def __init__(self) -> None:
+        self.inserts: list[list[dict]] = []
+
+    def __call__(self, rows: list[dict]) -> None:
+        self.inserts.append(list(rows))
+
+    @property
+    def rows(self) -> list[dict]:
+        return [row for insert in self.inserts for row in insert]
+
+
+@pytest.fixture(autouse=True)
+def audit_capture(monkeypatch):
+    """DIAAT-286: audit rows written during the test, captured instead of inserted.
+
+    Unit tests have no database: without this, every audited request would try to
+    connect and fall back to the fail-open path. Tests of the real insert undo this
+    patch (or use the integration suite).
+    """
+    capture = AuditCapture()
+    monkeypatch.setattr("transcribe_api.domain.audit_recording._insert", capture)
+    return capture

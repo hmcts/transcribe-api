@@ -839,15 +839,20 @@ async def test_rejected_submission_never_carries_azures_response_text(tel, mocke
     async def post(self, url, **_kwargs):
         return _response(400, "POST", url, **rejection)
 
-    sentry = mocker.patch("sentry_sdk.capture_exception")
     with caplog.at_level("DEBUG"), pytest.raises(BatchSubmissionError) as raised:
         await _submit(mocker, post)
 
     message = str(raised.value)
     expected = "InvalidPayload" if "json" in rejection else None
     assert message == "Batch job submission failed: HTTP 400" + (f" ({expected})" if expected else "")
-    (sent,) = sentry.call_args.args
-    for seen in (message, caplog.text, str(sent), repr(sent.args)):
+    # What App Insights receives for each logged exception: its type and stack, as
+    # hmcts-otel exports them (the message redacted).
+    exported = [
+        str(record.__dict__.get(key, ""))
+        for record in caplog.records
+        for key in ("exception.stacktrace", "exception.message")
+    ]
+    for seen in (message, caplog.text, repr(raised.value.args), *exported):
         for prohibited in (SAS_SIGNATURE, FILE_STEM, "Cannot access", "Bad request"):
             assert prohibited not in seen
 

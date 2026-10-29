@@ -222,7 +222,6 @@ def setup_test_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "LANGFUSE_PUBLIC_KEY": "pk-lf-test-public-key-123456",
         "LANGFUSE_SECRET_KEY": "sk-lf-test-secret-key-123456",
         "LANGFUSE_HOST": "https://langfuse-ai.justice.gov.uk",
-        "SENTRY_DSN": "",  # Disable Sentry in tests
         "JWT_SECRET_KEY": "test-jwt-secret",
     }
 

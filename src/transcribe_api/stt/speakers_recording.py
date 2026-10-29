@@ -1,13 +1,49 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 
 from hmcts_otel import record_event
 
 from transcribe_api.domain.models_recording import DialogueEntry, PhraseAlternatives
-from transcribe_api.runtime.telemetry import ATTR_POSTPROCESS_STEP, EVENT_POSTPROCESS_DEGRADED
+from transcribe_api.runtime.telemetry import (
+    ATTR_POSTPROCESS_STEP,
+    EVENT_POSTPROCESS_DEGRADED,
+    POSTPROCESS_STEPS,
+)
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SpeakerStepReport:
+    """DIAAT-286 provenance: which speaker-processing step failed, if one did."""
+
+    degraded: str | None = None
+
+    @property
+    def applied(self) -> list[str]:
+        """The steps whose output the transcript has (all of them unless one failed)."""
+        if self.degraded not in POSTPROCESS_STEPS:
+            return list(POSTPROCESS_STEPS)
+        return list(POSTPROCESS_STEPS[: POSTPROCESS_STEPS.index(self.degraded)])
+
+
+_step_report: ContextVar[SpeakerStepReport | None] = ContextVar("speaker_step_report", default=None)
+
+
+@contextmanager
+def speaker_step_report() -> Iterator[SpeakerStepReport]:
+    """Collect what process_speakers did inside the block (for the job's provenance)."""
+    report = SpeakerStepReport()
+    token = _step_report.set(report)
+    try:
+        yield report
+    finally:
+        _step_report.reset(token)
 
 
 def _merged_alternatives(
@@ -237,3 +273,6 @@ def process_speakers(entries: list[DialogueEntry]) -> list[DialogueEntry]:
 
 def _degraded(step: str) -> None:
     record_event(EVENT_POSTPROCESS_DEGRADED, {ATTR_POSTPROCESS_STEP: step})
+    report = _step_report.get()
+    if report is not None:
+        report.degraded = step

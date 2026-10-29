@@ -107,7 +107,7 @@ from transcribe_api.domain.models_dictation import AuditLog
 from transcribe_api.runtime.db_connection import get_engine
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterable, AsyncIterator, Mapping
+    from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Mapping
     from types import TracebackType
     from uuid import UUID
 
@@ -212,6 +212,21 @@ def record_audit(
     except Exception as exc:
         _write_failed(action, exc)
         return False
+    return _submit(row)
+
+
+def persist_rows(rows: list[AuditLog]) -> bool:
+    """Write rows built elsewhere (the recording area's writer, domain/audit_recording.py)
+    by the same rules as record_audit: off the event loop, fail-open. Never raises."""
+    written = True
+    for row in rows:
+        written = _submit(row) and written
+    return written
+
+
+def _submit(row: AuditLog) -> bool:
+    """Insert now when off the event loop; otherwise defer to the enclosing
+    deferred_audit() block or hand to a worker thread (True: handed over)."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -355,7 +370,13 @@ class AuditedAction:
         storage error status) is written when it exits, as before. One row either way.
         """
         self._streams = True
-        return _AuditedStreamingResponse(self, content, status_code=status_code, headers=headers)
+
+        async def conclude(reason: str | None) -> None:
+            row = self._conclude_stream(reason)
+            if row is not None:
+                await anyio.to_thread.run_sync(_persist, row)
+
+        return _AuditedStreamingResponse(conclude, content, status_code=status_code, headers=headers)
 
     def _conclude(self, exc: BaseException | None) -> AuditLog | None:
         """Settle the outcome; the row to write, or None (a skipped success, or one
@@ -396,6 +417,21 @@ class AuditedAction:
         )
 
 
+def audited_streaming_response(
+    content: AsyncIterable[bytes],
+    conclude: Callable[[str | None], Awaitable[None]],
+    *,
+    status_code: int = 200,
+    headers: Mapping[str, str] | None = None,
+    media_type: str | None = None,
+) -> StreamingResponse:
+    """A StreamingResponse that calls ``conclude`` once, when its body ends: with None
+    once the last chunk is sent, else with ``STREAM_ERROR``, ``CLIENT_DISCONNECTED`` or
+    ``STREAM_CANCELLED``. It closes ``content`` either way. For an audit interface of
+    its own (the recording area's ``AuditScope.streaming_response``)."""
+    return _AuditedStreamingResponse(conclude, content, status_code=status_code, headers=headers, media_type=media_type)
+
+
 class _AuditedStreamingResponse(StreamingResponse):
     """A StreamingResponse that concludes its audited action when the body ends.
 
@@ -408,17 +444,18 @@ class _AuditedStreamingResponse(StreamingResponse):
 
     def __init__(
         self,
-        audit: AuditedAction,
+        conclude: Callable[[str | None], Awaitable[None]],
         content: AsyncIterable[bytes],
         *,
         status_code: int,
         headers: Mapping[str, str] | None,
+        media_type: str | None = None,
     ) -> None:
-        self._audit = audit
+        self._conclude = conclude
         self._exhausted = False
         self._iterator_failed = False
         self._source = content
-        super().__init__(self._watched(content), status_code=status_code, headers=headers)
+        super().__init__(self._watched(content), status_code=status_code, headers=headers, media_type=media_type)
 
     async def _watched(self, content: AsyncIterable[bytes]) -> AsyncIterator[bytes]:
         try:
@@ -448,9 +485,7 @@ class _AuditedStreamingResponse(StreamingResponse):
             with anyio.CancelScope(shield=True):
                 await _aclose(self.body_iterator)
                 await _aclose(self._source)
-                row = self._audit._conclude_stream(reason)
-                if row is not None:
-                    await anyio.to_thread.run_sync(_persist, row)
+                await self._conclude(reason)
 
 
 async def _aclose(iterator: object) -> None:

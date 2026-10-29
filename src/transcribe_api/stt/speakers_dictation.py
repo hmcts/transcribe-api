@@ -1,7 +1,9 @@
-import sentry_sdk
+import logging
 
 from transcribe_api.documents.minutes.llm_calls import generate_speaker_predictions
 from transcribe_api.domain.models_dictation import DialogueEntry
+
+logger = logging.getLogger(__name__)
 
 
 def convert_input_dialogue_entries_to_dialogue_entries(
@@ -90,28 +92,29 @@ async def process_speakers_and_dialogue_entries(
         # Step 1: Group similar speakers together
         grouped_dialogue_entries = group_dialogue_entries_by_speaker(dialogue_entries)
     except Exception as e:
-        sentry_sdk.capture_exception(e)
+        # The previous step's output is kept: degraded, not failed. Type and stack only.
+        logger.warning("Speaker grouping failed (%s)", type(e).__name__, exc_info=e)
         return dialogue_entries
 
     try:
         # Step 2: Normalize speaker labels to numbers
         normalised_dialogue_entries = normalize_speaker_labels(grouped_dialogue_entries)
     except Exception as e:
-        sentry_sdk.capture_exception(e)
+        logger.warning("Speaker normalisation failed (%s)", type(e).__name__, exc_info=e)
         return grouped_dialogue_entries
 
     try:
         # Step 3: Add "Speaker" prefix
         labelled_dialogue_entries = add_speaker_labels_to_dialogue_entries(normalised_dialogue_entries)
     except Exception as e:
-        sentry_sdk.capture_exception(e)
+        logger.warning("Speaker labelling failed (%s)", type(e).__name__, exc_info=e)
         return normalised_dialogue_entries
 
     try:
         # Step 4: Get speaker predictions
         speaker_predictions = await generate_speaker_predictions(labelled_dialogue_entries, user_id)
     except Exception as e:
-        sentry_sdk.capture_exception(e)
+        logger.warning("Speaker naming failed (%s)", type(e).__name__, exc_info=e)
         return labelled_dialogue_entries
 
     try:
@@ -128,5 +131,5 @@ async def process_speakers_and_dialogue_entries(
             )
         return predicted_entries
     except Exception as e:
-        sentry_sdk.capture_exception(e)
+        logger.warning("Applying speaker predictions failed (%s)", type(e).__name__, exc_info=e)
         return labelled_dialogue_entries

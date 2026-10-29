@@ -217,22 +217,16 @@ async def _submit_to_speech(
     except BatchSubmissionError as exc:
         # Type and stack only: the Azure error text can echo request content (DIAAT-274 P7).
         logger.error("Batch submission failed for job %s (%s)", job.id, type(exc).__name__, exc_info=exc)
-        import sentry_sdk
-
-        sentry_sdk.capture_exception(exc)
         job.status = JobStatus.FAILED
         # Store only the high-level message — full Azure error detail (which
-        # may contain endpoint URLs or subscription IDs) goes to Sentry only.
+        # may contain endpoint URLs or subscription IDs) is never stored or logged.
         job.error_message = "Azure batch transcription submission failed"
         job.idempotency_key = None
         raise
     except SpeechAuthError as exc:
         # The pod's workload identity could not get a token (federation or
-        # role assignment missing); the detail is in the log and Sentry.
+        # role assignment missing); the type and redacted stack are in the log.
         logger.error("Batch submission failed for job %s (%s)", job.id, type(exc).__name__, exc_info=exc)
-        import sentry_sdk
-
-        sentry_sdk.capture_exception(exc)
         job.status = JobStatus.FAILED
         job.error_message = "Could not authenticate to Azure Speech"
         job.idempotency_key = None
@@ -242,9 +236,6 @@ async def _submit_to_speech(
         # the job, Speech may be transcribing, and a same-key retry must not
         # start a second transcription.
         logger.error("Unexpected error submitting job %s (%s)", job.id, type(exc).__name__, exc_info=exc)
-        import sentry_sdk
-
-        sentry_sdk.capture_exception(exc)
         job.status = JobStatus.FAILED
         job.error_message = "Job submission failed due to an internal error"
         raise

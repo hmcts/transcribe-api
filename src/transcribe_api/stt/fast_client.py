@@ -1,4 +1,7 @@
+import asyncio
 import json
+import math
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -6,6 +9,7 @@ from typing import Any
 import aiofiles
 import httpx
 from fastapi import HTTPException
+from hmcts_otel import Outcome, record_speech_usage
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -23,12 +27,40 @@ from transcribe_api.stt.speech_auth import SpeechAuthError, speech_auth_headers
 from transcribe_api.stt.utils import (
     cleanup_files,
     convert_input_dialogue_entries_to_dialogue_entries,
+    get_audio_duration,
 )
 
 TOO_MANY_REQUESTS = 429
+# OBS-5: the AI usage feature of uploaded-audio transcription (hmcts.speech.audio.duration).
+UPLOAD_TRANSCRIPTION_FEATURE = "upload_transcription"
 # Azure statuses where the service, not the audio, failed: authentication,
-# permissions/quota and throttling.
-_SERVICE_SIDE_CLIENT_ERRORS = frozenset({401, 403, TOO_MANY_REQUESTS})
+# permissions/quota, throttling, a wrong endpoint or API version (404), a timeout (408)
+# and a conflict (409). These are retried; only the rest of 4xx (the request or the
+# audio rejected) mark the file as failed for good.
+_SERVICE_SIDE_CLIENT_ERRORS = frozenset({401, 403, 404, 408, 409, TOO_MANY_REQUESTS})
+
+
+# Azure error codes are identifiers ("InvalidRequest", "401"); anything else is
+# not logged. Messages are never logged: they can carry request content.
+_AZURE_ERROR_CODE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+
+
+def _loggable_azure_code(code: object) -> str:
+    return code if isinstance(code, str) and _AZURE_ERROR_CODE.fullmatch(code) else "unrecognised"
+
+
+NO_SPEECH_DETECTED = "speech.no_speech_detected"
+
+
+class NoSpeechDetectedError(HTTPException):
+    """Azure transcribed the audio but found no speech in it (silent or speech-free
+    audio): the user's recording, not a service error, so a 422 (a handled failure).
+    ``error_code`` names it for telemetry and the user-facing message."""
+
+    error_code = NO_SPEECH_DETECTED
+
+    def __init__(self) -> None:
+        super().__init__(status_code=422, detail="No speech was detected in the recording")
 
 
 def _azure_error_status(response_status: int) -> int:
@@ -67,6 +99,45 @@ def _transcription_definition(config: SpeechConfiguration) -> dict[str, Any]:
         "diarization": {"enabled": config.diarization},
         "profanityFilterMode": config.profanity_filter_mode,
     }
+
+
+# The detail of an HTTPException raised for an Azure error: never Azure's own message,
+# which can quote the request, and which travels with the exception (exception
+# events). The status and Azure's code are logged; user_error_message builds what the
+# user sees from the status.
+_AZURE_REJECTED = "Azure Speech returned an error"
+
+
+def _reported_audio_seconds(response: dict[str, Any]) -> float | None:
+    """The audio duration Azure reports for the request (``durationMilliseconds``), in
+    seconds: the quantity fast transcription is billed on. None if absent or invalid."""
+    value = response.get("durationMilliseconds")
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return value / 1000 if math.isfinite(value) and value >= 0 else None
+
+
+async def _record_fast_transcription_usage(
+    status_code: int, response: dict[str, Any], audio_file_path: Path, outcome: Outcome = Outcome.SUCCESS
+) -> None:
+    """Record the audio seconds of a request Azure processed (OBS-5). Usage only.
+
+    Only a response Azure transcribed (HTTP 2xx, no error body) is recorded: that is
+    what it bills. Requests it rejected or failed are not billed and not recorded.
+    The duration Azure reports is preferred; otherwise the file is measured (ffprobe).
+    If neither is available nothing is recorded (and a warning is logged): a guess
+    would skew the usage share that cost is allocated by.
+    """
+    if not 200 <= status_code < 300:  # noqa: PLR2004 - not transcribed, so not billed
+        return
+    seconds = _reported_audio_seconds(response)
+    if seconds is None:
+        try:
+            seconds = await asyncio.to_thread(get_audio_duration, audio_file_path)
+        except Exception:
+            logger.warning("Fast transcription audio duration unknown: usage not recorded")
+            return
+    record_speech_usage(seconds=seconds, mode="fast", feature=UPLOAD_TRANSCRIPTION_FEATURE, outcome=outcome)
 
 
 @retry(
@@ -215,7 +286,7 @@ async def transcribe_audio_with_azure(audio_file_path: Path):
     try:
         headers = await speech_auth_headers(settings.AZURE_SPEECH_KEY)
     except SpeechAuthError as exc:
-        logger.error(str(exc))
+        logger.error("Could not authenticate to Azure Speech (%s)", type(exc).__name__)
         raise HTTPException(status_code=500, detail="Could not authenticate to Azure Speech") from exc
     async with aiofiles.open(audio_file_path, "rb") as audio_file:
         audio_content = await audio_file.read()
@@ -240,22 +311,48 @@ async def transcribe_audio_with_azure(audio_file_path: Path):
 
             # Check for nested error response shape: {"error": {"code": "...", "message": "..."}}
             if "error" in full_response and isinstance(full_response["error"], dict):
-                error_message = full_response["error"].get("message", "Unknown error occurred")
-                logger.error(f"Azure API error (nested): {error_message}")
-                raise HTTPException(status_code=_azure_error_status(response.status_code), detail=error_message)
+                logger.error(
+                    "Azure API error (nested) status=%s code=%s",
+                    response.status_code,
+                    _loggable_azure_code(full_response["error"].get("code")),
+                )
+                raise HTTPException(status_code=_azure_error_status(response.status_code), detail=_AZURE_REJECTED)
 
             # Check for top-level error response: {"code": "...", "message": "..."}
             if "code" in full_response:
-                error_message = full_response.get("message", "Unknown error occurred")
-                logger.error(f"Azure API error: {error_message}")
-                raise HTTPException(status_code=_azure_error_status(response.status_code), detail=error_message)
+                logger.error(
+                    "Azure API error status=%s code=%s",
+                    response.status_code,
+                    _loggable_azure_code(full_response.get("code")),
+                )
+                raise HTTPException(status_code=_azure_error_status(response.status_code), detail=_AZURE_REJECTED)
 
             # If no error, proceed with phrases extraction
             phrases = full_response.get("phrases")
+            if isinstance(phrases, list) and not phrases:
+                # Transcribed (and billed) but no speech found: the user's recording, a
+                # failure outcome (not an error: it is not the service's fault).
+                await _record_fast_transcription_usage(
+                    response.status_code, full_response, audio_file_path, Outcome.FAILURE
+                )
+                raise NoSpeechDetectedError
             if not phrases:
+                # A response without its phrases: the service's, an error outcome.
+                await _record_fast_transcription_usage(
+                    response.status_code, full_response, audio_file_path, Outcome.ERROR
+                )
                 raise HTTPException(
                     status_code=500,
                     detail="No transcription phrases found in response",
                 )
 
-            return convert_input_dialogue_entries_to_dialogue_entries(phrases)
+            try:
+                entries = convert_input_dialogue_entries_to_dialogue_entries(phrases)
+            except Exception:
+                # Transcribed (and billed) but unusable: an error outcome, as above.
+                await _record_fast_transcription_usage(
+                    response.status_code, full_response, audio_file_path, Outcome.ERROR
+                )
+                raise
+            await _record_fast_transcription_usage(response.status_code, full_response, audio_file_path)
+            return entries

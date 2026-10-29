@@ -1,7 +1,7 @@
 """Unit tests for pure speaker processing functions."""
 
 import sys
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 # Block the deep import chain triggered by speakers.py -> llm_calls -> interface_functions -> postgres_database
 _mock_llm = MagicMock()
@@ -174,11 +174,6 @@ class TestConvertInputDialogueEntriesFromSpeakers:
 
 @pytest.mark.asyncio
 class TestProcessSpeakersAndDialogueEntries:
-    @pytest.fixture(autouse=True)
-    def _mock_sentry(self):
-        with patch("transcribe_api.stt.speakers_dictation.sentry_sdk") as mock:
-            yield mock
-
     @pytest.fixture(autouse=True)
     def _mock_predictions(self, monkeypatch):
         """Ensure generate_speaker_predictions is always an AsyncMock."""

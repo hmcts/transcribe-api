@@ -7,6 +7,7 @@ from tomllib import load
 from typing import Any
 
 import litellm
+from hmcts_otel import ai_fallback
 from langfuse import Langfuse
 from langfuse.decorators import langfuse_context, observe
 from litellm import acompletion
@@ -106,6 +107,29 @@ def _load_vertex_credentials() -> str:
         raise RuntimeError(f"Failed to parse GOOGLE_APPLICATION_CREDENTIALS_JSON_OBJECT: {e!s}") from e
 
 
+# OBS-5: metadata marking a litellm call as a fallback for the usage metrics
+# (hmcts.ai.fallback). Read by the hmcts-otel litellm callback; never sent to the model.
+AI_FALLBACK_METADATA = "hmcts_ai_fallback"
+GEMINI_MODEL_FALLBACKS = (LLMModel.VERTEX_GEMINI_25_FLASH, LLMModel.VERTEX_GEMINI_20_FLASH)
+
+
+def _gemini_model_fallbacks(model: str, metadata: dict | None) -> list:
+    """litellm ``fallbacks=`` for a Gemini call: the smaller Gemini models.
+
+    litellm does not tell callbacks that a call is one of its SDK-level fallbacks, so
+    a fallback to a *different* model carries ``hmcts_ai_fallback`` in its metadata
+    (litellm applies a dict fallback's keys to that attempt only). The requested model
+    itself, when listed, is a plain retry and is not marked. Neither are the EU region
+    attempts in gemini_eu_fallback_acompletion: same model, same price, another region.
+    """
+    return [
+        candidate
+        if candidate == model
+        else {"model": candidate, "metadata": {**(metadata or {}), AI_FALLBACK_METADATA: True}}
+        for candidate in GEMINI_MODEL_FALLBACKS
+    ]
+
+
 async def gemini_eu_fallback_acompletion(*, model: str, messages: list, **kwargs):
     """
     Gemini completion with EU region fallback.
@@ -121,7 +145,7 @@ async def gemini_eu_fallback_acompletion(*, model: str, messages: list, **kwargs
             result = await acompletion(
                 model=model,
                 messages=messages,
-                fallbacks=[LLMModel.VERTEX_GEMINI_25_FLASH, LLMModel.VERTEX_GEMINI_20_FLASH],
+                fallbacks=_gemini_model_fallbacks(model, kwargs.get("metadata")),
                 max_retries=llm_params["NUM_RETRIES"],
                 retry_strategy=llm_params["RETRY_STRATEGY"],
                 safety_settings=[{"category": _cat, "threshold": "BLOCK_NONE"} for _cat in safety_categories],
@@ -246,7 +270,8 @@ async def _completion_with_multi_fallback(*, model: str, messages: list, **kwarg
             try:
                 # Fall back to Azure Grok
                 logger.info("Falling back to Azure Grok due to Gemini content filtering")
-                result = await azure_grok_acompletion(model=LLMModel.AZURE_GROK_3, messages=messages, **kwargs)
+                with ai_fallback():  # OBS-5: usage metrics record it as a fallback
+                    result = await azure_grok_acompletion(model=LLMModel.AZURE_GROK_3, messages=messages, **kwargs)
                 # Update observation to track Grok fallback usage
                 langfuse_context.update_current_observation(
                     metadata={
@@ -260,7 +285,8 @@ async def _completion_with_multi_fallback(*, model: str, messages: list, **kwarg
                 return result
             except Exception as grok_error:
                 # If Grok also fails, fall back to Azure OpenAI GPT-4o as final fallback
-                result = await azure_acompletion(model=LLMModel.AZURE_GPT_4O, messages=messages, **kwargs)
+                with ai_fallback():
+                    result = await azure_acompletion(model=LLMModel.AZURE_GPT_4O, messages=messages, **kwargs)
                 # Update observation to track final fallback usage
                 langfuse_context.update_current_observation(
                     metadata={

@@ -1,4 +1,4 @@
-from unittest.mock import patch
+import logging
 
 import pytest
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
@@ -75,79 +75,41 @@ class TestHttpExceptionHandler:
 
 
 class TestUnhandledExceptionHandler:
-    """Test cases for the unhandled_exception_handler function."""
+    """The handler for unhandled exceptions: a generic 500 and a log of the exception's
+    type (its stack is recorded on the request span by the app's wrapper). No Sentry."""
 
     @pytest.mark.asyncio
-    @patch("transcribe_api.runtime.exception_handlers.sentry_sdk.capture_exception")
-    async def test_handles_unhandled_exception_with_sentry(self, mock_capture_exception):
-        """Test that unhandled exceptions are captured by Sentry."""
-        # Arrange
+    async def test_logs_the_exception_and_returns_a_generic_500(self):
         exc = ValueError("Test unhandled exception")
+        records: list[logging.LogRecord] = []
 
-        test_request_id = "test-request-id-456"
-        request_id = test_request_id
+        class Collect(logging.Handler):  # on the module's logger, before any export filter
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
 
-        # Act
-        response = await unhandled_exception_handler(exc, request_id)
+        handler_logger = logging.getLogger("transcribe_api.runtime.exception_handlers")
+        collect = Collect()
+        handler_logger.addHandler(collect)
+        try:
+            response = await unhandled_exception_handler(exc, "test-request-id-456")
+        finally:
+            handler_logger.removeHandler(collect)
 
-        # Assert
-        assert isinstance(response, JSONResponse), "Response should be a JSONResponse instance"
-        assert response.status_code == 500, f"Status code should be 500, got {response.status_code}"
-        assert response.headers["X-Request-Id"] == test_request_id, (
-            f"Request ID should be '{test_request_id}', got '{response.headers['X-Request-Id']}'"
-        )
-
-        # Check response content
+        assert isinstance(response, JSONResponse)
+        assert response.status_code == 500
+        assert response.headers["X-Request-Id"] == "test-request-id-456"
         content = response.body.decode()
-        assert "Internal Server Error" in content, "Response content should contain 'Internal Server Error'"
-        assert test_request_id in content, f"Response content should contain request ID '{test_request_id}'"
-
-        # Verify Sentry was called
-        mock_capture_exception.assert_called_once_with(exc)
-
-    @pytest.mark.asyncio
-    @patch("transcribe_api.runtime.exception_handlers.sentry_sdk.capture_exception")
-    async def test_handles_unhandled_exception_without_request_id(self, mock_capture_exception):
-        """Test that unhandled exceptions are handled when there is no request ID."""
-        # Arrange
-        exc = RuntimeError("Test runtime error")
-
-        request_id = ""
-
-        # Act
-        response = await unhandled_exception_handler(exc, request_id)
-
-        # Assert
-        assert isinstance(response, JSONResponse), "Response should be a JSONResponse instance"
-        assert response.status_code == 500, f"Status code should be 500, got {response.status_code}"
-        assert response.headers["X-Request-Id"] == "", (
-            f"Request ID should be empty string, got '{response.headers['X-Request-Id']}'"
-        )
-
-        # Verify Sentry was called
-        mock_capture_exception.assert_called_once_with(exc)
+        assert "Internal Server Error" in content and "test-request-id-456" in content
+        assert "Test unhandled exception" not in content  # never the exception's text
+        (record,) = records
+        assert record.levelno == logging.ERROR
+        # The type only: the app's wrapper records the exception on the request span.
+        assert record.exc_info is None and "exception.stacktrace" not in record.__dict__
+        assert record.getMessage() == "Unhandled exception (ValueError)"
 
     @pytest.mark.asyncio
-    @patch("transcribe_api.runtime.exception_handlers.sentry_sdk.capture_exception")
-    async def test_sentry_capture_exception_failure(self, mock_capture_exception):
-        """Test that handler continues to work even if Sentry capture fails."""
-        # Arrange
-        exc = ValueError("Test exception")
+    async def test_handles_unhandled_exception_without_request_id(self):
+        response = await unhandled_exception_handler(RuntimeError("Test runtime error"), "")
 
-        # Make Sentry capture fail
-        mock_capture_exception.side_effect = Exception("Sentry failure")
-
-        request_id = "test-request-id"
-
-        # Act
-        response = await unhandled_exception_handler(exc, request_id)
-
-        # Assert
-        assert isinstance(response, JSONResponse), "Response should be a JSONResponse instance"
-        assert response.status_code == 500, f"Status code should be 500, got {response.status_code}"
-        assert response.headers["X-Request-Id"] == "test-request-id", (
-            f"Request ID should be 'test-request-id', got '{response.headers['X-Request-Id']}'"
-        )
-
-        # Verify Sentry was called despite failure
-        mock_capture_exception.assert_called_once_with(exc)
+        assert response.status_code == 500
+        assert response.headers["X-Request-Id"] == ""

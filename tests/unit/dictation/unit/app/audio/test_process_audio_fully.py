@@ -37,7 +37,6 @@ _gs.cache_clear()
 @pytest.fixture(autouse=True)
 def _patch_external(monkeypatch):
     """Patch all external dependencies for every test in this module."""
-    monkeypatch.setattr("transcribe_api.stt.pipeline.sentry_sdk", MagicMock())
     monkeypatch.setattr("transcribe_api.stt.pipeline.load_or_create_transcription", MagicMock())
     monkeypatch.setattr("transcribe_api.stt.pipeline.get_transcription_title", MagicMock(return_value=None))
     monkeypatch.setattr("transcribe_api.stt.pipeline.save_transcription_title", MagicMock(return_value=True))
@@ -129,6 +128,56 @@ class TestTranscribeAndGenerateLlmOutput:
         # The user sees the type, never the exception text (it can quote the response).
         assert job_arg.error_message.startswith("Transcription failed (RuntimeError)")
         assert "Azure error" not in job_arg.error_message
+
+    async def test_transcription_failure_log_is_type_only(self, monkeypatch, caplog):
+        # The stage and the job's background span record the exception: this log
+        # must not add a third exception record (PR review).
+        monkeypatch.setattr(
+            "transcribe_api.stt.pipeline.transcribe_audio",
+            AsyncMock(side_effect=RuntimeError("Azure error")),
+        )
+        monkeypatch.setattr("transcribe_api.stt.pipeline.save_transcription_job", MagicMock())
+
+        with caplog.at_level("ERROR"), pytest.raises(RuntimeError):
+            await transcribe_and_generate_llm_output(
+                user_upload_blob_storage_file_key="blob",
+                user_id=uuid4(),
+                user_email="user@example.com",
+                azure_user_id="a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            )
+
+        (record,) = [r for r in caplog.records if r.getMessage() == "Transcription failed (RuntimeError)"]
+        assert record.exc_info is None
+        assert "exception.stacktrace" not in record.__dict__
+
+    async def test_a_failed_error_record_save_is_raised_so_the_poller_retries(self, monkeypatch, caplog):
+        """A 422 (no speech, audio rejected) whose error record cannot be saved must not
+        reach the poller as a 422, which skips the upload for good with no record:
+        the save's failure is raised (retried), chained to the transcription's."""
+        from fastapi import HTTPException
+        from hmcts_otel import client_failure_code
+
+        rejected = HTTPException(status_code=422, detail="No speech detected")
+        monkeypatch.setattr("transcribe_api.stt.pipeline.transcribe_audio", AsyncMock(side_effect=rejected))
+        monkeypatch.setattr(
+            "transcribe_api.stt.pipeline.save_transcription_job", MagicMock(side_effect=OSError("database down"))
+        )
+
+        with caplog.at_level("ERROR"), pytest.raises(OSError, match="database down") as raised:
+            await transcribe_and_generate_llm_output(
+                user_upload_blob_storage_file_key="blob",
+                user_id=uuid4(),
+                user_email="user@example.com",
+                azure_user_id="a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            )
+
+        assert raised.value.__cause__ is rejected
+        assert client_failure_code(raised.value) is None  # the poller retries it
+        (record,) = [
+            r for r in caplog.records if r.getMessage() == "The failed transcription job could not be saved (OSError)"
+        ]
+        assert record.exc_info is None
+        assert "exception.stacktrace" not in record.__dict__
 
     async def test_sends_email_after_completion(self, monkeypatch):
         mock_email = MagicMock()
@@ -335,6 +384,44 @@ class TestTerminalOutcome:
             assert self._finished(telemetry) == ("error", "job_record.failed")
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("named_as", ["6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f", "6F1C2D3E4B5A4C6D8E7F9A0B1C2D3E4F"])
+    async def test_a_record_save_failure_is_in_the_transcriptions_journey(self, monkeypatch, named_as):
+        """The upload-job-failures alert counts this error: it carries the journey of
+        the transcription the job was for (the ID the save would have used, canonical
+        form), so it can be traced to its upload."""
+        from hmcts_otel import conventions as c
+        from hmcts_otel.testing import capture_telemetry
+
+        from transcribe_api.runtime.telemetry import JOURNEY_TRANSCRIPTION
+
+        monkeypatch.setattr(
+            "transcribe_api.stt.pipeline.load_or_create_transcription", MagicMock(side_effect=RuntimeError("db"))
+        )
+        with capture_telemetry() as telemetry:
+            with pytest.raises(RuntimeError):
+                await self._run(named_as)
+            (finished,) = telemetry.events("job.finished")
+        assert (finished[c.OUTCOME], finished[c.ERROR_CODE]) == ("error", "job_record.failed")
+        assert finished[c.JOURNEY_ID] == self.TID
+        assert finished[c.JOURNEY_TYPE] == JOURNEY_TRANSCRIPTION  # as the rest of the job
+
+    @pytest.mark.asyncio
+    async def test_a_record_save_failure_without_an_id_has_no_journey(self, monkeypatch):
+        """A file name that is not a UUID: the ID would be generated by the save."""
+        from hmcts_otel import conventions as c
+        from hmcts_otel.testing import capture_telemetry
+
+        monkeypatch.setattr(
+            "transcribe_api.stt.pipeline.load_or_create_transcription", MagicMock(side_effect=RuntimeError("db"))
+        )
+        with capture_telemetry() as telemetry:
+            with pytest.raises(RuntimeError):
+                await self._run(None)
+            (finished,) = telemetry.events("job.finished")
+        assert finished[c.ERROR_CODE] == "job_record.failed"
+        assert c.JOURNEY_ID not in finished
+
+    @pytest.mark.asyncio
     async def test_failure_after_the_document_still_ends_the_journey(self, monkeypatch):
         from hmcts_otel.testing import capture_telemetry
 
@@ -412,15 +499,18 @@ class TestTerminalOutcome:
         assert docx.call_args.args[2] == "Transcript"
 
     @pytest.mark.asyncio
-    async def test_an_azure_speech_error_is_a_dependency_error_in_stage_and_job(self, monkeypatch):
+    @pytest.mark.parametrize("status", [500, 502])
+    async def test_an_azure_speech_error_is_a_dependency_error_in_stage_and_job(self, monkeypatch, status):
         from fastapi import HTTPException
         from hmcts_otel import conventions as c
         from hmcts_otel.testing import capture_telemetry
 
         self._saved(monkeypatch, self.TID)
-        # transcription.py raises 422 for any Azure error body, e.g. an invalid key (401).
+        # transcription.py raises 502 for auth, quota, throttling and outages (e.g. an
+        # invalid key, 401), and 500 when it is misconfigured or Azure's response lacks phrases.
         monkeypatch.setattr(
-            "transcribe_api.stt.pipeline.transcribe_audio", AsyncMock(side_effect=HTTPException(status_code=422))
+            "transcribe_api.stt.pipeline.transcribe_audio",
+            AsyncMock(side_effect=HTTPException(status_code=status)),
         )
         with capture_telemetry() as telemetry:
             with pytest.raises(HTTPException):
@@ -429,6 +519,55 @@ class TestTerminalOutcome:
             failed = telemetry.events("transcription.failed")[0]
             assert failed[c.OUTCOME] == "error"
             assert failed[c.ERROR_CODE] == "speech.request_failed"
+
+    @pytest.mark.asyncio
+    async def test_audio_rejected_by_azure_is_a_failure_in_stage_and_job(self, monkeypatch):
+        from fastapi import HTTPException
+        from hmcts_otel import conventions as c
+        from hmcts_otel.testing import capture_telemetry
+
+        self._saved(monkeypatch, self.TID)
+        # transcription.py raises 422 when Azure rejected the audio or the request: the
+        # user's file, not a service error, so it stays out of error rates and alerts.
+        monkeypatch.setattr(
+            "transcribe_api.stt.pipeline.transcribe_audio", AsyncMock(side_effect=HTTPException(status_code=422))
+        )
+        with capture_telemetry() as telemetry:
+            with pytest.raises(HTTPException):
+                await self._run(self.TID)
+            assert self._finished(telemetry) == ("failure", "transcription.failed")
+            failed = telemetry.events("transcription.failed")[0]
+            assert failed[c.OUTCOME] == "failure"
+            assert failed[c.ERROR_CODE] == "speech.audio_rejected"
+
+    @pytest.mark.asyncio
+    async def test_audio_with_no_speech_is_a_failure_with_its_own_code_and_message(self, monkeypatch):
+        """Silent or speech-free audio: Azure transcribed it and found nothing. The
+        user's recording: a failure (out of error rates and the upload-job-failures
+        alert), with a reason the user can act on rather than "please try again"."""
+        from hmcts_otel import conventions as c
+        from hmcts_otel.testing import capture_telemetry
+
+        from transcribe_api.stt.fast_client import NoSpeechDetectedError
+
+        self._saved(monkeypatch, self.TID)
+        saved_jobs = []
+        monkeypatch.setattr(
+            "transcribe_api.stt.pipeline.save_transcription_job", lambda job, **_: saved_jobs.append(job)
+        )
+        monkeypatch.setattr(
+            "transcribe_api.stt.pipeline.transcribe_audio", AsyncMock(side_effect=NoSpeechDetectedError())
+        )
+        with capture_telemetry() as telemetry:
+            with pytest.raises(NoSpeechDetectedError):
+                await self._run(self.TID)
+            assert self._finished(telemetry) == ("failure", "transcription.failed")
+            failed = telemetry.events("transcription.failed")[0]
+            assert failed[c.OUTCOME] == "failure"
+            assert failed[c.ERROR_CODE] == "speech.no_speech_detected"
+        (job,) = saved_jobs
+        assert "no speech was detected" in job.error_message
+        assert "try again" not in job.error_message
 
     @pytest.mark.asyncio
     async def test_job_outcome_follows_the_stage_that_stopped_it(self, monkeypatch):
@@ -506,6 +645,8 @@ async def test_an_ownership_conflict_is_a_failure_outside_any_journey(monkeypatc
         assert finished[c.OUTCOME] == "failure"
         assert finished[c.ERROR_CODE] == "job.ownership_conflict"
         assert not [e for e in telemetry.events() if e.get(c.JOURNEY_ID) == victim]
+        # Documented choice: no journey at all (the only ID is the victim's).
+        assert c.JOURNEY_ID not in finished
 
 
 @pytest.mark.asyncio

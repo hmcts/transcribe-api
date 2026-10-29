@@ -62,6 +62,8 @@ def telemetry_relay_router(authenticated_user_dependency) -> APIRouter:
         # Journey IDs come from the client: only the browser's own session journey,
         # never a server-side one (e.g. another user's transcription).
         journey_types={JOURNEY_DICTATION_SESSION},
+        # A browser-sent journey parent_id is dropped (allow_parent_id defaults to False):
+        # it would let a user link their events under any journey.
         # A session sends a batch every few seconds at most; this leaves room for
         # retries after an outage without letting one client flood the pipeline.
         rate_limit_per_minute=60,

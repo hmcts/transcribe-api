@@ -248,3 +248,82 @@ def test_browser_events_carry_no_client_claimed_transcription_id():
     for name, spec in default_schema.events.items():
         if spec.browser:
             assert "dictation.transcription_id" not in spec.attributes, name
+
+
+def test_a_browser_supplied_journey_parent_is_dropped(client, as_user):
+    """The browser's session is a root journey: a parent_id it sends would let a user link
+    their events under any journey, so it never becomes hmcts.journey.parent_id."""
+    _signed_in(as_user)
+    forged_parent = "6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f"
+    event = {"name": "dictation.paused", "journey": {**_journey(), "parent_id": forged_parent}}
+    with capture_telemetry() as telemetry:
+        assert _post(client, [event]).json() == {"accepted": 1, "rejected": 0}
+        relayed = _browser_events(telemetry)
+        assert [e[c.JOURNEY_ID] for e in relayed] == [SESSION]
+        assert not [e for e in telemetry.events() if c.JOURNEY_PARENT_ID in e]
+        assert forged_parent not in str(telemetry.events())
+
+
+def test_the_relay_body_limit_still_applies_without_a_declared_length(client, as_user):
+    """A body with no declared length is still bounded (hmcts-otel's relay limit, which
+    also drops browser-sent journey parents itself)."""
+    _signed_in(as_user)
+
+    def chunks():
+        yield b'{"events": ['
+        yield b" " * 40_000
+        yield b"]}"
+
+    response = client.post("/api/telemetry", content=chunks(), headers={"content-type": "application/json"})
+    assert response.status_code == 413
+
+
+def test_speech_connected_time_is_metered_only_for_accepted_events(client, as_user):
+    """OBS-5: real-time Speech usage (live dictation) is the browser-reported Speech
+    session length, summed from the unsampled hmcts.event.duration metric by the AI
+    usage queries (ai_audio_hours_daily.kql). Only events the relay accepted count."""
+    _signed_in(as_user)
+    stopped = {"name": "speech.session_stopped", "attributes": {"dictation.segments_captured": 3}}
+    events = [
+        {**stopped, "journey": _journey(), "duration_ms": 600_000},
+        {**stopped, "journey": _journey(), "duration_ms": 1_200_000},
+        # Another journey type is refused: not usage.
+        {**stopped, "journey": {"type": "dictation.transcription", "id": SESSION}, "duration_ms": 3_600_000},
+    ]
+    with capture_telemetry() as telemetry:
+        assert _post(client, events).json() == {"accepted": 2, "rejected": 1}
+        points = [
+            p
+            for p in telemetry.metric_points(c.METRIC_EVENT_DURATION)
+            if p["attributes"].get("event") == "speech.session_stopped"
+        ]
+        ((point,),) = [points]
+        assert point["attributes"]["source"] == "browser"
+        assert point["count"] == 2
+        assert point["sum"] == 1800.0  # seconds
+
+
+def _post_raw(client, body: bytes):
+    return client.post("/api/telemetry", content=body, headers={"content-type": "application/json"})
+
+
+def test_a_lone_surrogate_in_a_batch_with_a_parent_is_a_client_error(client, as_user):
+    """Removing the parent re-encodes the batch: a lone surrogate (valid JSON, not valid
+    UTF-8) must not turn into a 500 that counts toward the server-error alerts."""
+    _signed_in(as_user)
+    journey = f'{{"type":"{JOURNEY_DICTATION_SESSION}","id":"{SESSION}","parent_id":"6f1c2d3e"}}'
+    body = f'{{"events":[{{"name":"dictation.paused","journey":{journey},"attributes":{{"x":"\\ud800"}}}}]}}'.encode()
+    with capture_telemetry() as telemetry:
+        response = _post_raw(client, body)
+        assert 400 <= response.status_code < 500, response.status_code
+        assert not [e for e in telemetry.events() if c.JOURNEY_PARENT_ID in e]
+
+
+def test_deeply_nested_json_is_a_client_error(client, as_user):
+    """Nesting that fits inside the body limit can still exhaust json.loads' recursion."""
+    _signed_in(as_user)
+    depth = 16_000
+    body = b'{"events":[{"name":"dictation.paused","attributes":' + b"[" * depth + b"]" * depth + b"}]}"
+    assert len(body) < 32_768
+    response = _post_raw(client, body)
+    assert 400 <= response.status_code < 500, response.status_code

@@ -1302,6 +1302,11 @@ async def save_live_transcription_submission(
     # The browser's dictation session (OBS-4) is the journey's parent, so every event
     # of the submission (stages, document, transcript) carries it as
     # hmcts.journey.parent_id. Only a UUID is accepted; anything else is ignored.
+    # The value is client-asserted (as the session journey itself is: the browser
+    # makes its ID with crypto.randomUUID). It is kept as the parent for DIAAT-279
+    # traceability: one query by session ID finds the submission. A user can only
+    # name a session whose ID they hold; another user's session ID is random and
+    # is never returned by the API, and the relay drops browser-sent parents.
     with journey(JOURNEY_SUBMISSION, str(submission_id), parent_id=_dictation_session_id(dictation_session_id)):
         try:
             # The stage sees the original exception (one exception event, its real

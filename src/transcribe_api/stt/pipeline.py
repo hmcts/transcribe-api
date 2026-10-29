@@ -5,10 +5,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
-import sentry_sdk
 from docx import Document as DocxDocument
 from fastapi import HTTPException
-from hmcts_otel import Outcome, StageHandle, background_span, record_event, stage
+from hmcts_otel import Outcome, StageHandle, background_span, client_failure_code, record_event, stage
 from hmcts_otel import conventions as c
 
 from transcribe_api.documents.minutes.llm_calls import (
@@ -36,7 +35,7 @@ from transcribe_api.domain.provenance_dictation import transcript_provenance
 from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager
 from transcribe_api.runtime.logger import logger
 from transcribe_api.runtime.telemetry import transcription_journey
-from transcribe_api.stt.fast_client import speech_configuration, transcribe_audio
+from transcribe_api.stt.fast_client import NoSpeechDetectedError, speech_configuration, transcribe_audio
 from transcribe_api.stt.speakers_dictation import process_speakers_and_dialogue_entries
 from transcribe_api.stt.utils import (
     get_file_blob_path,
@@ -87,8 +86,7 @@ async def _generate_and_save_title(dialogue_entries: list, transcription: Transc
             transcription.title = previous_title
             title_stage.error("title.failed")
             # Type only: LLM and database errors can echo content.
-            logger.error("Error generating or saving meeting title (%s)", type(e).__name__)
-            sentry_sdk.capture_exception(e)
+            logger.error("Error generating or saving meeting title (%s)", type(e).__name__, exc_info=e)
             return False
 
 
@@ -141,8 +139,7 @@ async def _generate_and_upload_transcript_docx(
             return None
 
     except Exception as e:
-        logger.error("Error generating transcript document (%s)", type(e).__name__)
-        sentry_sdk.capture_exception(e)
+        logger.error("Error generating transcript document (%s)", type(e).__name__, exc_info=e)
         return None
 
 
@@ -175,8 +172,7 @@ async def transcribe_and_generate_llm_output(
     ``error`` with the most significant degraded part (minutes, document, title, email)
     if it completed with failures; or ``cancelled``.
     """
-    # Own trace for the whole background task (OpenTelemetry; Sentry is for error
-    # triage only).
+    # Own trace for the whole background task (OpenTelemetry).
     with background_span("Transcribe and Generate LLM Output", tracer_name=__name__):
         progress = _JobProgress()
         try:
@@ -186,11 +182,26 @@ async def transcribe_and_generate_llm_output(
             transcription = load_or_create_transcription(transcription_id, user_id)
         except OwnershipConflictError:
             # The file name names another user's transcription (SEC-1): a rejected
-            # request, not a service error. No journey: the owner is not this user.
+            # request, not a service error (outcome failure, out of the error alerts).
+            # Deliberately no journey: the only ID is the one the file name names,
+            # which is that user's transcription, and a rejected request must not
+            # write into their journey (as the upload route). The investigator's trail
+            # is the ACCESS_DENIED audit row (actor and that ID) and the blocked
+            # security.ownership_violation event.
             record_event("job.finished", {c.OUTCOME: "failure", c.ERROR_CODE: "job.ownership_conflict"})
             raise
-        except Exception:
-            record_event("job.finished", {c.OUTCOME: "error", c.ERROR_CODE: "job_record.failed"})
+        except Exception as e:
+            # The enclosing background span records the exception's redacted stack.
+            logger.error("Transcription record could not be loaded (%s)", type(e).__name__)
+            # An error outcome (the upload-job-failures alert): in the journey of the
+            # transcription the job was for, so it can be traced to its upload. The
+            # ID is the one the save would have used (the file name's UUID, as the
+            # upload's journey; canonical form, as transcription.id). Its owner is not
+            # known (the lookup failed): if the name were another user's, this one
+            # event joins their journey; it carries no content. A file name that is
+            # not a UUID has no ID yet (transcription_id None): no journey.
+            with transcription_journey(transcription_id):
+                record_event("job.finished", {c.OUTCOME: "error", c.ERROR_CODE: "job_record.failed"})
             raise
         # The row exists, so the ID is known even for non-UUID file names.
         with transcription_journey(transcription.id):
@@ -237,9 +248,8 @@ async def _generate_minutes_and_title(
     if minutes_errors:
         # The job carries on; the failure is reported on job.finished.
         progress.degraded.append("minutes.failed")
-        logger.error("Error generating minutes (%s)", ", ".join(type(e).__name__ for e in minutes_errors))
-        for error in minutes_errors:
-            sentry_sdk.capture_exception(error)
+        for error in minutes_errors:  # each task's stage already recorded its exception
+            logger.error("Minutes generation failed (%s)", type(error).__name__)
 
 
 async def _run_pipeline(
@@ -257,11 +267,19 @@ async def _run_pipeline(
                 speech = speech_configuration()  # DIAAT-286: what the request is sent with
                 dialogue_entries = await transcribe_audio(user_upload_blob_storage_file_key)
                 transcribed_at = datetime.now(UTC)
-            except HTTPException:
-                # transcription.py reports every Azure Speech error (including auth,
-                # quota and outages) as an HTTPException. There is no client here: it is
-                # a dependency failure, not a client 4xx.
-                progress.current_stage.error("speech.request_failed")
+            except HTTPException as exc:
+                # transcription.py reports Azure Speech errors as HTTPExceptions:
+                # 422 when Azure rejected the audio or request (the user's file: a
+                # handled failure, job outcome "failure"), 5xx for auth, quota,
+                # throttling and outages (a dependency error that counts towards
+                # error rates and the upload-job-failures alert). Audio Azure
+                # transcribed but found no speech in is a failure with its own code.
+                if isinstance(exc, NoSpeechDetectedError):
+                    progress.current_stage.fail(exc.error_code)
+                elif client_failure_code(exc) is not None:
+                    progress.current_stage.fail("speech.audio_rejected")
+                else:
+                    progress.current_stage.error("speech.request_failed")
                 raise
         progress.step = "speaker_naming"
         with stage("speaker_naming") as progress.current_stage:
@@ -279,16 +297,29 @@ async def _run_pipeline(
             check_owner=False,  # a new job: the ID is generated by the server
         )
     except Exception as e:
-        save_transcription_job(
-            TranscriptionJob(
-                transcription_id=transcription.id,
-                dialogue_entries=[],
-                s3_audio_url=user_upload_blob_storage_file_key,
-                error_message=user_error_message(e, "Transcription"),
-            ),
-            check_owner=False,  # a new job: the ID is generated by the server
-        )
-        sentry_sdk.capture_exception(e)
+        # Type only: the exception is recorded, with its redacted stack, by the step's
+        # stage and by the job's background span it propagates to (one record each,
+        # not a third from this log).
+        logger.error("Transcription failed (%s)", type(e).__name__)
+        try:
+            save_transcription_job(
+                TranscriptionJob(
+                    transcription_id=transcription.id,
+                    dialogue_entries=[],
+                    s3_audio_url=user_upload_blob_storage_file_key,
+                    error_message=user_error_message(e, "Transcription"),
+                ),
+                check_owner=False,  # a new job: the ID is generated by the server
+            )
+        except Exception as save_error:
+            # The save's failure is raised, not the transcription's: without its error
+            # record the job must not end as the file's failure (a 4xx makes the poller
+            # skip the upload for good, leaving the user no explanation). A database
+            # error is retried, and the retry saves the record. Type only here: the
+            # raised exception (chained to the transcription's) is recorded by the
+            # job's background span.
+            logger.error("The failed transcription job could not be saved (%s)", type(save_error).__name__)
+            raise save_error from e
         raise
     record_event("transcript.available")
 
@@ -324,5 +355,4 @@ async def _run_pipeline(
         except Exception as e:
             notification_stage.error("notification.email_failed")
             progress.degraded.append("notification.email_failed")
-            logger.error("Error sending email (%s)", type(e).__name__)
-            sentry_sdk.capture_exception(e)
+            logger.error("Error sending email (%s)", type(e).__name__, exc_info=e)

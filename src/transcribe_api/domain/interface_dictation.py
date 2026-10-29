@@ -1,8 +1,8 @@
+import logging
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytz
-import sentry_sdk
 from fastapi import HTTPException
 from sqlalchemy import event, func, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -30,6 +30,8 @@ from transcribe_api.runtime.security_events import (
     record_ownership_violation,
     resource_type_of,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @event.listens_for(Session, "before_flush")
@@ -153,19 +155,30 @@ _CLIENT_ERROR_MESSAGES = {
     ),
     ("Minutes generation", 400): "Minutes generation failed: there is no transcript to generate minutes from.",
 }
+# Specific client-caused failures, by the exception's ``error_code`` (a fixed name).
+_CODED_ERROR_MESSAGES = {
+    "speech.no_speech_detected": (
+        "Transcription failed: no speech was detected in this recording. Check that the file "
+        "contains speech and that you uploaded the right recording. Retrying the same file is "
+        "unlikely to help."
+    ),
+}
 
 
 def user_error_message(error: BaseException, what: str) -> str:
     """The error text stored on a job or minute version and shown to the user.
 
     Never the exception's own text: it can quote transcript, prompts or a service
-    response (as logs, blob metadata and Sentry already avoid). A client-caused
+    response (as logs and blob metadata already avoid). A client-caused
     failure (HTTP 4xx) gets a fixed reason that says retrying will not help;
     anything else is reported as transient, with the type so support can tell
     failures apart.
     """
     status = error.status_code if isinstance(error, HTTPException) else None
     if isinstance(status, int) and 400 <= status < 500:
+        coded = _CODED_ERROR_MESSAGES.get(getattr(error, "error_code", None))
+        if coded is not None:
+            return coded
         return _CLIENT_ERROR_MESSAGES.get(
             (what, status),
             f"{what} failed: the request could not be processed (error {status}). "
@@ -295,7 +308,8 @@ def _is_transcription_showable(transcription: Transcription, current_time: datet
         return False
     except Exception as e:
         # If anything goes wrong, default to showing the transcription
-        sentry_sdk.capture_exception(e)
+        # Type only, no stack: this runs once per row of a transcription list.
+        logger.warning("Transcription visibility check failed (%s)", type(e).__name__)
         return True
 
 

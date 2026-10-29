@@ -7,9 +7,12 @@ issues on long audio recordings.
 """
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from fastapi import HTTPException
+from hmcts_otel import client_failure_code
 from sqlmodel import Session
 
 from transcribe_api.domain.blob_ownership import (
@@ -298,13 +301,46 @@ class TranscriptionPollingService:
             await self._mark_blob_permanently_failed(blob_path, {"last_error": "OwnershipConflictError"})
             return False
         except Exception as e:
-            # Type and stack only: exception text can carry content.
-            logger.error("Error processing audio file %s (%s)", _redact_blob_path(blob_path), type(e).__name__, exc_info=e)
-            # Type only in blob metadata too: the message can carry content.
-            await self._mark_blob_with_error(blob_path, type(e).__name__)
-            return False
+            return await self._handle_failure(blob_path, e)
         else:
             return True
+
+    async def _handle_failure(self, blob_path: str, e: Exception) -> bool:
+        """Mark the blob after a failed attempt. Always False (not processed).
+
+        A client-caused failure (an HTTP 4xx: no speech in the recording, Azure
+        rejected the audio) is the file's, so a retry would fail the same way after
+        re-downloading the file, re-billing Azure, recording its usage again and saving
+        another error job and job.finished. The pipeline has already saved the error
+        job (with its user-facing message) and recorded job.finished, once. The rule is
+        the one that gives the job its "failure" outcome (client_failure_code). Service
+        and dependency errors are retried, up to max_retry_attempts.
+        """
+        if isinstance(e, HTTPException) and client_failure_code(e) is not None:
+            logger.warning(
+                "Audio file %s failed with a client error (HTTPException, status=%s): not retried",
+                _redact_blob_path(blob_path),
+                e.status_code,
+            )
+            try:  # keep the attempts so far (retry_count) in the blob's metadata
+                current = await self.azure_blob_manager.get_blob_metadata(blob_path) or {}
+            except Exception:
+                current = {}
+            await self._mark_blob_permanently_failed(
+                blob_path, {**current, "last_error": type(e).__name__}, client_failure=True
+            )
+            return False
+        # Type only, no exc_info: a traceback ends with the exception's text, which
+        # can carry Azure or LLM error messages (and through them, content).
+        logger.error(
+            "Error processing audio file %s (%s, status=%s)",
+            _redact_blob_path(blob_path),
+            type(e).__name__,
+            getattr(e, "status_code", None),
+        )
+        # Type only in blob metadata too: the message can carry content.
+        await self._mark_blob_with_error(blob_path, type(e).__name__)
+        return False
 
     async def _mark_blob_in_progress(self, blob_path: str) -> bool:
         """
@@ -416,7 +452,9 @@ class TranscriptionPollingService:
         except Exception as e:
             logger.error(f"Error marking blob with error {_redact_blob_path(blob_path)}: {e}")
 
-    async def _mark_blob_permanently_failed(self, blob_path: str, current_metadata: dict) -> None:
+    async def _mark_blob_permanently_failed(
+        self, blob_path: str, current_metadata: dict, *, client_failure: bool = False
+    ) -> None:
         """
         Mark a blob as permanently failed after exceeding retry limit.
 
@@ -437,9 +475,13 @@ class TranscriptionPollingService:
                 "failed_at": datetime.now(UTC).isoformat(),
             }
             await self.azure_blob_manager.set_blob_metadata(blob_name=blob_path, metadata=metadata)
-            logger.error(
-                f"Marked blob as permanently failed after "
-                f"{current_metadata.get('retry_count', 0)} attempts: {_redact_blob_path(blob_path)}"
+            # A client failure (the user's file) is not the service's error: a warning.
+            logger.log(
+                logging.WARNING if client_failure else logging.ERROR,
+                "Marked blob as permanently failed after %s attempt(s)%s: %s",
+                current_metadata.get("retry_count", 0),
+                " (client failure, not retried)" if client_failure else "",
+                _redact_blob_path(blob_path),
             )
         except Exception as e:
             logger.error(f"Error marking blob as permanently failed {_redact_blob_path(blob_path)}: {e}")
@@ -577,13 +619,18 @@ class TranscriptionPollingService:
                     logger.info(f"Worker {worker_id} processing blob: {_redact_blob_path(blob_info['name'])}")
                     await self.process_discovered_audio(blob_info)
                 except Exception as e:
-                    logger.error(f"Worker {worker_id} error processing blob {_redact_blob_path(blob_info.get('name', 'unknown'))}: {e}")
+                    logger.error(
+                        "Worker %s error processing blob %s (%s)",
+                        worker_id,
+                        _redact_blob_path(blob_info.get("name", "unknown")),
+                        type(e).__name__,
+                    )
                 finally:
                     # Mark task as done
                     self.blob_queue.task_done()
 
             except Exception as e:
-                logger.error(f"Worker {worker_id} encountered unexpected error: {e}")
+                logger.error("Worker %s encountered unexpected error (%s)", worker_id, type(e).__name__)
 
         logger.info(f"Worker {worker_id} stopped")
 

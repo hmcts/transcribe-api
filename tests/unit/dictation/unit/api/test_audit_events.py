@@ -217,14 +217,21 @@ async def test_the_event_loop_stays_responsive_while_an_audit_write_is_slow(audi
 
 
 @pytest.mark.asyncio
-async def test_an_async_audit_keeps_its_outcomes_and_never_raises_on_a_failed_write(audit_log, monkeypatch):
+async def test_an_async_audit_records_denied_on_http_exception(audit_log):
     actor = uuid.uuid4()
     with pytest.raises(HTTPException):
         async with audit.audited(audit.TRANSCRIPT_VIEWED, actor_id=actor, object_type="transcription", object_id=None):
             raise HTTPException(status_code=404)
+    assert [r.outcome for r in audit_log.rows()] == ["denied"]
+    assert audit._current.get() is None  # reset after each block
+
+
+@pytest.mark.asyncio
+async def test_an_async_audit_records_denied_on_ownership_violation_and_fails_open_on_write_error(audit_log, monkeypatch):
+    actor = uuid.uuid4()
     async with audit.audited(audit.TRANSCRIPT_VIEWED, actor_id=actor, object_type="transcription", object_id=None):
         audit.note_ownership_violation("transcription", "read", "detected", actor_id=actor, object_id=None)
-    assert [r.outcome for r in audit_log.rows()] == ["denied", "denied"]
+    assert [r.outcome for r in audit_log.rows()] == ["denied"]
     assert audit._current.get() is None  # reset after each block
 
     monkeypatch.setattr(audit, "get_engine", MagicMock(side_effect=ConnectionError("down")))
@@ -482,7 +489,8 @@ def test_deleting_is_recorded_with_its_outcome(client, as_user, mocker, audit_lo
     as_user(user)
     mocker.patch("transcribe_api.api.routes_dictation.delete_transcription_by_id", side_effect=effect)
     target = uuid.uuid4()
-    assert client.delete(f"/api/transcriptions/{target}").status_code == status
+    response = client.delete(f"/api/transcriptions/{target}")
+    assert response.status_code == status
     row = _row(audit_log)
     assert (row.event_type, row.outcome, row.user_id, row.object_id) == (
         "transcript.delete",
@@ -1013,3 +1021,18 @@ def test_a_proxied_document_link_is_not_a_second_export(client, as_user, mocker,
     assert response.status_code == 200
     assert response.json()["download_url"].endswith(f"/api/download?transcription_id={transcription.id}")
     assert audit_log.rows() == []
+
+
+def test_rows_built_elsewhere_are_written_by_the_shared_writer(audit_log):
+    """persist_rows: the recording writer's path into the shared audit_log."""
+    from transcribe_api.domain.models_dictation import AuditLog
+
+    rows = [
+        AuditLog(event_type="job.delete", user_id=str(uuid.uuid4()), outcome="success", object_type="job"),
+        AuditLog(event_type="audio.export", user_id=str(uuid.uuid4()), outcome="denied", object_type="job"),
+    ]
+    assert audit.persist_rows(rows) is True
+    assert [(r.event_type, r.outcome) for r in audit_log.rows()] == [
+        ("job.delete", "success"),
+        ("audio.export", "denied"),
+    ]
