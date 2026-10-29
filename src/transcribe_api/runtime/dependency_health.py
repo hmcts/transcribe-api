@@ -259,7 +259,15 @@ class DependencyHealthChecker:
 
         started = time.perf_counter()
         future = self._start(check)
-        done, _ = await asyncio.wait({future}, timeout=self._timeout_s)
+        try:
+            done, _ = await asyncio.wait({future}, timeout=self._timeout_s)
+        except asyncio.CancelledError:
+            if check.blocking:
+                self._inflight[check.name] = future
+            else:
+                future.cancel()
+                await asyncio.gather(future, return_exceptions=True)
+            raise
         seconds = time.perf_counter() - started
         if not done:
             if check.blocking:
