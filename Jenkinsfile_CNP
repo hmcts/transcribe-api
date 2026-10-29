@@ -42,6 +42,12 @@ withPipeline(type, product, component) {
     writeFile file: 'src/transcribe_api/runtime/BUILD_VERSION', text: env.GIT_COMMIT.substring(0, 7)
   }
 
+  // DIAAT-287: the prohibited-content (PII) scan of the validation scenarios' telemetry,
+  // written by the unit tests, kept with the build as release evidence.
+  afterAlways('test') {
+    archiveArtifacts allowEmptyArchive: true, artifacts: 'test-results/telemetry-pii-scan.json'
+  }
+
   // Keep the long-lived environment branches in step with master so a deploy
   // to demo/ithc/perftest is never built from stale code.
   syncBranchesWithMaster(['demo', 'ithc', 'perftest'])
