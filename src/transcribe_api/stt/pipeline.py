@@ -191,8 +191,8 @@ async def transcribe_and_generate_llm_output(
             record_event("job.finished", {c.OUTCOME: "failure", c.ERROR_CODE: "job.ownership_conflict"})
             raise
         except Exception as e:
-            # The stack (redacted) for App Insights: the poller logs the type only.
-            logger.error("Transcription record could not be loaded (%s)", type(e).__name__, exc_info=e)
+            # The enclosing background span records the exception's redacted stack.
+            logger.error("Transcription record could not be loaded (%s)", type(e).__name__)
             # An error outcome (the upload-job-failures alert): in the journey of the
             # transcription the job was for, so it can be traced to its upload. The
             # ID is the one the save would have used (the file name's UUID, as the
