@@ -426,7 +426,8 @@ sequenceDiagram
   K->>D: Save minutes and title
   K->>B: Store a .docx of the transcript
   K->>K: Email the user (only if GOV.UK Notify is configured)
-  K->>B: Mark processed, delete the audio
+  K->>B: Mark the audio processed (metadata only)
+  Note over K,B: Processed audio is deleted on the first poll after the worker next starts
 
   U->>A: Open the transcription, view minutes
   U->>A: Ask for edited minutes (POST /api/generate-or-edit-minutes)
