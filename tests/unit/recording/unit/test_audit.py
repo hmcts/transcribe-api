@@ -224,3 +224,91 @@ def test_an_unmapped_violation_is_mapped_by_its_action_not_an_error():
     assert action_for_violation("audio", "read") == "audio.export"  # in the table
     assert action_for_violation("audio", "delete") == "job.delete"  # by the action
     assert action_for_violation("job", "write") == "transcript.edit"
+
+
+# A streamed response (audio export): the row is written when the body ends ---------
+
+
+def _http_scope() -> dict:
+    return {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"}, "method": "GET", "path": "/"}
+
+
+async def _never_disconnected() -> dict:
+    import asyncio
+
+    await asyncio.Event().wait()  # the client stays connected
+    return {"type": "http.disconnect"}
+
+
+def _streamed(chunks, *, fail_before: int | None = None):
+    """A response from an audited block, as the audio route returns it."""
+
+    async def content():
+        for index, chunk in enumerate(chunks):
+            if index == fail_before:
+                raise RuntimeError("storage read failed")
+            yield chunk
+
+    with audited("audio.export", ACTOR, JOB) as scope:
+        scope.detail["partial"] = False
+        return scope.streaming_response(content(), media_type="audio/wav")
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_export_is_a_success_only_once_the_body_is_sent(audit_capture):
+    response = _streamed([b"a", b"b"])
+    assert audit_capture.inserts == []  # not when the response is returned
+
+    sent: list[dict] = []
+
+    async def send(message):
+        assert audit_capture.inserts == []  # nor while the body is being sent
+        sent.append(message)
+
+    await response(_http_scope(), _never_disconnected, send)
+    (row,) = audit_capture.rows
+    assert (row["action"], row["outcome"], row["detail"]) == ("audio.export", "success", {"partial": False})
+    assert sent[0]["headers"] and (b"content-type", b"audio/wav") in sent[0]["headers"]
+
+
+@pytest.mark.asyncio
+async def test_a_storage_error_before_the_first_byte_is_a_failed_export(audit_capture):
+    response = _streamed([b"a", b"b"], fail_before=0)
+
+    async def send(_message):
+        return None
+
+    with pytest.raises(RuntimeError, match="storage read failed"):
+        await response(_http_scope(), _never_disconnected, send)
+    (row,) = audit_capture.rows
+    assert (row["outcome"], row["detail"]) == ("failed", {"partial": False, "reason": "stream_error"})
+
+
+@pytest.mark.asyncio
+async def test_a_client_disconnect_mid_download_is_a_failed_export(audit_capture):
+    from starlette.requests import ClientDisconnect
+
+    response = _streamed([b"a", b"b", b"c"])
+    sends = 0
+
+    async def send(_message):
+        nonlocal sends
+        sends += 1
+        if sends > 2:  # ASGI 2.4: send raises once the client has gone
+            raise OSError
+
+    with pytest.raises(ClientDisconnect):
+        await response(_http_scope(), _never_disconnected, send)
+    (row,) = audit_capture.rows
+    assert (row["outcome"], row["detail"]) == ("failed", {"partial": False, "reason": "client_disconnected"})
+
+
+def test_a_block_that_fails_after_building_its_stream_is_one_failed_row(audit_capture):
+    async def content():
+        yield b"never sent"
+
+    with pytest.raises(HTTPException), audited("audio.export", ACTOR, JOB) as scope:
+        scope.streaming_response(content())
+        raise HTTPException(status_code=404)
+    (row,) = audit_capture.rows
+    assert (row["outcome"], row["detail"]) == ("failed", {"reason": "http_404"})

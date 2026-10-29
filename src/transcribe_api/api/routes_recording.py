@@ -29,7 +29,6 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from fastapi.responses import StreamingResponse
 from hmcts_otel import Journey, StageHandle, journey, record_event, stage
 from hmcts_otel import conventions as c
 from pydantic import BaseModel, Field, field_validator
@@ -37,7 +36,6 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
-from starlette.background import BackgroundTask
 
 from transcribe_api.domain.audit_recording import (
     AuditRecord,
@@ -1531,15 +1529,13 @@ async def get_job_audio(
     _check_job_access(job, current_user, "audio", "read")
     _assert_job_owner(job, current_user, "audio", "read")
     # DIAAT-286: one record per request (a seek is its own Range request: partial).
-    # Recorded once the response is built; a storage error after the first bytes are
-    # sent cannot change it.
+    # A streamed (Azure) response is recorded when its body ends: success once sent,
+    # failed on a storage error or a client disconnect.
     with audited("audio.export", current_user.id, job.id) as audit:
-        return await _job_audio_response(job, request, audit.detail)
+        return await _job_audio_response(job, request, audit)
 
 
-async def _job_audio_response(
-    job: SpeechBatchJob, request: Request, audit_detail: dict[str, object]
-) -> Response:
+async def _job_audio_response(job: SpeechBatchJob, request: Request, audit: AuditScope) -> Response:
     if not job.audio_blob_path:
         raise HTTPException(status_code=404, detail="Audio not available for this job")
 
@@ -1557,7 +1553,7 @@ async def _job_audio_response(
             raise HTTPException(status_code=404, detail="Audio file not found")
 
     start, end, is_partial = _parse_range(request.headers.get("range"), total_size)
-    audit_detail["partial"] = is_partial
+    audit.detail["partial"] = is_partial
     length = end - start + 1
     status_code = 206 if is_partial else 200
 
@@ -1585,17 +1581,15 @@ async def _job_audio_response(
     # can no longer be turned into a clean 404 (headers are already sent),
     # same limitation any streaming file server has.
     #
-    # The background task closes the stream if a client disconnect left it
-    # suspended mid-body (Starlette stops iterating but never closes it),
-    # rather than leaving its blob client and credential to the garbage
-    # collector. Closing a stream that already finished is a no-op.
-    chunk_iter = _stream_blob_range(job.audio_blob_path, start, length)
-    return StreamingResponse(
-        chunk_iter,
+    # The audited response closes the stream when the body ends, including after a
+    # client disconnect left it suspended mid-body (Starlette stops iterating but
+    # never closes it), rather than leaving its blob client and credential to the
+    # garbage collector.
+    return audit.streaming_response(
+        _stream_blob_range(job.audio_blob_path, start, length),
         media_type=media_type,
         status_code=status_code,
         headers=headers,
-        background=BackgroundTask(_close_stream, chunk_iter),
     )
 
 
@@ -1610,13 +1604,6 @@ async def _stream_blob_range(blob_name: str, start: int, length: int) -> AsyncGe
     ):
         async for chunk in chunks:
             yield chunk
-
-
-async def _close_stream(stream: AsyncGenerator[bytes]) -> None:
-    # A plain coroutine function, not stream.aclose itself: BackgroundTask
-    # doesn't recognise that builtin method as async, so would call it in a
-    # worker thread and never await the result.
-    await stream.aclose()
 
 
 @router.delete("/jobs/{job_id}", status_code=204)

@@ -52,7 +52,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Iterator
+from collections.abc import AsyncIterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -60,6 +60,7 @@ from typing import Literal
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
+from fastapi.responses import StreamingResponse
 from hmcts_otel import conventions as c
 from hmcts_otel import get_request_id, record_event
 
@@ -208,11 +209,49 @@ class AuditScope:
     object_id: UUID | None = None
     detail: dict[str, object] = field(default_factory=dict)
     skipped: bool = False
+    # Set by ``audited``: what the row records, for a streamed response's own row.
+    _action: AuditAction | None = field(default=None, repr=False)
+    _actor_id: UUID | None = field(default=None, repr=False)
+    _object_type: AuditObjectType = field(default="job", repr=False)
+    _streams: bool = field(default=False, repr=False)
 
     def skip(self) -> None:
         """No record from this scope: nothing sensitive happened (e.g. the job has no
         transcript yet), or the block wrote its own record (a refusal)."""
         self.skipped = True
+
+    def streaming_response(
+        self,
+        content: AsyncIterable[bytes],
+        *,
+        status_code: int = 200,
+        headers: Mapping[str, str] | None = None,
+        media_type: str | None = None,
+    ) -> StreamingResponse:
+        """A response whose row is written when its body ends, not when it is returned.
+
+        Returned from the ``audited`` block: ``success`` once the last chunk is sent,
+        else ``failed`` with ``detail.reason`` ``stream_error`` (the storage stream
+        raised), ``client_disconnected`` or ``cancelled``. A block that raises is
+        recorded as failed when it exits, as before. One row either way.
+        """
+        self._streams = True
+
+        async def conclude(reason: str | None) -> None:
+            if self.skipped or self._action is None or self._actor_id is None:
+                return
+            if reason is None:
+                record = AuditRecord(
+                    self._action, "success", self._actor_id, self.object_id, self._object_type, self.detail or None
+                )
+            else:
+                detail = {**self.detail, "reason": reason}
+                record = AuditRecord(self._action, "failed", self._actor_id, self.object_id, self._object_type, detail)
+            write_audit(record)
+
+        return audit_core.audited_streaming_response(
+            content, conclude, status_code=status_code, headers=headers, media_type=media_type
+        )
 
 
 @contextmanager
@@ -228,7 +267,7 @@ def audited(
     HTTPException, else "error"), and the exception propagates unchanged. Nothing if
     the block called ``skip()``.
     """
-    scope = AuditScope(object_id=object_id)
+    scope = AuditScope(object_id=object_id, _action=action, _actor_id=actor_id, _object_type=object_type)
     try:
         yield scope
     except HTTPException as exc:
@@ -242,7 +281,8 @@ def audited(
     except Exception:
         _failed(scope, action, actor_id, object_type, "error")
         raise
-    if not scope.skipped:
+    # A streamed response writes its own row when its body ends (streaming_response).
+    if not scope.skipped and not scope._streams:
         write_audit(AuditRecord(action, "success", actor_id, scope.object_id, object_type, scope.detail or None))
 
 

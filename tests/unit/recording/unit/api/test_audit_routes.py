@@ -242,6 +242,55 @@ def test_audio_missing_after_authorisation_is_a_failed_export(local_audio, mocke
     _assert_safe(row)
 
 
+@pytest.fixture
+def azure_audio(monkeypatch, mocker):
+    """The streamed (Azure) audio path, with its blob reads faked."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "azure")
+    get_settings.cache_clear()
+    manager = mocker.MagicMock()
+    manager.get_blob_size = AsyncMock(return_value=10)
+    blob_manager = mocker.patch(f"{ROUTES}.AsyncAzureBlobManager")
+    blob_manager.return_value.__aenter__ = AsyncMock(return_value=manager)
+    blob_manager.return_value.__aexit__ = AsyncMock(return_value=False)
+    chunks = {"fail": False}
+
+    async def stream(_blob_name, _start, _length):
+        if chunks["fail"]:
+            raise RuntimeError("storage read failed")
+        yield b"01234"
+        yield b"56789"
+
+    mocker.patch(f"{ROUTES}._stream_blob_range", stream)
+    yield chunks
+    get_settings.cache_clear()
+
+
+def test_streamed_audio_is_an_export_once_its_body_is_sent(azure_audio, mocker, audit_capture):
+    job = _job()
+    mocker.patch(f"{ROUTES}.get_job_by_id", return_value=job)
+
+    response = _client().get(f"/api/v1/jobs/{job.id}/audio")
+
+    assert (response.status_code, response.content) == (200, b"0123456789")
+    row = _only_row(audit_capture)
+    assert _summary(row) == ("audio.export", "success", "job", job.id, {"partial": False})
+    _assert_safe(row)
+
+
+def test_streamed_audio_that_fails_to_download_is_a_failed_export(azure_audio, mocker, audit_capture):
+    job = _job()
+    mocker.patch(f"{ROUTES}.get_job_by_id", return_value=job)
+    azure_audio["fail"] = True
+
+    _client().get(f"/api/v1/jobs/{job.id}/audio")  # headers sent, then the read fails
+
+    row = _only_row(audit_capture)
+    assert _summary(row) == ("audio.export", "failed", "job", job.id, {"partial": False, "reason": "stream_error"})
+    _assert_safe(row)
+
+
 # deleted -----------------------------------------------------------------------------------
 
 
