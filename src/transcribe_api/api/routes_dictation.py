@@ -118,17 +118,16 @@ from transcribe_api.stt.utils import (
 
 router = APIRouter()
 
-# OBS-4: browser telemetry relay, POST /api/telemetry (same roles as dictation).
-router.include_router(
-    telemetry_relay_router(
-        get_allowlisted_user(
-            required_roles_any=[
-                get_role("Normal"),
-                get_role("Judge"),
-                get_role("LegalTextManager"),
-                get_role("SystemAdministrator"),
-            ]
-        )
+# OBS-4: browser telemetry relay, POST /api/telemetry (same roles as dictation). A
+# router of its own: every page sends to it, so it has no hmcts.area (shared).
+telemetry_router = telemetry_relay_router(
+    get_allowlisted_user(
+        required_roles_any=[
+            get_role("Normal"),
+            get_role("Judge"),
+            get_role("LegalTextManager"),
+            get_role("SystemAdministrator"),
+        ]
     )
 )
 

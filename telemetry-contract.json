@@ -206,6 +206,13 @@
       "pattern": "[a-z][a-z0-9_.]{0,63}",
       "type": "str"
     },
+    "hmcts.area": {
+      "allowed_values": null,
+      "description": "Product area the signal belongs to, e.g. dictation or recording (set with area()).",
+      "max_length": 128,
+      "pattern": "[a-z][a-z0-9_]{0,31}",
+      "type": "str"
+    },
     "hmcts.dependency.ref": {
       "allowed_values": null,
       "description": "Reference in an external system, e.g. Azure Speech job ID.",
