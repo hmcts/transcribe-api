@@ -64,7 +64,6 @@ AI_FEATURE_BATCH_TRANSCRIPTION = "batch_transcription"
 # job was submitted).
 ATTR_AUDIO_DURATION_S = "speech.audio_duration_s"
 ATTR_AUDIO_DURATION_SOURCE = "speech.audio_duration_source"
-AUDIO_DURATION_SOURCES = ("azure", "estimate")
 
 # DIAAT-277: service health (runtime/dependency_health.py), with the
 # service.dependency.up gauge and service.dependency.check.duration histogram.

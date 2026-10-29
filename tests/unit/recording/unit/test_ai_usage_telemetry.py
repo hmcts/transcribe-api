@@ -340,3 +340,23 @@ async def test_usage_telemetry_carries_no_cost_and_no_content(tel):
     exported = tel.all_exported_text().lower()
     for word in ("cost", "price", "gbp", "usd"):
         assert word not in exported
+
+
+async def test_an_implausible_estimate_is_not_recorded(tel):
+    """The estimate is the caller's: beyond a day it is not a recording's length."""
+    no_azure = AsyncMock(return_value=BatchResults([], audio_duration_seconds=None))
+    await _poll(_service(), _job(estimate=1e9), results=no_azure)
+
+    assert _audio(tel) == []
+    assert _sources(tel) == {"none": 1}
+
+
+async def test_the_mock_speech_backend_records_no_usage(tel):
+    """No audio went to Azure."""
+    service = _service()
+    service.settings = MagicMock(SPEECH_BACKEND="mock", BATCH_POLL_INTERVAL_SECONDS=30)
+    await _poll(service, _job(estimate=90.0))
+
+    assert _audio(tel) == []
+    (finished,) = tel.events("job.finished")
+    assert "speech.audio_duration_s" not in finished

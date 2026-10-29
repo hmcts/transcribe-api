@@ -505,11 +505,16 @@ class BatchPollingService:
         # OBS-5: Azure Speech usage, recorded once the transcript is saved: a save that
         # fails raises before this, and the next poll records it. Only for succeeded jobs
         # (whether Azure bills any audio of a failed job is not known, so none is recorded).
-        # A job processed twice (G18) records it twice, like job.finished.
-        usage = job_telemetry.record_speech_usage(
-            *job_telemetry.billed_audio_seconds(
-                getattr(dialogue_entries, "audio_duration_seconds", None),
-                job.audio_duration_seconds,
+        # A job processed twice (G18) records it twice, like job.finished. Nothing with
+        # the mock Speech backend: no audio went to Azure.
+        usage = (
+            {}
+            if self.settings.SPEECH_BACKEND == "mock"
+            else job_telemetry.record_speech_usage(
+                *job_telemetry.billed_audio_seconds(
+                    getattr(dialogue_entries, "audio_duration_seconds", None),
+                    job.audio_duration_seconds,
+                )
             )
         )
         job_telemetry.record_transcript_available(

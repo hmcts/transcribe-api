@@ -323,5 +323,13 @@ async def transcribe_audio_with_azure(audio_file_path: Path):
                     detail="No transcription phrases found in response",
                 )
 
+            try:
+                entries = convert_input_dialogue_entries_to_dialogue_entries(phrases)
+            except Exception:
+                # Transcribed (and billed) but unusable: an error outcome, as above.
+                await _record_fast_transcription_usage(
+                    response.status_code, full_response, audio_file_path, Outcome.ERROR
+                )
+                raise
             await _record_fast_transcription_usage(response.status_code, full_response, audio_file_path)
-            return convert_input_dialogue_entries_to_dialogue_entries(phrases)
+            return entries

@@ -94,6 +94,9 @@ METRIC_SPEECH_USAGE_JOBS = "transcription.speech.usage.jobs"
 DURATION_SOURCE_AZURE = "azure"
 DURATION_SOURCE_ESTIMATE = "estimate"
 DURATION_SOURCE_NONE = "none"
+# The submitted estimate is the caller's: one beyond a day is not a recording's length,
+# and recording it would skew the usage share Speech cost is allocated by.
+MAX_ESTIMATED_AUDIO_SECONDS = 24 * 60 * 60
 
 # Values of the "phase" attribute on transcription.job.duration.
 PHASE_QUEUE_WAIT = "queue_wait"
@@ -266,13 +269,12 @@ def billed_audio_seconds(azure_seconds: object, estimated_seconds: object) -> tu
     Azure's own duration (from its results file, what it bills on) when it is known,
     else the duration given when the job was submitted (an estimate), else nothing.
     """
-    for value, source in (
-        (azure_seconds, DURATION_SOURCE_AZURE),
-        (estimated_seconds, DURATION_SOURCE_ESTIMATE),
-    ):
-        seconds = _seconds(value)
-        if seconds is not None:
-            return seconds, source
+    seconds = _seconds(azure_seconds)
+    if seconds is not None:
+        return seconds, DURATION_SOURCE_AZURE
+    seconds = _seconds(estimated_seconds)
+    if seconds is not None and seconds <= MAX_ESTIMATED_AUDIO_SECONDS:
+        return seconds, DURATION_SOURCE_ESTIMATE
     return None, DURATION_SOURCE_NONE
 
 

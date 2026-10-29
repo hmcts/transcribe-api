@@ -568,3 +568,22 @@ async def test_requests_azure_did_not_transcribe_record_no_usage(
         await _transcribe_with(audio_file, body, status_code=status_code)
 
     assert _audio_points(telemetry) == []
+
+
+@pytest.mark.asyncio
+async def test_phrases_that_cannot_be_converted_are_billed_usage_with_an_error_outcome(
+    mock_settings, audio_file, telemetry
+):
+    """Usage is recorded after the conversion: a response that then fails is an error."""
+    with (
+        patch(
+            "transcribe_api.stt.fast_client.convert_input_dialogue_entries_to_dialogue_entries",
+            side_effect=KeyError("text"),
+        ),
+        pytest.raises(KeyError),
+    ):
+        await _transcribe_with(audio_file, {"durationMilliseconds": 30000, "phrases": [VALID_PHRASE]})
+
+    ((attributes, seconds),) = _audio_points(telemetry)
+    assert seconds == 30.0
+    assert attributes["hmcts.outcome"] == "error"
