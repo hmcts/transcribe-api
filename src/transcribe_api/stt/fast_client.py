@@ -47,6 +47,20 @@ def _loggable_azure_code(code: object) -> str:
     return code if isinstance(code, str) and _AZURE_ERROR_CODE.fullmatch(code) else "unrecognised"
 
 
+NO_SPEECH_DETECTED = "speech.no_speech_detected"
+
+
+class NoSpeechDetectedError(HTTPException):
+    """Azure transcribed the audio but found no speech in it (silent or speech-free
+    audio): the user's recording, not a service error, so a 422 (a handled failure).
+    ``error_code`` names it for telemetry and the user-facing message."""
+
+    error_code = NO_SPEECH_DETECTED
+
+    def __init__(self) -> None:
+        super().__init__(status_code=422, detail="No speech was detected in the recording")
+
+
 def _azure_error_status(response_status: int) -> int:
     """422 (the audio or request was rejected) only for Azure's own client errors;
     502 (a dependency failure, worth retrying) for auth, quota, throttling, outages
@@ -313,8 +327,15 @@ async def transcribe_audio_with_azure(audio_file_path: Path):
 
             # If no error, proceed with phrases extraction
             phrases = full_response.get("phrases")
+            if isinstance(phrases, list) and not phrases:
+                # Transcribed (and billed) but no speech found: the user's recording, a
+                # failure outcome (not an error: it is not the service's fault).
+                await _record_fast_transcription_usage(
+                    response.status_code, full_response, audio_file_path, Outcome.FAILURE
+                )
+                raise NoSpeechDetectedError
             if not phrases:
-                # Transcribed (and billed) but nothing usable: an error outcome.
+                # A response without its phrases: the service's, an error outcome.
                 await _record_fast_transcription_usage(
                     response.status_code, full_response, audio_file_path, Outcome.ERROR
                 )

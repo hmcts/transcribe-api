@@ -223,7 +223,9 @@ class TestTranscribeAudioWithAzure:
 
         assert exc.value.status_code == expected
 
-    async def test_empty_phrases_raises_500(self, mock_settings, audio_file, mock_http_response):
+    async def test_no_speech_detected_raises_422(self, mock_settings, audio_file, mock_http_response):
+        """Silent or speech-free audio: Azure transcribed it but found no phrases. The
+        user's recording, not a service error (a 422 with its own code)."""
         with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_client.post = AsyncMock(return_value=mock_http_response({"phrases": []}))
@@ -234,8 +236,12 @@ class TestTranscribeAudioWithAzure:
             with pytest.raises(HTTPException) as exc:
                 await transcribe_audio_with_azure(audio_file)
 
-        assert exc.value.status_code == 500
-        assert "No transcription phrases found" in exc.value.detail
+        from transcribe_api.stt.fast_client import NO_SPEECH_DETECTED, NoSpeechDetectedError
+
+        assert isinstance(exc.value, NoSpeechDetectedError)
+        assert exc.value.status_code == 422
+        assert exc.value.error_code == NO_SPEECH_DETECTED == "speech.no_speech_detected"
+        assert exc.value.detail == "No speech was detected in the recording"
 
     async def test_missing_phrases_key_raises_500(self, mock_settings, audio_file, mock_http_response):
         with patch("httpx.AsyncClient") as mock_client_class:
@@ -541,14 +547,27 @@ async def test_no_usage_is_recorded_when_the_duration_is_unknown(mock_settings, 
 
 
 @pytest.mark.asyncio
-async def test_transcribed_audio_without_phrases_is_billed_usage_with_an_error_outcome(
+async def test_transcribed_audio_without_speech_is_billed_usage_with_a_failure_outcome(
     mock_settings, audio_file, telemetry
 ):
-    with pytest.raises(HTTPException):
+    with pytest.raises(HTTPException) as exc:
         await _transcribe_with(audio_file, {"durationMilliseconds": 30000, "phrases": []})
 
+    assert exc.value.status_code == 422
     ((attributes, seconds),) = _audio_points(telemetry)
     assert seconds == 30.0
+    assert attributes["hmcts.outcome"] == "failure"  # the user's recording, not an error
+
+
+@pytest.mark.asyncio
+async def test_a_transcribed_response_without_phrases_is_billed_usage_with_an_error_outcome(
+    mock_settings, audio_file, telemetry
+):
+    with pytest.raises(HTTPException) as exc:
+        await _transcribe_with(audio_file, {"durationMilliseconds": 30000})
+
+    assert exc.value.status_code == 500
+    ((attributes, _),) = _audio_points(telemetry)
     assert attributes["hmcts.outcome"] == "error"
 
 

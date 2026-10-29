@@ -13,7 +13,7 @@ from hmcts_otel import conventions as c
 
 from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager
 from transcribe_api.stt.speakers_dictation import process_speakers_and_dialogue_entries
-from transcribe_api.stt.fast_client import speech_configuration, transcribe_audio
+from transcribe_api.stt.fast_client import NoSpeechDetectedError, speech_configuration, transcribe_audio
 from transcribe_api.stt.utils import (
     get_file_blob_path,
     get_url_for_transcription,
@@ -186,11 +186,24 @@ async def transcribe_and_generate_llm_output(
             transcription = load_or_create_transcription(transcription_id, user_id)
         except OwnershipConflictError:
             # The file name names another user's transcription (SEC-1): a rejected
-            # request, not a service error. No journey: the owner is not this user.
+            # request, not a service error (outcome failure, out of the error alerts).
+            # Deliberately no journey: the only ID is the one the file name names,
+            # which is that user's transcription, and a rejected request must not
+            # write into their journey (as the upload route). The investigator's trail
+            # is the ACCESS_DENIED audit row (actor and that ID) and the blocked
+            # security.ownership_violation event.
             record_event("job.finished", {c.OUTCOME: "failure", c.ERROR_CODE: "job.ownership_conflict"})
             raise
         except Exception:
-            record_event("job.finished", {c.OUTCOME: "error", c.ERROR_CODE: "job_record.failed"})
+            # An error outcome (the upload-job-failures alert): in the journey of the
+            # transcription the job was for, so it can be traced to its upload. The
+            # ID is the one the save would have used (the file name's UUID, as the
+            # upload's journey; canonical form, as transcription.id). Its owner is not
+            # known (the lookup failed): if the name were another user's, this one
+            # event joins their journey; it carries no content. A file name that is
+            # not a UUID has no ID yet (transcription_id None): no journey.
+            with transcription_journey(transcription_id):
+                record_event("job.finished", {c.OUTCOME: "error", c.ERROR_CODE: "job_record.failed"})
             raise
         # The row exists, so the ID is known even for non-UUID file names.
         with transcription_journey(transcription.id):
@@ -262,8 +275,11 @@ async def _run_pipeline(
                 # 422 when Azure rejected the audio or request (the user's file: a
                 # handled failure, job outcome "failure"), 5xx for auth, quota,
                 # throttling and outages (a dependency error that counts towards
-                # error rates and the upload-job-failures alert).
-                if client_failure_code(exc) is not None:
+                # error rates and the upload-job-failures alert). Audio Azure
+                # transcribed but found no speech in is a failure with its own code.
+                if isinstance(exc, NoSpeechDetectedError):
+                    progress.current_stage.fail(exc.error_code)
+                elif client_failure_code(exc) is not None:
                     progress.current_stage.fail("speech.audio_rejected")
                 else:
                     progress.current_stage.error("speech.request_failed")

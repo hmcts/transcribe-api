@@ -301,3 +301,31 @@ def test_speech_connected_time_is_metered_only_for_accepted_events(client, as_us
         assert point["attributes"]["source"] == "browser"
         assert point["count"] == 2
         assert point["sum"] == 1800.0  # seconds
+
+
+def _post_raw(client, body: bytes):  # noqa: F811
+    return client.post("/api/telemetry", content=body, headers={"content-type": "application/json"})
+
+
+def test_a_lone_surrogate_in_a_batch_with_a_parent_is_a_client_error(client, as_user):  # noqa: F811
+    """Removing the parent re-encodes the batch: a lone surrogate (valid JSON, not valid
+    UTF-8) must not turn into a 500 that counts toward the server-error alerts."""
+    _signed_in(as_user)
+    journey = f'{{"type":"{JOURNEY_DICTATION_SESSION}","id":"{SESSION}","parent_id":"6f1c2d3e"}}'
+    body = f'{{"events":[{{"name":"dictation.paused","journey":{journey},"attributes":{{"x":"\\ud800"}}}}]}}'.encode()
+    with capture_telemetry() as telemetry:
+        response = _post_raw(client, body)
+        assert 400 <= response.status_code < 500, response.status_code
+        assert not [e for e in telemetry.events() if c.JOURNEY_PARENT_ID in e]
+
+
+def test_deeply_nested_json_is_a_client_error(client, as_user):  # noqa: F811
+    """Nesting that fits inside the body limit can still exhaust json.loads' recursion."""
+    _signed_in(as_user)
+    depth = 16_000
+    body = b'{"events":[{"name":"dictation.paused","attributes":' + b"[" * depth + b"]" * depth + b"}]}"
+    assert len(body) < 32_768
+    response = _post_raw(client, body)
+    assert 400 <= response.status_code < 500, response.status_code
+
+

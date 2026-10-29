@@ -146,6 +146,14 @@ _CLIENT_ERROR_MESSAGES = {
     ),
     ("Minutes generation", 400): "Minutes generation failed: there is no transcript to generate minutes from.",
 }
+# Specific client-caused failures, by the exception's ``error_code`` (a fixed name).
+_CODED_ERROR_MESSAGES = {
+    "speech.no_speech_detected": (
+        "Transcription failed: no speech was detected in this recording. Check that the file "
+        "contains speech and that you uploaded the right recording. Retrying the same file is "
+        "unlikely to help."
+    ),
+}
 
 
 def user_error_message(error: BaseException, what: str) -> str:
@@ -159,6 +167,9 @@ def user_error_message(error: BaseException, what: str) -> str:
     """
     status = error.status_code if isinstance(error, HTTPException) else None
     if isinstance(status, int) and 400 <= status < 500:  # noqa: PLR2004
+        coded = _CODED_ERROR_MESSAGES.get(getattr(error, "error_code", None))
+        if coded is not None:
+            return coded
         return _CLIENT_ERROR_MESSAGES.get(
             (what, status),
             f"{what} failed: the request could not be processed (error {status}). "
