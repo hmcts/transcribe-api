@@ -85,6 +85,9 @@ class _PendingJob:
     created_datetime: datetime | None = None
     processing_started_datetime: datetime | None = None
     enable_diarization: bool | None = None
+    # OBS-5: the duration given when the job was submitted (an estimate), the fallback
+    # for the Speech usage recorded when Azure's results do not carry one.
+    audio_duration_seconds: float | None = None
 
 
 def _extract_model_identifier(status_data: dict, locale: str) -> str:
@@ -375,6 +378,7 @@ class BatchPollingService:
                         processing_started_datetime=row.processing_started_datetime,
                         enable_diarization=row.enable_diarization,
                         trace_parent=row.trace_parent,
+                        audio_duration_seconds=row.audio_duration_seconds,
                     )
                 )
             return result
@@ -498,10 +502,20 @@ class BatchPollingService:
                 model_display_name,
                 provenance,
             )
+        # OBS-5: Azure Speech usage, recorded once the transcript is saved: a save that
+        # fails raises before this, and the next poll records it. Only for succeeded jobs
+        # (whether Azure bills any audio of a failed job is not known, so none is recorded).
+        # A job processed twice (G18) records it twice, like job.finished.
+        usage = job_telemetry.record_speech_usage(
+            *job_telemetry.billed_audio_seconds(
+                getattr(dialogue_entries, "audio_duration_seconds", None),
+                job.audio_duration_seconds,
+            )
+        )
         job_telemetry.record_transcript_available(
             processed_entries, job_telemetry.azure_last_action(status_data), polled_at, speech_ref
         )
-        _job_finished(job, status_data, "success")
+        _job_finished(job, status_data, "success", attributes=usage)
 
         await self._dispatch_success(job, processed_entries)
 

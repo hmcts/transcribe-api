@@ -475,3 +475,96 @@ def test_an_unrecognised_azure_code_is_not_logged_verbatim():
     assert _loggable_azure_code("InvalidRequest") == "InvalidRequest"
     assert _loggable_azure_code(f"bad code {SENTINEL}") == "unrecognised"
     assert _loggable_azure_code(None) == "unrecognised"
+
+
+# --- OBS-5: audio seconds Azure transcribed (hmcts.speech.audio.duration) ------------
+
+
+async def _transcribe_with(audio_file, body, status_code=200):
+    from transcribe_api.stt.fast_client import transcribe_audio_with_azure
+
+    response = MagicMock(status_code=status_code)
+    response.json.return_value = body
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=response)
+        mock_client_class.return_value.__aenter__.return_value = mock_client
+        return await transcribe_audio_with_azure(audio_file)
+
+
+def _audio_points(telemetry):
+    from hmcts_otel import conventions as c
+
+    return [(p["attributes"], p["value"]) for p in telemetry.metric_points(c.METRIC_SPEECH_AUDIO_DURATION)]
+
+
+@pytest.fixture
+def telemetry():
+    from hmcts_otel.testing import capture_telemetry
+
+    with capture_telemetry() as capture:
+        yield capture
+
+
+@pytest.mark.asyncio
+async def test_transcribed_audio_seconds_are_the_duration_azure_reports(mock_settings, audio_file, telemetry):
+    with patch("transcribe_api.stt.fast_client.get_audio_duration") as measure:
+        await _transcribe_with(audio_file, {"durationMilliseconds": 182439, "phrases": [VALID_PHRASE]})
+
+    measure.assert_not_called()  # Azure's figure is what it bills
+    ((attributes, seconds),) = _audio_points(telemetry)
+    assert seconds == pytest.approx(182.439)
+    assert attributes == {
+        "hmcts.speech.mode": "fast",
+        "hmcts.ai.feature": "upload_transcription",
+        "hmcts.outcome": "success",
+    }
+
+
+@pytest.mark.asyncio
+async def test_without_a_reported_duration_the_file_is_measured(mock_settings, audio_file, telemetry):
+    with patch("transcribe_api.stt.fast_client.get_audio_duration", return_value=12.5) as measure:
+        await _transcribe_with(audio_file, {"phrases": [VALID_PHRASE]})
+
+    measure.assert_called_once_with(audio_file)
+    ((_, seconds),) = _audio_points(telemetry)
+    assert seconds == 12.5
+
+
+@pytest.mark.asyncio
+async def test_no_usage_is_recorded_when_the_duration_is_unknown(mock_settings, audio_file, telemetry):
+    with patch("transcribe_api.stt.fast_client.get_audio_duration", side_effect=ValueError("ffprobe failed")):
+        entries = await _transcribe_with(audio_file, {"durationMilliseconds": "x", "phrases": [VALID_PHRASE]})
+
+    assert entries  # the transcription itself is unaffected
+    assert _audio_points(telemetry) == []
+
+
+@pytest.mark.asyncio
+async def test_transcribed_audio_without_phrases_is_billed_usage_with_an_error_outcome(
+    mock_settings, audio_file, telemetry
+):
+    with pytest.raises(HTTPException):
+        await _transcribe_with(audio_file, {"durationMilliseconds": 30000, "phrases": []})
+
+    ((attributes, seconds),) = _audio_points(telemetry)
+    assert seconds == 30.0
+    assert attributes["hmcts.outcome"] == "error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "body"),
+    [
+        (400, {"code": "InvalidRequest", "message": "bad audio"}),
+        (401, {"error": {"code": "401", "message": "invalid key"}}),
+        (500, {"durationMilliseconds": 30000}),  # not transcribed, whatever the body says
+    ],
+)
+async def test_requests_azure_did_not_transcribe_record_no_usage(
+    mock_settings, audio_file, telemetry, status_code, body
+):
+    with patch("transcribe_api.stt.fast_client.get_audio_duration", return_value=12.5), pytest.raises(HTTPException):
+        await _transcribe_with(audio_file, body, status_code=status_code)
+
+    assert _audio_points(telemetry) == []

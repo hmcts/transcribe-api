@@ -2,7 +2,7 @@ from uuid import UUID, uuid4
 
 import sentry_sdk
 from fastapi import HTTPException
-from hmcts_otel import stage
+from hmcts_otel import ai_feature, stage
 from langfuse.decorators import langfuse_context, observe
 from uwotm8 import convert_american_to_british_spelling
 
@@ -60,11 +60,12 @@ async def edit_minutes_with_ai(
         user_instructions=edit_instructions,
     )
 
-    initial_completion = await llm_completion(
-        temperature=0.1,
-        messages=compiled_chat_prompt,
-        model=LLMModel.VERTEX_GEMINI_25_FLASH,
-    )
+    with ai_feature("minutes_ai_edit"):  # OBS-5: token usage by feature
+        initial_completion = await llm_completion(
+            temperature=0.1,
+            messages=compiled_chat_prompt,
+            model=LLMModel.VERTEX_GEMINI_25_FLASH,
+        )
     british_minutes = convert_american_to_british_spelling(initial_completion.choices[0].message.content)
     html_minutes = markdown_to_html(british_minutes)
 
@@ -87,11 +88,12 @@ async def generate_meeting_title(
     compiled_chat_prompt = prompt.compile(meeting_transcript=transcript_string)
 
     meeting_title_completion_func = structured_output_llm_completion_builder_func(MeetingTitleOutput)
-    completion = await meeting_title_completion_func(
-        messages=compiled_chat_prompt,
-        temperature=0.1,
-        model=LLMModel.VERTEX_GEMINI_25_FLASH,
-    )
+    with ai_feature("title_generation"):
+        completion = await meeting_title_completion_func(
+            messages=compiled_chat_prompt,
+            temperature=0.1,
+            model=LLMModel.VERTEX_GEMINI_25_FLASH,
+        )
 
     if not completion or not completion.title:
         raise HTTPException(status_code=500, detail="No title generated")
@@ -113,11 +115,12 @@ async def generate_speaker_predictions(dialogue_entries: list, user_id: str) -> 
 
     compiled_chat_prompt = prompt.compile(meeting_transcript=conversation_context)
     speaker_prediction_completion_func = structured_output_llm_completion_builder_func(SpeakerPredictionOutput)
-    completion = await speaker_prediction_completion_func(
-        messages=compiled_chat_prompt,
-        temperature=0.1,
-        model=LLMModel.VERTEX_GEMINI_25_FLASH,
-    )
+    with ai_feature("speaker_naming"):
+        completion = await speaker_prediction_completion_func(
+            messages=compiled_chat_prompt,
+            temperature=0.1,
+            model=LLMModel.VERTEX_GEMINI_25_FLASH,
+        )
 
     predictions = completion
 
@@ -157,13 +160,15 @@ async def generate_llm_output_task(
 
         try:
             # Generate content based on template
-            if template.name == TemplateName.GENERAL:
-                llm_output = await generate_general_style_summary(dialogue_entries, user_id)
-            elif template.name == TemplateName.CRISSA:
-                llm_output = await generate_full_crissa(dialogue_entries, user_id)
-            else:
-                msg = "Invalid template parameter"
-                raise ValueError(msg)
+            # OBS-5: one feature for every template (the template is on the stage).
+            with ai_feature("minutes_generation"):
+                if template.name == TemplateName.GENERAL:
+                    llm_output = await generate_general_style_summary(dialogue_entries, user_id)
+                elif template.name == TemplateName.CRISSA:
+                    llm_output = await generate_full_crissa(dialogue_entries, user_id)
+                else:
+                    msg = "Invalid template parameter"
+                    raise ValueError(msg)
 
             # Update the existing minute_version instead of creating a new one
             initial_minute_version.html_content = llm_output
@@ -302,14 +307,15 @@ Please generate a structured summary of this conversation."""
 
     try:
         # Call the LLM to generate the summary
-        response = await llm_completion(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            model=LLMModel.AZURE_GPT_4O,
-            temperature=0.3,
-        )
+        with ai_feature("realtime_summary"):
+            response = await llm_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                model=LLMModel.AZURE_GPT_4O,
+                temperature=0.3,
+            )
     except Exception as e:
         sentry_sdk.capture_exception(e)
         raise HTTPException(status_code=500, detail=f"Failed to generate realtime summary: {e!s}") from e

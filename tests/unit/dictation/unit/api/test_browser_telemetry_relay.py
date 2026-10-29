@@ -276,3 +276,28 @@ def test_the_relay_body_limit_still_applies_without_a_declared_length(client, as
 
     response = client.post("/api/telemetry", content=chunks(), headers={"content-type": "application/json"})
     assert response.status_code == 413
+
+
+def test_speech_connected_time_is_metered_only_for_accepted_events(client, as_user):  # noqa: F811
+    """OBS-5: real-time Speech usage (live dictation) is the browser-reported Speech
+    session length, summed from the unsampled hmcts.event.duration metric by the AI
+    usage queries (ai_audio_hours_daily.kql). Only events the relay accepted count."""
+    _signed_in(as_user)
+    stopped = {"name": "speech.session_stopped", "attributes": {"dictation.segments_captured": 3}}
+    events = [
+        {**stopped, "journey": _journey(), "duration_ms": 600_000},
+        {**stopped, "journey": _journey(), "duration_ms": 1_200_000},
+        # Another journey type is refused: not usage.
+        {**stopped, "journey": {"type": "dictation.transcription", "id": SESSION}, "duration_ms": 3_600_000},
+    ]
+    with capture_telemetry() as telemetry:
+        assert _post(client, events).json() == {"accepted": 2, "rejected": 1}
+        points = [
+            p
+            for p in telemetry.metric_points(c.METRIC_EVENT_DURATION)
+            if p["attributes"].get("event") == "speech.session_stopped"
+        ]
+        ((point,),) = [points]
+        assert point["attributes"]["source"] == "browser"
+        assert point["count"] == 2
+        assert point["sum"] == 1800.0  # seconds
