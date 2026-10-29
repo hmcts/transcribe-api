@@ -248,8 +248,8 @@ async def _generate_minutes_and_title(
     if minutes_errors:
         # The job carries on; the failure is reported on job.finished.
         progress.degraded.append("minutes.failed")
-        for error in minutes_errors:  # one record per failure, with its (redacted) stack
-            logger.error("Minutes generation failed (%s)", type(error).__name__, exc_info=error)
+        for error in minutes_errors:  # each task's stage already recorded its exception
+            logger.error("Minutes generation failed (%s)", type(error).__name__)
 
 
 async def _run_pipeline(
