@@ -93,6 +93,13 @@ def _assert_clean(event, *identifiers):
 # The event --------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _register_security_schema():
+    from transcribe_api.runtime.telemetry_schema import register_schema
+
+    register_schema()
+
+
 def test_the_event_is_registered_with_controlled_attributes_only():
     spec = default_schema.get_event(sec.EVENT_OWNERSHIP_VIOLATION)
     assert set(spec.attributes) == EVENT_KEYS
