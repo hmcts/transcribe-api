@@ -39,13 +39,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 from starlette.background import BackgroundTask
 
-from transcribe_api.stt import local_storage
-from transcribe_api.stt.accuracy import DEFAULT_CONFIDENCE_THRESHOLD, compute_accuracy
-from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
-from transcribe_api.stt.batch_client import BatchSubmissionError, delete_batch_job
-from transcribe_api.stt.preprocessing import AudioDecodeError, normalize_to_wav
-from transcribe_api.stt.speech_auth import SpeechAuthError
-from transcribe_api.stt.submission import submit_and_queue_batch_job
 from transcribe_api.domain.audit_recording import (
     AuditRecord,
     AuditScope,
@@ -55,8 +48,9 @@ from transcribe_api.domain.audit_recording import (
     denied,
     write_audit,
 )
-from transcribe_api.runtime.settings_recording import get_settings
-from transcribe_api.runtime.db_recording import get_session
+from transcribe_api.domain.auth.approles_recording import get_valid_roles
+from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
+from transcribe_api.domain.auth.dependencies_recording import get_current_user
 from transcribe_api.domain.interface_recording import (
     get_job_by_id,
     get_job_by_idempotency_key_for_user,
@@ -70,16 +64,23 @@ from transcribe_api.domain.models_recording import (
     SpeechBatchJob,
     WordCorrection,
 )
+from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
+from transcribe_api.runtime.db_recording import get_session
 from transcribe_api.runtime.security_events import record_ownership_violation
+from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.runtime.telemetry import (
     EVENT_UPLOAD_VALIDATION_FAILED,
     JOURNEY_JOB,
     JOURNEY_UPLOAD,
     upload_id_from_blob,
 )
-from transcribe_api.domain.auth.approles_recording import get_valid_roles
-from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
-from transcribe_api.domain.auth.dependencies_recording import get_current_user
+from transcribe_api.runtime.version import APP_VERSION
+from transcribe_api.stt import local_storage
+from transcribe_api.stt.accuracy import DEFAULT_CONFIDENCE_THRESHOLD, compute_accuracy
+from transcribe_api.stt.batch_client import BatchSubmissionError, delete_batch_job
+from transcribe_api.stt.preprocessing import AudioDecodeError, normalize_to_wav
+from transcribe_api.stt.speech_auth import SpeechAuthError
+from transcribe_api.stt.submission import submit_and_queue_batch_job
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1")
@@ -551,13 +552,8 @@ async def health() -> dict:
 
 @router.get("/version")
 async def version() -> dict:
-    """Return the git commit SHA baked into the image at build time.
-
-    Used by the post-deploy version-gated check (DIAAT-241) to confirm the
-    newly built container is live before running e2e tests. Returns "unknown"
-    when GIT_SHA was not passed as a build arg (e.g. local development).
-    """
-    return {"version": get_settings().GIT_SHA}
+    """Return the build version (see runtime/version.py), as /api/health does."""
+    return {"version": APP_VERSION}
 
 
 async def _read_upload_capped(
@@ -1658,7 +1654,7 @@ async def _delete_job(session: Session, job: SpeechBatchJob) -> None:
             else:
                 async with AsyncAzureBlobManager() as blob_manager:
                     await blob_manager.delete_blob(job.audio_blob_path)
-        except Exception as exc:  # noqa: BLE001 — surfaced to the caller as a 502
+        except Exception as exc:
             logger.error("Failed to delete audio blob %s: %s", job.audio_blob_path, exc)
             raise HTTPException(
                 status_code=502, detail="Failed to delete the audio file; job not deleted"
@@ -1669,7 +1665,7 @@ async def _delete_job(session: Session, job: SpeechBatchJob) -> None:
     if job.batch_job_url:
         try:
             await delete_batch_job(job.batch_job_url)
-        except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+        except Exception as exc:
             logger.warning("Could not delete batch job %s: %s", job.batch_job_url, exc)
 
     session.delete(job)

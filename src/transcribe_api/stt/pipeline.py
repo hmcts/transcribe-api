@@ -10,12 +10,13 @@ from fastapi import HTTPException
 from hmcts_otel import Outcome, StageHandle, background_span, client_failure_code, record_event, stage
 from hmcts_otel import conventions as c
 
-from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager
-from transcribe_api.stt.speakers_dictation import process_speakers_and_dialogue_entries
-from transcribe_api.stt.fast_client import NoSpeechDetectedError, speech_configuration, transcribe_audio
-from transcribe_api.stt.utils import (
-    get_file_blob_path,
-    get_url_for_transcription,
+from transcribe_api.documents.minutes.llm_calls import (
+    generate_llm_output_task,
+    generate_meeting_title,
+)
+from transcribe_api.documents.minutes.templates.templates_metadata import (
+    crissa_template,
+    general_template,
 )
 from transcribe_api.domain.exceptions import OwnershipConflictError
 from transcribe_api.domain.interface_dictation import (
@@ -29,18 +30,17 @@ from transcribe_api.domain.models_dictation import (
     Transcription,
     TranscriptionJob,
 )
-from transcribe_api.runtime.logger import logger
-from transcribe_api.documents.minutes.llm_calls import (
-    generate_llm_output_task,
-    generate_meeting_title,
-)
-from transcribe_api.documents.minutes.templates.templates_metadata import (
-    crissa_template,
-    general_template,
-)
-from transcribe_api.domain.provenance_dictation import transcript_provenance
-from transcribe_api.runtime.telemetry import transcription_journey
 from transcribe_api.domain.notify.gov_notify import send_email
+from transcribe_api.domain.provenance_dictation import transcript_provenance
+from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager
+from transcribe_api.runtime.logger import logger
+from transcribe_api.runtime.telemetry import transcription_journey
+from transcribe_api.stt.fast_client import NoSpeechDetectedError, speech_configuration, transcribe_audio
+from transcribe_api.stt.speakers_dictation import process_speakers_and_dialogue_entries
+from transcribe_api.stt.utils import (
+    get_file_blob_path,
+    get_url_for_transcription,
+)
 
 
 async def generate_and_save_meeting_title(
@@ -75,7 +75,7 @@ async def _generate_and_save_title(dialogue_entries: list, transcription: Transc
                 return True
             title_stage.error("title.failed")  # the transcription no longer exists
             transcription.title = previous_title
-            return False  # noqa: TRY300 - not an exception: nothing was updated
+            return False
         except Exception as e:
             if provisional_title and _stored_title(transcription) == provisional_title:
                 # The save committed and only a later step (e.g. the refresh) failed.

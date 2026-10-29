@@ -52,7 +52,7 @@ _sync_engine_singleton = None
 
 def get_engine():
     """Return the process-wide synchronous database engine, creating it once."""
-    global _sync_engine_singleton  # noqa: PLW0603
+    global _sync_engine_singleton
     if _sync_engine_singleton is not None:
         return _sync_engine_singleton
     database_url = get_settings().DATABASE_CONNECTION_STRING
@@ -66,7 +66,7 @@ _AsyncSessionLocal = None
 
 
 def get_async_engine():
-    global _async_engine_singleton, _AsyncSessionLocal  # noqa: PLW0603 - Singleton pattern requires global state
+    global _async_engine_singleton, _AsyncSessionLocal
     if _async_engine_singleton is not None:
         return _async_engine_singleton
 
@@ -92,7 +92,7 @@ def get_async_engine():
 
 
 @asynccontextmanager
-async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
+async def get_async_session() -> AsyncGenerator[AsyncSession]:
     """
     Yield an async SQLAlchemy session with commit/rollback semantics.
     """

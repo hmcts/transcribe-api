@@ -1,8 +1,8 @@
-# ruff: noqa: TRY003, TRY300, EM101
 import json
 import logging
 from collections.abc import Callable
 from enum import StrEnum
+from pathlib import Path
 from tomllib import load
 from typing import Any
 
@@ -12,8 +12,6 @@ from langfuse import Langfuse
 from langfuse.decorators import langfuse_context, observe
 from litellm import acompletion
 from pydantic import BaseModel
-from pathlib import Path
-
 
 from transcribe_api.runtime.settings_dictation import get_settings
 

@@ -6,11 +6,10 @@ or the pollers start.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
-
-import contextlib
 from contextlib import AbstractContextManager
 from pathlib import PurePosixPath
 from uuid import UUID

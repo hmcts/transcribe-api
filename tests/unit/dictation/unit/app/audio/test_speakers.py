@@ -9,6 +9,7 @@ sys.modules.setdefault("transcribe_api.documents.minutes.llm_calls", _mock_llm)
 
 import pytest  # noqa: E402
 
+from transcribe_api.domain.models_dictation import DialogueEntry  # noqa: E402
 from transcribe_api.stt.speakers_dictation import (  # noqa: E402
     add_speaker_labels_to_dialogue_entries,
     convert_input_dialogue_entries_to_dialogue_entries,
@@ -16,7 +17,6 @@ from transcribe_api.stt.speakers_dictation import (  # noqa: E402
     normalize_speaker_labels,
     process_speakers_and_dialogue_entries,
 )
-from transcribe_api.domain.models_dictation import DialogueEntry  # noqa: E402
 
 
 class TestGroupDialogueEntriesBySpeaker:

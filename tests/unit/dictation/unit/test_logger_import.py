@@ -15,7 +15,7 @@ def test_logger_does_not_import_the_orm():
         "loaded = [m for m in ('transcribe_api.domain.models_dictation', 'sqlmodel') if m in sys.modules]; "
         "print(loaded); sys.exit(1 if loaded else 0)"
     )
-    result = subprocess.run(  # noqa: S603 - fixed command, no external input
+    result = subprocess.run(
         [sys.executable, "-c", code],
         cwd=ROOT,
         env={**os.environ, "PYTHONPATH": str(ROOT / "src")},

@@ -6,17 +6,6 @@ from hmcts_otel import ai_feature, stage
 from langfuse.decorators import langfuse_context, observe
 from uwotm8 import convert_american_to_british_spelling
 
-from transcribe_api.domain.interface_dictation import (
-    create_error_minute_version,
-    get_minute_version_by_id,
-    save_minute_version,
-)
-from transcribe_api.domain.models_dictation import (
-    DialogueEntry,
-    MinuteVersion,
-    TemplateMetadata,
-    TemplateName,
-)
 from transcribe_api.documents.llm.llm_client import (
     LLMModel,
     langfuse_client,
@@ -30,8 +19,19 @@ from transcribe_api.documents.minutes.types import (
     MeetingTitleOutput,
     SpeakerPredictionOutput,
 )
-from transcribe_api.runtime.telemetry import register_minutes_schema
+from transcribe_api.domain.interface_dictation import (
+    create_error_minute_version,
+    get_minute_version_by_id,
+    save_minute_version,
+)
+from transcribe_api.domain.models_dictation import (
+    DialogueEntry,
+    MinuteVersion,
+    TemplateMetadata,
+    TemplateName,
+)
 from transcribe_api.runtime.markdown import html_to_markdown, markdown_to_html
+from transcribe_api.runtime.telemetry import register_minutes_schema
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ async def edit_minutes_with_ai(
     edit_instructions: str,
     transcript: list[DialogueEntry],
     user_id: str,
-    **kwargs,  # noqa: ARG001
+    **kwargs,
 ) -> str:
     current_markdown_minutes = html_to_markdown(current_minute_version.html_content)
     langfuse_context.update_current_trace(
@@ -177,7 +177,7 @@ async def generate_llm_output_task(
             initial_minute_version.is_generating = False
             save_minute_version(initial_minute_version, check_owner=False)
 
-            return llm_output  # noqa: TRY300
+            return llm_output
 
         except Exception as e:
             # Save error state
@@ -230,7 +230,7 @@ async def ai_edit_task(
             new_minute_version.is_generating = False
             save_minute_version(new_minute_version, check_owner=False)
 
-            return llm_output  # noqa: TRY300
+            return llm_output
 
         except Exception as e:
             # Pass template from current_minutes to create valid error state
@@ -250,7 +250,7 @@ async def ai_edit_task(
 async def generate_realtime_summary(
     transcript_entries: list[dict],
     existing_summary: str | None = None,
-    **kwargs,  # noqa: ARG001
+    **kwargs,
 ) -> str:
     """
     Generate a real-time summary of conversation transcript entries.

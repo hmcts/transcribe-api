@@ -12,8 +12,8 @@ Acceptance criteria covered:
 from hmcts_otel import conventions as c
 from hmcts_otel.testing import capture_telemetry
 
-from transcribe_api.runtime.browser_telemetry import JOURNEY_DICTATION_SESSION
 from tests.unit.dictation.unit.api.test_routes import _make_user_with_oid
+from transcribe_api.runtime.browser_telemetry import JOURNEY_DICTATION_SESSION
 
 SESSION = "3f2b8c1a-9d4e-4f6a-8b7c-1d2e3f4a5b6c"
 # The live-dictation events (OBS-4), registered in the merged schema: all operational.

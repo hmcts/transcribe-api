@@ -21,8 +21,8 @@ from hmcts_otel import default_redactor, get_tracer
 from hmcts_otel.testing import TelemetryCapture, capture_telemetry
 from opentelemetry.trace import SpanKind
 
-from transcribe_api.stt.preprocessing import AudioDecodeError
 from transcribe_api.runtime.telemetry import JOURNEY_UPLOAD, configure_telemetry, upload_id_from_blob
+from transcribe_api.stt.preprocessing import AudioDecodeError
 
 USER_ID = "00000000-0000-4000-8000-000000000001"
 HEARING_ID = "3F2504E0-4F89-41D3-9A0C-0305E82C3301"  # upper case: normalised on export
@@ -70,8 +70,8 @@ def tel():
 
 def _client(mocker, *, normalised: bytes | Exception = b"", stored: bool = True) -> TestClient:
     from transcribe_api.api.app import create_app
-    from transcribe_api.domain.models_recording import User
     from transcribe_api.domain.auth.dependencies_recording import get_current_user
+    from transcribe_api.domain.models_recording import User
 
     manager = mocker.AsyncMock()
     manager.create_blob_from_file = mocker.AsyncMock(return_value=stored)
@@ -379,8 +379,8 @@ CASE_FIRST_NAME = "PA_50123_2024 Smith v Home Office"
 @pytest.mark.parametrize("original", [ORIGINAL_NAME, OTHER_NAME, CASE_FIRST_NAME])
 def test_original_file_name_never_reaches_logs_or_telemetry(tel, mocker, original):
     from transcribe_api.api.app import create_app
-    from transcribe_api.domain.models_recording import User
     from transcribe_api.domain.auth.dependencies_recording import get_current_user
+    from transcribe_api.domain.models_recording import User
 
     _real_storage(mocker)
     mocker.patch("transcribe_api.api.routes_recording.normalize_to_wav", new=_writes_wav(_wav(0.5)))

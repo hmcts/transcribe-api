@@ -17,24 +17,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from azure.core.exceptions import ServiceResponseTimeoutError
-from sqlalchemy import exc as sa_exc
 from azure.core.exceptions import (
     ClientAuthenticationError,
     HttpResponseError,
     ResourceNotFoundError,
     ServiceRequestError,
+    ServiceResponseTimeoutError,
 )
 from fastapi.testclient import TestClient
 from hmcts_otel import conventions as c
 from hmcts_otel import get_meter
 from hmcts_otel.testing import capture_telemetry
+from sqlalchemy import exc as sa_exc
 from sqlalchemy.exc import OperationalError
 
 from transcribe_api.runtime import dependency_health
-from transcribe_api.stt import job_telemetry
-from transcribe_api.stt.batch_client import SpeechNotConfiguredError
-from transcribe_api.stt.job_telemetry import METRIC_POLLER_LAST_SUCCESS_AGE, PollerHeartbeat
 from transcribe_api.runtime.dependency_health import (
     METRIC_DEPENDENCY_CHECK_DURATION,
     METRIC_DEPENDENCY_UP,
@@ -43,6 +40,9 @@ from transcribe_api.runtime.dependency_health import (
     error_code,
 )
 from transcribe_api.runtime.telemetry import EVENT_DEPENDENCY_HEALTH_CHANGED, configure_telemetry
+from transcribe_api.stt import job_telemetry
+from transcribe_api.stt.batch_client import SpeechNotConfiguredError
+from transcribe_api.stt.job_telemetry import METRIC_POLLER_LAST_SUCCESS_AGE, PollerHeartbeat
 
 SECRET_HOST = "bat-dev-psql.postgres.database.azure.com"
 SECRET_KEY = "s3cr3t-speech-key-value"  # pragma: allowlist secret
@@ -232,9 +232,8 @@ async def test_run_checks_until_cancelled(monkeypatch):
     checker = _checker(DependencyCheck("database", AsyncMock()))
     sleep = AsyncMock(side_effect=[None, asyncio.CancelledError()])
     monkeypatch.setattr(asyncio, "sleep", sleep)
-    with patch.object(checker, "check_once", new=AsyncMock()) as check_once:
-        with pytest.raises(asyncio.CancelledError):
-            await checker.run()
+    with patch.object(checker, "check_once", new=AsyncMock()) as check_once, pytest.raises(asyncio.CancelledError):
+        await checker.run()
     assert check_once.await_count == 2
     sleep.assert_awaited_with(60)
 
@@ -296,8 +295,8 @@ async def test_no_hostnames_keys_urls_or_messages_in_telemetry(tel, caplog):
 
 
 async def test_speech_probe_lists_one_base_model_with_the_workload_identity(monkeypatch, speech_workload_identity):
-    from transcribe_api.stt.batch_client import check_speech_available
     from transcribe_api.runtime.settings_recording import get_settings
+    from transcribe_api.stt.batch_client import check_speech_available
 
     monkeypatch.setenv("AZURE_SPEECH_ENDPOINT", "https://test.cognitiveservices.azure.com/")
     get_settings.cache_clear()
@@ -348,11 +347,11 @@ async def test_speech_probe_raises_on_401(monkeypatch):
 
 
 async def test_speech_probe_without_configuration_fails(monkeypatch):
+    from transcribe_api.runtime.settings_recording import get_settings
     from transcribe_api.stt.batch_client import (
         SpeechNotConfiguredError,
         check_speech_available,
     )
-    from transcribe_api.runtime.settings_recording import get_settings
 
     monkeypatch.setenv("AZURE_SPEECH_ENDPOINT", "")
     get_settings.cache_clear()
@@ -539,8 +538,8 @@ def test_endpoint_is_excluded_from_request_telemetry(client_with_checker, monkey
 
 def test_app_starts_the_checker_outside_tests(monkeypatch):
     from transcribe_api.api.app import create_app
-    from transcribe_api.stt.polling_service import BatchPollingService
     from transcribe_api.runtime.settings_recording import get_settings
+    from transcribe_api.stt.polling_service import BatchPollingService
 
     monkeypatch.setenv("ENVIRONMENT", "dev")
     get_settings.cache_clear()

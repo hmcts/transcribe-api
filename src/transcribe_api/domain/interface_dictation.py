@@ -9,8 +9,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 
+from transcribe_api.documents.minutes.types import TranscriptionMetadata
 from transcribe_api.domain.exceptions import OwnershipConflictError, UserHasTranscriptionsError, UserNotFoundError
-from transcribe_api.runtime.db_dictation import engine
 from transcribe_api.domain.models_dictation import (
     BaseTable,
     DialogueEntry,
@@ -21,14 +21,21 @@ from transcribe_api.domain.models_dictation import (
     TranscriptionJob,
     User,
 )
-from transcribe_api.documents.minutes.types import TranscriptionMetadata
-from transcribe_api.runtime.security_events import READ, REASSIGN, TRANSCRIPTION, WRITE, record_ownership_violation, resource_type_of
+from transcribe_api.runtime.db_dictation import engine
+from transcribe_api.runtime.security_events import (
+    READ,
+    REASSIGN,
+    TRANSCRIPTION,
+    WRITE,
+    record_ownership_violation,
+    resource_type_of,
+)
 
 logger = logging.getLogger(__name__)
 
 
 @event.listens_for(Session, "before_flush")
-def before_flush(session, flush_context, instances):  # noqa: ARG001
+def before_flush(session, flush_context, instances):
     for obj in session.dirty:
         if isinstance(obj, BaseTable):
             obj.updated_datetime = datetime.now(UTC)
@@ -168,7 +175,7 @@ def user_error_message(error: BaseException, what: str) -> str:
     failures apart.
     """
     status = error.status_code if isinstance(error, HTTPException) else None
-    if isinstance(status, int) and 400 <= status < 500:  # noqa: PLR2004
+    if isinstance(status, int) and 400 <= status < 500:
         coded = _CODED_ERROR_MESSAGES.get(getattr(error, "error_code", None))
         if coded is not None:
             return coded
@@ -249,7 +256,7 @@ def save_minute_version(
         return merged
 
 
-def _is_transcription_showable(transcription: Transcription, current_time: datetime) -> bool:  # noqa: PLR0911
+def _is_transcription_showable(transcription: Transcription, current_time: datetime) -> bool:  # NOSONAR
     try:
         # Any minute versions have error messages (show for user awareness of errors)
         if transcription.minute_versions and any(
@@ -298,7 +305,7 @@ def _is_transcription_showable(transcription: Transcription, current_time: datet
             if (current_time - created_dt).total_seconds() > five_minutes_in_seconds:
                 return True
 
-        return False  # noqa: TRY300
+        return False
     except Exception as e:
         # If anything goes wrong, default to showing the transcription
         # Type only, no stack: this runs once per row of a transcription list.

@@ -11,7 +11,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from transcribe_api.domain.models_dictation import User
+from transcribe_api.domain.models_dictation import Transcription, User
 
 
 def _make_user(roles: list[str] | None = None, completed_onboarding: bool = False) -> User:
@@ -73,12 +73,13 @@ def test_health_returns_app_version_from_env(monkeypatch, client):
     import transcribe_api.api.routes_dictation
     import transcribe_api.runtime.version
 
-    monkeypatch.setenv("APP_VERSION", "1.2.3-abc1234")
-    importlib.reload(transcribe_api.runtime.version)
-    importlib.reload(transcribe_api.api.routes_dictation)
     try:
-        assert client.get("/api/health").json() == {"status": "ok", "version": "1.2.3-abc1234"}
-        assert client.get("/api/healthcheck").json() == {"status": "ok", "version": "1.2.3-abc1234"}
+        with monkeypatch.context() as env:
+            env.setenv("APP_VERSION", "1.2.3-abc1234")
+            importlib.reload(transcribe_api.runtime.version)
+            importlib.reload(transcribe_api.api.routes_dictation)
+            assert client.get("/api/health").json() == {"status": "ok", "version": "1.2.3-abc1234"}
+            assert client.get("/api/healthcheck").json() == {"status": "ok", "version": "1.2.3-abc1234"}
     finally:
         importlib.reload(transcribe_api.runtime.version)
         importlib.reload(transcribe_api.api.routes_dictation)
@@ -314,8 +315,7 @@ def test_upload_audio_rejects_key_with_mismatched_oid(client, as_user):
 # Audit log events — ST-J3
 # ---------------------------------------------------------------------------
 
-def _make_transcription(user_id=None) -> "Transcription":
-    from transcribe_api.domain.models_dictation import Transcription
+def _make_transcription(user_id=None) -> Transcription:
     t = Transcription(id=uuid.uuid4(), user_id=user_id or uuid.uuid4(), title="Test Hearing")
     t.__dict__.setdefault("transcription_jobs", [])
     t.__dict__.setdefault("minute_versions", [])

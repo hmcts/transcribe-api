@@ -35,10 +35,11 @@ from uuid import uuid4
 
 os.environ.setdefault("ENVIRONMENT", "local")
 
-from sqlmodel import Session, col, create_engine, select  # noqa: E402
-from sqlalchemy import cast, String  # noqa: E402
+from sqlalchemy import String, cast
+from sqlmodel import Session, col, create_engine, select
 
-from transcribe_api.domain.models_recording import (  # noqa: E402
+from transcribe_api.domain.models_dictation import User
+from transcribe_api.domain.models_recording import (
     BatchJobStatus,
     Caller,
     CorrectionDatasetEntry,
@@ -49,12 +50,11 @@ from transcribe_api.domain.models_recording import (  # noqa: E402
     WordCorrection,
     WordInfo,
 )
-from transcribe_api.domain.models_dictation import User  # noqa: E402
-from transcribe_api.runtime.local_dev_database import (  # noqa: E402
+from transcribe_api.runtime.local_dev_database import (
     UnsafeDatabaseURLError,
     local_dev_database_url,
 )
-from transcribe_api.stt import local_storage  # noqa: E402
+from transcribe_api.stt import local_storage
 
 MOCK_USER_AZURE_ID = "local-dev-user-123"
 SEED_AUDIO_SOURCE = Path(__file__).parent / "scripts-seed-demo-audio.wav"

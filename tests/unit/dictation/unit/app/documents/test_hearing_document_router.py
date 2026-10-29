@@ -3,9 +3,12 @@
 from datetime import UTC, datetime
 
 from transcribe_api.documents.anonymity import AnonymityStatus
-from transcribe_api.documents.hearing_document_router import ISSUES_INTRO_TEXT, build_hearing_document_from_document_data
-from transcribe_api.documents.models import DocumentData, HearingFormData, SectionTranscripts, TranscriptMessage
+from transcribe_api.documents.hearing_document_router import (
+    ISSUES_INTRO_TEXT,
+    build_hearing_document_from_document_data,
+)
 from transcribe_api.documents.lib.models import IACTemplate
+from transcribe_api.documents.models import DocumentData, HearingFormData, SectionTranscripts, TranscriptMessage
 
 
 def _sample_document_data(anonymity_order: str = "granted") -> DocumentData:
@@ -86,7 +89,7 @@ def test_build_hearing_document_routes_content_loader_values() -> None:
     assert "Determination of the Issues" in body_texts
     assert "Notice of Decision" in body_texts
     assert "ANONYMITY ORDER" in body_texts
-    assert "To the Respondent – Fee Award" in body_texts  # noqa: RUF001
+    assert "To the Respondent – Fee Award" in body_texts
     assert "Fee Award" not in body_texts
     assert "Signature" in body_texts
     assert "[ADD SIGNATURE]\tDate [not final until dated]" in body_texts

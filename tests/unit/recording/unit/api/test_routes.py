@@ -10,8 +10,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from transcribe_api.api.app import create_app
-from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.domain.models_recording import JobStatus, SpeechBatchJob, User
+from transcribe_api.runtime.settings_recording import get_settings
 
 _TEST_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000002")
 
@@ -92,30 +92,41 @@ class TestHealth:
 
 
 class TestVersion:
-    def test_defaults_to_unknown(self, client, monkeypatch):
-        # No GIT_SHA in the environment -> the "unknown" default.
-        monkeypatch.delenv("GIT_SHA", raising=False)
-        from transcribe_api.runtime.settings_recording import get_settings
-
-        get_settings.cache_clear()
+    def test_returns_local_version_without_a_build(self, client, monkeypatch, tmp_path):
+        self._reload_version(monkeypatch, tmp_path, app_version=None, build_version=None)
         response = client.get("/api/v1/version")
         assert response.status_code == 200
-        assert response.json() == {"version": "unknown"}
-        get_settings.cache_clear()
+        assert response.json() == {"version": "0.0.999"}
 
-    def test_returns_baked_git_sha(self, client, monkeypatch):
-        monkeypatch.setenv("GIT_SHA", "abc123def456")
-        from transcribe_api.runtime.settings_recording import get_settings
+    def test_returns_baked_build_version(self, client, monkeypatch, tmp_path):
+        self._reload_version(monkeypatch, tmp_path, app_version=None, build_version="1112c85\n")
+        assert client.get("/api/v1/version").json() == {"version": "1112c85"}
 
-        get_settings.cache_clear()
-        response = client.get("/api/v1/version")
-        assert response.status_code == 200
-        assert response.json() == {"version": "abc123def456"}
-        get_settings.cache_clear()
+    def test_app_version_overrides_build_version(self, client, monkeypatch, tmp_path):
+        self._reload_version(monkeypatch, tmp_path, app_version="1.2.3", build_version="1112c85")
+        assert client.get("/api/v1/version").json() == {"version": "1.2.3"}
+
+    def test_matches_health_version(self, client):
+        assert client.get("/api/v1/version").json()["version"] == client.get("/api/health").json()["version"]
 
     def test_no_auth_required(self, client):
         response = client.get("/api/v1/version")
         assert response.status_code == 200
+
+    @staticmethod
+    def _reload_version(monkeypatch, tmp_path, *, app_version, build_version):
+        from transcribe_api.api import routes_recording
+        from transcribe_api.runtime import version
+
+        build_file = tmp_path / "BUILD_VERSION"
+        if build_version is not None:
+            build_file.write_text(build_version)
+        monkeypatch.setattr(version, "BUILD_VERSION_FILE", build_file)
+        if app_version is None:
+            monkeypatch.delenv("APP_VERSION", raising=False)
+        else:
+            monkeypatch.setenv("APP_VERSION", app_version)
+        monkeypatch.setattr(routes_recording, "APP_VERSION", version.read_version())
 
 
 def _patch_normalize(mocker, wav_bytes=b"WAVDATA"):
@@ -365,8 +376,8 @@ class TestGetJobAudio:
     def test_streams_full_content_from_local_backend(
         self, client, as_current_user, mocker, tmp_path, monkeypatch
     ):
-        from transcribe_api.stt import local_storage
         from transcribe_api.runtime.settings_recording import get_settings
+        from transcribe_api.stt import local_storage
 
         monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
         monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path))
@@ -391,8 +402,8 @@ class TestGetJobAudio:
     def test_streams_partial_range_from_local_backend(
         self, client, as_current_user, mocker, tmp_path, monkeypatch
     ):
-        from transcribe_api.stt import local_storage
         from transcribe_api.runtime.settings_recording import get_settings
+        from transcribe_api.stt import local_storage
 
         monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
         monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path))
@@ -436,8 +447,8 @@ class TestGetJobAudio:
     def test_supports_suffix_range_for_the_last_n_bytes(
         self, client, as_current_user, mocker, tmp_path, monkeypatch
     ):
-        from transcribe_api.stt import local_storage
         from transcribe_api.runtime.settings_recording import get_settings
+        from transcribe_api.stt import local_storage
 
         monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
         monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path))
@@ -462,8 +473,8 @@ class TestGetJobAudio:
     def test_returns_416_for_a_malformed_range_header(
         self, client, as_current_user, mocker, tmp_path, monkeypatch
     ):
-        from transcribe_api.stt import local_storage
         from transcribe_api.runtime.settings_recording import get_settings
+        from transcribe_api.stt import local_storage
 
         monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
         monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path))
@@ -488,8 +499,8 @@ class TestGetJobAudio:
     def test_returns_416_for_an_out_of_bounds_range(
         self, client, as_current_user, mocker, tmp_path, monkeypatch
     ):
-        from transcribe_api.stt import local_storage
         from transcribe_api.runtime.settings_recording import get_settings
+        from transcribe_api.stt import local_storage
 
         monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
         monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path))
@@ -512,8 +523,8 @@ class TestGetJobAudio:
     def test_returns_200_with_empty_body_for_a_zero_byte_file(
         self, client, as_current_user, mocker, tmp_path, monkeypatch
     ):
-        from transcribe_api.stt import local_storage
         from transcribe_api.runtime.settings_recording import get_settings
+        from transcribe_api.stt import local_storage
 
         monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
         monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path))
@@ -537,8 +548,8 @@ class TestGetJobAudio:
     def test_returns_416_for_a_range_request_against_a_zero_byte_file(
         self, client, as_current_user, mocker, tmp_path, monkeypatch
     ):
-        from transcribe_api.stt import local_storage
         from transcribe_api.runtime.settings_recording import get_settings
+        from transcribe_api.stt import local_storage
 
         monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
         monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path))
@@ -1478,9 +1489,9 @@ class TestCorrectSegment:
         self, client, as_current_user, mocker, monkeypatch
     ):
         """DIAAT-231: default-off flag means no row in correction_dataset_entry."""
-        from transcribe_api.runtime.settings_recording import get_settings
-        from transcribe_api.runtime.db_recording import get_session
         from transcribe_api.domain.models_recording import CorrectionDatasetEntry
+        from transcribe_api.runtime.db_recording import get_session
+        from transcribe_api.runtime.settings_recording import get_settings
 
         monkeypatch.setenv("CORRECTIONS_DATASET_EXPORT_ENABLED", "false")
         get_settings.cache_clear()
@@ -1517,9 +1528,9 @@ class TestCorrectSegment:
         self, client, as_current_user, mocker, monkeypatch
     ):
         """DIAAT-231: enabling the flag stages a row capturing the correction."""
-        from transcribe_api.runtime.settings_recording import get_settings
-        from transcribe_api.runtime.db_recording import get_session
         from transcribe_api.domain.models_recording import CorrectionDatasetEntry
+        from transcribe_api.runtime.db_recording import get_session
+        from transcribe_api.runtime.settings_recording import get_settings
 
         monkeypatch.setenv("CORRECTIONS_DATASET_EXPORT_ENABLED", "true")
         get_settings.cache_clear()
@@ -1782,9 +1793,9 @@ class TestCorrectWordRange:
         self, client, as_current_user, mocker, monkeypatch
     ):
         """DIAAT-231: default-off flag means no row in correction_dataset_entry."""
-        from transcribe_api.runtime.settings_recording import get_settings
-        from transcribe_api.runtime.db_recording import get_session
         from transcribe_api.domain.models_recording import CorrectionDatasetEntry
+        from transcribe_api.runtime.db_recording import get_session
+        from transcribe_api.runtime.settings_recording import get_settings
 
         monkeypatch.setenv("CORRECTIONS_DATASET_EXPORT_ENABLED", "false")
         get_settings.cache_clear()
@@ -1826,9 +1837,9 @@ class TestCorrectWordRange:
         phrase (from entry.words, not any prior correction) paired with the
         clerk's corrected phrase and the per-word confidence for that range.
         """
-        from transcribe_api.runtime.settings_recording import get_settings
-        from transcribe_api.runtime.db_recording import get_session
         from transcribe_api.domain.models_recording import CorrectionDatasetEntry
+        from transcribe_api.runtime.db_recording import get_session
+        from transcribe_api.runtime.settings_recording import get_settings
 
         monkeypatch.setenv("CORRECTIONS_DATASET_EXPORT_ENABLED", "true")
         get_settings.cache_clear()

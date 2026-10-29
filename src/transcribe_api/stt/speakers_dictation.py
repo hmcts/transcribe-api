@@ -1,7 +1,7 @@
 import logging
 
-from transcribe_api.domain.models_dictation import DialogueEntry
 from transcribe_api.documents.minutes.llm_calls import generate_speaker_predictions
+from transcribe_api.domain.models_dictation import DialogueEntry
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +129,7 @@ async def process_speakers_and_dialogue_entries(
                     end_time=entry.end_time,
                 )
             )
-        return predicted_entries  # noqa: TRY300
+        return predicted_entries
     except Exception as e:
         logger.warning("Applying speaker predictions failed (%s)", type(e).__name__, exc_info=e)
         return labelled_dialogue_entries

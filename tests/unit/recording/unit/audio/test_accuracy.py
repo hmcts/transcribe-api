@@ -1,7 +1,7 @@
 """Unit tests for accuracy/needs-review computation."""
 
-from transcribe_api.stt.accuracy import DEFAULT_CONFIDENCE_THRESHOLD, compute_accuracy
 from transcribe_api.domain.models_recording import DialogueEntry
+from transcribe_api.stt.accuracy import DEFAULT_CONFIDENCE_THRESHOLD, compute_accuracy
 
 
 def _entry(

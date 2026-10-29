@@ -17,7 +17,6 @@ import pytest
 from hmcts_otel import conventions as c
 from hmcts_otel.testing import capture_telemetry
 
-from transcribe_api.documents import content_loader, versioning
 from tests.unit.dictation.unit.api.test_live_transcription_submission_logging import (
     _MINIMAL_BODY,
     PII_APPELLANT,
@@ -27,6 +26,7 @@ from tests.unit.dictation.unit.api.test_live_transcription_submission_logging im
     _make_user,
     _patch_submission_deps,
 )
+from transcribe_api.documents import content_loader, versioning
 
 SESSION = "3f2b8c1a-9d4e-4f6a-8b7c-1d2e3f4a5b6c"
 CASE_DETAILS = (PII_APPELLANT, PII_RESPONDENT, PII_JUDGE, PII_TRANSCRIPT)
