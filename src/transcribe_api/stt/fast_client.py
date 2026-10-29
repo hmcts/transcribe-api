@@ -21,13 +21,52 @@ from transcribe_api.stt.utils import (
 )
 from transcribe_api.domain.models_dictation import DialogueEntry
 from transcribe_api.runtime.logger import logger
+from transcribe_api.domain.provenance_dictation import SpeechConfiguration, endpoint_reference
 from transcribe_api.runtime.settings_dictation import get_settings
 from transcribe_api.stt.speech_auth import SpeechAuthError, speech_auth_headers
 
 TOO_MANY_REQUESTS = 429
+# Azure statuses where the service, not the audio, failed: authentication,
+# permissions/quota and throttling.
+_SERVICE_SIDE_CLIENT_ERRORS = frozenset({401, 403, TOO_MANY_REQUESTS})
+
+
+def _azure_error_status(response_status: int) -> int:
+    """422 (the audio or request was rejected) only for Azure's own client errors;
+    502 (a dependency failure, worth retrying) for auth, quota, throttling, outages
+    and anything else. The user-facing message depends on this (user_error_message)."""
+    if 400 <= response_status < 500 and response_status not in _SERVICE_SIDE_CLIENT_ERRORS:  # noqa: PLR2004
+        return 422
+    return 502
 # Azure batch transcription profanity options are: Masked, Removed, None.
 # Use "None" to preserve profanity exactly as spoken (verbatim output).
 VERBATIM_PROFANITY_FILTER_MODE = "None"
+# Fast transcription request settings: sent to Azure (transcribe_audio_with_azure)
+# and recorded as the transcript's provenance (DIAAT-286) from this one definition.
+FAST_TRANSCRIPTION_API_VERSION = "2024-11-15"
+FAST_TRANSCRIPTION_LOCALES = ("en-GB",)
+FAST_TRANSCRIPTION_DIARIZATION = True
+
+
+def speech_configuration() -> SpeechConfiguration:
+    """The fast transcription configuration in use (sent to Azure, and its provenance)."""
+    host, region = endpoint_reference(get_settings().AZURE_SPEECH_ENDPOINT)
+    return SpeechConfiguration(
+        endpoint_host=host,
+        region=region,
+        api_version=FAST_TRANSCRIPTION_API_VERSION,
+        locales=list(FAST_TRANSCRIPTION_LOCALES),
+        diarization=FAST_TRANSCRIPTION_DIARIZATION,
+        profanity_filter_mode=VERBATIM_PROFANITY_FILTER_MODE,
+    )
+
+
+def _transcription_definition(config: SpeechConfiguration) -> dict[str, Any]:
+    return {
+        "locales": config.locales,
+        "diarization": {"enabled": config.diarization},
+        "profanityFilterMode": config.profanity_filter_mode,
+    }
 
 
 @retry(
@@ -167,7 +206,11 @@ async def transcribe_audio_with_azure(audio_file_path: Path):
     if not settings.AZURE_SPEECH_ENDPOINT:
         raise HTTPException(status_code=500, detail="AZURE_SPEECH_ENDPOINT not set")
 
-    url = f"{settings.AZURE_SPEECH_ENDPOINT.rstrip('/')}/speechtotext/transcriptions:transcribe?api-version=2024-11-15"
+    config = speech_configuration()
+    url = (
+        f"{settings.AZURE_SPEECH_ENDPOINT.rstrip('/')}/speechtotext/transcriptions:transcribe"
+        f"?api-version={config.api_version}"
+    )
     # Workload identity bearer token; the key header only for local dev.
     try:
         headers = await speech_auth_headers(settings.AZURE_SPEECH_KEY)
@@ -178,16 +221,7 @@ async def transcribe_audio_with_azure(audio_file_path: Path):
         audio_content = await audio_file.read()
         files: Any = {
             "audio": (audio_file_path.name, audio_content),
-            "definition": (
-                None,
-                json.dumps(
-                    {
-                        "locales": ["en-GB"],
-                        "diarization": {"enabled": True},
-                        "profanityFilterMode": VERBATIM_PROFANITY_FILTER_MODE,
-                    }
-                ),
-            ),
+            "definition": (None, json.dumps(_transcription_definition(config))),
         }
 
         timeout_settings = httpx.Timeout(
@@ -208,13 +242,13 @@ async def transcribe_audio_with_azure(audio_file_path: Path):
             if "error" in full_response and isinstance(full_response["error"], dict):
                 error_message = full_response["error"].get("message", "Unknown error occurred")
                 logger.error(f"Azure API error (nested): {error_message}")
-                raise HTTPException(status_code=422, detail=error_message)
+                raise HTTPException(status_code=_azure_error_status(response.status_code), detail=error_message)
 
             # Check for top-level error response: {"code": "...", "message": "..."}
             if "code" in full_response:
                 error_message = full_response.get("message", "Unknown error occurred")
                 logger.error(f"Azure API error: {error_message}")
-                raise HTTPException(status_code=422, detail=error_message)
+                raise HTTPException(status_code=_azure_error_status(response.status_code), detail=error_message)
 
             # If no error, proceed with phrases extraction
             phrases = full_response.get("phrases")

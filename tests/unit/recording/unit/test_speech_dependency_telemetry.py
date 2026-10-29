@@ -140,6 +140,9 @@ async def _poll(service, job, status_data, results=None) -> None:
         patch(f"{BASE}.process_speakers", side_effect=lambda entries: entries),
         patch(f"{BASE}._resolve_model_display_name", new=AsyncMock(return_value=None)),
         patch(f"{BASE}.delete_batch_job", new=AsyncMock()),
+        # A failed job marks its blob: never a real blob manager (its credential would
+        # try the Azure CLI, which the socket guard does not stop).
+        patch(f"{BASE}.AsyncAzureBlobManager"),
     ):
         await service._process_job(job)
 

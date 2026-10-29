@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 import pytz
 import sentry_sdk
 from fastapi import HTTPException
-from sqlalchemy import event, func
+from sqlalchemy import event, func, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
@@ -22,6 +22,7 @@ from transcribe_api.domain.models_dictation import (
     User,
 )
 from transcribe_api.documents.minutes.types import TranscriptionMetadata
+from transcribe_api.runtime.security_events import READ, REASSIGN, TRANSCRIPTION, WRITE, record_ownership_violation, resource_type_of
 
 
 @event.listens_for(Session, "before_flush")
@@ -31,8 +32,12 @@ def before_flush(session, flush_context, instances):  # noqa: ARG001
             obj.updated_datetime = datetime.now(UTC)
 
 
-def _ensure_owner_unchanged(session: Session, owner_column, record_id: UUID | None, owner: UUID | None) -> None:
+def _ensure_owner_unchanged(
+    session: Session, owner_column, record_id: UUID | None, owner: UUID | None, *, actor_id: UUID | None = None
+) -> None:
     """Refuse to re-parent an existing row (SEC-1). The row is locked until commit.
+
+    ``actor_id``: the user making the request, for the audit record (DIAAT-286).
 
     FOR NO KEY UPDATE (key_share): enough to stop a concurrent re-parenting, and,
     unlike FOR UPDATE, it does not block inserts of child rows whose foreign key
@@ -45,7 +50,26 @@ def _ensure_owner_unchanged(session: Session, owner_column, record_id: UUID | No
         select(owner_column).where(model.id == record_id).with_for_update(key_share=True)
     ).first()
     if existing_owner is not None and str(existing_owner) != str(owner):
-        raise OwnershipConflictError(model.__name__)
+        raise _ownership_conflict(model.__name__, actor_id=actor_id, object_id=record_id)
+
+
+def _ownership_conflict(
+    record_type: str, *, actor_id: UUID | None = None, object_id: UUID | None = None
+) -> OwnershipConflictError:
+    """The SEC-1 refusal, recorded as a blocked security event (DIAAT-285) and audited
+    (DIAAT-286, when the actor is known) where it is raised."""
+    record_ownership_violation(resource_type_of(record_type), REASSIGN, actor_id=actor_id, object_id=object_id)
+    return OwnershipConflictError(record_type)
+
+
+def _blocked_if_not_owner(transcription: Transcription | None, user_id: UUID, action: str) -> None:
+    """404 unless the caller owns it. Another user's row is also recorded (DIAAT-285), from
+    the row already loaded: no extra query, and the same 404 as for an unknown ID."""
+    if transcription is None:
+        raise HTTPException(status_code=404, detail="Transcription not found")
+    if transcription.user_id != user_id:
+        record_ownership_violation(TRANSCRIPTION, action, actor_id=user_id, object_id=transcription.id)
+        raise HTTPException(status_code=404, detail="Transcription not found")
 
 
 def get_transcription_owner(transcription_id: UUID) -> UUID | None:
@@ -67,9 +91,37 @@ def load_or_create_transcription(transcription_id: str | UUID | None, user_id: U
             existing = session.get(Transcription, record_id)
             if existing is not None:
                 if str(existing.user_id) != str(user_id):
-                    raise OwnershipConflictError(Transcription.__name__)
+                    raise _ownership_conflict(Transcription.__name__, actor_id=user_id, object_id=record_id)
                 return existing
     return save_transcription(Transcription(id=record_id), user_id)
+
+
+def save_transcription_title(
+    transcription_id: UUID, user_id: UUID, title: str, expected_current: str | None
+) -> bool:
+    """Set the title of the caller's transcription, only if it is still
+    ``expected_current`` (compare-and-set).
+
+    Unlike save_transcription (a merge of a whole copy loaded earlier), this never
+    overwrites a change made meanwhile, e.g. the user renaming the transcription
+    while its job runs. False if nothing was updated (renamed meanwhile, or no such
+    transcription of this user).
+    """
+    current = Transcription.title.is_(None) if expected_current is None else Transcription.title == expected_current
+    with Session(engine) as session:
+        result = session.execute(
+            update(Transcription)
+            .where(Transcription.id == transcription_id, Transcription.user_id == user_id, current)
+            .values(title=title, updated_datetime=datetime.now(UTC))
+        )
+        session.commit()
+        return result.rowcount == 1
+
+
+def get_transcription_title(transcription_id: UUID) -> str | None:
+    """The stored title (None if the transcription does not exist)."""
+    with Session(engine) as session:
+        return session.exec(select(Transcription.title).where(Transcription.id == transcription_id)).first()
 
 
 def save_transcription(
@@ -77,12 +129,42 @@ def save_transcription(
     user_id: UUID,
 ) -> Transcription:
     with Session(engine) as session:
-        _ensure_owner_unchanged(session, Transcription.user_id, transcription_data.id, user_id)
+        _ensure_owner_unchanged(session, Transcription.user_id, transcription_data.id, user_id, actor_id=user_id)
         transcription_data.user_id = user_id
         merged = session.merge(transcription_data)
         session.commit()
         session.refresh(merged)
         return merged
+
+
+# Fixed, user-facing reasons for client-caused failures (never the exception's text).
+_CLIENT_ERROR_MESSAGES = {
+    ("Transcription", 422): (
+        "Transcription failed: the speech service could not process this audio. Check that the file "
+        "is a supported audio format and not too long; if it is, contact support. Retrying the same "
+        "file is unlikely to help."
+    ),
+    ("Minutes generation", 400): "Minutes generation failed: there is no transcript to generate minutes from.",
+}
+
+
+def user_error_message(error: BaseException, what: str) -> str:
+    """The error text stored on a job or minute version and shown to the user.
+
+    Never the exception's own text: it can quote transcript, prompts or a service
+    response (as logs, blob metadata and Sentry already avoid). A client-caused
+    failure (HTTP 4xx) gets a fixed reason that says retrying will not help;
+    anything else is reported as transient, with the type so support can tell
+    failures apart.
+    """
+    status = error.status_code if isinstance(error, HTTPException) else None
+    if isinstance(status, int) and 400 <= status < 500:  # noqa: PLR2004
+        return _CLIENT_ERROR_MESSAGES.get(
+            (what, status),
+            f"{what} failed: the request could not be processed (error {status}). "
+            "Retrying is unlikely to help; please contact support.",
+        )
+    return f"{what} failed ({type(error).__name__}). Please try again, or contact support if it keeps happening."
 
 
 def create_error_minute_version(
@@ -121,7 +203,7 @@ def create_error_minute_version(
         "transcription_id": transcription_id,
         "html_content": "",
         "is_generating": False,
-        "error_message": str(error),
+        "error_message": user_error_message(error, "Minutes generation"),
     }
     if template is not None:
         kwargs["template"] = template
@@ -135,12 +217,16 @@ def save_minute_version(
     minute_data: MinuteVersion,
     *,
     check_owner: bool = True,
+    actor_id: UUID | None = None,
 ) -> MinuteVersion:
     """``check_owner=False`` only for IDs the server generated itself (SEC-1 guard
-    skipped: no conflict is possible, and it saves a locking query)."""
+    skipped: no conflict is possible, and it saves a locking query). ``actor_id``: the
+    requesting user, for the audit record of a refusal."""
     with Session(engine) as session:
         if check_owner:
-            _ensure_owner_unchanged(session, MinuteVersion.transcription_id, minute_data.id, minute_data.transcription_id)
+            _ensure_owner_unchanged(
+                session, MinuteVersion.transcription_id, minute_data.id, minute_data.transcription_id, actor_id=actor_id
+            )
         minute_data.template = (
             minute_data.template.model_dump() if hasattr(minute_data.template, "model_dump") else minute_data.template
         )
@@ -336,12 +422,25 @@ def save_transcription_job(
     job: TranscriptionJob,
     *,
     check_owner: bool = True,
+    from_client: bool = False,
+    actor_id: UUID | None = None,
 ) -> TranscriptionJob:
     """``check_owner=False`` only for IDs the server generated itself (see
-    save_minute_version)."""
+    save_minute_version).
+
+    ``from_client=True`` for a job sent by a client: its ``provenance`` is ignored and
+    the stored one kept (DIAAT-286: provenance says what produced the output, so only
+    the server writes it).
+    """
     with Session(engine) as session:
         if check_owner:
-            _ensure_owner_unchanged(session, TranscriptionJob.transcription_id, job.id, job.transcription_id)
+            _ensure_owner_unchanged(
+                session, TranscriptionJob.transcription_id, job.id, job.transcription_id, actor_id=actor_id
+            )
+        if from_client:
+            job.provenance = session.exec(
+                select(TranscriptionJob.provenance).where(TranscriptionJob.id == job.id)
+            ).first()
         job.dialogue_entries = [
             entry.model_dump() if hasattr(entry, "model_dump") else entry for entry in job.dialogue_entries
         ]
@@ -408,8 +507,7 @@ def get_tags_for_transcription(transcription_id: UUID, user_id: UUID) -> list[Ta
     with Session(engine) as session:
         # Verify transcription exists and belongs to user
         transcription = session.get(Transcription, transcription_id)
-        if not transcription or transcription.user_id != user_id:
-            raise HTTPException(status_code=404, detail="Transcription not found")
+        _blocked_if_not_owner(transcription, user_id, READ)
 
         # Load tags with selectinload
         statement = (
@@ -448,8 +546,7 @@ def add_tag_to_transcription(transcription_id: UUID, tag_name: str, user_id: UUI
     with Session(engine) as session:
         # Verify transcription exists and belongs to user
         transcription = session.get(Transcription, transcription_id)
-        if not transcription or transcription.user_id != user_id:
-            raise HTTPException(status_code=404, detail="Transcription not found")
+        _blocked_if_not_owner(transcription, user_id, WRITE)
 
         # Get or create the tag
         tag = get_or_create_tag(tag_name)
@@ -478,8 +575,7 @@ def remove_tag_from_transcription(transcription_id: UUID, tag_name: str, user_id
     with Session(engine) as session:
         # Verify transcription exists and belongs to user
         transcription = session.get(Transcription, transcription_id)
-        if not transcription or transcription.user_id != user_id:
-            raise HTTPException(status_code=404, detail="Transcription not found")
+        _blocked_if_not_owner(transcription, user_id, WRITE)
 
         # Normalize tag name
         normalized_name = tag_name.strip().lower()

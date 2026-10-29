@@ -170,13 +170,14 @@ class TestTranscribeAudioWithAzure:
         audio_tuple = posted_files[0]["audio"]
         assert audio_tuple[0] == audio_file.name  # not hardcoded "audio.webm"
 
-    async def test_nested_error_response_raises_422(self, mock_settings, audio_file, mock_http_response):
-        """Azure nested error shape {'error': {'code': '401', 'message': '...'}} surfaces correctly."""
+    async def test_nested_auth_error_is_a_service_failure(self, mock_settings, audio_file, mock_http_response):
+        """An invalid key (401) is the service's failure, not the audio's: 502, so the
+        user is told to retry rather than to check their file."""
         with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_client.post = AsyncMock(return_value=mock_http_response({
                 "error": {"code": "401", "message": "Access denied due to invalid subscription key"}
-            }))
+            }, status_code=401))
             mock_client_class.return_value.__aenter__.return_value = mock_client
 
             from transcribe_api.stt.fast_client import transcribe_audio_with_azure
@@ -184,7 +185,7 @@ class TestTranscribeAudioWithAzure:
             with pytest.raises(HTTPException) as exc:
                 await transcribe_audio_with_azure(audio_file)
 
-        assert exc.value.status_code == 422
+        assert exc.value.status_code == 502
         assert "Access denied due to invalid subscription key" in exc.value.detail
 
     async def test_top_level_error_response_raises_422(self, mock_settings, audio_file, mock_http_response):
@@ -193,7 +194,7 @@ class TestTranscribeAudioWithAzure:
             mock_client = AsyncMock()
             mock_client.post = AsyncMock(return_value=mock_http_response({
                 "code": "InvalidRequest", "message": "Bad audio format"
-            }))
+            }, status_code=400))
             mock_client_class.return_value.__aenter__.return_value = mock_client
 
             from transcribe_api.stt.fast_client import transcribe_audio_with_azure
@@ -203,6 +204,24 @@ class TestTranscribeAudioWithAzure:
 
         assert exc.value.status_code == 422
         assert "Bad audio format" in exc.value.detail
+
+    @pytest.mark.parametrize(("status", "expected"), [(403, 502), (429, 502), (503, 502), (200, 502), (415, 422)])
+    async def test_only_azure_client_rejections_are_422(
+        self, mock_settings, audio_file, mock_http_response, status, expected
+    ):
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(
+                return_value=mock_http_response({"error": {"code": "X", "message": "m"}}, status_code=status)
+            )
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            from transcribe_api.stt.fast_client import transcribe_audio_with_azure
+
+            with pytest.raises(HTTPException) as exc:
+                await transcribe_audio_with_azure(audio_file)
+
+        assert exc.value.status_code == expected
 
     async def test_empty_phrases_raises_500(self, mock_settings, audio_file, mock_http_response):
         with patch("httpx.AsyncClient") as mock_client_class:

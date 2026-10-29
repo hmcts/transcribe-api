@@ -254,15 +254,14 @@ class TestMarkBlobInProgress:
 
 
 class TestJourney:
-    """DIAAT-276: processing runs in the transcription journey (same ID as the upload)."""
+    """The poller attaches no journey: the file name's UUID is client input and may
+    name another user's transcription. The pipeline attaches it after the save."""
 
     @pytest.mark.asyncio
-    async def test_pipeline_runs_in_the_transcription_journey(self, service):
+    async def test_no_journey_before_the_transcription_is_saved(self, service):
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from hmcts_otel import current_journey
-
-        from transcribe_api.runtime.telemetry import JOURNEY_TRANSCRIPTION
 
         tid = "6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f"
         seen = {}
@@ -279,5 +278,4 @@ class TestJourney:
             patch("transcribe_api.stt.work_poller.transcribe_and_generate_llm_output", fake_pipeline),
         ):
             assert await service.process_discovered_audio(make_blob(f"user-uploads/oid/{tid}.mp4"))
-        assert seen["journey"].type == JOURNEY_TRANSCRIPTION
-        assert seen["journey"].id == tid
+        assert seen["journey"] is None

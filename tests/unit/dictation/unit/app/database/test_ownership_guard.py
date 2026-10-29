@@ -40,11 +40,6 @@ def _user(engine) -> User:
         return user
 
 
-def _title(engine, transcription_id):
-    with Session(engine) as session:
-        return session.get(Transcription, transcription_id).title
-
-
 def _owner(engine, transcription_id):
     with Session(engine) as session:
         return session.get(Transcription, transcription_id).user_id
@@ -128,7 +123,7 @@ def test_an_upload_naming_your_own_transcription_keeps_its_fields(engine):
     new_id = uuid4()
     created = db.load_or_create_transcription(str(new_id), owner.id)
     assert created.id == new_id
-    assert _title(engine, saved.id) == "Hearing 12 May"
+    assert db.get_transcription_title(saved.id) == "Hearing 12 May"
 
 
 def test_the_ownership_lock_does_not_block_child_inserts():
@@ -142,3 +137,23 @@ def test_the_ownership_lock_does_not_block_child_inserts():
     import inspect
 
     assert "key_share=True" in inspect.getsource(db._ensure_owner_unchanged)
+
+
+def test_title_update_never_overwrites_a_rename_and_respects_the_owner(engine):
+    owner, other = _user(engine), _user(engine)
+    saved = db.save_transcription(Transcription(), owner.id)  # the job starts: no title
+
+    assert db.save_transcription_title(saved.id, owner.id, "Generated", None) is True
+    assert db.get_transcription_title(saved.id) == "Generated"
+
+    # The user renames it; a later (stale) update must not overwrite that.
+    with Session(engine) as session:
+        row = session.get(Transcription, saved.id)
+        row.title = "Renamed by the judge"
+        session.add(row)
+        session.commit()
+    assert db.save_transcription_title(saved.id, owner.id, "Generated again", "Generated") is False
+    assert db.get_transcription_title(saved.id) == "Renamed by the judge"
+
+    assert db.save_transcription_title(saved.id, other.id, "hijack", "Renamed by the judge") is False
+    assert db.get_transcription_title(saved.id) == "Renamed by the judge"
