@@ -57,7 +57,6 @@ TEST_ENV: dict[str, str] = {
     "LANGFUSE_PUBLIC_KEY": "pk-lf-test-public-key-123456",
     "LANGFUSE_SECRET_KEY": "sk-lf-test-secret-key-123456",
     "LANGFUSE_HOST": "https://langfuse-ai.justice.gov.uk",
-    "SENTRY_DSN": "",
     "JWT_SECRET_KEY": "test-jwt-secret",
     "DISABLE_FASTAPI_INSTRUMENTATION": "true",
     "RUN_WORKERS": "false",

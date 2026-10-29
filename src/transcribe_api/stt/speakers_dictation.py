@@ -131,5 +131,5 @@ async def process_speakers_and_dialogue_entries(
             )
         return predicted_entries  # noqa: TRY300
     except Exception as e:
-        logger.warning("Speaker naming failed (%s)", type(e).__name__, exc_info=e)
+        logger.warning("Applying speaker predictions failed (%s)", type(e).__name__, exc_info=e)
         return labelled_dialogue_entries

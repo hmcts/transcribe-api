@@ -59,9 +59,9 @@ async def unhandled_exception_handler(exc: Exception, request_id: str | None = N
     """Handle unexpected exceptions (unhandled errors, bugs, etc.).
 
     This handler processes unhandled exceptions that occur during request
-    processing. It logs the exception (type and a stack redacted by hmcts-otel,
-    for App Insights), then returns a generic error message to the client to
-    avoid exposing internal implementation details.
+    processing. The app's wrapper records the exception on the request span (type
+    and redacted stack, for App Insights); this logs its type and returns a generic
+    error message, so no internal detail reaches the client.
 
     Parameters
     ----------
@@ -95,7 +95,9 @@ async def unhandled_exception_handler(exc: Exception, request_id: str | None = N
     'request_id'
     """
     rid = request_id or ""
-    logger.error("Unhandled exception (%s)", type(exc).__name__, exc_info=exc)
+    # The type only: the app's exception wrapper already records the exception (with
+    # its redacted stack) on the request span, which is exported once.
+    logger.error("Unhandled exception (%s)", type(exc).__name__)
     return JSONResponse(
         status_code=500,
         content={"detail": "Internal Server Error", "request_id": rid},

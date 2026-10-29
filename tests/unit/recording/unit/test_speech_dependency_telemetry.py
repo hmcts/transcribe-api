@@ -845,7 +845,14 @@ async def test_rejected_submission_never_carries_azures_response_text(tel, mocke
     message = str(raised.value)
     expected = "InvalidPayload" if "json" in rejection else None
     assert message == "Batch job submission failed: HTTP 400" + (f" ({expected})" if expected else "")
-    for seen in (message, caplog.text, repr(raised.value.args)):
+    # What App Insights receives for each logged exception: its type and stack, as
+    # hmcts-otel exports them (the message redacted).
+    exported = [
+        str(record.__dict__.get(key, ""))
+        for record in caplog.records
+        for key in ("exception.stacktrace", "exception.message")
+    ]
+    for seen in (message, caplog.text, repr(raised.value.args), *exported):
         for prohibited in (SAS_SIGNATURE, FILE_STEM, "Cannot access", "Bad request"):
             assert prohibited not in seen
 

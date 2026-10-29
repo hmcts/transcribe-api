@@ -75,8 +75,8 @@ class TestHttpExceptionHandler:
 
 
 class TestUnhandledExceptionHandler:
-    """The handler for unhandled exceptions: a generic 500, and the exception logged
-    (type and a stack hmcts-otel redacts) for App Insights. No Sentry on CNP."""
+    """The handler for unhandled exceptions: a generic 500 and a log of the exception's
+    type (its stack is recorded on the request span by the app's wrapper). No Sentry."""
 
     @pytest.mark.asyncio
     async def test_logs_the_exception_and_returns_a_generic_500(self):
@@ -103,13 +103,8 @@ class TestUnhandledExceptionHandler:
         assert "Test unhandled exception" not in content  # never the exception's text
         (record,) = records
         assert record.levelno == logging.ERROR
-        # The exception is attached: as exc_info, or (once hmcts-otel is configured) as
-        # its type and a stack with the message redacted, which is what is exported.
-        if record.exc_info is not None:
-            assert record.exc_info[1] is exc
-        else:
-            assert record.__dict__["exception.type"] == "ValueError"
-            assert "Test unhandled exception" not in record.__dict__["exception.stacktrace"]
+        # The type only: the app's wrapper records the exception on the request span.
+        assert record.exc_info is None and "exception.stacktrace" not in record.__dict__
         assert record.getMessage() == "Unhandled exception (ValueError)"
 
     @pytest.mark.asyncio

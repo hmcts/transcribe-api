@@ -319,8 +319,9 @@ Please generate a structured summary of this conversation."""
                 temperature=0.3,
             )
     except Exception as e:
-        # Type and redacted stack only; never the LLM's error text, to the log or the client.
-        logger.error("Realtime summary failed (%s)", type(e).__name__, exc_info=e)
+        # The type only, never the LLM's error text, to the log or the client. The 500
+        # raised from it is recorded, with its (redacted) stack, on the request span.
+        logger.error("Realtime summary failed (%s)", type(e).__name__)
         raise HTTPException(status_code=500, detail="Failed to generate realtime summary") from e
     else:
         summary = response.choices[0].message.content.strip()

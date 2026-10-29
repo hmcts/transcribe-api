@@ -301,7 +301,8 @@ def _is_transcription_showable(transcription: Transcription, current_time: datet
         return False  # noqa: TRY300
     except Exception as e:
         # If anything goes wrong, default to showing the transcription
-        logger.warning("Transcription visibility check failed (%s)", type(e).__name__, exc_info=e)
+        # Type only, no stack: this runs once per row of a transcription list.
+        logger.warning("Transcription visibility check failed (%s)", type(e).__name__)
         return True
 
 
