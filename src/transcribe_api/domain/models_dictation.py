@@ -135,7 +135,8 @@ class TranscriptionJob(BaseTable, table=True):
     error_message: str | None = Field(default=None)
     s3_audio_url: str | None = Field(default=None)
     # DIAAT-286: the configuration that produced this job's output (a decision
-    # document or a transcript). No content. Set by the server only (0003).
+    # document or a transcript), shaped by domain/provenance_dictation.Provenance. No content.
+    # Set by the server only (0003): a client's value is ignored (save_transcription_job).
     provenance: dict | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
     # Blob deletion cleanup fields
     needs_cleanup: bool = Field(default=False)
@@ -143,10 +144,12 @@ class TranscriptionJob(BaseTable, table=True):
 
 
 class AuditLog(SQLModel, table=True):
-    """Immutable record of every access-denied event fired by the auth layer.
+    """Immutable record of a security-relevant event (see app/database/audit.py).
 
-    Written by write_audit_event() which is passed as audit_writer to
-    get_allowlisted_user() on all privileged routes.
+    Access denied by the auth layer (written by write_audit_event, passed as
+    audit_writer to get_allowlisted_user), role changes, user deletions and, since
+    DIAAT-286, the sensitive actions on records: viewed, exported, deleted and
+    ownership refusals, with their outcome.
     """
 
     __tablename__ = "audit_log"
@@ -161,8 +164,9 @@ class AuditLog(SQLModel, table=True):
     user_id: str = Field(index=True)
     # Written by the auth library only; app rows identify the actor by user_id (0003).
     email: str | None = Field(default=None)
-    held_roles: list = Field(sa_column=Column(JSONB, nullable=False))
-    required_roles: list = Field(sa_column=Column(JSONB, nullable=False))
+    # App rows have no roles: an empty list (NOT NULL).
+    held_roles: list = Field(default_factory=list, sa_column=Column(JSONB, nullable=False))
+    required_roles: list = Field(default_factory=list, sa_column=Column(JSONB, nullable=False))
     resource: str | None = Field(default=None)
     detail: dict | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
     client_ip: str | None = Field(default=None)

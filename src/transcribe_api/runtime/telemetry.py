@@ -47,6 +47,12 @@ _UPLOAD_ID = re.compile(r"^uploads/[^/]+/([0-9a-fA-F-]{36})-")
 EVENT_UPLOAD_VALIDATION_FAILED = "upload.validation_failed"
 
 
+# DIAAT-277: service health (runtime/dependency_health.py), with the
+# service.dependency.up gauge and service.dependency.check.duration histogram.
+EVENT_DEPENDENCY_HEALTH_CHANGED = "dependency.health_changed"
+ATTR_DEPENDENCY_NAME = "dependency.name"
+ATTR_DEPENDENCY_STATE = "dependency.state"
+
 # Recording job lifecycle, Azure Speech and post-processing (DIAAT-281/282/283): the
 # names the code emits. They are registered, with their descriptions, in the merged
 # schema (runtime/telemetry_schema.py).

@@ -232,6 +232,31 @@ async def submit_batch_job(
     return job_url
 
 
+class SpeechNotConfiguredError(Exception):
+    """AZURE_SPEECH_ENDPOINT is not set."""
+
+
+async def check_speech_available(timeout_s: float) -> None:
+    """Health check (DIAAT-277): list at most one base model; raises on failure.
+
+    ``GET .../speechtotext/<version>/models/base?top=1`` with the same endpoint and
+    credential (the workload identity) as submissions: a read of the service catalogue,
+    no audio and nothing billed. A failed token is a SpeechAuthError. The response body
+    is never read. Not retried and not counted in the Speech call metrics, which
+    describe job traffic.
+    """
+    settings = get_settings()
+    if not settings.AZURE_SPEECH_ENDPOINT:
+        raise SpeechNotConfiguredError
+    headers = await _auth_headers()
+    endpoint = settings.AZURE_SPEECH_ENDPOINT.rstrip("/")
+    async with httpx.AsyncClient(timeout=timeout_s) as client:
+        response = await client.get(
+            f"{endpoint}/speechtotext/{SPEECH_API_VERSION}/models/base", headers=headers, params={"top": 1}
+        )
+    response.raise_for_status()
+
+
 @_RETRY_POLICY
 async def get_batch_job_status(job_url: str) -> dict:
     """Return the full Azure batch job status JSON."""

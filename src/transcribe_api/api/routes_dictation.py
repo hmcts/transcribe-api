@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import tempfile
 import threading
 import urllib.parse
@@ -27,6 +28,16 @@ from transcribe_api.domain.blob_ownership import (
     USER_UPLOADS_PREFIX,
     blob_owner_segment,
     segment_belongs_to_user,
+)
+from transcribe_api.domain.audit import (
+    SECTIONED_TRANSCRIPT,
+    TRANSCRIPT,
+    TRANSCRIPT_DELETED,
+    TRANSCRIPT_EXPORTED,
+    TRANSCRIPT_VIEWED,
+    AuditedAction,
+    audited,
+    deferred_audit,
 )
 from transcribe_api.domain.exceptions import OwnershipConflictError
 from transcribe_api.domain.interface_dictation import (
@@ -61,7 +72,7 @@ from transcribe_api.domain.models_dictation import (
 from transcribe_api.documents.content_loader import get_document_content
 from transcribe_api.documents.models import DEFAULT_JURISDICTION
 from transcribe_api.documents.template_renderer import render_hearing_document
-from transcribe_api.documents.versioning import DECISION_TEMPLATE, template_version
+from transcribe_api.documents.versioning import DECISION_TEMPLATE, track_render
 from transcribe_api.documents.llm.llm_client import (
     langfuse_client,
 )
@@ -81,6 +92,17 @@ from transcribe_api.documents.minutes.types import (
     UploadUrlRequest,
     UploadUrlResponse,
 )
+from transcribe_api.domain.provenance_dictation import decision_document_provenance
+from transcribe_api.runtime.security_events import (
+    AUDIO,
+    DOCUMENT,
+    READ,
+    TEST,
+    TRANSCRIPTION,
+    WRITE,
+    owner_matches,
+    record_ownership_violation,
+)
 from transcribe_api.runtime.telemetry import JOURNEY_SUBMISSION, transcription_id_from_key, transcription_journey
 from transcribe_api.domain.auth.approles_dictation import get_role, has_any_role
 from transcribe_api.domain.auth.dependencies_dictation import get_allowlisted_user, get_current_user
@@ -89,7 +111,9 @@ from transcribe_api.documents.llm.langfuse_models import (
     LangfuseTraceRequest,
 )
 from transcribe_api.runtime.browser_telemetry import telemetry_relay_router
+from transcribe_api.runtime.dependency_health import get_dependency_checker, health_response
 from transcribe_api.runtime.settings_dictation import get_settings
+from transcribe_api.runtime.settings_recording import get_settings as get_recording_settings
 from transcribe_api.runtime.version import APP_VERSION
 
 router = APIRouter()
@@ -109,7 +133,15 @@ router.include_router(
 )
 
 
-def _validate_blob_ownership(blob_path: str, current_user: "User", request: Request) -> None:
+def _validate_blob_ownership(
+    blob_path: str,
+    current_user: "User",
+    request: Request,
+    *,
+    resource_type: str = DOCUMENT,
+    action: str = READ,
+    object_id: UUID | str | None = None,
+) -> None:
     """Validate that a blob path's ownership segment belongs to the requesting user.
 
     Accepts both new OID-based paths (user-uploads/{azure_user_id}/...) and legacy
@@ -134,7 +166,18 @@ def _validate_blob_ownership(blob_path: str, current_user: "User", request: Requ
             _sanitize_for_log(current_user.id),
             _sanitize_for_log(f"{request.method} {request.url.path}"),
         )
+        # object_id: the transcription the request named (DIAAT-286 audit record only).
+        record_ownership_violation(resource_type, action, actor_id=current_user.id, object_id=object_id)
         raise HTTPException(status_code=403, detail="Access denied")
+
+
+def _assert_owned(transcription: Transcription, current_user: User, resource_type: str) -> None:
+    """Post-authorisation assertion (DIAAT-285): the record about to be returned is the
+    caller's. The lookup already filters by owner, so this never fires with correct
+    code; if it does, the request gets the same 404 as an unknown ID and Security is
+    alerted (security.ownership_violation, outcome "detected")."""
+    if not owner_matches(transcription.user_id, current_user.id, resource_type=resource_type, object_id=transcription.id):
+        raise HTTPException(status_code=404, detail="Transcription not found")
 
 
 # Azure Blob Storage configuration is handled through get_settings()
@@ -145,6 +188,50 @@ UK_TIMEZONE = pytz.timezone("Europe/London")
 @router.get("/health")
 async def health_check():
     return JSONResponse(status_code=200, content={"status": "ok", "version": APP_VERSION})
+
+
+@router.get("/health/dependencies")
+async def dependency_health_check():
+    """Last known health of each dependency (DIAAT-277), from the background checker.
+
+    Never runs a check: it reads the cache, so it is cheap and cannot hang. 200 when
+    no dependency is down, 503 when any is ("unknown" until the first check). Not the
+    liveness or readiness probe: those stay /health, so a dependency outage does not
+    restart every pod. Unauthenticated like /health: names and states only. Not
+    traced (hmcts-otel excludes /health paths).
+    """
+    status_code, body = health_response(get_dependency_checker().statuses())
+    return JSONResponse(status_code=status_code, content=body, headers={"Cache-Control": "no-store"})
+
+
+# The controlled alert test may run only here, and only with
+# SECURITY_ALERT_TEST_TRIGGER_ENABLED: never in a deployed CNP environment (preview and
+# aat, perftest, ithc, demo, prod) unless this list is changed on purpose.
+SECURITY_ALERT_TEST_ENVIRONMENTS = frozenset({"local", "test"})
+
+
+def security_alert_test_allowed() -> bool:
+    """Fail closed: ENVIRONMENT must be set explicitly to an allowed value. The
+    settings default ("local") does not count, so a pod whose ENVIRONMENT is missing
+    or blank cannot run the test whatever the flag says."""
+    environment = os.environ.get("ENVIRONMENT", "").strip().lower()
+    return get_recording_settings().SECURITY_ALERT_TEST_TRIGGER_ENABLED and environment in SECURITY_ALERT_TEST_ENVIRONMENTS
+
+
+@router.post("/security/alert-test", status_code=202)
+async def security_alert_test(
+    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("SystemAdministrator")])),  # noqa: ARG001, B008
+) -> dict:
+    """Controlled test of the Security alert route (DIAAT-285 AC2, ALERTS.md).
+
+    Records one synthetic security.ownership_violation with outcome "test": no record
+    is touched, nothing about the caller is recorded. SystemAdministrator only, and
+    404 (as for an unknown path) unless security_alert_test_allowed().
+    """
+    if not security_alert_test_allowed():
+        raise HTTPException(status_code=404, detail="Not Found")
+    record_ownership_violation(TRANSCRIPTION, READ, TEST)
+    return {"event": "security.ownership_violation", "outcome": "test"}
 
 
 @router.get("/healthcheck")
@@ -374,6 +461,7 @@ async def _verified_upload_transcription_id(key: str, current_user: User) -> str
             "UNAUTHORISED_ACCESS_ATTEMPT user_id=%s reason=upload_key_names_other_users_transcription",
             _sanitize_for_log(current_user.id),
         )
+        record_ownership_violation(TRANSCRIPTION, WRITE, actor_id=current_user.id, object_id=transcription_id)
         raise HTTPException(status_code=403, detail="Access denied")
     return transcription_id
 
@@ -392,12 +480,16 @@ async def upload_audio_proxy(
     # Validate the key and its owner BEFORE attaching any journey: the key is client
     # input, and a rejected request must not write events into another user's journey.
     # Rejections are client errors: recorded as a handled failure without a journey.
+    # deferred_audit: a refusal's ACCESS_DENIED row is inserted off the event loop.
     try:
-        if not key.startswith("user-uploads/"):
-            raise HTTPException(status_code=400, detail="Invalid upload key")
-        _validate_blob_ownership(key, current_user, request)
-        # Only a verified ID (new, or the caller's own transcription) names the journey.
-        transcription_id = await _verified_upload_transcription_id(key, current_user)
+        async with deferred_audit():
+            if not key.startswith("user-uploads/"):
+                raise HTTPException(status_code=400, detail="Invalid upload key")
+            _validate_blob_ownership(
+                key, current_user, request, resource_type=AUDIO, action=WRITE, object_id=transcription_id_from_key(key)
+            )
+            # Only a verified ID (new, or the caller's own transcription) names the journey.
+            transcription_id = await _verified_upload_transcription_id(key, current_user)
     except HTTPException as exc:
         code = "upload.forbidden" if exc.status_code == 403 else "upload.invalid_key"  # noqa: PLR2004
         record_event("upload.rejected", {c.OUTCOME: "failure", c.ERROR_CODE: code})
@@ -587,12 +679,13 @@ async def get_transcription(
     except pytz.exceptions.UnknownTimeZoneError:
         tz = UK_TIMEZONE
 
-    transcription = get_transcription_by_id(transcription_id, current_user.id, tz)
-    logger.info(
-        "TRANSCRIPT_VIEWED transcription_id=%s user_id=%s",
-        _sanitize_for_log(transcription_id),
-        _sanitize_for_log(current_user.id),
-    )
+    # DIAAT-286: audited in the database (audit_log), not logged.
+    async with audited(
+        TRANSCRIPT_VIEWED, actor_id=current_user.id, object_type=TRANSCRIPTION, object_id=transcription_id
+    ) as audit:
+        transcription = get_transcription_by_id(transcription_id, current_user.id, tz)
+        audit.authorised()
+        _assert_owned(transcription, current_user, TRANSCRIPTION)
     return transcription
 
 
@@ -621,12 +714,30 @@ async def get_document_download_url(
     The document blob path is stored at submission time.  This endpoint
     generates a new SAS token on each request so the URL never expires
     before the user can click it.
+
+    Audited as an export (DIAAT-286) with direct storage access: the browser fetches
+    the document from storage with this link, so the link is the export. Without it,
+    the link points at /api/download, which records the export itself; a refusal or
+    failure here is still recorded.
     """
+    async with audited(
+        TRANSCRIPT_EXPORTED,
+        actor_id=current_user.id,
+        object_type=DOCUMENT,
+        object_id=transcription_id,
+        detail={"via": "link"},
+    ) as audit:
+        return await _document_download_url(transcription_id, current_user, audit)
+
+
+async def _document_download_url(transcription_id: UUID, current_user: User, audit: AuditedAction) -> dict[str, str]:
     try:
         tz = UK_TIMEZONE
         transcription = get_transcription_by_id(transcription_id, current_user.id, tz)
     except Exception:
         raise HTTPException(status_code=404, detail="Transcription not found")  # noqa: B904
+    audit.authorised()
+    _assert_owned(transcription, current_user, DOCUMENT)
 
     # Get the blob path from the transcription job
     blob_path: str | None = None
@@ -659,6 +770,9 @@ async def get_document_download_url(
         )
     else:
         download_url = f"{settings.APP_URL.rstrip('/')}/api/download?transcription_id={transcription_id}"
+        # The link only points at /api/download, which records the export when the
+        # document is streamed: one row per download, not two.
+        audit.skip_if_successful()
 
     logger.info(
         "Generated fresh download URL for transcription %s (document: %s)",
@@ -670,16 +784,31 @@ async def get_document_download_url(
 
 
 @router.get("/download")
-async def download_document(  # noqa: C901
+async def download_document(
     transcription_id: UUID,
     request: Request,
     current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
 ):
     """Stream a transcript document from blob storage, verifying ownership before serving."""
+    async with audited(
+        TRANSCRIPT_EXPORTED,
+        actor_id=current_user.id,
+        object_type=DOCUMENT,
+        object_id=transcription_id,
+        detail={"via": "stream"},
+    ) as audit:
+        return await _stream_document(transcription_id, request, current_user, audit)
+
+
+async def _stream_document(  # noqa: C901
+    transcription_id: UUID, request: Request, current_user: User, audit: AuditedAction
+) -> StreamingResponse:
     try:
         transcription = get_transcription_by_id(transcription_id, current_user.id, UK_TIMEZONE)
     except Exception:
         raise HTTPException(status_code=404, detail="Transcription not found")  # noqa: B904
+    audit.authorised()
+    _assert_owned(transcription, current_user, DOCUMENT)
 
     blob_path: str | None = None
     if transcription.transcription_jobs:
@@ -695,12 +824,7 @@ async def download_document(  # noqa: C901
             raise HTTPException(status_code=500, detail="Stored document URL is malformed")
         blob_path = path_parts[1]
 
-    _validate_blob_ownership(blob_path, current_user, request)
-    logger.info(
-        "TRANSCRIPT_DOWNLOADED transcription_id=%s user_id=%s type=document",
-        _sanitize_for_log(transcription_id),
-        _sanitize_for_log(current_user.id),
-    )
+    _validate_blob_ownership(blob_path, current_user, request, resource_type=DOCUMENT, object_id=transcription_id)
 
     title = transcription.title or "hearing-document"
     hearing_date = transcription.created_datetime.strftime("%Y-%m-%d") if transcription.created_datetime else ""
@@ -721,7 +845,13 @@ async def download_document(  # noqa: C901
 
     client = httpx.AsyncClient()
     blob_req = client.build_request("GET", download_url, headers=fetch_headers)
-    blob_response = await client.send(blob_req, stream=True)
+    try:
+        blob_response = await client.send(blob_req, stream=True)
+    except Exception:
+        await client.aclose()
+        raise  # audited as failed
+    if blob_response.status_code >= 400:  # noqa: PLR2004 - storage refused or failed: nothing exported
+        audit.fail("storage_status")
 
     response_headers = {}
     for h in ["Content-Type", "Content-Disposition", "Content-Length", "Content-Range"]:
@@ -736,7 +866,8 @@ async def download_document(  # noqa: C901
             await blob_response.aclose()
             await client.aclose()
 
-    return StreamingResponse(generate(), status_code=blob_response.status_code, headers=response_headers)
+    # The export is recorded when the body has been sent (or failed), not now.
+    return audit.streaming_response(generate(), status_code=blob_response.status_code, headers=response_headers)
 
 
 @router.delete("/transcriptions/{transcription_id}", status_code=204)
@@ -744,13 +875,10 @@ async def delete_transcription(
     transcription_id: UUID,
     current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
 ):
-    """Delete a specific transcription by ID."""
-    delete_transcription_by_id(transcription_id, current_user.id)
-    logger.info(
-        "TRANSCRIPT_DELETED transcription_id=%s user_id=%s",
-        _sanitize_for_log(transcription_id),
-        _sanitize_for_log(current_user.id),
-    )
+    """Delete a specific transcription by ID. Audited (DIAAT-286); a refusal (404:
+    unknown or another user's) is ``denied``, an error ``failed``."""
+    async with audited(TRANSCRIPT_DELETED, actor_id=current_user.id, object_type=TRANSCRIPTION, object_id=transcription_id):
+        delete_transcription_by_id(transcription_id, current_user.id)
 
 
 @router.get(
@@ -804,7 +932,7 @@ async def save_minute_version_route(
     minute_data.transcription_id = transcription_id
 
     try:
-        saved_minute = save_minute_version(minute_data)
+        saved_minute = save_minute_version(minute_data, actor_id=current_user.id)
     except OwnershipConflictError:
         # The ID belongs to a minute version of another transcription.
         raise HTTPException(status_code=404, detail="Minute version not found") from None
@@ -831,7 +959,8 @@ async def save_transcription_job_route(
     # The job belongs to the transcription in the path (checked above), whatever the body says.
     job_data.transcription_id = transcription_id
     try:
-        job = save_transcription_job(job=job_data)
+        # Provenance is the server's: a client's value is ignored (DIAAT-286).
+        job = save_transcription_job(job=job_data, from_client=True, actor_id=current_user.id)
     except OwnershipConflictError:
         raise HTTPException(status_code=404, detail="Transcription job not found") from None
     logger.info(
@@ -848,13 +977,15 @@ async def get_transcription_jobs_route(
     transcription_id: UUID,
     current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
 ) -> list[TranscriptionJob]:
-    """Get all transcription jobs for a specific transcription."""
-    # Verify user has access to this transcription
-    transcription = get_transcription_by_id(transcription_id, current_user.id, UK_TIMEZONE)
-    if not transcription:
-        raise HTTPException(status_code=404, detail="Transcription not found")
-
-    return get_transcription_jobs(transcription_id)
+    """Get all transcription jobs for a specific transcription: the transcript text,
+    so audited as a view of the transcript (DIAAT-286)."""
+    async with audited(TRANSCRIPT_VIEWED, actor_id=current_user.id, object_type=TRANSCRIPT, object_id=transcription_id) as audit:
+        # Verify user has access to this transcription
+        transcription = get_transcription_by_id(transcription_id, current_user.id, UK_TIMEZONE)
+        if not transcription:
+            raise HTTPException(status_code=404, detail="Transcription not found")
+        audit.authorised()
+        return get_transcription_jobs(transcription_id)
 
 
 @router.get("/transcriptions/{transcription_id}/jobs/{job_id}/audio")
@@ -864,8 +995,29 @@ async def stream_audio(
     request: Request,
     current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
 ):
-    """Stream audio from blob storage with HTTP Range support for seekable playback."""
+    """Stream audio from blob storage with HTTP Range support for seekable playback.
+
+    Audited as an export (DIAAT-286) once per playback: a request for the start of the
+    file (no Range, or one from byte 0). Seeks are not recorded unless refused or failed.
+    """
+    range_header = request.headers.get("range")
+    async with audited(
+        TRANSCRIPT_EXPORTED,
+        actor_id=current_user.id,
+        object_type=AUDIO,
+        object_id=transcription_id,
+        detail={"via": "stream", "job_id": str(job_id)},
+    ) as audit:
+        if range_header and not range_header.replace(" ", "").startswith("bytes=0-"):
+            audit.skip_if_successful()
+        return await _stream_audio(transcription_id, job_id, request, current_user, audit)
+
+
+async def _stream_audio(  # noqa: C901
+    transcription_id: UUID, job_id: UUID, request: Request, current_user: User, audit: AuditedAction
+) -> StreamingResponse:
     get_transcription_by_id(transcription_id, current_user.id, UK_TIMEZONE)
+    audit.authorised()
 
     jobs = get_transcription_jobs(transcription_id)
     job = next((j for j in jobs if j.id == job_id), None)
@@ -884,13 +1036,7 @@ async def stream_audio(
     else:
         blob_path = stored_url
 
-    _validate_blob_ownership(blob_path, current_user, request)
-    logger.info(
-        "TRANSCRIPT_DOWNLOADED transcription_id=%s job_id=%s user_id=%s type=audio",
-        _sanitize_for_log(transcription_id),
-        _sanitize_for_log(job_id),
-        _sanitize_for_log(current_user.id),
-    )
+    _validate_blob_ownership(blob_path, current_user, request, resource_type=AUDIO, object_id=transcription_id)
 
     _audio_settings = get_settings()
     playback_url = await generate_blob_download_url(
@@ -905,7 +1051,13 @@ async def stream_audio(
 
     client = httpx.AsyncClient()
     blob_req = client.build_request("GET", playback_url, headers=fetch_headers)
-    blob_response = await client.send(blob_req, stream=True)
+    try:
+        blob_response = await client.send(blob_req, stream=True)
+    except Exception:
+        await client.aclose()
+        raise  # audited as failed
+    if blob_response.status_code >= 400:  # noqa: PLR2004 - storage refused or failed: nothing exported
+        audit.fail("storage_status")
 
     response_headers = {"Accept-Ranges": "bytes"}
     for h in ["Content-Type", "Content-Length", "Content-Range"]:
@@ -920,7 +1072,8 @@ async def stream_audio(
             await blob_response.aclose()
             await client.aclose()
 
-    return StreamingResponse(generate(), status_code=blob_response.status_code, headers=response_headers)
+    # The export is recorded when the body has been sent (or failed), not now.
+    return audit.streaming_response(generate(), status_code=blob_response.status_code, headers=response_headers)
 
 
 class LiveTranscriptMessage(BaseModel):
@@ -1037,10 +1190,23 @@ async def get_sectioned_transcript_route(
     transcription_id: UUID,
     current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
 ) -> TranscriptViewerResponse:
-    """Get the recorder-style sectioned transcript for a hearing if available."""
+    """Get the recorder-style sectioned transcript for a hearing if available.
+
+    Audited as a view of the transcript (DIAAT-286)."""
+    async with audited(
+        TRANSCRIPT_VIEWED, actor_id=current_user.id, object_type=SECTIONED_TRANSCRIPT, object_id=transcription_id
+    ) as audit:
+        return await _sectioned_transcript(transcription_id, current_user, audit)
+
+
+async def _sectioned_transcript(
+    transcription_id: UUID, current_user: User, audit: AuditedAction
+) -> TranscriptViewerResponse:
     transcription = get_transcription_by_id(transcription_id, current_user.id, UK_TIMEZONE)
     if not transcription:
         raise HTTPException(status_code=404, detail="Transcription not found")
+    audit.authorised()
+    _assert_owned(transcription, current_user, TRANSCRIPTION)
 
     oid_prefix = get_file_blob_path(str(current_user.azure_user_id), "live-transcription-submission-")
     email_prefix = get_file_blob_path(current_user.email, "live-transcription-submission-")
@@ -1170,7 +1336,8 @@ async def _save_live_transcription_submission(  # noqa: PLR0915
     submission_stage: StageHandle,
 ) -> LiveTranscriptionSubmissionResponse:
     # DIAAT-279: on the document events; the version is added once rendering has
-    # loaded the document content (see documents/versioning.py).
+    # loaded the document content: the content of this render only (DIAAT-286, see
+    # documents/versioning.py), also stored as the document's provenance.
     document_attributes: dict[str, str] = {"document.template": DECISION_TEMPLATE}
     blob_filename = f"live-transcription-submission-{submission_id}.json"
     blob_path = get_file_blob_path(str(current_user.azure_user_id), blob_filename)
@@ -1226,21 +1393,27 @@ async def _save_live_transcription_submission(  # noqa: PLR0915
             # template, its version and a code saying where it failed.
             temp_output_dir = Path(tempfile.gettempdir()) / "hearing_documents"
             with stage("document_generation", attributes=document_attributes) as document_stage:
-                try:
-                    # Off the event loop; no file left behind on cancellation.
-                    temp_doc_path = await _render_hearing_document_off_loop(
-                        request=request,
-                        output_dir=temp_output_dir,
-                        user_email=current_user.email,
-                    )
-                except Exception:
-                    document_stage.set_attribute("document.template_version", template_version())
-                    document_stage.error("document.render_failed")
-                    raise
-                document_attributes["document.template_version"] = template_version()
+                with track_render() as render:
+                    try:
+                        # Off the event loop; no file left behind on cancellation.
+                        temp_doc_path = await _render_hearing_document_off_loop(
+                            request=request,
+                            output_dir=temp_output_dir,
+                            user_email=current_user.email,
+                        )
+                    except Exception:
+                        document_stage.set_attribute("document.template_version", render.version)
+                        document_stage.error("document.render_failed")
+                        raise
+                generated_at = datetime.now(UTC)
+                document_attributes["document.template_version"] = render.version
                 document_stage.set_attribute(
                     "document.template_version", document_attributes["document.template_version"]
                 )
+                # DIAAT-286: stored with the document's job record, in the same insert.
+                provenance = decision_document_provenance(
+                    template=DECISION_TEMPLATE, template_version=render.version, generated_at=generated_at
+                ).to_record()
 
                 logger.info(
                     "Rendered hearing document for user %s",
@@ -1333,6 +1506,7 @@ async def _save_live_transcription_submission(  # noqa: PLR0915
             transcription_id=saved_transcription.id,
             dialogue_entries=dialogue_entries,
             s3_audio_url=doc_blob_path,
+            provenance=provenance,
         )
         save_transcription_job(transcription_job)
 
