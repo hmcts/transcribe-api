@@ -51,8 +51,8 @@ Both upstream surfaces are preserved unchanged, and they do not collide:
 - Feature branches start from `develop`, and their PRs go into `develop`. Each PR gets its own preview.
 - `develop` deploys to demo (`benchnotes.demo.platform.hmcts.net`). The permanent draft PR #45 (`develop` → `master`) rebuilds on every push to `develop`, and Flux deploys its `pr-45-*` image. Never merge, close or mark #45 ready.
 - To release, open a PR into `master` from a branch cut from `develop`. `master` deploys to AAT, then prod.
-- Merge `master` into `develop` at least every 2 weeks, by a PR from a branch cut from `master` (not from `master` itself: Jenkins stops building a branch that is the head of an open PR), with a merge commit. Old `pr-*` images expire after about 3 weeks, and demo pods then fail to pull.
-- Migrations go only through `master`. A feature that needs schema first lands an additive migration on `master` by its own PR; then `master` is merged into `develop`, then the feature. A revision that exists only on `develop` gives Alembic two heads at the next merge.
+- Merge `master` into `develop` at least every 2 weeks, by a PR from a branch cut from `master` (not from `master` itself: Jenkins stops building a branch that is the head of an open PR), with a merge commit. Old `pr-*` images expire after about 3 weeks, and demo pods then fail to pull. If there is nothing to merge, re-run the latest Jenkins build of `PR-45` instead, which pushes a fresh tag.
+- Migrations go only through `master`. A feature that needs schema first lands an additive migration on `master` by its own PR; then `master` is merged into `develop`, then the feature. Otherwise a revision on `develop` and a different one on `master` from the same parent give Alembic two heads at the next merge.
 - `demo` is the CNP branch for the demo Terraform only, and every `master` build overwrites it. Demo uses `master`'s Helm chart, so demo-only settings go in cnp-flux-config `apps/transcribe/transcribe-api/demo.yaml`.
 
 ## Local development
