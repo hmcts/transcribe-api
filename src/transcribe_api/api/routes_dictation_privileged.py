@@ -24,7 +24,7 @@ from transcribe_api.api.document_content_models import (
     LegalFrameworkPayload,
 )
 from transcribe_api.stt.utils import generate_blob_download_url
-from transcribe_api.domain.audit import write_audit_event
+from transcribe_api.domain.audit import TRANSCRIPT_EXPORTED, TRANSCRIPT_VIEWED, USER_DELETED, audited, write_audit_event
 from transcribe_api.runtime.db_connection import get_engine
 from transcribe_api.domain.exceptions import UserHasTranscriptionsError, UserNotFoundError
 from transcribe_api.domain.interface_dictation import (
@@ -35,7 +35,7 @@ from transcribe_api.domain.interface_dictation import (
     get_user_by_id,
     update_user,
 )
-from transcribe_api.domain.models_dictation import DocumentContent, Transcription
+from transcribe_api.domain.models_dictation import DocumentContent
 from transcribe_api.documents.content_loader import clear_cache as clear_content_cache
 from transcribe_api.documents.content_loader import get_document_content as load_document_content
 from transcribe_api.documents.minutes.types import AdminTranscriptionListResponse, AdminTranscriptionRecord
@@ -45,6 +45,7 @@ from transcribe_api.runtime.log_sanitization import sanitize_for_log
 from transcribe_api.runtime.settings_dictation import get_settings
 
 if TYPE_CHECKING:
+    from transcribe_api.domain.audit import AuditedAction
     from transcribe_api.domain.models_dictation import User
 
 logger = logging.getLogger(__name__)
@@ -395,20 +396,55 @@ async def admin_list_transcriptions(
     return AdminTranscriptionListResponse(items=items, total=total, page=page, page_size=page_size)
 
 
-@router.get("/transcriptions/{transcription_id}", response_model=Transcription)
+class AdminJobProvenance(BaseModel):
+    """What produced one job's output (DIAAT-286, transcribe_api.domain.provenance_dictation.Provenance)."""
+
+    job_id: UUID
+    provenance: dict[str, Any] | None
+
+
+class AdminTranscriptionDetail(BaseModel):
+    """The transcription's fields, plus the provenance of its outputs."""
+
+    id: UUID
+    user_id: UUID | None = None
+    title: str | None = None
+    created_datetime: datetime | None = None
+    updated_datetime: datetime | None = None
+    provenance: list[AdminJobProvenance] = []
+
+
+@router.get("/transcriptions/{transcription_id}", response_model=AdminTranscriptionDetail)
 async def admin_get_transcription(
     transcription_id: UUID,
     admin_user: User = Depends(get_allowlisted_user(required_roles_all=[_require_role("SystemAdministrator")], audit_writer=write_audit_event)),  # noqa: B008
-) -> Transcription:
-    """View any transcription regardless of owner. SystemAdministrator only."""
-    transcription = admin_get_transcription_by_id(transcription_id)
+) -> AdminTranscriptionDetail:
+    """View any transcription regardless of owner, with the provenance of its outputs.
+    SystemAdministrator only. Audited (DIAAT-286) as a privileged view."""
+    with audited(
+        TRANSCRIPT_VIEWED,
+        actor_id=admin_user.id,
+        object_type="transcription",
+        object_id=transcription_id,
+        detail={"privileged": True},
+    ) as audit:
+        transcription = admin_get_transcription_by_id(transcription_id)
+        audit.authorised()
     _log_admin_transcript_access(
         admin_id=str(admin_user.id),
         action="VIEW_TRANSCRIPTION",
         target_transcription_id=str(transcription_id),
         target_owner_id=str(transcription.user_id),
     )
-    return transcription
+    jobs = sorted(transcription.transcription_jobs or [], key=lambda job: job.created_datetime)
+    return AdminTranscriptionDetail(
+        id=transcription.id,
+        user_id=transcription.user_id,
+        title=transcription.title,
+        created_datetime=transcription.created_datetime,
+        updated_datetime=transcription.updated_datetime,
+        provenance=[AdminJobProvenance(job_id=job.id, provenance=job.provenance) for job in jobs],
+    )
 
 
 @router.get("/transcriptions/{transcription_id}/document-download")
@@ -416,8 +452,21 @@ async def admin_get_document_download_url(
     transcription_id: UUID,
     admin_user: User = Depends(get_allowlisted_user(required_roles_all=[_require_role("SystemAdministrator")], audit_writer=write_audit_event)),  # noqa: B008
 ) -> dict[str, str]:
-    """Download any transcript document regardless of owner. SystemAdministrator only."""
+    """Download any transcript document regardless of owner. SystemAdministrator only.
+    Audited (DIAAT-286) as a privileged export."""
+    with audited(
+        TRANSCRIPT_EXPORTED,
+        actor_id=admin_user.id,
+        object_type="document",
+        object_id=transcription_id,
+        detail={"via": "link", "privileged": True},
+    ) as audit:
+        return await _admin_document_download_url(transcription_id, admin_user, audit)
+
+
+async def _admin_document_download_url(transcription_id: UUID, admin_user: User, audit: AuditedAction) -> dict[str, str]:
     transcription = admin_get_transcription_by_id(transcription_id)
+    audit.authorised()
 
     blob_path: str | None = None
     if transcription.transcription_jobs:
@@ -599,7 +648,7 @@ async def admin_delete_user_route(
     )
     app_roles: list[str] = admin_user.app_roles
     write_audit_event(AuditEvent(
-        event_type="USER_DELETED",
+        event_type=USER_DELETED,
         user_id=str(admin_user.id),
         email=admin_user.email,
         held_roles=app_roles,

@@ -32,8 +32,12 @@ def before_flush(session, flush_context, instances):  # noqa: ARG001
             obj.updated_datetime = datetime.now(UTC)
 
 
-def _ensure_owner_unchanged(session: Session, owner_column, record_id: UUID | None, owner: UUID | None) -> None:
+def _ensure_owner_unchanged(
+    session: Session, owner_column, record_id: UUID | None, owner: UUID | None, *, actor_id: UUID | None = None
+) -> None:
     """Refuse to re-parent an existing row (SEC-1). The row is locked until commit.
+
+    ``actor_id``: the user making the request, for the audit record (DIAAT-286).
 
     FOR NO KEY UPDATE (key_share): enough to stop a concurrent re-parenting, and,
     unlike FOR UPDATE, it does not block inserts of child rows whose foreign key
@@ -46,12 +50,15 @@ def _ensure_owner_unchanged(session: Session, owner_column, record_id: UUID | No
         select(owner_column).where(model.id == record_id).with_for_update(key_share=True)
     ).first()
     if existing_owner is not None and str(existing_owner) != str(owner):
-        raise _ownership_conflict(model.__name__)
+        raise _ownership_conflict(model.__name__, actor_id=actor_id, object_id=record_id)
 
 
-def _ownership_conflict(record_type: str) -> OwnershipConflictError:
-    """The SEC-1 refusal, recorded as a blocked security event (DIAAT-285) where it is raised."""
-    record_ownership_violation(resource_type_of(record_type), REASSIGN)
+def _ownership_conflict(
+    record_type: str, *, actor_id: UUID | None = None, object_id: UUID | None = None
+) -> OwnershipConflictError:
+    """The SEC-1 refusal, recorded as a blocked security event (DIAAT-285) and audited
+    (DIAAT-286, when the actor is known) where it is raised."""
+    record_ownership_violation(resource_type_of(record_type), REASSIGN, actor_id=actor_id, object_id=object_id)
     return OwnershipConflictError(record_type)
 
 
@@ -61,7 +68,7 @@ def _blocked_if_not_owner(transcription: Transcription | None, user_id: UUID, ac
     if transcription is None:
         raise HTTPException(status_code=404, detail="Transcription not found")
     if transcription.user_id != user_id:
-        record_ownership_violation(TRANSCRIPTION, action)
+        record_ownership_violation(TRANSCRIPTION, action, actor_id=user_id, object_id=transcription.id)
         raise HTTPException(status_code=404, detail="Transcription not found")
 
 
@@ -84,7 +91,7 @@ def load_or_create_transcription(transcription_id: str | UUID | None, user_id: U
             existing = session.get(Transcription, record_id)
             if existing is not None:
                 if str(existing.user_id) != str(user_id):
-                    raise _ownership_conflict(Transcription.__name__)
+                    raise _ownership_conflict(Transcription.__name__, actor_id=user_id, object_id=record_id)
                 return existing
     return save_transcription(Transcription(id=record_id), user_id)
 
@@ -122,7 +129,7 @@ def save_transcription(
     user_id: UUID,
 ) -> Transcription:
     with Session(engine) as session:
-        _ensure_owner_unchanged(session, Transcription.user_id, transcription_data.id, user_id)
+        _ensure_owner_unchanged(session, Transcription.user_id, transcription_data.id, user_id, actor_id=user_id)
         transcription_data.user_id = user_id
         merged = session.merge(transcription_data)
         session.commit()
@@ -210,12 +217,16 @@ def save_minute_version(
     minute_data: MinuteVersion,
     *,
     check_owner: bool = True,
+    actor_id: UUID | None = None,
 ) -> MinuteVersion:
     """``check_owner=False`` only for IDs the server generated itself (SEC-1 guard
-    skipped: no conflict is possible, and it saves a locking query)."""
+    skipped: no conflict is possible, and it saves a locking query). ``actor_id``: the
+    requesting user, for the audit record of a refusal."""
     with Session(engine) as session:
         if check_owner:
-            _ensure_owner_unchanged(session, MinuteVersion.transcription_id, minute_data.id, minute_data.transcription_id)
+            _ensure_owner_unchanged(
+                session, MinuteVersion.transcription_id, minute_data.id, minute_data.transcription_id, actor_id=actor_id
+            )
         minute_data.template = (
             minute_data.template.model_dump() if hasattr(minute_data.template, "model_dump") else minute_data.template
         )
@@ -411,12 +422,25 @@ def save_transcription_job(
     job: TranscriptionJob,
     *,
     check_owner: bool = True,
+    from_client: bool = False,
+    actor_id: UUID | None = None,
 ) -> TranscriptionJob:
     """``check_owner=False`` only for IDs the server generated itself (see
-    save_minute_version)."""
+    save_minute_version).
+
+    ``from_client=True`` for a job sent by a client: its ``provenance`` is ignored and
+    the stored one kept (DIAAT-286: provenance says what produced the output, so only
+    the server writes it).
+    """
     with Session(engine) as session:
         if check_owner:
-            _ensure_owner_unchanged(session, TranscriptionJob.transcription_id, job.id, job.transcription_id)
+            _ensure_owner_unchanged(
+                session, TranscriptionJob.transcription_id, job.id, job.transcription_id, actor_id=actor_id
+            )
+        if from_client:
+            job.provenance = session.exec(
+                select(TranscriptionJob.provenance).where(TranscriptionJob.id == job.id)
+            ).first()
         job.dialogue_entries = [
             entry.model_dump() if hasattr(entry, "model_dump") else entry for entry in job.dialogue_entries
         ]

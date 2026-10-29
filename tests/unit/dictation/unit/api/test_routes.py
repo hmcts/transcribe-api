@@ -323,7 +323,12 @@ def _make_transcription(user_id=None) -> "Transcription":
     return t
 
 
-def test_transcript_viewed_logs_audit_event(client, as_user, mocker):
+# DIAAT-286: viewed and deleted are audit records in the database (audit_log), which
+# replaced the TRANSCRIPT_VIEWED / TRANSCRIPT_DELETED log lines. Detailed tests:
+# tests/unit/api/test_audit_events.py.
+
+
+def test_transcript_viewed_writes_an_audit_record(client, as_user, mocker, audit_log):
     user = _make_user(roles=["Judge"])
     as_user(user)
     transcription_id = uuid.uuid4()
@@ -331,46 +336,30 @@ def test_transcript_viewed_logs_audit_event(client, as_user, mocker):
     mock_logger = mocker.patch("transcribe_api.api.routes_dictation.logger")
     response = client.get(f"/api/transcriptions/{transcription_id}")
     assert response.status_code == 200
-    log_messages = [call[0][0] for call in mock_logger.info.call_args_list]
-    assert any("TRANSCRIPT_VIEWED" in msg for msg in log_messages)
+    (row,) = audit_log.rows()
+    assert (row.event_type, row.outcome, row.user_id, row.object_id) == (
+        "transcript.view",
+        "success",
+        str(user.id),
+        str(transcription_id),
+    )
+    assert not any("transcript.view" in c[0][0] for c in mock_logger.info.call_args_list)
 
 
-def test_transcript_viewed_log_contains_transcription_id_and_user(client, as_user, mocker):
-    user = _make_user(roles=["Judge"])
-    as_user(user)
-    transcription_id = uuid.uuid4()
-    mocker.patch("transcribe_api.api.routes_dictation.get_transcription_by_id", return_value=_make_transcription(user.id))
-    mock_logger = mocker.patch("transcribe_api.api.routes_dictation.logger")
-    client.get(f"/api/transcriptions/{transcription_id}")
-    viewed_call = next(c for c in mock_logger.info.call_args_list if "TRANSCRIPT_VIEWED" in c[0][0])
-    args = viewed_call[0]
-    assert str(transcription_id) in str(args[1])
-    assert str(user.id) in str(args[2])
-
-
-def test_transcript_deleted_logs_audit_event(client, as_user, mocker):
+def test_transcript_deleted_writes_an_audit_record(client, as_user, mocker, audit_log):
     user = _make_user(roles=["Judge"])
     as_user(user)
     transcription_id = uuid.uuid4()
     mocker.patch("transcribe_api.api.routes_dictation.delete_transcription_by_id")
-    mock_logger = mocker.patch("transcribe_api.api.routes_dictation.logger")
     response = client.delete(f"/api/transcriptions/{transcription_id}")
     assert response.status_code == 204
-    log_messages = [call[0][0] for call in mock_logger.info.call_args_list]
-    assert any("TRANSCRIPT_DELETED" in msg for msg in log_messages)
-
-
-def test_transcript_deleted_log_contains_transcription_id_and_user(client, as_user, mocker):
-    user = _make_user(roles=["Judge"])
-    as_user(user)
-    transcription_id = uuid.uuid4()
-    mocker.patch("transcribe_api.api.routes_dictation.delete_transcription_by_id")
-    mock_logger = mocker.patch("transcribe_api.api.routes_dictation.logger")
-    client.delete(f"/api/transcriptions/{transcription_id}")
-    deleted_call = next(c for c in mock_logger.info.call_args_list if "TRANSCRIPT_DELETED" in c[0][0])
-    args = deleted_call[0]
-    assert str(transcription_id) in str(args[1])
-    assert str(user.id) in str(args[2])
+    (row,) = audit_log.rows()
+    assert (row.event_type, row.outcome, row.user_id, row.object_id) == (
+        "transcript.delete",
+        "success",
+        str(user.id),
+        str(transcription_id),
+    )
 
 
 def test_transcript_job_submitted_logs_audit_event(client, as_user, mocker):

@@ -542,3 +542,52 @@ def test_admin_document_download_uses_configured_ttl(client, as_user, mock_admin
     client.get(f"/api/admin/transcriptions/{transcription.id}/document-download")
     _, kwargs = mock_generate.call_args
     assert kwargs["expiry_hours"] == pytest.approx(30 / 60)
+
+
+# ---------------------------------------------------------------------------
+# DIAAT-286: privileged access is audited in the database (audit_log)
+# ---------------------------------------------------------------------------
+
+def test_an_administrator_viewing_a_record_is_audited_as_privileged(client, as_user, mock_admin_get, audit_log):
+    admin = _make_user(roles=["SystemAdministrator"])
+    as_user(admin)
+    transcription, _ = mock_admin_get
+    assert client.get(f"/api/admin/transcriptions/{transcription.id}").status_code == 200
+    (row,) = audit_log.rows()
+    assert (row.event_type, row.outcome, row.user_id, row.object_id, row.detail) == (
+        "transcript.view",
+        "success",
+        str(admin.id),
+        str(transcription.id),
+        {"privileged": True},
+    )
+
+
+def test_an_administrator_viewing_an_unknown_record_is_audited_as_denied(client, as_user, mocker, audit_log):
+    as_user(_make_user(roles=["SystemAdministrator"]))
+    from fastapi import HTTPException
+    mocker.patch(
+        "transcribe_api.api.routes_dictation_privileged.admin_get_transcription_by_id",
+        side_effect=HTTPException(status_code=404, detail="Transcription not found"),
+    )
+    assert client.get(f"/api/admin/transcriptions/{uuid.uuid4()}").status_code == 404
+    (row,) = audit_log.rows()
+    assert row.outcome == "denied"
+
+
+def test_an_administrator_document_link_is_audited_as_a_privileged_export(
+    client, as_user, mock_admin_download, audit_log
+):
+    admin = _make_user(roles=["SystemAdministrator"])
+    as_user(admin)
+    transcription, _ = mock_admin_download
+    assert client.get(f"/api/admin/transcriptions/{transcription.id}/document-download").status_code == 200
+    (row,) = audit_log.rows()
+    assert (row.event_type, row.outcome, row.user_id, row.object_type, row.detail) == (
+        "transcript.export",
+        "success",
+        str(admin.id),
+        "document",
+        {"via": "link", "privileged": True},
+    )
+
