@@ -18,15 +18,21 @@ areas. Attributes, all controlled values (registered in runtime/telemetry_schema
 The event carries the journey (the current one, or the target job's or upload's) and
 ``hmcts.request.id`` (added by hmcts-otel), and nothing else: no user ID, owner ID,
 email, record ID, blob or file name, title or content. Investigators correlate through
-``hmcts.request.id`` with the application's logs (``UNAUTHORISED_ACCESS_ATTEMPT``) and,
-once DIAAT-286 adds them, the audit records, which say who and what.
+``hmcts.request.id`` with the audit record (DIAAT-286, ``audit_log.request_id``), which
+says who and what: the same call writes it, in the database, with the actor and record
+IDs passed here (domain/audit.py), and with the application's logs
+(``UNAUTHORISED_ACCESS_ATTEMPT``).
 """
 
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from hmcts_otel import Journey, record_event
+
+if TYPE_CHECKING:
+    from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
@@ -72,13 +78,20 @@ def record_ownership_violation(
     outcome: str = BLOCKED,
     *,
     journey: Journey | None = None,
+    actor_id: UUID | str | None = None,
+    object_id: UUID | str | None = None,
 ) -> None:
-    """Record ``security.ownership_violation``: the single place that does.
+    """Record ``security.ownership_violation`` (no identifier) and its audit record.
 
-    Only the three enums, plus the request ID and the journey that record_event adds
-    (``journey`` if given, e.g. the target job, else the current one). Nothing about
-    who the caller or the owner is. ``detected`` is also logged at ERROR (types only):
-    it means an authorisation check let a non-owner through.
+    Telemetry: only the three enums, plus the request ID and the journey that
+    record_event adds (``journey`` if given, e.g. the target job, else the current
+    one). Nothing about who the caller or the owner is. ``detected`` is also logged at
+    ERROR (types only): it means an authorisation check let a non-owner through.
+
+    Audit (DIAAT-286): the database row gets ``actor_id`` (the caller's internal user
+    ID) and ``object_id`` (the record they tried to reach): it marks the request's
+    audited action denied, or is an ``ACCESS_DENIED`` row of its own. Neither ID
+    reaches telemetry. Not for the controlled test.
     """
     record_event(
         EVENT_OWNERSHIP_VIOLATION,
@@ -87,6 +100,10 @@ def record_ownership_violation(
     )
     if outcome == DETECTED:
         logger.error("OWNERSHIP_ASSERTION_FAILED resource_type=%s action=%s", resource_type, action)
+    if outcome != TEST:
+        from transcribe_api.domain.audit import note_ownership_violation  # audit imports this module's callers
+
+        note_ownership_violation(resource_type, action, outcome, actor_id=actor_id, object_id=object_id)
 
 
 def resource_type_of(model_name: str) -> str:
@@ -102,7 +119,9 @@ def resource_type_of(model_name: str) -> str:
     return resource_type
 
 
-def owner_matches(owner_id: object, user_id: object, *, resource_type: str, action: str = READ) -> bool:
+def owner_matches(
+    owner_id: object, user_id: object, *, resource_type: str, action: str = READ, object_id: object = None
+) -> bool:
     """Post-authorisation assertion: is the record about to be returned the caller's?
 
     Called after the authorised lookup, just before a record leaves the service. The
@@ -112,5 +131,11 @@ def owner_matches(owner_id: object, user_id: object, *, resource_type: str, acti
     """
     if owner_id is not None and str(owner_id) == str(user_id):
         return True
-    record_ownership_violation(resource_type, action, DETECTED)
+    record_ownership_violation(
+        resource_type,
+        action,
+        DETECTED,
+        actor_id=str(user_id),
+        object_id=str(object_id) if object_id is not None else None,
+    )
     return False

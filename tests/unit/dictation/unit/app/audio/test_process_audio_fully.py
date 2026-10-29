@@ -611,3 +611,56 @@ def test_user_error_messages_tell_permanent_failures_from_transient_ones():
 
     no_dialogue = user_error_message(HTTPException(status_code=400), "Minutes generation")
     assert "no transcript" in no_dialogue
+
+
+@pytest.mark.asyncio
+class TestTranscriptProvenance:
+    """DIAAT-286: the transcript's job row records what produced it, in the same insert."""
+
+    async def test_the_transcript_job_records_the_speech_configuration_and_dictionary(self, monkeypatch):
+        from importlib import metadata
+
+        from transcribe_api.domain.provenance_dictation import Provenance
+
+        monkeypatch.setattr("transcribe_api.runtime.version.APP_VERSION", "9.9.9-release")
+        settings = MagicMock(AZURE_SPEECH_ENDPOINT="https://uksouth.api.cognitive.microsoft.com")
+        monkeypatch.setattr("transcribe_api.stt.fast_client.get_settings", lambda: settings)
+        mock_save_job = MagicMock()
+        monkeypatch.setattr("transcribe_api.stt.pipeline.save_transcription_job", mock_save_job)
+
+        await transcribe_and_generate_llm_output(
+            user_upload_blob_storage_file_key="user-uploads/user@example.com/file.wav",
+            user_id=uuid4(),
+            user_email="user@example.com",
+            azure_user_id="a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            transcription_id=str(uuid4()),
+        )
+
+        job = mock_save_job.call_args_list[0].args[0]  # the job holding the transcript
+        provenance = Provenance.model_validate(job.provenance)
+        assert provenance.output == "transcript"
+        assert provenance.speech.endpoint_host == "uksouth.api.cognitive.microsoft.com"
+        assert provenance.speech.region == "uksouth"
+        assert provenance.speech.api_version == "2024-11-15"
+        assert provenance.speech.locales == ["en-GB"]
+        assert provenance.speech.diarization is True
+        assert [(s.name, s.version) for s in provenance.post_processing] == [
+            ("british_spelling", metadata.version("uwotm8"))
+        ]
+        assert provenance.application_release == "9.9.9-release"
+        assert provenance.template is None
+
+    async def test_a_failed_transcription_records_no_provenance(self, monkeypatch):
+        monkeypatch.setattr(
+            "transcribe_api.stt.pipeline.transcribe_audio", AsyncMock(side_effect=RuntimeError("Azure error"))
+        )
+        mock_save_job = MagicMock()
+        monkeypatch.setattr("transcribe_api.stt.pipeline.save_transcription_job", mock_save_job)
+        with pytest.raises(RuntimeError):
+            await transcribe_and_generate_llm_output(
+                user_upload_blob_storage_file_key="blob",
+                user_id=uuid4(),
+                user_email="user@example.com",
+                azure_user_id="a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            )
+        assert mock_save_job.call_args.args[0].provenance is None  # no output, nothing produced it

@@ -464,6 +464,67 @@ def test_admin_get_transcription_writes_audit_log(client, as_user, mock_admin_ge
     assert call_kwargs["target_transcription_id"] == str(transcription.id)
 
 
+def test_admin_get_transcription_keeps_its_pre_provenance_shape(client, as_user, mock_admin_get):
+    """Golden shape: the response before DIAAT-286 (response_model=Transcription),
+    serialised from the same record, is contained unchanged in today's response, which
+    only adds "provenance". response_model=Transcription serialised the model's
+    fields only: never the transcription_jobs or tags relationships, loaded or not."""
+    from fastapi import FastAPI
+
+    from transcribe_api.domain.models_dictation import DialogueEntry, Tag
+
+    as_user(_make_user(roles=["SystemAdministrator"]))
+    transcription, _ = mock_admin_get
+    job = TranscriptionJob(
+        id=uuid.uuid4(),
+        transcription_id=transcription.id,
+        dialogue_entries=[DialogueEntry(speaker="A", text="words", start_time=0.0, end_time=1.0)],
+        s3_audio_url="user-uploads/judge@justice.gov.uk/a.mp3",
+        error_message="Transcription failed",
+        provenance={"output": "transcript"},
+    )
+    transcription.transcription_jobs = [job]
+    transcription.tags = [Tag(name="urgent")]
+    transcription.updated_datetime = datetime(2026, 1, 16, 9, 30, 0, tzinfo=UTC)
+
+    before = FastAPI()  # the route's contract before 5946944
+
+    @before.get("/t", response_model=Transcription)
+    def old_route() -> Transcription:
+        return transcription
+
+    old = TestClient(before).get("/t").json()
+    new = client.get(f"/api/admin/transcriptions/{transcription.id}").json()
+
+    assert set(old) == set(Transcription.model_fields)  # what the old contract carried
+    assert {k: new[k] for k in old} == old  # every old field, same name and value
+    assert set(new) - set(old) == {"provenance"}  # additive only
+    assert new["provenance"] == [{"job_id": str(job.id), "provenance": {"output": "transcript"}}]
+
+
+def test_admin_transcription_schema_keeps_the_pre_provenance_field_types():
+    """The OpenAPI schema too: each field the Transcription response declared keeps its
+    type and nullability (a generated client is typed from it); provenance is added."""
+    from fastapi import FastAPI
+
+    from transcribe_api.api.routes_dictation_privileged import AdminTranscriptionDetail
+
+    def schema(model):
+        app = FastAPI()
+
+        @app.get("/t", response_model=model)
+        def route(): ...
+
+        components = app.openapi()["components"]["schemas"]
+        return components[model.__name__]
+
+    old, new = schema(Transcription), schema(AdminTranscriptionDetail)
+    added = set(new["properties"]) - set(old["properties"])
+    assert added == {"provenance"}
+    assert {k: new["properties"][k] for k in old["properties"]} == old["properties"]
+    assert new.get("required", []) == old.get("required", [])
+
+
 # ---------------------------------------------------------------------------
 # GET /api/admin/transcriptions/{id}/document-download
 # ---------------------------------------------------------------------------
@@ -542,3 +603,52 @@ def test_admin_document_download_uses_configured_ttl(client, as_user, mock_admin
     client.get(f"/api/admin/transcriptions/{transcription.id}/document-download")
     _, kwargs = mock_generate.call_args
     assert kwargs["expiry_hours"] == pytest.approx(30 / 60)
+
+
+# ---------------------------------------------------------------------------
+# DIAAT-286: privileged access is audited in the database (audit_log)
+# ---------------------------------------------------------------------------
+
+def test_an_administrator_viewing_a_record_is_audited_as_privileged(client, as_user, mock_admin_get, audit_log):
+    admin = _make_user(roles=["SystemAdministrator"])
+    as_user(admin)
+    transcription, _ = mock_admin_get
+    assert client.get(f"/api/admin/transcriptions/{transcription.id}").status_code == 200
+    (row,) = audit_log.rows()
+    assert (row.event_type, row.outcome, row.user_id, row.object_id, row.detail) == (
+        "transcript.view",
+        "success",
+        str(admin.id),
+        str(transcription.id),
+        {"privileged": True},
+    )
+
+
+def test_an_administrator_viewing_an_unknown_record_is_audited_as_denied(client, as_user, mocker, audit_log):
+    as_user(_make_user(roles=["SystemAdministrator"]))
+    from fastapi import HTTPException
+    mocker.patch(
+        "transcribe_api.api.routes_dictation_privileged.admin_get_transcription_by_id",
+        side_effect=HTTPException(status_code=404, detail="Transcription not found"),
+    )
+    assert client.get(f"/api/admin/transcriptions/{uuid.uuid4()}").status_code == 404
+    (row,) = audit_log.rows()
+    assert row.outcome == "denied"
+
+
+def test_an_administrator_document_link_is_audited_as_a_privileged_export(
+    client, as_user, mock_admin_download, audit_log
+):
+    admin = _make_user(roles=["SystemAdministrator"])
+    as_user(admin)
+    transcription, _ = mock_admin_download
+    assert client.get(f"/api/admin/transcriptions/{transcription.id}/document-download").status_code == 200
+    (row,) = audit_log.rows()
+    assert (row.event_type, row.outcome, row.user_id, row.object_type, row.detail) == (
+        "transcript.export",
+        "success",
+        str(admin.id),
+        "document",
+        {"via": "link", "privileged": True},
+    )
+
