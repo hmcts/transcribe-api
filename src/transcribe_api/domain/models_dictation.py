@@ -168,7 +168,8 @@ class AuditLog(SQLModel, table=True):
     held_roles: list = Field(default_factory=list, sa_column=Column(JSONB, nullable=False))
     required_roles: list = Field(default_factory=list, sa_column=Column(JSONB, nullable=False))
     resource: str | None = Field(default=None)
-    detail: dict | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
+    # none_as_null: no detail is SQL NULL, not a JSON null (as recording's table had).
+    detail: dict | None = Field(default=None, sa_column=Column(JSONB(none_as_null=True), nullable=True))
     client_ip: str | None = Field(default=None)
     # DIAAT-286 (0003): success, denied or failed. NULL on older auth-library rows.
     outcome: str | None = Field(default=None, max_length=16)

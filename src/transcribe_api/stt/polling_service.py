@@ -34,7 +34,7 @@ from transcribe_api.stt.batch_client import (
     get_batch_results,
     get_model_details,
 )
-from transcribe_api.stt.speakers_recording import process_speakers
+from transcribe_api.stt.speakers_recording import process_speakers, speaker_step_report
 from transcribe_api.stt.speech_telemetry import speech_config_attributes
 from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.runtime.db_recording import get_engine
@@ -47,6 +47,7 @@ from transcribe_api.domain.interface_recording import (
     update_job_batch_status,
 )
 from transcribe_api.domain.models_recording import BatchJobStatus
+from transcribe_api.domain.provenance_recording import TranscriptProvenance, build_provenance
 from transcribe_api.runtime.telemetry import (
     ATTR_FAILURE_SOURCE,
     ATTR_SPEECH_ERROR_CODE,
@@ -463,7 +464,8 @@ class BatchPollingService:
                 job_telemetry.CODE_POSTPROCESS_FAILED, stages=(postprocessing, processing)
             ),
         ):
-            processed_entries = process_speakers(dialogue_entries)
+            with speaker_step_report() as speaker_steps:
+                processed_entries = process_speakers(dialogue_entries)
             model_identifier = _extract_model_identifier(status_data, job.locale)
             transcription_duration_seconds = _extract_transcription_duration_seconds(
                 status_data, job.created_datetime
@@ -472,6 +474,15 @@ class BatchPollingService:
         # A call to Azure Speech, not post-processing: never raises (DIAAT-243 AC5) and is
         # measured by the Speech call metrics (DIAAT-282).
         model_display_name = await _resolve_model_display_name(model_identifier)
+        # DIAAT-286: the configuration that produced the transcript, saved with it.
+        provenance = build_provenance(
+            locale=job.locale,
+            diarization=job.enable_diarization,
+            status_data=status_data,
+            batch_job_url=job.batch_job_url,
+            model_display_name=model_display_name,
+            speaker_steps=speaker_steps,
+        )
 
         with (
             stage(STAGE_PERSISTENCE, attributes=speech_ref) as persistence,
@@ -485,6 +496,7 @@ class BatchPollingService:
                 transcription_duration_seconds,
                 model_identifier,
                 model_display_name,
+                provenance,
             )
         job_telemetry.record_transcript_available(
             processed_entries, job_telemetry.azure_last_action(status_data), polled_at, speech_ref
@@ -588,6 +600,7 @@ class BatchPollingService:
         transcription_duration_seconds=None,
         model_identifier=None,
         model_display_name=None,
+        provenance: TranscriptProvenance | None = None,
     ) -> None:
         with Session(get_engine()) as session:
             save_job_results(
@@ -598,6 +611,7 @@ class BatchPollingService:
                 transcription_duration_seconds=transcription_duration_seconds,
                 model_identifier=model_identifier,
                 model_display_name=model_display_name,
+                provenance=provenance,
             )
 
     def _record_error(self, job_id, error_msg) -> None:

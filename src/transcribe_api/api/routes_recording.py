@@ -46,6 +46,15 @@ from transcribe_api.stt.batch_client import BatchSubmissionError, delete_batch_j
 from transcribe_api.stt.preprocessing import AudioDecodeError, normalize_to_wav
 from transcribe_api.stt.speech_auth import SpeechAuthError
 from transcribe_api.stt.submission import submit_and_queue_batch_job
+from transcribe_api.domain.audit_recording import (
+    AuditRecord,
+    AuditScope,
+    DenialReason,
+    action_for_violation,
+    audited,
+    denied,
+    write_audit,
+)
 from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.runtime.db_recording import get_session
 from transcribe_api.domain.interface_recording import (
@@ -788,12 +797,26 @@ async def submit_job(
     session: Session = Depends(get_session),
     current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> JobResponse:
+    # DIAAT-286: "did X submit Y". An idempotent replay is recorded too (detail.replayed).
+    with audited("job.submit", current_user.id) as audit:
+        job = await _submit_job(body, session, current_user, audit)
+        audit.object_id = job.id
+    return _to_response(job)
+
+
+async def _submit_job(
+    body: SubmitJobRequest,
+    session: Session,
+    current_user: AuthenticatedUser,
+    audit: AuditScope,
+) -> SpeechBatchJob:
     if body.idempotency_key:
         existing = get_job_by_idempotency_key_for_user(
             session, body.idempotency_key, current_user.id
         )
         if existing:
-            return _to_response(existing)
+            audit.detail["replayed"] = True
+            return existing
 
     # blob_name is later trusted by GET /jobs/{id}/audio to read straight from
     # storage — without this check a caller could point it at another user's
@@ -804,6 +827,11 @@ async def submit_job(
         record_ownership_violation(
             "upload", "submit", "blocked", journey=_upload_journey(body.blob_name)
         )
+        # DIAAT-286: the refusal is the audit record (naming the targeted upload by its
+        # ID, never the blob name), in place of a "failed" submission.
+        upload_id = _upload_uuid(body.blob_name)
+        write_audit(denied("job.submit", current_user.id, upload_id, "not_owner", "upload"))
+        audit.skip()
         raise HTTPException(status_code=422, detail="blob_name does not belong to this user")
 
     try:
@@ -828,7 +856,8 @@ async def submit_job(
                 session, body.idempotency_key, current_user.id
             )
             if existing:
-                return _to_response(existing)
+                audit.detail["replayed"] = True
+                return existing
         raise HTTPException(
             status_code=409, detail="Concurrent submission conflict; retry"
         ) from None
@@ -841,7 +870,7 @@ async def submit_job(
             detail="The transcription service is unavailable. Please try again later.",
         ) from None
 
-    return _to_response(job)
+    return job
 
 
 @router.get("/jobs", response_model=ListJobsResponse)
@@ -868,16 +897,29 @@ async def list_jobs(
     is_admin = get_valid_roles()["SystemAdministrator"] in current_user.app_roles
     filter_user_id = None if is_admin else current_user.id
     jobs, total = list_jobs_paginated(session, filter_user_id, parsed_status, limit, offset)
+    audit_records: list[AuditRecord] = []
     if not is_admin:
         # DIAAT-285: defence in depth. The query is already filtered by user, so a
         # foreign row here is a defect: drop it rather than return its transcript.
-        jobs = [job for job in jobs if _owned_by_caller(job, current_user, "transcript", "read")]
-    return ListJobsResponse(
+        owned = []
+        for job in jobs:
+            refusal = _ownership_refusal(job, current_user, "transcript", "read")
+            if refusal is None:
+                owned.append(job)
+            else:
+                audit_records.append(refusal)
+        jobs = owned
+    response = ListJobsResponse(
         jobs=[_to_response(j) for j in jobs],
         total=total,
         limit=limit,
         offset=offset,
     )
+    # DIAAT-286: only the refusals above are audited here (rare, and important). A list
+    # is not recorded as a view of each transcript: the dashboard polls it every 5 s
+    # while a job is in flight, which would bury the real events (see audit.py).
+    write_audit(*audit_records)
+    return response
 
 
 @router.get("/jobs/{job_id}", response_model=JobResponse)
@@ -891,7 +933,12 @@ async def get_job(
         raise HTTPException(status_code=404, detail="Job not found")
     _check_job_access(job, current_user, "transcript", "read")
     _assert_job_owner(job, current_user, "transcript", "read")
-    return _to_response(job)
+    # DIAAT-286: a view only when the transcript is returned (not while processing).
+    with audited("transcript.view", current_user.id, job.id) as audit:
+        response = _to_response(job)
+        if response.dialogue_entries is None:
+            audit.skip()
+    return response
 
 
 @router.post("/jobs/{job_id}/baseline", response_model=JobResponse)
@@ -968,6 +1015,15 @@ def _job_journey(job: SpeechBatchJob) -> Journey | None:
         return None
 
 
+def _upload_uuid(blob_name: str) -> UUID | None:
+    """The upload ID in a blob name, if it has one (DIAAT-286 audit; never the name)."""
+    upload_id = upload_id_from_blob(blob_name)
+    try:
+        return UUID(upload_id) if upload_id else None
+    except ValueError:
+        return None
+
+
 def _upload_journey(blob_name: str) -> Journey | None:
     """The upload a rejected blob_name points at, if it has an upload ID (never the name)."""
     upload_id = upload_id_from_blob(blob_name)
@@ -1003,26 +1059,46 @@ def _check_job_access(
     if _is_admin(current_user):
         return
     if job.user_id is None or job.user_id != current_user.id:
-        record_ownership_violation(resource_type, action, "blocked", journey=_job_journey(job))
+        reason: DenialReason = "legacy_job" if job.user_id is None else "not_owner"
+        write_audit(_violation(job, current_user, resource_type, action, "blocked", reason))
         raise HTTPException(status_code=404, detail="Job not found")
 
 
-def _owned_by_caller(
+def _violation(
     job: SpeechBatchJob,
     current_user: AuthenticatedUser,
     resource_type: str,
     action: str,
-) -> bool:
-    """DIAAT-285: post-authorisation ownership assertion. True if the caller may have it.
+    outcome: str,
+    reason: DenialReason,
+) -> AuditRecord:
+    """DIAAT-285's security event, and the DIAAT-286 audit record for the caller to write.
+
+    The event carries no identifiers; the audit record (in the database) names the
+    caller and the job, and shares the event's hmcts.request.id.
+    """
+    record_ownership_violation(resource_type, action, outcome, journey=_job_journey(job))
+    return denied(action_for_violation(resource_type, action), current_user.id, job.id, reason)
+
+
+def _ownership_refusal(
+    job: SpeechBatchJob,
+    current_user: AuthenticatedUser,
+    resource_type: str,
+    action: str,
+) -> AuditRecord | None:
+    """DIAAT-285: post-authorisation ownership assertion. None if the caller may have it.
 
     Independent of _check_job_access on purpose: it runs after authorisation has
     already passed, so it should never fail. If it does, an authorisation check
-    is broken: record outcome "detected" (logged at ERROR) and report False.
+    is broken: record outcome "detected" (logged at ERROR) and return the audit
+    record of the refusal (DIAAT-286) for the caller to write.
     """
     if _is_admin(current_user) or (job.user_id is not None and job.user_id == current_user.id):
-        return True
-    record_ownership_violation(resource_type, action, "detected", journey=_job_journey(job))
-    return False
+        return None
+    return _violation(
+        job, current_user, resource_type, action, "detected", "ownership_assertion_failed"
+    )
 
 
 def _assert_job_owner(
@@ -1032,7 +1108,9 @@ def _assert_job_owner(
     action: str,
 ) -> None:
     """Block with the usual 404 if the post-authorisation ownership assertion fails."""
-    if not _owned_by_caller(job, current_user, resource_type, action):
+    refusal = _ownership_refusal(job, current_user, resource_type, action)
+    if refusal is not None:
+        write_audit(refusal)
         raise HTTPException(status_code=404, detail="Job not found")
 
 
@@ -1456,6 +1534,16 @@ async def get_job_audio(
         raise HTTPException(status_code=404, detail="Job not found")
     _check_job_access(job, current_user, "audio", "read")
     _assert_job_owner(job, current_user, "audio", "read")
+    # DIAAT-286: one record per request (a seek is its own Range request: partial).
+    # Recorded once the response is built; a storage error after the first bytes are
+    # sent cannot change it.
+    with audited("audio.export", current_user.id, job.id) as audit:
+        return await _job_audio_response(job, request, audit.detail)
+
+
+async def _job_audio_response(
+    job: SpeechBatchJob, request: Request, audit_detail: dict[str, object]
+) -> Response:
     if not job.audio_blob_path:
         raise HTTPException(status_code=404, detail="Audio not available for this job")
 
@@ -1473,6 +1561,7 @@ async def get_job_audio(
             raise HTTPException(status_code=404, detail="Audio file not found")
 
     start, end, is_partial = _parse_range(request.headers.get("range"), total_size)
+    audit_detail["partial"] = is_partial
     length = end - start + 1
     status_code = 206 if is_partial else 200
 
@@ -1554,7 +1643,14 @@ async def delete_job(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     _check_job_access(job, current_user, "job", "delete")
+    # DIAAT-286: success once the row is deleted; failed (http_502) if the audio could
+    # not be deleted and the job was kept.
+    with audited("job.delete", current_user.id, job.id):
+        await _delete_job(session, job)
+    return Response(status_code=204)
 
+
+async def _delete_job(session: Session, job: SpeechBatchJob) -> None:
     if job.audio_blob_path:
         try:
             if get_settings().AUDIO_STORAGE_BACKEND == "local":
@@ -1578,4 +1674,3 @@ async def delete_job(
 
     session.delete(job)
     session.commit()
-    return Response(status_code=204)

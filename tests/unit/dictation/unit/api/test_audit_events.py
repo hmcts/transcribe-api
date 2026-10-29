@@ -1013,3 +1013,18 @@ def test_a_proxied_document_link_is_not_a_second_export(client, as_user, mocker,
     assert response.status_code == 200
     assert response.json()["download_url"].endswith(f"/api/download?transcription_id={transcription.id}")
     assert audit_log.rows() == []
+
+
+def test_rows_built_elsewhere_are_written_by_the_shared_writer(audit_log):
+    """persist_rows: the recording writer's path into the shared audit_log."""
+    from transcribe_api.domain.models_dictation import AuditLog
+
+    rows = [
+        AuditLog(event_type="job.delete", user_id=str(uuid.uuid4()), outcome="success", object_type="job"),
+        AuditLog(event_type="audio.export", user_id=str(uuid.uuid4()), outcome="denied", object_type="job"),
+    ]
+    assert audit.persist_rows(rows) is True
+    assert [(r.event_type, r.outcome) for r in audit_log.rows()] == [
+        ("job.delete", "success"),
+        ("audio.export", "denied"),
+    ]

@@ -212,6 +212,21 @@ def record_audit(
     except Exception as exc:
         _write_failed(action, exc)
         return False
+    return _submit(row)
+
+
+def persist_rows(rows: list[AuditLog]) -> bool:
+    """Write rows built elsewhere (the recording area's writer, domain/audit_recording.py)
+    by the same rules as record_audit: off the event loop, fail-open. Never raises."""
+    written = True
+    for row in rows:
+        written = _submit(row) and written
+    return written
+
+
+def _submit(row: AuditLog) -> bool:
+    """Insert now when off the event loop; otherwise defer to the enclosing
+    deferred_audit() block or hand to a worker thread (True: handed over)."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
