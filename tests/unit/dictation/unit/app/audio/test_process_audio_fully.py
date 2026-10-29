@@ -129,6 +129,55 @@ class TestTranscribeAndGenerateLlmOutput:
         assert job_arg.error_message.startswith("Transcription failed (RuntimeError)")
         assert "Azure error" not in job_arg.error_message
 
+    async def test_transcription_failure_log_is_type_only(self, monkeypatch, caplog):
+        # The stage and the job's background span record the exception: this log
+        # must not add a third exception record (PR review).
+        monkeypatch.setattr(
+            "transcribe_api.stt.pipeline.transcribe_audio",
+            AsyncMock(side_effect=RuntimeError("Azure error")),
+        )
+        monkeypatch.setattr("transcribe_api.stt.pipeline.save_transcription_job", MagicMock())
+
+        with caplog.at_level("ERROR"), pytest.raises(RuntimeError):
+            await transcribe_and_generate_llm_output(
+                user_upload_blob_storage_file_key="blob",
+                user_id=uuid4(),
+                user_email="user@example.com",
+                azure_user_id="a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            )
+
+        (record,) = [r for r in caplog.records if r.getMessage() == "Transcription failed (RuntimeError)"]
+        assert record.exc_info is None
+        assert "exception.stacktrace" not in record.__dict__
+
+    async def test_failed_error_record_save_is_logged_and_the_original_failure_raised(self, monkeypatch, caplog):
+        monkeypatch.setattr(
+            "transcribe_api.stt.pipeline.transcribe_audio",
+            AsyncMock(side_effect=RuntimeError("Azure error")),
+        )
+        monkeypatch.setattr(
+            "transcribe_api.stt.pipeline.save_transcription_job", MagicMock(side_effect=OSError("database down"))
+        )
+
+        with caplog.at_level("ERROR"), pytest.raises(RuntimeError, match="Azure error"):
+            await transcribe_and_generate_llm_output(
+                user_upload_blob_storage_file_key="blob",
+                user_id=uuid4(),
+                user_email="user@example.com",
+                azure_user_id="a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            )
+
+        (record,) = [
+            r for r in caplog.records if r.getMessage() == "The failed transcription job could not be saved (OSError)"
+        ]
+        # With its stack: as exc_info, or as the exception attributes hmcts-otel
+        # converts it to once configured.
+        if record.exc_info is not None:
+            assert record.exc_info[0] is OSError
+        else:
+            assert record.__dict__.get("exception.type") == "OSError"
+            assert record.__dict__.get("exception.stacktrace")
+
     async def test_sends_email_after_completion(self, monkeypatch):
         mock_email = MagicMock()
         monkeypatch.setattr("transcribe_api.stt.pipeline.send_email", mock_email)
