@@ -15,7 +15,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from hmcts_azure_auth.audit import AuditEvent, AuditEventType
 from pydantic import BaseModel
-from sqlmodel import Session, select
+from sqlmodel import Field, Session, select
 
 from transcribe_api.api.document_content_models import (
     AnonymityStatusPayload,
@@ -35,7 +35,7 @@ from transcribe_api.domain.interface_dictation import (
     get_user_by_id,
     update_user,
 )
-from transcribe_api.domain.models_dictation import DocumentContent
+from transcribe_api.domain.models_dictation import BaseTable, DocumentContent
 from transcribe_api.documents.content_loader import clear_cache as clear_content_cache
 from transcribe_api.documents.content_loader import get_document_content as load_document_content
 from transcribe_api.documents.minutes.types import AdminTranscriptionListResponse, AdminTranscriptionRecord
@@ -403,15 +403,19 @@ class AdminJobProvenance(BaseModel):
     provenance: dict[str, Any] | None
 
 
-class AdminTranscriptionDetail(BaseModel):
-    """The transcription's fields, plus the provenance of its outputs."""
+class AdminTranscriptionDetail(BaseTable):
+    """The transcription as this route returned it before DIAAT-286, plus the
+    provenance of its outputs (additive).
 
-    id: UUID
-    user_id: UUID | None = None
-    title: str | None = None
-    created_datetime: datetime | None = None
-    updated_datetime: datetime | None = None
-    provenance: list[AdminJobProvenance] = []
+    It was ``response_model=Transcription``: the model's fields (id, created_datetime,
+    updated_datetime, user_id, title), never its relationships. Declared as the model
+    declares them (BaseTable, then user_id and title), so names, types, order and
+    the OpenAPI schema are unchanged.
+    """
+
+    user_id: UUID = Field(default=None)
+    title: str | None = Field(default=None)
+    provenance: list[AdminJobProvenance] = Field(default_factory=list)
 
 
 @router.get("/transcriptions/{transcription_id}", response_model=AdminTranscriptionDetail)
@@ -421,7 +425,7 @@ async def admin_get_transcription(
 ) -> AdminTranscriptionDetail:
     """View any transcription regardless of owner, with the provenance of its outputs.
     SystemAdministrator only. Audited (DIAAT-286) as a privileged view."""
-    with audited(
+    async with audited(
         TRANSCRIPT_VIEWED,
         actor_id=admin_user.id,
         object_type="transcription",
@@ -454,7 +458,7 @@ async def admin_get_document_download_url(
 ) -> dict[str, str]:
     """Download any transcript document regardless of owner. SystemAdministrator only.
     Audited (DIAAT-286) as a privileged export."""
-    with audited(
+    async with audited(
         TRANSCRIPT_EXPORTED,
         actor_id=admin_user.id,
         object_type="document",

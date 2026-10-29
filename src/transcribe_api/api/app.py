@@ -188,6 +188,10 @@ async def lifespan(app: FastAPI):
     yield
 
     await stop_background_workers(tasks)
+    # Audit rows handed to worker threads from the event loop (DIAAT-286): not lost.
+    from transcribe_api.domain.audit import drain_pending_writes
+
+    await drain_pending_writes()
 
 
 def create_app() -> FastAPI:

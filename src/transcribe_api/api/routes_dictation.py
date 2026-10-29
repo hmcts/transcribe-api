@@ -37,6 +37,7 @@ from transcribe_api.domain.audit import (
     TRANSCRIPT_VIEWED,
     AuditedAction,
     audited,
+    deferred_audit,
 )
 from transcribe_api.domain.exceptions import OwnershipConflictError
 from transcribe_api.domain.interface_dictation import (
@@ -479,14 +480,16 @@ async def upload_audio_proxy(
     # Validate the key and its owner BEFORE attaching any journey: the key is client
     # input, and a rejected request must not write events into another user's journey.
     # Rejections are client errors: recorded as a handled failure without a journey.
+    # deferred_audit: a refusal's ACCESS_DENIED row is inserted off the event loop.
     try:
-        if not key.startswith("user-uploads/"):
-            raise HTTPException(status_code=400, detail="Invalid upload key")
-        _validate_blob_ownership(
-            key, current_user, request, resource_type=AUDIO, action=WRITE, object_id=transcription_id_from_key(key)
-        )
-        # Only a verified ID (new, or the caller's own transcription) names the journey.
-        transcription_id = await _verified_upload_transcription_id(key, current_user)
+        async with deferred_audit():
+            if not key.startswith("user-uploads/"):
+                raise HTTPException(status_code=400, detail="Invalid upload key")
+            _validate_blob_ownership(
+                key, current_user, request, resource_type=AUDIO, action=WRITE, object_id=transcription_id_from_key(key)
+            )
+            # Only a verified ID (new, or the caller's own transcription) names the journey.
+            transcription_id = await _verified_upload_transcription_id(key, current_user)
     except HTTPException as exc:
         code = "upload.forbidden" if exc.status_code == 403 else "upload.invalid_key"  # noqa: PLR2004
         record_event("upload.rejected", {c.OUTCOME: "failure", c.ERROR_CODE: code})
@@ -677,7 +680,7 @@ async def get_transcription(
         tz = UK_TIMEZONE
 
     # DIAAT-286: audited in the database (audit_log), not logged.
-    with audited(
+    async with audited(
         TRANSCRIPT_VIEWED, actor_id=current_user.id, object_type=TRANSCRIPTION, object_id=transcription_id
     ) as audit:
         transcription = get_transcription_by_id(transcription_id, current_user.id, tz)
@@ -712,10 +715,12 @@ async def get_document_download_url(
     generates a new SAS token on each request so the URL never expires
     before the user can click it.
 
-    Audited as an export (DIAAT-286): with direct storage access the browser fetches
-    the document from storage with this link, so the link is the export.
+    Audited as an export (DIAAT-286) with direct storage access: the browser fetches
+    the document from storage with this link, so the link is the export. Without it,
+    the link points at /api/download, which records the export itself; a refusal or
+    failure here is still recorded.
     """
-    with audited(
+    async with audited(
         TRANSCRIPT_EXPORTED,
         actor_id=current_user.id,
         object_type=DOCUMENT,
@@ -765,6 +770,9 @@ async def _document_download_url(transcription_id: UUID, current_user: User, aud
         )
     else:
         download_url = f"{settings.APP_URL.rstrip('/')}/api/download?transcription_id={transcription_id}"
+        # The link only points at /api/download, which records the export when the
+        # document is streamed: one row per download, not two.
+        audit.skip_if_successful()
 
     logger.info(
         "Generated fresh download URL for transcription %s (document: %s)",
@@ -782,7 +790,7 @@ async def download_document(
     current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
 ):
     """Stream a transcript document from blob storage, verifying ownership before serving."""
-    with audited(
+    async with audited(
         TRANSCRIPT_EXPORTED,
         actor_id=current_user.id,
         object_type=DOCUMENT,
@@ -858,7 +866,8 @@ async def _stream_document(  # noqa: C901
             await blob_response.aclose()
             await client.aclose()
 
-    return StreamingResponse(generate(), status_code=blob_response.status_code, headers=response_headers)
+    # The export is recorded when the body has been sent (or failed), not now.
+    return audit.streaming_response(generate(), status_code=blob_response.status_code, headers=response_headers)
 
 
 @router.delete("/transcriptions/{transcription_id}", status_code=204)
@@ -868,7 +877,7 @@ async def delete_transcription(
 ):
     """Delete a specific transcription by ID. Audited (DIAAT-286); a refusal (404:
     unknown or another user's) is ``denied``, an error ``failed``."""
-    with audited(TRANSCRIPT_DELETED, actor_id=current_user.id, object_type=TRANSCRIPTION, object_id=transcription_id):
+    async with audited(TRANSCRIPT_DELETED, actor_id=current_user.id, object_type=TRANSCRIPTION, object_id=transcription_id):
         delete_transcription_by_id(transcription_id, current_user.id)
 
 
@@ -970,7 +979,7 @@ async def get_transcription_jobs_route(
 ) -> list[TranscriptionJob]:
     """Get all transcription jobs for a specific transcription: the transcript text,
     so audited as a view of the transcript (DIAAT-286)."""
-    with audited(TRANSCRIPT_VIEWED, actor_id=current_user.id, object_type=TRANSCRIPT, object_id=transcription_id) as audit:
+    async with audited(TRANSCRIPT_VIEWED, actor_id=current_user.id, object_type=TRANSCRIPT, object_id=transcription_id) as audit:
         # Verify user has access to this transcription
         transcription = get_transcription_by_id(transcription_id, current_user.id, UK_TIMEZONE)
         if not transcription:
@@ -992,7 +1001,7 @@ async def stream_audio(
     file (no Range, or one from byte 0). Seeks are not recorded unless refused or failed.
     """
     range_header = request.headers.get("range")
-    with audited(
+    async with audited(
         TRANSCRIPT_EXPORTED,
         actor_id=current_user.id,
         object_type=AUDIO,
@@ -1063,7 +1072,8 @@ async def _stream_audio(  # noqa: C901
             await blob_response.aclose()
             await client.aclose()
 
-    return StreamingResponse(generate(), status_code=blob_response.status_code, headers=response_headers)
+    # The export is recorded when the body has been sent (or failed), not now.
+    return audit.streaming_response(generate(), status_code=blob_response.status_code, headers=response_headers)
 
 
 class LiveTranscriptMessage(BaseModel):
@@ -1183,7 +1193,7 @@ async def get_sectioned_transcript_route(
     """Get the recorder-style sectioned transcript for a hearing if available.
 
     Audited as a view of the transcript (DIAAT-286)."""
-    with audited(
+    async with audited(
         TRANSCRIPT_VIEWED, actor_id=current_user.id, object_type=SECTIONED_TRANSCRIPT, object_id=transcription_id
     ) as audit:
         return await _sectioned_transcript(transcription_id, current_user, audit)
