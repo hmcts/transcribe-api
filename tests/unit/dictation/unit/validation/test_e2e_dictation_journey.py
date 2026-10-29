@@ -293,8 +293,21 @@ class Browser:
             "dictation.session_index": index,
             "dictation.segments_captured": segments,
             "dictation.user_initiated": True,
+            "speech.stop_reason": "paused",
         }
         self.emit("speech.session_stopped", attributes, 60_000)
+
+    def stop_running(self, sid: str, index: int, segments: int, reason: str, duration_ms: int = 45_000) -> None:
+        """The Speech session still running when the dictation ends (sessionEnded, or the
+        hook unmounting): stopped just before the end, not a pause (OBS-5)."""
+        attributes = {
+            "speech.session_id": sid,
+            "dictation.session_index": index,
+            "dictation.segments_captured": segments,
+            "dictation.user_initiated": False,
+            "speech.stop_reason": reason,
+        }
+        self.emit("speech.session_stopped", attributes, duration_ms)
 
     def canceled(self, index: int, reason: str, error_code: str | None, collapses: int) -> None:
         attributes = {"dictation.session_index": index, "speech.cancel_reason": reason}
@@ -601,8 +614,15 @@ def test_slow_speech_start_shows_in_the_start_latency(client, services, telemetr
     _start(browser, ready_ms=9_000, first_text_ms=14_500)  # throttled network or a far Speech region
     browser.flush()
     assert browser.submit().status_code == 200
+    browser.stop_running(SPEECH_SESSION_1, 1, segments=2, reason="submitted")
     browser.end("success", None, "submitted", segments=2, speech_sessions=1)
     (started,) = telemetry.events("speech.session_started")
+    # Submitted while recording: the running Speech session is counted, then the end.
+    names = [e[c.CUSTOM_EVENT_NAME] for e in _session_query(telemetry.events(), browser.session)]
+    assert names[-3:] == ["dictation.submission_finished", "speech.session_stopped", "dictation.session_ended"]
+    assert "dictation.paused" not in names
+    (stopped,) = telemetry.events("speech.session_stopped")
+    assert (stopped["speech.stop_reason"], stopped[c.DURATION_MS]) == ("submitted", 45_000)
     assert started[c.JOURNEY_ID] == browser.session
     assert started["dictation.reconnect_attempt"] == 0  # a user start: the start-latency panel's "user" series
     _record(
@@ -703,7 +723,8 @@ def test_interrupted_session_with_failing_autosave_then_tab_closed(client, servi
             "live_draft.seconds_since_last_save": 90,
         },
     )
-    # pagehide: the stored end is sent with keepalive.
+    # pagehide: the running Speech session's stop and the end are sent with keepalive.
+    browser.stop_running(SPEECH_SESSION_1, 1, segments=5, reason="page_exit")
     browser.end("error", "autosave.failed", "page_hidden", segments=5, speech_sessions=1, autosave_failures=3)
 
     (ended,) = _named(_session_query(telemetry.events(), browser.session), "dictation.session_ended")
@@ -765,6 +786,7 @@ def test_document_generation_failure_is_on_the_session_and_alerts(client, servic
     services.document_renders = False
     response = browser.submit()
     assert response.status_code == 500
+    browser.stop_running(SPEECH_SESSION_1, 1, segments=3, reason="page_exit")
     browser.end("error", "submission.failed", "left_page", segments=3, speech_sessions=1)
 
     journey = _session_query(telemetry.events(), browser.session)
