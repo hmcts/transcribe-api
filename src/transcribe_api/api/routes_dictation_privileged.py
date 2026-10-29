@@ -23,9 +23,12 @@ from transcribe_api.api.document_content_models import (
     HearingTypePayload,
     LegalFrameworkPayload,
 )
-from transcribe_api.stt.utils import generate_blob_download_url
+from transcribe_api.documents.content_loader import clear_cache as clear_content_cache
+from transcribe_api.documents.content_loader import get_document_content as load_document_content
+from transcribe_api.documents.minutes.types import AdminTranscriptionListResponse, AdminTranscriptionRecord
 from transcribe_api.domain.audit import TRANSCRIPT_EXPORTED, TRANSCRIPT_VIEWED, USER_DELETED, audited, write_audit_event
-from transcribe_api.runtime.db_connection import get_engine
+from transcribe_api.domain.auth.approles_dictation import get_role, get_valid_roles
+from transcribe_api.domain.auth.dependencies_dictation import get_allowlisted_user
 from transcribe_api.domain.exceptions import UserHasTranscriptionsError, UserNotFoundError
 from transcribe_api.domain.interface_dictation import (
     admin_delete_user,
@@ -36,13 +39,10 @@ from transcribe_api.domain.interface_dictation import (
     update_user,
 )
 from transcribe_api.domain.models_dictation import BaseTable, DocumentContent
-from transcribe_api.documents.content_loader import clear_cache as clear_content_cache
-from transcribe_api.documents.content_loader import get_document_content as load_document_content
-from transcribe_api.documents.minutes.types import AdminTranscriptionListResponse, AdminTranscriptionRecord
-from transcribe_api.domain.auth.approles_dictation import get_role, get_valid_roles
-from transcribe_api.domain.auth.dependencies_dictation import get_allowlisted_user
+from transcribe_api.runtime.db_connection import get_engine
 from transcribe_api.runtime.log_sanitization import sanitize_for_log
 from transcribe_api.runtime.settings_dictation import get_settings
+from transcribe_api.stt.utils import generate_blob_download_url
 
 if TYPE_CHECKING:
     from transcribe_api.domain.audit import AuditedAction
@@ -141,7 +141,7 @@ async def admin_me(
 
 @router.get("/roles", response_model=list[str])
 async def get_admin_roles(
-    admin_user: User = Depends(get_allowlisted_user(required_roles_any=[_require_role("LegalTextManager"), _require_role("SystemAdministrator")], audit_writer=write_audit_event)),  # noqa: B008, ARG001
+    admin_user: User = Depends(get_allowlisted_user(required_roles_any=[_require_role("LegalTextManager"), _require_role("SystemAdministrator")], audit_writer=write_audit_event)),  # noqa: B008
 ) -> list[str]:
     return list(get_valid_roles().values())
 
@@ -153,7 +153,7 @@ async def get_admin_roles(
 
 @router.get("/document-content", response_model=DocumentContentResponse)
 async def get_document_content(
-    admin_user: User = Depends(get_allowlisted_user(required_roles_any=[_require_role("LegalTextManager"), _require_role("SystemAdministrator")], audit_writer=write_audit_event)),  # noqa: B008, ARG001
+    admin_user: User = Depends(get_allowlisted_user(required_roles_any=[_require_role("LegalTextManager"), _require_role("SystemAdministrator")], audit_writer=write_audit_event)),  # noqa: B008
 ) -> DocumentContentResponse:
     """Return the full document_content.json payload."""
     data = _read_content()
@@ -482,7 +482,7 @@ async def _admin_document_download_url(transcription_id: UUID, admin_user: User,
     if blob_path.startswith("https://"):
         parsed = urllib.parse.urlparse(blob_path)
         path_parts = parsed.path.lstrip("/").split("/", 1)
-        if len(path_parts) < 2:  # noqa: PLR2004
+        if len(path_parts) < 2:
             raise HTTPException(status_code=500, detail="Stored document URL is malformed")
         blob_path = path_parts[1]
 

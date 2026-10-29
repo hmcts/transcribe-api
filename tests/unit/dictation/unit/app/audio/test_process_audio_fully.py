@@ -23,14 +23,13 @@ sys.modules.setdefault("transcribe_api.documents.minutes.llm_calls", MagicMock()
 
 import pytest  # noqa: E402
 
+# Clear the get_settings cache so other test files can create their own Settings
+# instances without getting our dummy-values cached result.
+from transcribe_api.runtime.settings_dictation import get_settings as _gs  # noqa: E402
 from transcribe_api.stt.pipeline import (  # noqa: E402
     generate_and_save_meeting_title,
     transcribe_and_generate_llm_output,
 )
-
-# Clear the get_settings cache so other test files can create their own Settings
-# instances without getting our dummy-values cached result.
-from transcribe_api.runtime.settings_dictation import get_settings as _gs  # noqa: E402
 
 _gs.cache_clear()
 
@@ -515,8 +514,8 @@ async def test_a_title_saved_before_a_later_error_counts_as_saved(monkeypatch):
     job does not report title.failed (stage and job agree)."""
     from hmcts_otel.testing import capture_telemetry
 
-    from transcribe_api.stt.pipeline import _generate_and_save_title
     from transcribe_api.domain.models_dictation import Transcription
+    from transcribe_api.stt.pipeline import _generate_and_save_title
 
     monkeypatch.setattr("transcribe_api.stt.pipeline.generate_meeting_title", AsyncMock(return_value="Bail hearing"))
     monkeypatch.setattr(
@@ -535,8 +534,8 @@ async def test_an_empty_title_is_a_title_failure_in_stage_and_job(monkeypatch):
     from hmcts_otel import conventions as c
     from hmcts_otel.testing import capture_telemetry
 
-    from transcribe_api.stt.pipeline import _generate_and_save_title
     from transcribe_api.domain.models_dictation import Transcription
+    from transcribe_api.stt.pipeline import _generate_and_save_title
 
     monkeypatch.setattr("transcribe_api.stt.pipeline.generate_meeting_title", AsyncMock(return_value="  "))
     save = MagicMock()
@@ -551,8 +550,8 @@ async def test_an_empty_title_is_a_title_failure_in_stage_and_job(monkeypatch):
 async def test_the_title_update_writes_only_the_title(monkeypatch):
     """The job's copy of the row may be stale (the user may have changed it while
     the job ran): only the title column is updated, for this user's transcription."""
-    from transcribe_api.stt.pipeline import _generate_and_save_title
     from transcribe_api.domain.models_dictation import Transcription
+    from transcribe_api.stt.pipeline import _generate_and_save_title
 
     monkeypatch.setattr("transcribe_api.stt.pipeline.generate_meeting_title", AsyncMock(return_value="Bail hearing"))
     whole_row_save = MagicMock()
@@ -567,8 +566,8 @@ async def test_the_title_update_writes_only_the_title(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_rename_made_while_the_job_ran_is_kept(monkeypatch):
-    from transcribe_api.stt.pipeline import _generate_and_save_title
     from transcribe_api.domain.models_dictation import Transcription
+    from transcribe_api.stt.pipeline import _generate_and_save_title
 
     monkeypatch.setattr("transcribe_api.stt.pipeline.generate_meeting_title", AsyncMock(return_value="Generated"))
     monkeypatch.setattr("transcribe_api.stt.pipeline.save_transcription_title", MagicMock(return_value=False))
@@ -581,8 +580,8 @@ async def test_a_rename_made_while_the_job_ran_is_kept(monkeypatch):
 @pytest.mark.asyncio
 async def test_a_title_cleared_while_the_job_ran_is_kept(monkeypatch):
     """An empty stored title is the user's choice, not a missing transcription."""
-    from transcribe_api.stt.pipeline import _generate_and_save_title
     from transcribe_api.domain.models_dictation import Transcription
+    from transcribe_api.stt.pipeline import _generate_and_save_title
 
     monkeypatch.setattr("transcribe_api.stt.pipeline.generate_meeting_title", AsyncMock(return_value="Generated"))
     monkeypatch.setattr("transcribe_api.stt.pipeline.save_transcription_title", MagicMock(return_value=False))

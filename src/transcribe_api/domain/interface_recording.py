@@ -8,7 +8,6 @@ from sqlalchemy import and_, case, func, or_
 from sqlalchemy import update as sa_update
 from sqlmodel import Session, col, select
 
-from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.domain.models_recording import (
     BatchJobStatus,
     Caller,
@@ -17,6 +16,7 @@ from transcribe_api.domain.models_recording import (
     JobStatus,
     SpeechBatchJob,
 )
+from transcribe_api.runtime.settings_recording import get_settings
 
 _POLL_BATCH_SIZE = 10
 

@@ -18,17 +18,32 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.responses import JSONResponse, StreamingResponse
 
 from transcribe_api.api.document_content_models import DocumentContentResponse
-from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager, _redact_blob_path, _sanitize_for_log
-from transcribe_api.stt.utils import (
-    generate_blob_download_url,
-    generate_blob_upload_url,
-    get_file_blob_path,
+from transcribe_api.documents.content_loader import get_document_content
+from transcribe_api.documents.llm.langfuse_models import (
+    LangfuseScoreRequest,
+    LangfuseTraceRequest,
 )
-from transcribe_api.domain.blob_ownership import (
-    USER_UPLOADS_PREFIX,
-    blob_owner_segment,
-    segment_belongs_to_user,
+from transcribe_api.documents.llm.llm_client import (
+    langfuse_client,
 )
+from transcribe_api.documents.minutes.llm_calls import ai_edit_task, generate_llm_output_task, generate_realtime_summary
+from transcribe_api.documents.minutes.templates.templates_metadata import (
+    get_all_templates,
+)
+from transcribe_api.documents.minutes.types import (
+    GenerateMinutesRequest,
+    GenerateSummaryRequest,
+    GenerateSummaryResponse,
+    OnboardingStatusResponse,
+    TemplateResponse,
+    TranscriptionMetadata,
+    UpdateUserRequest,
+    UploadUrlRequest,
+    UploadUrlResponse,
+)
+from transcribe_api.documents.models import DEFAULT_JURISDICTION
+from transcribe_api.documents.template_renderer import render_hearing_document
+from transcribe_api.documents.versioning import DECISION_TEMPLATE, track_render
 from transcribe_api.domain.audit import (
     SECTIONED_TRANSCRIPT,
     TRANSCRIPT,
@@ -38,6 +53,13 @@ from transcribe_api.domain.audit import (
     AuditedAction,
     audited,
     deferred_audit,
+)
+from transcribe_api.domain.auth.approles_dictation import get_role, has_any_role
+from transcribe_api.domain.auth.dependencies_dictation import get_allowlisted_user, get_current_user
+from transcribe_api.domain.blob_ownership import (
+    USER_UPLOADS_PREFIX,
+    blob_owner_segment,
+    segment_belongs_to_user,
 )
 from transcribe_api.domain.exceptions import OwnershipConflictError
 from transcribe_api.domain.interface_dictation import (
@@ -69,30 +91,11 @@ from transcribe_api.domain.models_dictation import (
     TranscriptionJob,
     User,
 )
-from transcribe_api.documents.content_loader import get_document_content
-from transcribe_api.documents.models import DEFAULT_JURISDICTION
-from transcribe_api.documents.template_renderer import render_hearing_document
-from transcribe_api.documents.versioning import DECISION_TEMPLATE, track_render
-from transcribe_api.documents.llm.llm_client import (
-    langfuse_client,
-)
-from transcribe_api.runtime.logger import logger
-from transcribe_api.documents.minutes.llm_calls import ai_edit_task, generate_llm_output_task, generate_realtime_summary
-from transcribe_api.documents.minutes.templates.templates_metadata import (
-    get_all_templates,
-)
-from transcribe_api.documents.minutes.types import (
-    GenerateMinutesRequest,
-    GenerateSummaryRequest,
-    GenerateSummaryResponse,
-    OnboardingStatusResponse,
-    TemplateResponse,
-    TranscriptionMetadata,
-    UpdateUserRequest,
-    UploadUrlRequest,
-    UploadUrlResponse,
-)
 from transcribe_api.domain.provenance_dictation import decision_document_provenance
+from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager, _redact_blob_path, _sanitize_for_log
+from transcribe_api.runtime.browser_telemetry import telemetry_relay_router
+from transcribe_api.runtime.dependency_health import get_dependency_checker, health_response
+from transcribe_api.runtime.logger import logger
 from transcribe_api.runtime.security_events import (
     AUDIO,
     DOCUMENT,
@@ -103,18 +106,15 @@ from transcribe_api.runtime.security_events import (
     owner_matches,
     record_ownership_violation,
 )
-from transcribe_api.runtime.telemetry import JOURNEY_SUBMISSION, transcription_id_from_key, transcription_journey
-from transcribe_api.domain.auth.approles_dictation import get_role, has_any_role
-from transcribe_api.domain.auth.dependencies_dictation import get_allowlisted_user, get_current_user
-from transcribe_api.documents.llm.langfuse_models import (
-    LangfuseScoreRequest,
-    LangfuseTraceRequest,
-)
-from transcribe_api.runtime.browser_telemetry import telemetry_relay_router
-from transcribe_api.runtime.dependency_health import get_dependency_checker, health_response
 from transcribe_api.runtime.settings_dictation import get_settings
 from transcribe_api.runtime.settings_recording import get_settings as get_recording_settings
+from transcribe_api.runtime.telemetry import JOURNEY_SUBMISSION, transcription_id_from_key, transcription_journey
 from transcribe_api.runtime.version import APP_VERSION
+from transcribe_api.stt.utils import (
+    generate_blob_download_url,
+    generate_blob_upload_url,
+    get_file_blob_path,
+)
 
 router = APIRouter()
 
@@ -220,7 +220,7 @@ def security_alert_test_allowed() -> bool:
 
 @router.post("/security/alert-test", status_code=202)
 async def security_alert_test(
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("SystemAdministrator")])),  # noqa: ARG001, B008
+    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("SystemAdministrator")])),  # noqa: B008
 ) -> dict:
     """Controlled test of the Security alert route (DIAAT-285 AC2, ALERTS.md).
 
@@ -243,7 +243,7 @@ async def health_check_legacy():
 @router.get("/document-content", response_model=DocumentContentResponse)
 async def get_document_content_route(
     response: Response,
-    current_user: User = Depends(get_allowlisted_user()),  # noqa: B008, ARG001
+    current_user: User = Depends(get_allowlisted_user()),  # noqa: B008
 ) -> DocumentContentResponse:
     """Return editable document content for allowlisted recorder users."""
     response.headers["Cache-Control"] = "no-store"
@@ -257,7 +257,7 @@ async def get_document_content_route(
 
 @router.get("/user/onboarding-status", response_model=OnboardingStatusResponse)
 async def get_onboarding_status(
-    current_user: User = Depends(get_current_user),  # noqa: B008
+    current_user: User = Depends(get_current_user),
 ) -> OnboardingStatusResponse:
     """
     Get user's onboarding status and allowlist check.
@@ -491,7 +491,7 @@ async def upload_audio_proxy(
             # Only a verified ID (new, or the caller's own transcription) names the journey.
             transcription_id = await _verified_upload_transcription_id(key, current_user)
     except HTTPException as exc:
-        code = "upload.forbidden" if exc.status_code == 403 else "upload.invalid_key"  # noqa: PLR2004
+        code = "upload.forbidden" if exc.status_code == 403 else "upload.invalid_key"
         record_event("upload.rejected", {c.OUTCOME: "failure", c.ERROR_CODE: code})
         raise
 
@@ -637,13 +637,13 @@ async def generate_or_edit_minutes(
                 str(user_id),
             )
 
-    asyncio.create_task(process_request())  # noqa: RUF006 - fire-and-forget background task
+    asyncio.create_task(process_request())
     return JSONResponse(content={"minute_version_id": new_minute_version_id, "status": "initiated"})
 
 
 @router.get("/templates", response_model=TemplateResponse)
 async def get_templates(
-    current_user: User = Depends(get_current_user),  # noqa: B008, ARG001
+    current_user: User = Depends(get_current_user),
 ):
     """Get all template categories (auth only, used during onboarding)."""
     templates = get_all_templates()
@@ -735,7 +735,7 @@ async def _document_download_url(transcription_id: UUID, current_user: User, aud
         tz = UK_TIMEZONE
         transcription = get_transcription_by_id(transcription_id, current_user.id, tz)
     except Exception:
-        raise HTTPException(status_code=404, detail="Transcription not found")  # noqa: B904
+        raise HTTPException(status_code=404, detail="Transcription not found")
     audit.authorised()
     _assert_owned(transcription, current_user, DOCUMENT)
 
@@ -750,7 +750,7 @@ async def _document_download_url(transcription_id: UUID, current_user: User, aud
     if blob_path.startswith("https://"):
         parsed = urllib.parse.urlparse(blob_path)
         path_parts = parsed.path.lstrip("/").split("/", 1)
-        if len(path_parts) < 2:  # noqa: PLR2004
+        if len(path_parts) < 2:
             raise HTTPException(status_code=500, detail="Stored document URL is malformed")
         blob_path = path_parts[1]
 
@@ -800,13 +800,13 @@ async def download_document(
         return await _stream_document(transcription_id, request, current_user, audit)
 
 
-async def _stream_document(  # noqa: C901
+async def _stream_document(
     transcription_id: UUID, request: Request, current_user: User, audit: AuditedAction
 ) -> StreamingResponse:
     try:
         transcription = get_transcription_by_id(transcription_id, current_user.id, UK_TIMEZONE)
     except Exception:
-        raise HTTPException(status_code=404, detail="Transcription not found")  # noqa: B904
+        raise HTTPException(status_code=404, detail="Transcription not found")
     audit.authorised()
     _assert_owned(transcription, current_user, DOCUMENT)
 
@@ -820,7 +820,7 @@ async def _stream_document(  # noqa: C901
     if blob_path.startswith("https://"):
         parsed = urllib.parse.urlparse(blob_path)
         path_parts = parsed.path.lstrip("/").split("/", 1)
-        if len(path_parts) < 2:  # noqa: PLR2004
+        if len(path_parts) < 2:
             raise HTTPException(status_code=500, detail="Stored document URL is malformed")
         blob_path = path_parts[1]
 
@@ -850,7 +850,7 @@ async def _stream_document(  # noqa: C901
     except Exception:
         await client.aclose()
         raise  # audited as failed
-    if blob_response.status_code >= 400:  # noqa: PLR2004 - storage refused or failed: nothing exported
+    if blob_response.status_code >= 400:
         audit.fail("storage_status")
 
     response_headers = {}
@@ -1013,7 +1013,7 @@ async def stream_audio(
         return await _stream_audio(transcription_id, job_id, request, current_user, audit)
 
 
-async def _stream_audio(  # noqa: C901
+async def _stream_audio(
     transcription_id: UUID, job_id: UUID, request: Request, current_user: User, audit: AuditedAction
 ) -> StreamingResponse:
     get_transcription_by_id(transcription_id, current_user.id, UK_TIMEZONE)
@@ -1030,7 +1030,7 @@ async def _stream_audio(  # noqa: C901
     if stored_url.startswith("https://"):
         parsed = urllib.parse.urlparse(stored_url)
         path_parts = parsed.path.lstrip("/").split("/", 1)
-        if len(path_parts) < 2:  # noqa: PLR2004
+        if len(path_parts) < 2:
             raise HTTPException(status_code=500, detail="Stored audio URL is malformed")
         blob_path = path_parts[1]
     else:
@@ -1056,7 +1056,7 @@ async def _stream_audio(  # noqa: C901
     except Exception:
         await client.aclose()
         raise  # audited as failed
-    if blob_response.status_code >= 400:  # noqa: PLR2004 - storage refused or failed: nothing exported
+    if blob_response.status_code >= 400:
         audit.fail("storage_status")
 
     response_headers = {"Accept-Ranges": "bytes"}
@@ -1223,11 +1223,10 @@ async def _sectioned_transcript(
         if not matching_blobs:
             raise HTTPException(status_code=404, detail="Sectioned transcript not found")
 
-        latest_blob = sorted(
+        latest_blob = max(
             matching_blobs,
             key=lambda blob: blob.get("last_modified") or datetime.min.replace(tzinfo=UTC),
-            reverse=True,
-        )[0]
+        )
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as tmp_file:
             temp_path = Path(tmp_file.name)
@@ -1329,7 +1328,7 @@ def _dictation_session_id(value: str | None) -> str | None:
         return None
 
 
-async def _save_live_transcription_submission(  # noqa: PLR0915
+async def _save_live_transcription_submission(  # NOSONAR
     request: LiveTranscriptionSubmissionRequest,
     current_user: User,
     submission_id: uuid.UUID,
@@ -1581,7 +1580,7 @@ async def remove_tag_from_transcription_route(
 
 @router.get("/user", response_model=User)
 async def get_current_user_route(
-    current_user: User = Depends(get_current_user),  # noqa: B008
+    current_user: User = Depends(get_current_user),
 ):
     """Get the current user's details (auth only, no allowlist check)."""
     return get_user_by_id(current_user.id)
@@ -1590,7 +1589,7 @@ async def get_current_user_route(
 # Add missing routes that frontend expects
 @router.get("/users/me", response_model=User)
 async def get_current_user_me_route(
-    current_user: User = Depends(get_current_user),  # noqa: B008
+    current_user: User = Depends(get_current_user),
 ):
     """Get the current user's details (auth only, no allowlist check)."""
     return get_user_by_id(current_user.id)
@@ -1598,7 +1597,7 @@ async def get_current_user_me_route(
 
 @router.get("/user/profile", response_model=User)
 async def get_user_profile_route(
-    current_user: User = Depends(get_current_user),  # noqa: B008
+    current_user: User = Depends(get_current_user),
 ):
     """Get the current user's profile (auth only, no allowlist check)."""
     return get_user_by_id(current_user.id)
@@ -1607,7 +1606,7 @@ async def get_user_profile_route(
 @router.post("/user", response_model=User)  # changed from .patch to .post
 async def update_current_user_route(
     request: UpdateUserRequest,
-    current_user: User = Depends(get_current_user),  # noqa: B008
+    current_user: User = Depends(get_current_user),
 ):
     """Update the current user's details (auth only, used during onboarding)."""
     update_fields = request.model_dump(exclude_unset=True)

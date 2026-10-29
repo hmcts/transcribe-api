@@ -24,20 +24,6 @@ from hmcts_otel import StageHandle, journey, record_event, stage
 from hmcts_otel import conventions as c
 from sqlmodel import Session
 
-from transcribe_api.stt import job_telemetry
-from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
-from transcribe_api.stt.batch_client import (
-    BatchResultError,
-    BatchResultsInvalidError,
-    delete_batch_job,
-    get_batch_job_status,
-    get_batch_results,
-    get_model_details,
-)
-from transcribe_api.stt.speakers_recording import process_speakers
-from transcribe_api.stt.speech_telemetry import speech_config_attributes
-from transcribe_api.runtime.settings_recording import get_settings
-from transcribe_api.runtime.db_recording import get_engine
 from transcribe_api.domain.interface_recording import (
     claim_webhook_dispatch,
     fetch_pending_batch_jobs,
@@ -47,6 +33,10 @@ from transcribe_api.domain.interface_recording import (
     update_job_batch_status,
 )
 from transcribe_api.domain.models_recording import BatchJobStatus
+from transcribe_api.domain.webhook import dispatch
+from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
+from transcribe_api.runtime.db_recording import get_engine
+from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.runtime.telemetry import (
     ATTR_FAILURE_SOURCE,
     ATTR_SPEECH_ERROR_CODE,
@@ -62,7 +52,17 @@ from transcribe_api.runtime.telemetry import (
     batch_job_id_from_url,
     upload_id_from_blob,
 )
-from transcribe_api.domain.webhook import dispatch
+from transcribe_api.stt import job_telemetry
+from transcribe_api.stt.batch_client import (
+    BatchResultError,
+    BatchResultsInvalidError,
+    delete_batch_job,
+    get_batch_job_status,
+    get_batch_results,
+    get_model_details,
+)
+from transcribe_api.stt.speakers_recording import process_speakers
+from transcribe_api.stt.speech_telemetry import speech_config_attributes
 
 logger = logging.getLogger(__name__)
 
@@ -192,8 +192,8 @@ def _extract_transcription_duration_seconds(
     last_action = status_data.get("lastActionDateTime")
     if isinstance(created, str) and isinstance(last_action, str):
         try:
-            start = datetime.fromisoformat(created.replace("Z", "+00:00"))
-            end = datetime.fromisoformat(last_action.replace("Z", "+00:00"))
+            start = datetime.fromisoformat(created)
+            end = datetime.fromisoformat(last_action)
             duration = (end - start).total_seconds()
             if duration >= 0:
                 return duration
@@ -276,8 +276,8 @@ class BatchPollingService:
         self._resolve_webhook_secret = webhook_secret_resolver or self._default_secret_resolver
 
     def _default_secret_resolver(self, caller_id: UUID) -> str:
-        from transcribe_api.runtime.security import decrypt_webhook_secret
         from transcribe_api.domain.interface_recording import get_caller_by_id
+        from transcribe_api.runtime.security import decrypt_webhook_secret
 
         with Session(get_engine()) as session:
             caller = get_caller_by_id(session, caller_id)

@@ -9,14 +9,6 @@ from defusedxml.ElementTree import fromstring
 from docx import Document
 from docx.oxml.ns import qn
 
-from transcribe_api.documents.styles import QUOTATION_BASE_INDENT_CM, cm_to_pt
-from transcribe_api.documents.template_renderer import (
-    FEE_AWARD_DROPDOWN_OPTIONS,
-    FEE_AWARD_DROPDOWN_PLACEHOLDER,
-    render_document,
-    render_hearing_document,
-    render_structured_document,
-)
 from transcribe_api.documents.lib.models import (
     Frontmatter,
     Heading,
@@ -24,6 +16,14 @@ from transcribe_api.documents.lib.models import (
     IACTemplate,
     PageBreak,
     Paragraph,
+)
+from transcribe_api.documents.styles import QUOTATION_BASE_INDENT_CM, cm_to_pt
+from transcribe_api.documents.template_renderer import (
+    FEE_AWARD_DROPDOWN_OPTIONS,
+    FEE_AWARD_DROPDOWN_PLACEHOLDER,
+    render_document,
+    render_hearing_document,
+    render_structured_document,
 )
 
 

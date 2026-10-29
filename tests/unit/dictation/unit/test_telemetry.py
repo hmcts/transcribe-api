@@ -58,7 +58,7 @@ def test_scripts_without_main_still_log_info_redacted():
     code = "from transcribe_api.runtime.logger import logger; logger.info('cleanup for %s on PA_50123_2024', 'judge@justice.gov.uk')"
     env = {k: v for k, v in os.environ.items() if k != "APPLICATIONINSIGHTS_CONNECTION_STRING"}
     env["PYTHONPATH"] = str(root / "src")
-    result = subprocess.run(  # noqa: S603 - fixed code, current interpreter
+    result = subprocess.run(
         [sys.executable, "-c", code],
         cwd=root,
         env=env,

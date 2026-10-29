@@ -19,11 +19,6 @@ from hmcts_otel import conventions as c
 from sqlalchemy import inspect as sa_inspect
 from sqlmodel import Session
 
-from transcribe_api.stt import job_telemetry
-from transcribe_api.stt.batch_client import BatchSubmissionError, submit_batch_job
-from transcribe_api.stt.speech_auth import SpeechAuthError
-from transcribe_api.stt.job_telemetry import record_job_finished, seconds_between
-from transcribe_api.stt.speech_telemetry import speech_config_attributes
 from transcribe_api.domain.interface_recording import save_job
 from transcribe_api.domain.models_recording import BatchJobStatus, JobStatus, SpeechBatchJob
 from transcribe_api.runtime.telemetry import (
@@ -33,6 +28,11 @@ from transcribe_api.runtime.telemetry import (
     batch_job_id_from_url,
     upload_id_from_blob,
 )
+from transcribe_api.stt import job_telemetry
+from transcribe_api.stt.batch_client import BatchSubmissionError, submit_batch_job
+from transcribe_api.stt.job_telemetry import record_job_finished, seconds_between
+from transcribe_api.stt.speech_auth import SpeechAuthError
+from transcribe_api.stt.speech_telemetry import speech_config_attributes
 
 logger = logging.getLogger(__name__)
 

@@ -17,15 +17,13 @@ class AudioDecodeError(Exception):
     """Raised when ffmpeg cannot decode the input (corrupt/unsupported format)."""
 
 
-_FILTER_CHAIN = ",".join(
-    [
-        "pan=mono|c0=0.5*c0+0.5*c1",
-        "highpass=f=100",
-        "lowpass=f=8000",
-        "volume=3.0",
-        "acompressor=threshold=0.1:ratio=4:attack=5:release=50",
-        "loudnorm=I=-16:TP=-1.5:LRA=11",
-    ]
+_FILTER_CHAIN = (
+    "pan=mono|c0=0.5*c0+0.5*c1,"
+    "highpass=f=100,"
+    "lowpass=f=8000,"
+    "volume=3.0,"
+    "acompressor=threshold=0.1:ratio=4:attack=5:release=50,"
+    "loudnorm=I=-16:TP=-1.5:LRA=11"
 )
 
 _SAMPLE_RATE = 16000

@@ -7,7 +7,6 @@ from pydantic import ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-
 class Settings(BaseSettings):
     # Core
     ENVIRONMENT: str = "local"
@@ -39,7 +38,7 @@ class Settings(BaseSettings):
 
     # Local audio storage (dev only — never set in deployed envs)
     AUDIO_STORAGE_BACKEND: Literal["azure", "local"] = "azure"
-    LOCAL_AUDIO_STORAGE_DIR: str = "/tmp/local-audio"  # noqa: S108  # nosec B108
+    LOCAL_AUDIO_STORAGE_DIR: str = "/tmp/local-audio"  # nosec B108  # NOSONAR
     LOCAL_AUDIO_BASE_URL: str = ""
 
     # Batch transcription backend (dev only — never set in deployed envs).
@@ -75,9 +74,9 @@ class Settings(BaseSettings):
     # Auth
     LOCAL_API_KEY: str = "local-dev-key-change-me"
     # Fernet key (URL-safe base64, 32 bytes) used to encrypt webhook_secret at rest.
-    # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"  # noqa: E501
+    # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     # The default is a fixed all-zeros key for local development only.
-    WEBHOOK_SECRET_ENCRYPTION_KEY: str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="  # noqa: S105  # gitleaks:allow
+    WEBHOOK_SECRET_ENCRYPTION_KEY: str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="  # gitleaks:allow
 
     # Webhook delivery
     WEBHOOK_TIMEOUT_SECONDS: float = 30.0

@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException
 
-from transcribe_api.domain.models_dictation import User
 from transcribe_api.domain.auth.approles_dictation import get_role
+from transcribe_api.domain.models_dictation import User
 
 
 def _make_user(email: str, roles: list[str]) -> User:

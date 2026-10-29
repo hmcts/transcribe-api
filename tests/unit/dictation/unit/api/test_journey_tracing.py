@@ -8,12 +8,12 @@ from hmcts_otel import conventions as c
 from hmcts_otel import current_journey
 from hmcts_otel.testing import capture_telemetry
 
-from transcribe_api.runtime.telemetry import JOURNEY_SUBMISSION, JOURNEY_TRANSCRIPTION, transcription_id_from_key
 from tests.unit.dictation.unit.api.test_live_transcription_submission_logging import (  # DIAAT-298 helpers
     _MINIMAL_BODY,
     _make_user,
     _patch_submission_deps,
 )
+from transcribe_api.runtime.telemetry import JOURNEY_SUBMISSION, JOURNEY_TRANSCRIPTION, transcription_id_from_key
 
 
 def test_transcription_id_from_key_is_canonical():

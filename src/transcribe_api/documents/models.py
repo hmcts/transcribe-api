@@ -29,7 +29,7 @@ def format_date_long(date_str: str) -> str:
         return ""
     try:
         # Parse date-only string (no timezone needed for date formatting)
-        date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()  # noqa: DTZ007
+        date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
     except ValueError:
         return date_str
     else:

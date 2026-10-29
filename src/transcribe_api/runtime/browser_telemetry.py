@@ -52,7 +52,7 @@ def _rate_limit_by_user(request: Request) -> str | None:
 def telemetry_relay_router(authenticated_user_dependency) -> APIRouter:
     """``POST /telemetry`` for the browser, behind the app's authentication."""
 
-    async def remember_identity(request: Request, user=Depends(authenticated_user_dependency)) -> None:  # noqa: B008
+    async def remember_identity(request: Request, user=Depends(authenticated_user_dependency)) -> None:
         request.state.telemetry_identity = str(user.id)
 
     return create_telemetry_relay_router(

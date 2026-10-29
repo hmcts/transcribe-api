@@ -241,22 +241,22 @@ def create_app() -> FastAPI:
     app.add_middleware(RequestIdMiddleware)
 
     # --- exception handlers ---
-    from transcribe_api.runtime.exception_handlers import (
-        http_exception_handler,
-        unhandled_exception_handler,
-    )
-
     # MERGE NOTE: these two handlers take (exc, request_id), not (request, exc). The
     # dictation app wrapped them so it could record the exception on the current
     # OpenTelemetry span before delegating. Registering them bare gives
     # "takes 1 positional argument but 2 were given" on every error path.
     from opentelemetry import trace
 
+    from transcribe_api.runtime.exception_handlers import (
+        http_exception_handler,
+        unhandled_exception_handler,
+    )
+
     async def _http_exception_wrapper(request: Request, exc: FastAPIHTTPException):
         # 4xx are expected outcomes (not found, forbidden, validation); only server
         # errors fail the span. The status carries the type only: messages can
         # include content.
-        if exc.status_code >= 500:  # noqa: PLR2004
+        if exc.status_code >= 500:
             span = trace.get_current_span()
             span.record_exception(exc)
             span.set_status(trace.StatusCode.ERROR, type(exc).__name__)

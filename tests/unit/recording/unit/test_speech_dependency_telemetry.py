@@ -25,6 +25,10 @@ from hmcts_otel.testing import TelemetryCapture, capture_telemetry
 from sqlalchemy.exc import IntegrityError, OperationalError
 from tenacity import Future, RetryError
 
+from transcribe_api.domain.interface_recording import JobStateCounts
+from transcribe_api.domain.models_recording import BatchJobStatus, JobStatus
+from transcribe_api.runtime.settings_recording import get_settings
+from transcribe_api.runtime.telemetry import JOURNEY_JOB, configure_telemetry
 from transcribe_api.stt import job_telemetry, speech_telemetry, submission
 from transcribe_api.stt.batch_client import (
     BatchResultError,
@@ -46,10 +50,6 @@ from transcribe_api.stt.speech_telemetry import (
     METRIC_SPEECH_CALL_FAILURES,
     METRIC_SPEECH_THROTTLED,
 )
-from transcribe_api.runtime.settings_recording import get_settings
-from transcribe_api.domain.interface_recording import JobStateCounts
-from transcribe_api.domain.models_recording import BatchJobStatus, JobStatus
-from transcribe_api.runtime.telemetry import JOURNEY_JOB, configure_telemetry
 
 SPEECH_JOB_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 MODEL_ID = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d"

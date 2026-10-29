@@ -14,16 +14,16 @@ from tenacity import (
 )
 from uwotm8 import convert_american_to_british_spelling
 
+from transcribe_api.domain.models_dictation import DialogueEntry
+from transcribe_api.domain.provenance_dictation import SpeechConfiguration, endpoint_reference
 from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager, _redact_blob_path
+from transcribe_api.runtime.logger import logger
+from transcribe_api.runtime.settings_dictation import get_settings
+from transcribe_api.stt.speech_auth import SpeechAuthError, speech_auth_headers
 from transcribe_api.stt.utils import (
     cleanup_files,
     convert_input_dialogue_entries_to_dialogue_entries,
 )
-from transcribe_api.domain.models_dictation import DialogueEntry
-from transcribe_api.runtime.logger import logger
-from transcribe_api.domain.provenance_dictation import SpeechConfiguration, endpoint_reference
-from transcribe_api.runtime.settings_dictation import get_settings
-from transcribe_api.stt.speech_auth import SpeechAuthError, speech_auth_headers
 
 TOO_MANY_REQUESTS = 429
 # Azure statuses where the service, not the audio, failed: authentication,
@@ -35,7 +35,7 @@ def _azure_error_status(response_status: int) -> int:
     """422 (the audio or request was rejected) only for Azure's own client errors;
     502 (a dependency failure, worth retrying) for auth, quota, throttling, outages
     and anything else. The user-facing message depends on this (user_error_message)."""
-    if 400 <= response_status < 500 and response_status not in _SERVICE_SIDE_CLIENT_ERRORS:  # noqa: PLR2004
+    if 400 <= response_status < 500 and response_status not in _SERVICE_SIDE_CLIENT_ERRORS:
         return 422
     return 502
 # Azure batch transcription profanity options are: Masked, Removed, None.

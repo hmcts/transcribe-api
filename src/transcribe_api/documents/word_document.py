@@ -16,8 +16,8 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 
-from transcribe_api.documents.models import ContentControl, ContentControlType, PopulationResult
 from transcribe_api.documents.lib.docx_style_profile import STYLE_NORMAL, resolve_style_name
+from transcribe_api.documents.models import ContentControl, ContentControlType, PopulationResult
 
 if TYPE_CHECKING:
     from docx.document import Document as DocxDocument
@@ -107,7 +107,7 @@ class WordDocument:
         doc_part = self._document.part
 
         for section in self._document.sections:
-            sect_pr = section._sectPr  # noqa: SLF001
+            sect_pr = section._sectPr
             for ref in sect_pr.xpath("./*[local-name()='headerReference' or local-name()='footerReference']"):
                 r_id = ref.get(qn("r:id"))
                 if not r_id or r_id in seen:
@@ -175,7 +175,7 @@ class WordDocument:
         """
         return {c.key for c in self.get_content_controls()}
 
-    def populate_content_controls(  # noqa: C901
+    def populate_content_controls(
         self,
         data: dict[str, str],
         *,
@@ -557,7 +557,7 @@ class WordDocument:
             if elem is not None:
                 rpr.remove(elem)
 
-    def _set_control_text_styled(  # noqa: C901
+    def _set_control_text_styled(
         self,
         sdt: _Element,
         value: str,
@@ -743,7 +743,7 @@ class WordDocument:
         # Support both python-docx Paragraph objects and raw w:p elements
         if hasattr(paragraph, "_element"):
             full_text = paragraph.text
-            para_elem = paragraph._element  # noqa: SLF001
+            para_elem = paragraph._element
         else:
             para_elem = paragraph
             full_text = self._extract_paragraph_text(para_elem)
@@ -912,7 +912,7 @@ class WordDocument:
                 continue
 
             target = part.rels[embed].target_part
-            target._blob = image_data  # noqa: SLF001
+            target._blob = image_data
             return True
 
         return False

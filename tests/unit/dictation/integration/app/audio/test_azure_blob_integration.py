@@ -27,7 +27,7 @@ class TestAzureBlobOperations:
 
         try:
             # Safe: Running trusted Azure CLI command to check authentication status
-            subprocess.run(["az", "account", "show"], check=True, capture_output=True)  # noqa: S607
+            subprocess.run(["az", "account", "show"], check=True, capture_output=True)
         except (subprocess.CalledProcessError, FileNotFoundError):
             pytest.skip("Azure CLI not authenticated. Run: az login")
         return "courtstransdevstor"  # Hardcoded real dev storage account
@@ -129,7 +129,7 @@ class TestAsyncAzureBlobPollingOperations:
 
         try:
             # Safe: Running trusted Azure CLI command to check authentication status
-            subprocess.run(["az", "account", "show"], check=True, capture_output=True)  # noqa: S607
+            subprocess.run(["az", "account", "show"], check=True, capture_output=True)
         except (subprocess.CalledProcessError, FileNotFoundError):
             pytest.skip("Azure CLI not authenticated. Run: az login")
         return "courtstransdevstor"  # Hardcoded real dev storage account

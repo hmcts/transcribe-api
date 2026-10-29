@@ -98,13 +98,13 @@ import anyio
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from hmcts_azure_auth.audit import AuditEvent, AuditEventType
-from hmcts_otel import get_request_id, record_event
 from hmcts_otel import conventions as c
+from hmcts_otel import get_request_id, record_event
 from sqlmodel import Session
 
 import transcribe_api.runtime.telemetry  # noqa: F401  (registers the merged schema)
-from transcribe_api.runtime.db_connection import get_engine
 from transcribe_api.domain.models_dictation import AuditLog
+from transcribe_api.runtime.db_connection import get_engine
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterable, AsyncIterator, Mapping
@@ -238,7 +238,7 @@ async def drain_pending_writes() -> None:
         await asyncio.gather(*list(_pending_writes), return_exceptions=True)
 
 
-class deferred_audit:  # noqa: N801 - used as a function: ``async with deferred_audit():``
+class deferred_audit:
     """Collect the audit rows written in the block (e.g. by an ownership check outside
     an audited action) and insert them in a worker thread when it exits, awaited, so
     before the response is sent. For async routes that are not an audited action."""
@@ -448,7 +448,7 @@ class _AuditedStreamingResponse(StreamingResponse):
             with anyio.CancelScope(shield=True):
                 await _aclose(self.body_iterator)
                 await _aclose(self._source)
-                row = self._audit._conclude_stream(reason)  # noqa: SLF001
+                row = self._audit._conclude_stream(reason)
                 if row is not None:
                     await anyio.to_thread.run_sync(_persist, row)
 
@@ -463,7 +463,7 @@ async def _aclose(iterator: object) -> None:
 _current: ContextVar[AuditedAction | None] = ContextVar("audited_action", default=None)
 
 
-class audited:  # noqa: N801 - used as a function: ``async with audited(...)``
+class audited:
     """Audit the enclosed action: one row when it ends, whatever happens.
 
     ``async with`` (route handlers): the row is built on the event loop, so it carries
@@ -492,7 +492,7 @@ class audited:  # noqa: N801 - used as a function: ``async with audited(...)``
 
     def _exit(self, exc: BaseException | None) -> AuditLog | None:
         try:
-            return self._audit._conclude(exc)  # noqa: SLF001
+            return self._audit._conclude(exc)
         finally:
             if self._token is not None:
                 _current.reset(self._token)

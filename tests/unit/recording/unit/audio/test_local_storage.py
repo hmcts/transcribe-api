@@ -4,8 +4,8 @@ import hashlib
 
 import pytest
 
-from transcribe_api.stt import local_storage
 from transcribe_api.runtime.settings_recording import get_settings
+from transcribe_api.stt import local_storage
 
 
 @pytest.fixture(autouse=True)

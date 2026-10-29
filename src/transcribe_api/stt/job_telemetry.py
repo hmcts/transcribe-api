@@ -38,13 +38,13 @@ from opentelemetry.metrics import CallbackOptions, Meter, Observation
 from sqlalchemy import exc as sa_exc
 from sqlmodel import Session
 
-from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.domain.interface_recording import (
     JobStateCounts,
     claim_stuck_jobs,
     count_job_states,
 )
 from transcribe_api.domain.models_recording import JobStatus
+from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.runtime.telemetry import (
     ATTR_FAILURE_SOURCE,
     ATTR_HTTP_STATUS,
@@ -114,7 +114,7 @@ def azure_last_action(status_data: Mapping[str, Any]) -> datetime | None:
     if not isinstance(value, str):
         return None
     try:
-        return _utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
+        return _utc(datetime.fromisoformat(value))
     except ValueError:
         return None
 

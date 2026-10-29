@@ -11,17 +11,16 @@ from __future__ import annotations
 import logging
 import re
 
-from sqlmodel import Session, select
-
-from transcribe_api.runtime.db_connection import get_engine
-from transcribe_api.domain.models_dictation import User
 from hmcts_azure_auth import get_allowlisted_user as _lib_get_allowlisted_user
 from hmcts_azure_auth.audit import AuditWriter
 from hmcts_azure_auth.roles import get_valid_roles
+from sqlmodel import Session, select
 
-from transcribe_api.domain.auth.token_auth import build_token_user_dep
 from transcribe_api.domain.auth.auth_models_dictation import AuthenticatedUser
+from transcribe_api.domain.auth.token_auth import build_token_user_dep
 from transcribe_api.domain.auth.user_creation import insert_user_or_load_existing
+from transcribe_api.domain.models_dictation import User
+from transcribe_api.runtime.db_connection import get_engine
 
 logger = logging.getLogger(__name__)
 

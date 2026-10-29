@@ -13,8 +13,8 @@ _WEBHOOK_SECRET = "test-secret"
 
 
 def _make_pending_job(batch_status="NotStarted", callback_url="https://cb.example.com/hook"):
-    from transcribe_api.stt.polling_service import _PendingJob
     from transcribe_api.domain.models_recording import BatchJobStatus
+    from transcribe_api.stt.polling_service import _PendingJob
 
     return _PendingJob(
         id=_JOB_ID,
@@ -571,8 +571,8 @@ class TestHandleFailed:
 
     @pytest.mark.asyncio
     async def test_skips_webhook_when_no_callback_url(self, service):
-        from transcribe_api.stt.polling_service import _PendingJob
         from transcribe_api.domain.models_recording import BatchJobStatus
+        from transcribe_api.stt.polling_service import _PendingJob
 
         job = _PendingJob(
             id=_JOB_ID,

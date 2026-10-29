@@ -261,8 +261,8 @@ class TestConvertToDialogueEntries:
         assert convert_to_dialogue_entries([]) == []
 
     def test_single_entry_creates_dialogue_entry(self):
-        from transcribe_api.stt.fast_client import convert_to_dialogue_entries
         from transcribe_api.domain.models_dictation import DialogueEntry
+        from transcribe_api.stt.fast_client import convert_to_dialogue_entries
         data = [{"speaker_label": "Speaker 0", "transcript": "Hello", "start_time": "0.0", "end_time": "1.5"}]
         result = convert_to_dialogue_entries(data)
         assert len(result) == 1
@@ -322,15 +322,15 @@ class TestDownloadAudioBlobWithRetry:
         self.mock_blob_manager.download_blob_to_file.return_value = False
         monkeypatch.setattr("transcribe_api.stt.fast_client.cleanup_files", AsyncMock())
         fast_fn = download_audio_blob_with_retry.retry_with(stop=stop_after_attempt(1), wait=wait_none())
-        with pytest.raises(Exception):  # noqa: B017, PT011  # tenacity wraps RuntimeError in RetryError
+        with pytest.raises(Exception):  # noqa: B017  # tenacity wraps RuntimeError in RetryError
             await fast_fn("user-uploads/user/file.mp3")
 
 
 @pytest.mark.asyncio
 class TestTranscribeAudio:
     async def test_converts_american_to_british_english(self, monkeypatch):
-        from transcribe_api.stt.fast_client import transcribe_audio
         from transcribe_api.domain.models_dictation import DialogueEntry
+        from transcribe_api.stt.fast_client import transcribe_audio
         entries = [DialogueEntry(speaker="S", text="color", start_time=0.0, end_time=1.0)]
         monkeypatch.setattr(
             "transcribe_api.stt.fast_client.perform_transcription_steps_with_azure_and_aws",
@@ -340,8 +340,8 @@ class TestTranscribeAudio:
         assert result[0].text == "colour"
 
     async def test_returns_all_entries(self, monkeypatch):
-        from transcribe_api.stt.fast_client import transcribe_audio
         from transcribe_api.domain.models_dictation import DialogueEntry
+        from transcribe_api.stt.fast_client import transcribe_audio
         entries = [
             DialogueEntry(speaker="S0", text="Hello", start_time=0.0, end_time=1.0),
             DialogueEntry(speaker="S1", text="Hi", start_time=1.0, end_time=2.0),
@@ -362,7 +362,7 @@ class TestPerformTranscriptionStepsWithAzureAndAws:
         self._entries = [DialogueEntry(speaker="S", text="Hi", start_time=0.0, end_time=1.0)]
         monkeypatch.setattr(
             "transcribe_api.stt.fast_client.download_audio_blob_with_retry",
-            AsyncMock(return_value=Path("/tmp/test.mp3")),  # noqa: S108
+            AsyncMock(return_value=Path("/tmp/test.mp3")),
         )
         monkeypatch.setattr(
             "transcribe_api.stt.fast_client.transcribe_audio_with_azure",
@@ -436,7 +436,7 @@ class TestTranscribeAudioWith429Response:
                 fast_fn = transcribe_audio_with_azure.retry_with(
                     stop=stop_after_attempt(1), wait=wait_none()
                 )
-                with pytest.raises(Exception):  # noqa: B017, PT011
+                with pytest.raises(Exception):  # noqa: B017
                     await fast_fn(audio_file)
 
         mock_response.raise_for_status.assert_called_once()
