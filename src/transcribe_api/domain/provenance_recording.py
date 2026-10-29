@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from datetime import datetime
+from functools import cache
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -89,6 +90,7 @@ class TranscriptProvenance(_Model):
     post_processing: PostProcessingProvenance
 
 
+@cache  # the installed package cannot change while the process runs
 def spelling_dictionary_version() -> str | None:
     try:
         return version(SPELLING_DICTIONARY_PACKAGE)

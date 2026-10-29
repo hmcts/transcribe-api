@@ -50,6 +50,7 @@ or a read API without that decision.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -60,7 +61,7 @@ from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 from hmcts_otel import conventions as c
-from hmcts_otel import get_request_id, is_valid_request_id, record_event
+from hmcts_otel import get_request_id, record_event
 
 from transcribe_api.domain import audit as audit_core
 from transcribe_api.domain.models_dictation import AuditLog
@@ -90,9 +91,23 @@ _ACTION_FOR_VIOLATION: dict[tuple[str, str], AuditAction] = {
 }
 
 
+# For a pair not in the table: by the security action alone, so a new call site never
+# turns a refusal (404) into an error (500) while its row is built.
+_ACTION_BY_SECURITY_ACTION: dict[str, AuditAction] = {
+    "read": "transcript.view",
+    "write": "transcript.edit",
+    "delete": "job.delete",
+    "submit": "job.submit",
+}
+
+
 def action_for_violation(resource_type: SecurityResourceType, action: SecurityAction) -> AuditAction:
     """The audited action that a DIAAT-285 ownership violation was an attempt at."""
-    return _ACTION_FOR_VIOLATION[(resource_type, action)]
+    audited_action = _ACTION_FOR_VIOLATION.get((resource_type, action))
+    if audited_action is None:
+        logger.warning("No audited action for violation %s/%s; mapped by action", resource_type, action)
+        audited_action = _ACTION_BY_SECURITY_ACTION.get(action, "transcript.view")
+    return audited_action
 
 
 @dataclass(frozen=True)
@@ -118,15 +133,17 @@ def denied(
 
 
 def _request_id() -> str | None:
-    request_id = get_request_id()
-    return request_id if is_valid_request_id(request_id) else None
+    """As the shared writer stores it (domain/audit.py), so one request's rows from
+    either area join to its telemetry the same way."""
+    return get_request_id()
 
 
 def write_audit(*records: AuditRecord) -> None:
-    """Insert the records in one statement and one transaction. Never raises.
+    """Write the records through the shared writer (domain/audit.py). Never raises.
 
-    Its own session, so a refusal or a failure is recorded even when the request's
-    transaction is rolled back. All rows share one timestamp and the request ID.
+    Each row in its own short transaction, off the event loop, fail-open; all rows
+    share one timestamp and the request ID. Its own session(s), so a refusal or a
+    failure is recorded even when the request's transaction is rolled back.
     """
     if not records:
         return
@@ -216,6 +233,11 @@ def audited(
         yield scope
     except HTTPException as exc:
         _failed(scope, action, actor_id, object_type, f"http_{exc.status_code}")
+        raise
+    except asyncio.CancelledError:
+        # The request was cancelled mid-action (client gone, shutdown): what was done
+        # may be partial, so it is recorded, as failed.
+        _failed(scope, action, actor_id, object_type, "cancelled")
         raise
     except Exception:
         _failed(scope, action, actor_id, object_type, "error")

@@ -206,3 +206,21 @@ def test_skipped_block_writes_nothing_even_when_it_raises(audit_capture):
 def test_security_violation_maps_to_the_audited_action(resource_type, action, expected):
     assert audit.action_for_violation(resource_type, action) == expected
     assert expected in AUDIT_ACTIONS
+
+
+def test_a_cancelled_action_is_recorded_as_failed(audit_capture):
+    """A request cancelled mid-action (client gone, shutdown) may have done part of it."""
+    import asyncio
+
+    with pytest.raises(asyncio.CancelledError), audited("job.delete", ACTOR, JOB):
+        raise asyncio.CancelledError
+    (row,) = audit_capture.rows
+    assert (row["action"], row["outcome"], row["detail"]) == ("job.delete", "failed", {"reason": "cancelled"})
+
+
+def test_an_unmapped_violation_is_mapped_by_its_action_not_an_error():
+    from transcribe_api.domain.audit_recording import action_for_violation
+
+    assert action_for_violation("audio", "read") == "audio.export"  # in the table
+    assert action_for_violation("audio", "delete") == "job.delete"  # by the action
+    assert action_for_violation("job", "write") == "transcript.edit"
