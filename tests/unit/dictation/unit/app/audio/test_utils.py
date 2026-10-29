@@ -10,6 +10,7 @@ import httpx
 import pytest
 from azure.storage.blob import BlobSasPermissions
 
+from transcribe_api.domain.models_dictation import DialogueEntry
 from transcribe_api.stt.utils import (
     convert_input_dialogue_entries_to_dialogue_entries,
     extract_transcription_id_from_blob_path,
@@ -19,7 +20,6 @@ from transcribe_api.stt.utils import (
     get_url_for_transcription,
     is_rate_limit_error,
 )
-from transcribe_api.domain.models_dictation import DialogueEntry
 
 
 @pytest.mark.asyncio
@@ -398,7 +398,7 @@ class TestCleanupFiles:
 
     async def test_nonexistent_path_does_nothing(self):
         from transcribe_api.stt.utils import cleanup_files
-        path = Path("/tmp/this_file_definitely_does_not_exist_12345.wav")  # noqa: S108
+        path = Path("/tmp/this_file_definitely_does_not_exist_12345.wav")
         await cleanup_files(path)  # Should not raise
 
 

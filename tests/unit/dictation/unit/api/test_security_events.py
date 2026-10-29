@@ -22,8 +22,6 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
 import transcribe_api.runtime.security_events as sec
-from transcribe_api.domain.exceptions import OwnershipConflictError
-from transcribe_api.domain.models_dictation import MinuteVersion, Transcription, TranscriptionJob, User
 from tests.unit.dictation.unit.api.test_routes import (
     TEST_OID,
     _make_transcription,
@@ -31,6 +29,8 @@ from tests.unit.dictation.unit.api.test_routes import (
     _make_user_with_oid,
     _mock_request,
 )
+from transcribe_api.domain.exceptions import OwnershipConflictError
+from transcribe_api.domain.models_dictation import MinuteVersion, Transcription, TranscriptionJob, User
 
 TITLE = "Smith v Secretary of State, PA/50123/2024"
 EVENT_KEYS = {sec.ATTR_RESOURCE_TYPE, sec.ATTR_ACTION, sec.ATTR_OUTCOME}

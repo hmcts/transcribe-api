@@ -1,7 +1,7 @@
 import sentry_sdk
 
-from transcribe_api.domain.models_dictation import DialogueEntry
 from transcribe_api.documents.minutes.llm_calls import generate_speaker_predictions
+from transcribe_api.domain.models_dictation import DialogueEntry
 
 
 def convert_input_dialogue_entries_to_dialogue_entries(
@@ -126,7 +126,7 @@ async def process_speakers_and_dialogue_entries(
                     end_time=entry.end_time,
                 )
             )
-        return predicted_entries  # noqa: TRY300
+        return predicted_entries
     except Exception as e:
         sentry_sdk.capture_exception(e)
         return labelled_dialogue_entries

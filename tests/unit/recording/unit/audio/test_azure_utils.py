@@ -150,7 +150,7 @@ class TestStreamBlobRange:
         async with anyio.create_task_group() as tg:
             tg.start_soon(consume)
             while not received:
-                await anyio.sleep(0)
+                await anyio.lowlevel.checkpoint()
             tg.cancel_scope.cancel()
 
         assert received == [b"chunk-0|"]

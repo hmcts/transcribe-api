@@ -71,7 +71,7 @@ _renderer_digest: str | None = _compute_renderer_digest()
 
 def template_version_for(content_digests: Collection[str]) -> str:
     """12 hex characters identifying the renderer and this content, or "unknown"."""
-    global _renderer_digest  # noqa: PLW0603 - computed once per process
+    global _renderer_digest
     if _renderer_digest is None:
         _renderer_digest = _compute_renderer_digest()  # retried, not cached as failed
     if _renderer_digest is None:

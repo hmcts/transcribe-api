@@ -279,9 +279,9 @@ def test_administrators_see_the_provenance_of_each_output(mocker):
     from fastapi.testclient import TestClient
 
     import transcribe_api.api.routes_dictation_privileged
-    from transcribe_api.domain.models_dictation import TranscriptionJob
     from tests.unit.dictation.unit.api.test_routes import _make_transcription, _make_user
     from transcribe_api.domain.auth.dependencies_dictation import get_current_user
+    from transcribe_api.domain.models_dictation import TranscriptionJob
 
     test_app = FastAPI()
     test_app.include_router(transcribe_api.api.routes_dictation_privileged.router, prefix="/api")

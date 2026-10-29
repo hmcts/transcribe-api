@@ -16,7 +16,6 @@ import pytest
 import sqlalchemy
 from sqlmodel import Session, SQLModel, create_engine
 
-from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.domain.interface_recording import get_job_by_id, save_job_results
 from transcribe_api.domain.models_recording import (
     BatchJobStatus,
@@ -27,6 +26,7 @@ from transcribe_api.domain.models_recording import (
     SpeechBatchJob,
     WordInfo,
 )
+from transcribe_api.runtime.settings_recording import get_settings
 
 # Bounded psycopg2 connect timeout so an unreachable Postgres fails fast
 # instead of stalling test *collection* on the module-level skip check below,

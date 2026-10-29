@@ -9,16 +9,16 @@ import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 from uwotm8 import convert_american_to_british_spelling
 
-from transcribe_api.stt.job_telemetry import record_speech_retry, response_error_code
-from transcribe_api.stt.speech_telemetry import SPEECH_API_VERSION, speech_call
-from transcribe_api.runtime.settings_recording import get_settings
-from transcribe_api.stt.speech_auth import speech_auth_headers
 from transcribe_api.domain.models_recording import (
     DialogueEntry,
     NBestCandidate,
     PhraseAlternatives,
     WordInfo,
 )
+from transcribe_api.runtime.settings_recording import get_settings
+from transcribe_api.stt.job_telemetry import record_speech_retry, response_error_code
+from transcribe_api.stt.speech_auth import speech_auth_headers
+from transcribe_api.stt.speech_telemetry import SPEECH_API_VERSION, speech_call
 
 # A fixed transcript for SPEECH_BACKEND=mock (see settings_recording.py). Two
 # speakers, word-level timing and a low-confidence word so the review UI's

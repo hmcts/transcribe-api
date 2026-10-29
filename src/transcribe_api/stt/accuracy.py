@@ -24,8 +24,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from transcribe_api.stt.wer import aggregate_word_error_rate, baseline_word_error_rate
 from transcribe_api.domain.models_recording import DialogueEntry
+from transcribe_api.stt.wer import aggregate_word_error_rate, baseline_word_error_rate
 
 # Azure's per-word confidence often sits in the high 70s/low 80s for
 # correctly-recognised but short/common words (e.g. "the", "this") purely

@@ -317,8 +317,9 @@ def test_0002_keeps_existing_naive_values_as_utc_whatever_the_session_timezone()
     """Rows written under 0001 hold UTC wall-clock time; 0002 must not shift them."""
     from datetime import UTC, datetime
 
-    from alembic import command
     from sqlalchemy import create_engine, text
+
+    from alembic import command
 
     engine = create_engine(os.environ["TEST_POSTGRES_URL"], connect_args={"options": "-c timezone=Europe/London"})
     with engine.begin() as connection:
@@ -363,8 +364,9 @@ def test_0002_keeps_existing_naive_values_as_utc_whatever_the_session_timezone()
 
 @pytest.mark.skipif(not os.getenv("TEST_POSTGRES_URL"), reason="needs TEST_POSTGRES_URL (a throwaway Postgres)")
 def test_0003_keeps_existing_rows_and_allows_app_rows_without_an_email():
-    from alembic import command
     from sqlalchemy import create_engine, text
+
+    from alembic import command
 
     engine = create_engine(os.environ["TEST_POSTGRES_URL"])
     with engine.begin() as connection:

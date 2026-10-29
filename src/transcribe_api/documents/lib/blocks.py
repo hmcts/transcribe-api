@@ -6,7 +6,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Literal
 
-from transcribe_api.documents.lib.docx_style_profile import INDENT_INCREMENT_CM, STYLE_NUM_NORMAL, STYLE_QUOTATION, cm_to_pt
+from transcribe_api.documents.lib.docx_style_profile import (
+    INDENT_INCREMENT_CM,
+    STYLE_NUM_NORMAL,
+    STYLE_QUOTATION,
+    cm_to_pt,
+)
 from transcribe_api.documents.lib.models import Heading, Paragraph
 
 INDENT_INCREMENT_PT = cm_to_pt(INDENT_INCREMENT_CM)

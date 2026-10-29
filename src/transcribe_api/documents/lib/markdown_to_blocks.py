@@ -15,7 +15,12 @@ from mistletoe import Document as MarkdownDocument
 from mistletoe import block_token as md_block
 from mistletoe import span_token as md_span
 
-from transcribe_api.documents.lib.docx_style_profile import INDENT_INCREMENT_CM, STYLE_NUM_NORMAL, STYLE_QUOTATION, cm_to_pt
+from transcribe_api.documents.lib.docx_style_profile import (
+    INDENT_INCREMENT_CM,
+    STYLE_NUM_NORMAL,
+    STYLE_QUOTATION,
+    cm_to_pt,
+)
 from transcribe_api.documents.lib.models import ContentBlock, Heading, Paragraph
 
 Alignment = Literal["left", "center", "right", "justify"]
@@ -180,7 +185,7 @@ class _MarkdownBlockVisitor:
                 text=text,
                 level=level,
                 bold=True,
-                underline=level <= 2,  # noqa: PLR2004
+                underline=level <= 2,
             )
         )
 

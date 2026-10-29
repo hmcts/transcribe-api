@@ -5,15 +5,18 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from transcribe_api.documents.anonymity import DELETE_MARKER, AnonymityStatus, get_anonymity_content, parse_anonymity_status
+from transcribe_api.documents.anonymity import (
+    DELETE_MARKER,
+    AnonymityStatus,
+    get_anonymity_content,
+    parse_anonymity_status,
+)
 from transcribe_api.documents.content_loader import (
     get_hearing_description,
     get_hearing_title,
     get_legal_framework_content_blocks,
     get_legal_framework_issues,
 )
-from transcribe_api.documents.models import DocumentData, format_date_long
-from transcribe_api.documents.notes_parser import parse_notes_html
 from transcribe_api.documents.lib.blocks import (
     enumerated_list_blocks,
     paragraph_blocks,
@@ -21,6 +24,8 @@ from transcribe_api.documents.lib.blocks import (
 )
 from transcribe_api.documents.lib.markdown_to_blocks import markdown_to_blocks
 from transcribe_api.documents.lib.models import ContentBlock, Frontmatter, HearingDocument, IACTemplate, Paragraph
+from transcribe_api.documents.models import DocumentData, format_date_long
+from transcribe_api.documents.notes_parser import parse_notes_html
 
 # MERGE NOTE: was three parents up (backend/) under the old layout, which
 # resolves to src/ here. data/ ships inside the package so it is present in a
@@ -225,7 +230,7 @@ def build_hearing_document_from_document_data(document_data: DocumentData) -> He
         notice_of_decision=section_heading_blocks("Notice of Decision", level=1, bold=True, underline=True)
         + paragraph_blocks("[Notice of Decision]", alignment="justify"),
         anonymity_order=anonymity_order_blocks,
-        to_the_respondent=section_heading_blocks("To the Respondent – Fee Award", level=1, bold=True, underline=True),  # noqa: RUF001
+        to_the_respondent=section_heading_blocks("To the Respondent – Fee Award", level=1, bold=True, underline=True),
         fee_award=paragraph_blocks("[Fee award to be determined]", alignment="justify"),
         signature=[
             *section_heading_blocks("Signature", level=1, bold=True),

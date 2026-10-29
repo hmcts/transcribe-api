@@ -250,7 +250,7 @@ class TestIsTranscriptionShowable:
         t.minute_versions = []
         t.transcription_jobs = []
         # naive datetime — pytz.utc.localize() should be called on it
-        t.created_datetime = dt.datetime(2020, 1, 1, 0, 0, 0)  # noqa: DTZ001  # naive, very old
+        t.created_datetime = dt.datetime(2020, 1, 1, 0, 0, 0)  # naive, very old
         assert _is_transcription_showable(t, datetime.now(UTC)) is True
 
 
@@ -541,7 +541,7 @@ class TestGetLiveDraft:
     def test_returns_none_when_no_draft_exists(self):
         from transcribe_api.domain.interface_dictation import get_live_draft
 
-        mock_session, mock_ctx = self._mock_ctx(None)
+        _, mock_ctx = self._mock_ctx(None)
 
         with patch("transcribe_api.domain.interface_dictation.Session", return_value=mock_ctx):
             result = get_live_draft(uuid4())
@@ -583,7 +583,7 @@ class TestGetLiveDraft:
         from transcribe_api.domain.interface_dictation import get_live_draft
 
         draft = MagicMock()
-        draft.updated_datetime = _dt.datetime.now() - timedelta(hours=1)  # noqa: DTZ005
+        draft.updated_datetime = _dt.datetime.now() - timedelta(hours=1)
         assert draft.updated_datetime.tzinfo is None
         draft.created_datetime = datetime.now(UTC) - timedelta(hours=1)
         mock_session, mock_ctx = self._mock_ctx(draft)
@@ -600,7 +600,7 @@ class TestGetLiveDraft:
         draft = MagicMock()
         draft.updated_datetime = None
         draft.created_datetime = datetime.now(UTC) - timedelta(hours=1)
-        mock_session, mock_ctx = self._mock_ctx(draft)
+        _, mock_ctx = self._mock_ctx(draft)
 
         with patch("transcribe_api.domain.interface_dictation.Session", return_value=mock_ctx):
             result = get_live_draft(uuid4())

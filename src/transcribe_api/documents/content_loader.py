@@ -49,8 +49,8 @@ def _load_content_file() -> dict[str, Any]:
     """
     from sqlmodel import Session, select
 
-    from transcribe_api.runtime.db_connection import get_engine
     from transcribe_api.domain.models_dictation import DocumentContent
+    from transcribe_api.runtime.db_connection import get_engine
 
     try:
         with Session(get_engine()) as session:
@@ -103,7 +103,7 @@ _content_used: ContextVar[set[str] | None] = ContextVar("document_content_used",
 def _used(content: dict[str, Any]) -> dict[str, Any]:
     """Remember a fingerprint of the content handed to the renderer (DIAAT-279): for
     the render in progress (track_content_used) and, process-wide, as the last used."""
-    global _last_used_digest, _digested  # noqa: PLW0603 - one value per process, like _cache
+    global _last_used_digest, _digested
     if _digested is not None and _digested[0] is content:
         digest = _digested[1]
     else:
@@ -157,8 +157,8 @@ def get_document_content() -> dict[str, Any]:
     """
     from sqlmodel import Session, select
 
-    from transcribe_api.runtime.db_connection import get_engine
     from transcribe_api.domain.models_dictation import DocumentContent
+    from transcribe_api.runtime.db_connection import get_engine
 
     try:
         with Session(get_engine()) as session:
