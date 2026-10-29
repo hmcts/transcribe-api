@@ -31,14 +31,21 @@ from hmcts_otel.testing import TelemetryCapture
 
 # Pattern classes --------------------------------------------------------------------------
 
-# Dictation's: RE2 syntax (no lookarounds), as the deployed sample scan uses.
+# RE2 syntax (no lookarounds), as the deployed sample scan (KQL) can run: dictation's,
+# with recording's case-reference forms that RE2 can express (file names, court numbers).
 RE2_PATTERNS: dict[str, re.Pattern[str]] = {
     "email": re.compile(
         r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})*\.[A-Za-z]{2,24}"
     ),
-    # First-tier Tribunal (IAC) appeal numbers (PA/50123/2024, HU-01234-2023) and
-    # Upper Tribunal references (UI-2024-001234).
-    "uk_case_reference": re.compile(r"\b(?:[A-Z]{2}[/-]\d{5}[/-]\d{4}|UI-\d{4}-\d{6})\b"),
+    # First-tier Tribunal (IAC) appeal numbers (PA/50123/2024, HU-01234-2023, and in file
+    # names PA_50123_2024 or pa_50123_2024), Upper Tribunal references (UI-2024-001234),
+    # Crown Court (T20247001) and county/family court (ZW24C50012) case numbers. Bounded
+    # by a non-alphanumeric character (not \b: "_" is a word character in file names).
+    "uk_case_reference": re.compile(
+        r"(?:^|[^A-Za-z0-9])"
+        r"(?:[A-Za-z]{2}[/_ -]\d{5}[/_ -]\d{4}|UI-\d{4}-\d{6}|T\d{8}|[A-Z]{2}\d{2}[A-Z]\d{5})"
+        r"(?:$|[^0-9])"
+    ),
     # Azure SAS signature: sig= and a value (sig=[REDACTED] is fine).
     "sas_signature": re.compile(r"(?i)(?:^|[^a-z0-9_])sig=[A-Za-z0-9%+/=]{8,}"),
     "bearer_token": re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{8,}"),
@@ -86,10 +93,12 @@ PATTERNS: dict[str, re.Pattern[str]] = {
 
 @dataclass(frozen=True)
 class Exported:
-    """One exported string and where it came from (e.g. "log attribute")."""
+    """One exported string, where it came from (e.g. "log attribute") and, for an
+    attribute value, its key (so a finding names the attribute, never the value)."""
 
     where: str
     text: str
+    key: str = ""
 
 
 @dataclass
@@ -111,7 +120,7 @@ def _attribute_items(where: str, attributes: Any, counts: Counts) -> Iterator[Ex
         counts.attributes += 1
         yield Exported(f"{where} key", str(key))
         text = value if isinstance(value, str) else json.dumps(value, default=str)
-        yield Exported(where, text)
+        yield Exported(where, text, str(key))
 
 
 def exported_items(tel: TelemetryCapture) -> tuple[list[Exported], Counts]:
@@ -169,9 +178,10 @@ class Finding:
     kind: str  # "seeded" or "pattern"
     name: str  # the seed label or pattern name: never the matched text
     where: str
+    key: str = ""  # the attribute it was found in, if any (a name, never the value)
 
     def as_dict(self) -> dict[str, str]:
-        return {"kind": self.kind, "name": self.name, "where": self.where}
+        return {"kind": self.kind, "name": self.name, "where": self.where, "key": self.key}
 
 
 @dataclass
@@ -183,8 +193,15 @@ class ScanResult:
     def passed(self) -> bool:
         return not self.findings
 
+    @property
+    def vacuous(self) -> bool:
+        """Nothing was exported as an event: the scan would prove nothing."""
+        return self.counts.custom_events == 0
+
     def summary(self) -> str:
-        return ", ".join(sorted({f"{f.kind} '{f.name}' in {f.where}" for f in self.findings}))
+        return ", ".join(
+            sorted({f"{f.kind} '{f.name}' in {f.where}" + (f" {f.key}" if f.key else "") for f in self.findings})
+        )
 
 
 def scan_items(
@@ -198,11 +215,11 @@ def scan_items(
     for item in items:
         for label, value in seeded.items():
             if value and value in item.text:
-                findings.add(Finding("seeded", label, item.where))
+                findings.add(Finding("seeded", label, item.where, item.key))
         for name, pattern in patterns.items():
             if pattern.search(item.text):
-                findings.add(Finding("pattern", name, item.where))
-    return sorted(findings, key=lambda f: (f.kind, f.name, f.where))
+                findings.add(Finding("pattern", name, item.where, item.key))
+    return sorted(findings, key=lambda f: (f.kind, f.name, f.where, f.key))
 
 
 def scan(
@@ -228,7 +245,8 @@ def record_scenario(
     seeded: Mapping[str, str],
     notes: Mapping[str, Any] | None = None,
 ) -> None:
-    """Add one scanned scenario to the session's evidence."""
+    """Add one scanned scenario to the session's evidence. A scenario that exported no
+    events fails (a vacuous scan proves nothing), as well as one with findings."""
     SEEDED_LABELS[area] = sorted(seeded)
     SCENARIOS.append(
         {
@@ -236,14 +254,16 @@ def record_scenario(
             "scenario": nodeid,
             "counts": asdict(result.counts),
             "findings": [finding.as_dict() for finding in result.findings],
-            "result": "pass" if result.passed else "fail",
-            **(notes or {}),
+            "vacuous": result.vacuous,
+            "result": "pass" if result.passed and not result.vacuous else "fail",
+            "notes": dict(notes or {}),  # under their own key: they can never replace the result
         }
     )
 
 
-def evidence(**metadata: Any) -> dict[str, Any]:
-    """The session's evidence: every scenario, totals, the checks (labels and patterns)."""
+def evidence(*, exit_status: int = 0, **metadata: Any) -> dict[str, Any]:
+    """The session's evidence: every scenario, totals, the checks (labels and patterns).
+    The result fails if any scenario failed or the test session itself did."""
     totals = Counts()
     for scenario in SCENARIOS:
         totals.add(Counts(**scenario["counts"]))
@@ -253,7 +273,9 @@ def evidence(**metadata: Any) -> dict[str, Any]:
         "epic": "DIAAT-205",
         "ticket": "DIAAT-287",
         **metadata,
-        "result": "fail" if failed else "pass",
+        "result": "fail" if failed or exit_status != 0 else "pass",
+        "pytest_exit_status": exit_status,
+        "areas_scanned": sorted({s["area"] for s in SCENARIOS}),
         "scenarios_scanned": len(SCENARIOS),
         "scenarios_failed": failed,
         "totals": asdict(totals),
@@ -263,6 +285,15 @@ def evidence(**metadata: Any) -> dict[str, Any]:
     }
 
 
-def write_evidence(path: Any, **metadata: Any) -> None:
+def write_evidence(path: Any, *, exit_status: int = 0, **metadata: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(evidence(**metadata), indent=2) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(evidence(exit_status=exit_status, **metadata), indent=2) + "\n", encoding="utf-8")
+
+
+def evidence_path(root: Any) -> Any:
+    """Where the evidence is written: under the repository root (not the working
+    directory), unless TELEMETRY_PII_SCAN_REPORT says otherwise."""
+    import os
+    from pathlib import Path
+
+    return Path(os.environ.get("TELEMETRY_PII_SCAN_REPORT", Path(root) / "test-results" / "telemetry-pii-scan.json"))

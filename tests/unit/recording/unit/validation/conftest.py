@@ -34,5 +34,7 @@ def tel(request):
         yield capture
         result = telemetry_scan.scan(capture, SEEDED)
     telemetry_scan.record_scenario("recording", request.node.nodeid, result, SEEDED)
+    if result.vacuous:
+        pytest.fail("the scenario captured no events: the scan would be vacuous")
     if not result.passed:
         pytest.fail(f"prohibited content in exported telemetry: {result.summary()}")

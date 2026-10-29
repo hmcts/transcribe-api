@@ -42,9 +42,11 @@ BENIGN = [
 
 
 @pytest.mark.parametrize("name", sorted(pii_scan.PATTERNS))
-def test_every_pattern_class_matches_its_sample(name):
-    assert set(PATTERN_SAMPLES) == set(pii_scan.PATTERNS)
-    assert pii_scan.PATTERNS[name].search(PATTERN_SAMPLES[name])
+@pytest.mark.parametrize("patterns", [pii_scan.PATTERNS, pii_scan.RE2_PATTERNS], ids=["union", "re2"])
+def test_every_pattern_class_matches_its_sample(patterns, name):
+    """Both the union and the RE2 subset the deployed KQL scan uses, on their own."""
+    assert set(PATTERN_SAMPLES) == set(patterns)
+    assert patterns[name].search(PATTERN_SAMPLES[name])
 
 
 def test_every_seeded_value_is_found_by_value():

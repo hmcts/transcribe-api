@@ -150,33 +150,43 @@ def speech_workload_identity(monkeypatch: pytest.MonkeyPatch):
     speech_auth._credential.cache_clear()
 
 
+def pytest_sessionstart(session):
+    """DIAAT-287: no evidence from an earlier run is ever archived as this run's."""
+    from tests.unit import telemetry_scan
+
+    telemetry_scan.evidence_path(session.config.rootpath).unlink(missing_ok=True)
+
+
 def pytest_sessionfinish(session, exitstatus):
     """DIAAT-287: write the session's prohibited-content scan evidence (both areas), if
-    any validation scenario ran. TELEMETRY_PII_SCAN_REPORT overrides the path."""
+    any validation scenario ran, under the repository root (TELEMETRY_PII_SCAN_REPORT
+    overrides the path). Its result also fails if the test session failed."""
     import os
     import platform
     import subprocess
     from datetime import UTC, datetime
     from importlib.metadata import version
-    from pathlib import Path
 
     from tests.unit import telemetry_scan
 
     if not telemetry_scan.SCENARIOS:
         return
     try:
-        commit = os.environ.get("GIT_COMMIT") or subprocess.run(  # noqa: S603 - fixed arguments
-            ["git", "rev-parse", "HEAD"],  # noqa: S607
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5,
-        ).stdout.strip()
+        commit = (
+            os.environ.get("GIT_COMMIT")
+            or subprocess.run(  # noqa: S603 - fixed arguments
+                ["git", "rev-parse", "HEAD"],  # noqa: S607
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5,
+            ).stdout.strip()
+        )
     except Exception:  # noqa: BLE001 - evidence metadata is best effort
         commit = None
-    path = Path(os.environ.get("TELEMETRY_PII_SCAN_REPORT", Path("test-results") / "telemetry-pii-scan.json"))
     telemetry_scan.write_evidence(
-        path,
+        telemetry_scan.evidence_path(session.config.rootpath),
+        exit_status=int(exitstatus),
         generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
         commit=commit,
         python=platform.python_version(),
