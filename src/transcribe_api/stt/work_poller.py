@@ -298,8 +298,14 @@ class TranscriptionPollingService:
             await self._mark_blob_permanently_failed(blob_path, {"last_error": "OwnershipConflictError"})
             return False
         except Exception as e:
-            # Type and stack only: exception text can carry content.
-            logger.error("Error processing audio file %s (%s)", _redact_blob_path(blob_path), type(e).__name__, exc_info=e)
+            # Type only, no exc_info: a traceback ends with the exception's text, which
+            # can carry Azure or LLM error messages (and through them, content).
+            logger.error(
+                "Error processing audio file %s (%s, status=%s)",
+                _redact_blob_path(blob_path),
+                type(e).__name__,
+                getattr(e, "status_code", None),
+            )
             # Type only in blob metadata too: the message can carry content.
             await self._mark_blob_with_error(blob_path, type(e).__name__)
             return False

@@ -8,7 +8,7 @@ from uuid import UUID
 import sentry_sdk
 from docx import Document as DocxDocument
 from fastapi import HTTPException
-from hmcts_otel import Outcome, StageHandle, background_span, record_event, stage
+from hmcts_otel import Outcome, StageHandle, background_span, client_failure_code, record_event, stage
 from hmcts_otel import conventions as c
 
 from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager
@@ -257,11 +257,16 @@ async def _run_pipeline(
                 speech = speech_configuration()  # DIAAT-286: what the request is sent with
                 dialogue_entries = await transcribe_audio(user_upload_blob_storage_file_key)
                 transcribed_at = datetime.now(UTC)
-            except HTTPException:
-                # transcription.py reports every Azure Speech error (including auth,
-                # quota and outages) as an HTTPException. There is no client here: it is
-                # a dependency failure, not a client 4xx.
-                progress.current_stage.error("speech.request_failed")
+            except HTTPException as exc:
+                # transcription.py reports Azure Speech errors as HTTPExceptions:
+                # 422 when Azure rejected the audio or request (the user's file: a
+                # handled failure, job outcome "failure"), 5xx for auth, quota,
+                # throttling and outages (a dependency error that counts towards
+                # error rates and the upload-job-failures alert).
+                if client_failure_code(exc) is not None:
+                    progress.current_stage.fail("speech.audio_rejected")
+                else:
+                    progress.current_stage.error("speech.request_failed")
                 raise
         progress.step = "speaker_naming"
         with stage("speaker_naming") as progress.current_stage:

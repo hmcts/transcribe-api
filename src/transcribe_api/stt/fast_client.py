@@ -1,4 +1,5 @@
 import json
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,15 @@ TOO_MANY_REQUESTS = 429
 # Azure statuses where the service, not the audio, failed: authentication,
 # permissions/quota and throttling.
 _SERVICE_SIDE_CLIENT_ERRORS = frozenset({401, 403, TOO_MANY_REQUESTS})
+
+
+# Azure error codes are identifiers ("InvalidRequest", "401"); anything else is
+# not logged. Messages are never logged: they can carry request content.
+_AZURE_ERROR_CODE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+
+
+def _loggable_azure_code(code: object) -> str:
+    return code if isinstance(code, str) and _AZURE_ERROR_CODE.fullmatch(code) else "unrecognised"
 
 
 def _azure_error_status(response_status: int) -> int:
@@ -241,13 +251,21 @@ async def transcribe_audio_with_azure(audio_file_path: Path):
             # Check for nested error response shape: {"error": {"code": "...", "message": "..."}}
             if "error" in full_response and isinstance(full_response["error"], dict):
                 error_message = full_response["error"].get("message", "Unknown error occurred")
-                logger.error(f"Azure API error (nested): {error_message}")
+                logger.error(
+                    "Azure API error (nested) status=%s code=%s",
+                    response.status_code,
+                    _loggable_azure_code(full_response["error"].get("code")),
+                )
                 raise HTTPException(status_code=_azure_error_status(response.status_code), detail=error_message)
 
             # Check for top-level error response: {"code": "...", "message": "..."}
             if "code" in full_response:
                 error_message = full_response.get("message", "Unknown error occurred")
-                logger.error(f"Azure API error: {error_message}")
+                logger.error(
+                    "Azure API error status=%s code=%s",
+                    response.status_code,
+                    _loggable_azure_code(full_response.get("code")),
+                )
                 raise HTTPException(status_code=_azure_error_status(response.status_code), detail=error_message)
 
             # If no error, proceed with phrases extraction

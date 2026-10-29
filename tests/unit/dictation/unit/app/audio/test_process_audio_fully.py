@@ -413,15 +413,18 @@ class TestTerminalOutcome:
         assert docx.call_args.args[2] == "Transcript"
 
     @pytest.mark.asyncio
-    async def test_an_azure_speech_error_is_a_dependency_error_in_stage_and_job(self, monkeypatch):
+    @pytest.mark.parametrize("status", [500, 502])
+    async def test_an_azure_speech_error_is_a_dependency_error_in_stage_and_job(self, monkeypatch, status):
         from fastapi import HTTPException
         from hmcts_otel import conventions as c
         from hmcts_otel.testing import capture_telemetry
 
         self._saved(monkeypatch, self.TID)
-        # transcription.py raises 422 for any Azure error body, e.g. an invalid key (401).
+        # transcription.py raises 502 for auth, quota, throttling and outages (e.g. an
+        # invalid key, 401), and 500 when it is misconfigured or Azure returns no phrases.
         monkeypatch.setattr(
-            "transcribe_api.stt.pipeline.transcribe_audio", AsyncMock(side_effect=HTTPException(status_code=422))
+            "transcribe_api.stt.pipeline.transcribe_audio",
+            AsyncMock(side_effect=HTTPException(status_code=status)),
         )
         with capture_telemetry() as telemetry:
             with pytest.raises(HTTPException):
@@ -430,6 +433,26 @@ class TestTerminalOutcome:
             failed = telemetry.events("transcription.failed")[0]
             assert failed[c.OUTCOME] == "error"
             assert failed[c.ERROR_CODE] == "speech.request_failed"
+
+    @pytest.mark.asyncio
+    async def test_audio_rejected_by_azure_is_a_failure_in_stage_and_job(self, monkeypatch):
+        from fastapi import HTTPException
+        from hmcts_otel import conventions as c
+        from hmcts_otel.testing import capture_telemetry
+
+        self._saved(monkeypatch, self.TID)
+        # transcription.py raises 422 when Azure rejected the audio or the request: the
+        # user's file, not a service error, so it stays out of error rates and alerts.
+        monkeypatch.setattr(
+            "transcribe_api.stt.pipeline.transcribe_audio", AsyncMock(side_effect=HTTPException(status_code=422))
+        )
+        with capture_telemetry() as telemetry:
+            with pytest.raises(HTTPException):
+                await self._run(self.TID)
+            assert self._finished(telemetry) == ("failure", "transcription.failed")
+            failed = telemetry.events("transcription.failed")[0]
+            assert failed[c.OUTCOME] == "failure"
+            assert failed[c.ERROR_CODE] == "speech.audio_rejected"
 
     @pytest.mark.asyncio
     async def test_job_outcome_follows_the_stage_that_stopped_it(self, monkeypatch):

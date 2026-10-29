@@ -248,3 +248,30 @@ def test_browser_events_carry_no_client_claimed_transcription_id():
     for name, spec in default_schema.events.items():
         if spec.browser:
             assert "dictation.transcription_id" not in spec.attributes, name
+
+
+def test_a_browser_supplied_journey_parent_is_dropped(client, as_user):
+    """The browser's session is a root journey: a parent_id it sends would let a user link
+    their events under any journey, so it never becomes hmcts.journey.parent_id."""
+    _signed_in(as_user)
+    forged_parent = "6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f"
+    event = {"name": "dictation.paused", "journey": {**_journey(), "parent_id": forged_parent}}
+    with capture_telemetry() as telemetry:
+        assert _post(client, [event]).json() == {"accepted": 1, "rejected": 0}
+        relayed = _browser_events(telemetry)
+        assert [e[c.JOURNEY_ID] for e in relayed] == [SESSION]
+        assert not [e for e in telemetry.events() if c.JOURNEY_PARENT_ID in e]
+        assert forged_parent not in str(telemetry.events())
+
+
+def test_the_relay_body_limit_still_applies_without_a_declared_length(client, as_user):
+    """The parent is dropped before the library reads the body: that read is bounded too."""
+    _signed_in(as_user)
+
+    def chunks():
+        yield b'{"events": ['
+        yield b" " * 40_000
+        yield b"]}"
+
+    response = client.post("/api/telemetry", content=chunks(), headers={"content-type": "application/json"})
+    assert response.status_code == 413

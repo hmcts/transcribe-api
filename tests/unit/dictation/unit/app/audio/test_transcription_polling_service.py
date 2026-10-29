@@ -279,3 +279,50 @@ class TestJourney:
         ):
             assert await service.process_discovered_audio(make_blob(f"user-uploads/oid/{tid}.mp4"))
         assert seen["journey"] is None
+
+
+class TestErrorLogging:
+    @pytest.mark.asyncio
+    async def test_a_pipeline_error_message_is_not_logged(self, service):
+        """The traceback's last line is the exception's text (e.g. Azure's error message
+        in an HTTPException detail): only the type and status are logged.
+
+        The record is read by a handler on the app logger, before the hmcts-otel root
+        handler's filter: that filter drops exc_info only while exception-message
+        capture is off, so the call site must not pass the text at all."""
+        import io
+        import logging
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from fastapi import HTTPException
+
+        from transcribe_api.runtime.logger import logger as app_logger
+
+        sentinel = "SENTINEL-azure-error-detail"
+        tid = "6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f"
+        user = MagicMock(id="11111111-1111-1111-1111-111111111111", email="j@x.com", azure_user_id="oid")
+        raw = io.StringIO()
+        handler = logging.StreamHandler(raw)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        app_logger.addHandler(handler)
+        try:
+            with (
+                patch.object(service, "_mark_blob_in_progress", AsyncMock(return_value=True)),
+                patch.object(service, "resolve_blob_owner_from_path", return_value=user),  # CNP: by OID
+                patch.object(service, "_mark_blob_with_error", AsyncMock()) as mark_error,
+                patch(
+                    "transcribe_api.stt.work_poller.extract_transcription_id_from_blob_path",
+                    return_value=tid,
+                ),
+                patch(
+                    "transcribe_api.stt.work_poller.transcribe_and_generate_llm_output",
+                    AsyncMock(side_effect=HTTPException(status_code=422, detail=sentinel)),
+                ),
+            ):
+                assert not await service.process_discovered_audio(make_blob(f"user-uploads/oid/{tid}.mp4"))
+        finally:
+            app_logger.removeHandler(handler)
+
+        assert sentinel not in raw.getvalue()
+        assert "HTTPException, status=422" in raw.getvalue()
+        assert sentinel not in str(mark_error.await_args)

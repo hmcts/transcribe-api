@@ -440,3 +440,38 @@ class TestTranscribeAudioWith429Response:
                     await fast_fn(audio_file)
 
         mock_response.raise_for_status.assert_called_once()
+
+
+SENTINEL = "SENTINEL-azure-says-the-judge-said-this"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"error": {"code": "InvalidRequest", "message": SENTINEL}},
+        {"code": "InvalidRequest", "message": SENTINEL},
+    ],
+)
+async def test_azure_error_message_is_never_logged(mock_settings, audio_file, mock_http_response, caplog, body):
+    """Azure's error message can echo request content: only the status and code are logged."""
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_http_response(body, status_code=400))
+        mock_client_class.return_value.__aenter__.return_value = mock_client
+
+        from transcribe_api.stt.fast_client import transcribe_audio_with_azure
+
+        with caplog.at_level("DEBUG"), pytest.raises(HTTPException):
+            await transcribe_audio_with_azure(audio_file)
+
+    assert SENTINEL not in caplog.text
+    assert "status=400 code=InvalidRequest" in caplog.text
+
+
+def test_an_unrecognised_azure_code_is_not_logged_verbatim():
+    from transcribe_api.stt.fast_client import _loggable_azure_code
+
+    assert _loggable_azure_code("InvalidRequest") == "InvalidRequest"
+    assert _loggable_azure_code(f"bad code {SENTINEL}") == "unrecognised"
+    assert _loggable_azure_code(None) == "unrecognised"
