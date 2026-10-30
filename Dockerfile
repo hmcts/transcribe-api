@@ -19,7 +19,7 @@ FROM ${REGISTRY_NAME}.azurecr.io/imported/mwader/static-ffmpeg:9.0.2-1@sha256:f5
 FROM ${REGISTRY_NAME}.azurecr.io/imported/slim/python:3.13-slim-trixie AS builder
 
 # renovate: datasource=github-releases depName=astral-sh/uv
-COPY --from=ghcr.io/astral-sh/uv:0.12.9 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.13.6 /uv /uvx /bin/
 
 ENV UV_MALWARE_CHECK=1 \
     UV_PYTHON_DOWNLOADS=never \
