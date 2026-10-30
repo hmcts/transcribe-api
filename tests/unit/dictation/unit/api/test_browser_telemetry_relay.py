@@ -34,7 +34,6 @@ DICTATION_EVENTS = (
     "live_draft.save_recovered",
     "live_draft.restore_finished",
     "dictation.submission_finished",
-    "auth.token_refresh_failed",
     "dictation.session_ended",
 )
 TRANSCRIPT = "The appellant " + "said" + " PA/50123/2024 at the hearing"  # built at runtime
@@ -327,3 +326,60 @@ def test_deeply_nested_json_is_a_client_error(client, as_user):
     assert len(body) < 32_768
     response = _post_raw(client, body)
     assert 400 <= response.status_code < 500, response.status_code
+
+
+# --- DIAAT-205: client-side errors and failed uploads, which browser Sentry used to report ---
+
+
+def test_client_errors_and_failed_uploads_are_operational_and_need_no_consent(client, as_user):
+    from hmcts_otel import EventClass, default_schema
+
+    _signed_in(as_user)
+    client.cookies.clear()  # no analytics consent
+    events = [
+        {
+            "name": "ui.error",
+            "attributes": {
+                "ui.error_type": "ChunkLoadError",
+                "ui.error_source": "render",
+                "page.route": "/transcriptions/:id",
+                "next.error.digest": "1234567890",
+            },
+        },
+        {
+            "name": "upload.transfer_failed",
+            "attributes": {
+                c.ERROR_CODE: "http.503",
+                "http.response.status_code": 503,
+                "file.type": "audio/webm",
+                "file.size_bytes": 1024,
+                "upload.retry_attempt": 2,
+                "upload.source": "recording",
+            },
+        },
+    ]
+    with capture_telemetry() as telemetry:
+        assert _post(client, events).json() == {"accepted": 2, "rejected": 0}
+        (error,) = telemetry.events("ui.error")
+        assert error["ui.error_type"] == "ChunkLoadError" and error["page.route"] == "/transcriptions/:id"
+        (failed,) = telemetry.events("upload.transfer_failed")
+        assert failed[c.ERROR_CODE] == "http.503" and failed["upload.retry_attempt"] == 2
+    for name in ("ui.error", "upload.transfer_failed"):
+        assert default_schema.get_event(name).event_class is EventClass.OPERATIONAL
+
+
+def test_a_client_error_never_carries_its_message(client, as_user):
+    _signed_in(as_user)
+    event = {
+        "name": "ui.error",
+        "attributes": {"ui.error_type": TRANSCRIPT, "ui.error_source": "window_error", "message": TRANSCRIPT},
+    }
+    with capture_telemetry() as telemetry:
+        _post(client, [event])
+        telemetry.assert_no_prohibited_content(TRANSCRIPT, "appellant")
+
+
+def test_the_unused_token_refresh_event_is_gone():
+    from hmcts_otel import default_schema
+
+    assert default_schema.get_event("auth.token_refresh_failed") is None

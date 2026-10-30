@@ -103,9 +103,13 @@ def test_dictation_server_events_are_registered(schema: TelemetrySchema) -> None
 
 def test_browser_events_keep_their_class(schema: TelemetrySchema) -> None:
     browser = {name: e for name, e in schema.events.items() if e.browser}
-    assert len(browser) == 49
+    # 49, less auth.token_refresh_failed (no token in the browser on CNP), plus ui.error and
+    # upload.transfer_failed (DIAAT-205: what browser Sentry used to report).
+    assert len(browser) == 50
     assert browser["minutes.rated"].event_class is EventClass.ANALYTICS
     assert browser["speech.unhealthy"].event_class is EventClass.OPERATIONAL
+    assert browser["ui.error"].event_class is EventClass.OPERATIONAL
+    assert browser["upload.transfer_failed"].event_class is EventClass.OPERATIONAL
 
 
 def test_setup_registers_the_schema() -> None:
