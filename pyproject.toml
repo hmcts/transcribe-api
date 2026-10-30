@@ -63,7 +63,7 @@ dependencies = [
 
     # --- documents: llm orchestration ---
     "litellm>=1.83.14",
-    "langfuse==2.60.10",
+    "langfuse==5.1.0",
     "google-auth>=2.52.0",
 
     # --- documents: rendering ---
