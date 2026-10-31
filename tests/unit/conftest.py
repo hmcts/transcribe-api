@@ -156,6 +156,27 @@ def jurisdiction_db(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPa
 
 
 @pytest.fixture
+def fresh_postgres():
+    """A throwaway Postgres (TEST_POSTGRES_URL), emptied and migrated to head; the test
+    is skipped without one. Never point TEST_POSTGRES_URL at a database you need."""
+    url = os.getenv("TEST_POSTGRES_URL")
+    if not url:
+        pytest.skip("needs TEST_POSTGRES_URL (a throwaway Postgres)")
+    from sqlalchemy import create_engine, text
+
+    from transcribe_api.runtime import migrations
+
+    engine = create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public"))
+        migrations.run_migrations(engine)
+        yield engine
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture
 def jurisdiction_app():
     """DIAAT-322: the dictation and jurisdiction routes; sign in with
     jurisdiction_fixtures.client_as (one user per app)."""

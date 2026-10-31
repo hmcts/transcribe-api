@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
 from tests.unit.jurisdiction_fixtures import add_jurisdiction, add_member, add_user, client_as, sign_up
+from transcribe_api.api.routes_dictation import TEMPLATE_NOT_AVAILABLE
 from transcribe_api.domain import interface_dictation, jurisdictions
 from transcribe_api.runtime.telemetry import transcription_id_from_key
 from transcribe_api.domain.jurisdictions import (
@@ -353,7 +354,8 @@ def test_document_content_is_the_iac_templates_only(engine, jurisdiction_app, mo
     client = client_as(jurisdiction_app, engine, user)
 
     assert client.get("/api/document-content", headers={"X-Jurisdiction": "IAC"}).status_code == 200
-    assert client.get("/api/document-content", headers={"X-Jurisdiction": "ET"}).status_code == 404
+    refused = client.get("/api/document-content", headers={"X-Jurisdiction": "ET"})
+    assert (refused.status_code, refused.json()) == (404, {"detail": TEMPLATE_NOT_AVAILABLE})
 
 
 def test_the_live_draft_is_the_jurisdictions_own(engine, jurisdiction_app, mocker):
@@ -459,7 +461,8 @@ def test_only_a_jurisdiction_with_the_decision_template_can_submit_a_decision(en
 
     response = client_as(jurisdiction_app, engine, user).post("/api/live-transcription/submission", json=body)
 
-    assert response.status_code == 404
+    # The template gate, not an unknown route, and before anything is made.
+    assert (response.status_code, response.json()) == (404, {"detail": TEMPLATE_NOT_AVAILABLE})
     render.assert_not_called()
     save.assert_not_called()
 

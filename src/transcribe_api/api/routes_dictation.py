@@ -248,12 +248,16 @@ async def health_check_legacy():
     return JSONResponse(status_code=200, content={"status": "ok", "version": APP_VERSION})
 
 
+# The 404 of a template a jurisdiction does not use (not a 403: no access is refused).
+TEMPLATE_NOT_AVAILABLE = "Not available in this jurisdiction"
+
+
 def _require_decision_template(jurisdiction: ActiveJurisdiction) -> None:
     """404 unless the jurisdiction uses the IAC decision template (DIAAT-322): its
     form, document content and document. A jurisdiction without it dictates into the
     general section and copies its text out (DIAAT-333)."""
     if jurisdiction.settings.template != TEMPLATE_IAC_DECISION:
-        raise HTTPException(status_code=404, detail="Not available in this jurisdiction")
+        raise HTTPException(status_code=404, detail=TEMPLATE_NOT_AVAILABLE)
 
 
 @router.get("/document-content", response_model=DocumentContentResponse)
