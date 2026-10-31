@@ -14,11 +14,14 @@ from pathlib import Path
 
 import pytest
 import pytz
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 from sqlmodel import Session
 
-from tests.unit.jurisdiction_fixtures import add_iac_as_migrated, load_migration, sign_up
+from tests.unit.jurisdiction_fixtures import (
+    add_iac_as_migrated,
+    client_as,
+    load_migration,
+    sign_up,
+)
 from transcribe_api import jurisdictions_admin as admin
 from transcribe_api.domain import interface_dictation, jurisdictions
 from transcribe_api.domain.models_dictation import DocumentContent, Jurisdiction, Transcription
@@ -60,24 +63,6 @@ def iac(jurisdiction_db) -> Jurisdiction:
     return add_iac_as_migrated(jurisdiction_db)
 
 
-@pytest.fixture
-def app():
-    import transcribe_api.api.routes_dictation
-    from transcribe_api.api.routes_jurisdictions import router
-
-    app = FastAPI()
-    app.include_router(transcribe_api.api.routes_dictation.router, prefix="/api")
-    app.include_router(router, prefix="/api")
-    return app
-
-
-def _client(app, user) -> TestClient:
-    from transcribe_api.domain.auth.dependencies_dictation import get_current_user
-
-    app.dependency_overrides[get_current_user] = lambda: user
-    return TestClient(app)
-
-
 def _add_the_et(engine) -> None:
     with Session(engine) as session:
         admin.run(["put", "ET", "--name", "Employment Tribunal", "--settings", str(ET_EXAMPLE)], session)
@@ -88,10 +73,10 @@ def test_the_iacs_wording_is_the_text_its_judges_saw_before():
     assert load_migration("0004_jurisdictions.py").IAC_SETTINGS["wording"] == IAC_TEXT_BEFORE
 
 
-def test_adding_a_jurisdiction_changes_nothing_an_iac_judge_sees(jurisdiction_db, iac, app):
+def test_adding_a_jurisdiction_changes_nothing_an_iac_judge_sees(jurisdiction_db, iac, jurisdiction_app):
     judge = sign_up(jurisdiction_db, "iac.judge@example.test")
     interface_dictation.save_transcription(Transcription(title="Smith v SSHD"), judge.id, iac.id)
-    client = _client(app, judge)
+    client = client_as(jurisdiction_app, jurisdiction_db, judge)
     before = (client.get("/api/jurisdictions/me").json(), client.get("/api/transcriptions-metadata").json())
 
     _add_the_et(jurisdiction_db)
@@ -115,14 +100,14 @@ def test_adding_a_jurisdiction_leaves_the_iac_row_and_memberships_alone(jurisdic
     assert [m.code for m in jurisdictions.load_memberships(judge.id)] == ["IAC"]
 
 
-def test_an_iac_judge_sees_nothing_from_the_new_jurisdiction(jurisdiction_db, iac, app):
+def test_an_iac_judge_sees_nothing_from_the_new_jurisdiction(jurisdiction_db, iac, jurisdiction_app):
     _add_the_et(jurisdiction_db)
     judge = sign_up(jurisdiction_db, "iac.judge@example.test")
     et_judge = sign_up(jurisdiction_db, "et.judge@example.test")  # claims the pending ET membership
     et_id = jurisdictions.load_memberships(et_judge.id)[0].jurisdiction_id
     interface_dictation.save_transcription(Transcription(title="ET claim"), judge.id, et_id)  # even their own
     interface_dictation.save_transcription(Transcription(title="IAC appeal"), judge.id, iac.id)
-    client = _client(app, judge)
+    client = client_as(jurisdiction_app, jurisdiction_db, judge)
 
     assert [t["title"] for t in client.get("/api/transcriptions-metadata").json()] == ["IAC appeal"]
     me = client.get("/api/jurisdictions/me", headers={"X-Jurisdiction": "ET"}).json()
@@ -139,14 +124,14 @@ def test_new_iac_judges_still_get_in_once_another_jurisdiction_exists(jurisdicti
     assert [m.code for m in jurisdictions.load_memberships(newcomer.id)] == ["IAC"]
 
 
-def test_an_iac_judges_legal_wording_is_served_unchanged(jurisdiction_db, iac, app):
+def test_an_iac_judges_legal_wording_is_served_unchanged(jurisdiction_db, iac, jurisdiction_app):
     """The real content loader: the database seeds itself from the bundled IAC wording,
     and the IAC judge gets it all, with another jurisdiction present."""
     bundled = json.loads((REPO / "src" / "transcribe_api" / "data" / "document_content.json").read_text())
     _add_the_et(jurisdiction_db)
     judge = sign_up(jurisdiction_db, "iac.judge@example.test")
 
-    response = _client(app, judge).get("/api/document-content")
+    response = client_as(jurisdiction_app, jurisdiction_db, judge).get("/api/document-content")
 
     assert response.status_code == 200
     body = response.json()
@@ -157,13 +142,13 @@ def test_an_iac_judges_legal_wording_is_served_unchanged(jurisdiction_db, iac, a
         assert session.get(DocumentContent, 1).content == bundled
 
 
-def test_a_tab_open_before_the_release_carries_on(jurisdiction_db, iac, app, mocker):
+def test_a_tab_open_before_the_release_carries_on(jurisdiction_db, iac, jurisdiction_app, mocker):
     """A page loaded before the deploy sends no X-Jurisdiction: the IAC judge's only
     jurisdiction is used, so their draft saves where it always did."""
     judge = sign_up(jurisdiction_db, "iac.judge@example.test")
     upsert = mocker.patch("transcribe_api.api.routes_dictation.upsert_live_draft")
 
-    response = _client(app, judge).put("/api/live-draft", json={"transcript": {"background": []}, "form_data": {}})
+    response = client_as(jurisdiction_app, jurisdiction_db, judge).put("/api/live-draft", json={"transcript": {"background": []}, "form_data": {}})
 
     assert response.status_code == 204
     assert upsert.call_args.args[:2] == (judge.id, iac.id)

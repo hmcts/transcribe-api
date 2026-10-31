@@ -258,8 +258,30 @@ def default_jurisdiction_id(user_id: UUID) -> UUID | None:
         return None
 
 
+def remember_choice(user_id: UUID, jurisdiction_id: UUID) -> bool:
+    """Store the jurisdiction the user chose (DIAAT-332), for requests that name none
+    and their next sign-in. False if there is no such user.
+
+    Not re-checked against their memberships here: a stored choice is only ever used
+    while it is one of their enabled jurisdictions (choose), so one an admin removes
+    a moment later is ignored, not obeyed."""
+    with Session(get_engine()) as session:
+        stored = session.execute(
+            update(User).where(User.id == user_id).values(active_jurisdiction_id=jurisdiction_id)
+        ).rowcount
+        session.commit()
+    if stored:
+        logger.info("User id=%s chose to work in jurisdiction id=%s", user_id, jurisdiction_id)
+    return stored == 1
+
+
 def _error(status_code: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code=status_code, detail={"code": code, "message": message})
+
+
+def not_available() -> HTTPException:
+    """403: a jurisdiction the user does not belong to (a code, never material)."""
+    return _error(403, NOT_AVAILABLE, "You do not have access to that jurisdiction.")
 
 
 def choose(
@@ -274,7 +296,7 @@ def choose(
         wanted = requested_code.strip().upper()
         current = next((m for m in memberships if m.code == wanted), None)
         if current is None:
-            raise _error(403, NOT_AVAILABLE, "You do not have access to that jurisdiction.")
+            raise not_available()
         return ActiveJurisdiction(current=current, memberships=memberships)
 
     current = next((m for m in memberships if m.jurisdiction_id == active_jurisdiction_id), None)

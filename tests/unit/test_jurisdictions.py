@@ -10,11 +10,11 @@ from datetime import UTC
 from uuid import uuid4
 
 import pytest
-from fastapi import FastAPI, HTTPException
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
-from tests.unit.jurisdiction_fixtures import add_jurisdiction, add_member, add_user, sign_up
+from tests.unit.jurisdiction_fixtures import add_jurisdiction, add_member, add_user, client_as, sign_up
 from transcribe_api.domain import interface_dictation, jurisdictions
 from transcribe_api.runtime.telemetry import transcription_id_from_key
 from transcribe_api.domain.jurisdictions import (
@@ -253,23 +253,7 @@ def test_the_list_shows_the_current_jurisdictions_transcriptions_only(engine):
 # GET /api/jurisdictions/me ------------------------------------------------------------
 
 
-@pytest.fixture
-def client():
-    from transcribe_api.api.routes_jurisdictions import router
-
-    app = FastAPI()
-    app.include_router(router, prefix="/api")
-    return app
-
-
-def _as(app, user: User) -> TestClient:
-    from transcribe_api.domain.auth.dependencies_dictation import get_current_user
-
-    app.dependency_overrides[get_current_user] = lambda: user
-    return TestClient(app)
-
-
-def test_me_gives_the_current_jurisdiction_with_its_wording(engine, client):
+def test_me_gives_the_current_jurisdiction_with_its_wording(engine, jurisdiction_app):
     iac = add_jurisdiction(
         engine,
         "IAC",
@@ -279,7 +263,7 @@ def test_me_gives_the_current_jurisdiction_with_its_wording(engine, client):
     user = add_user(engine, roles=())
     add_member(engine, user, iac)
 
-    response = _as(client, user).get("/api/jurisdictions/me")
+    response = client_as(jurisdiction_app, engine, user).get("/api/jurisdictions/me")
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
@@ -297,30 +281,30 @@ def test_me_gives_the_current_jurisdiction_with_its_wording(engine, client):
     }
 
 
-def test_me_says_when_the_user_has_no_jurisdiction(engine, client):
-    response = _as(client, add_user(engine, roles=())).get("/api/jurisdictions/me")
+def test_me_says_when_the_user_has_no_jurisdiction(engine, jurisdiction_app):
+    response = client_as(jurisdiction_app, engine, add_user(engine, roles=())).get("/api/jurisdictions/me")
     assert response.json() == {"status": "no_jurisdiction", "current": None, "jurisdictions": []}
 
 
-def test_me_asks_a_user_with_several_to_choose(engine, client):
+def test_me_asks_a_user_with_several_to_choose(engine, jurisdiction_app):
     iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
     user = add_user(engine, roles=())
     add_member(engine, user, iac)
     add_member(engine, user, et)
 
-    body = _as(client, user).get("/api/jurisdictions/me").json()
+    body = client_as(jurisdiction_app, engine, user).get("/api/jurisdictions/me").json()
 
     assert body["status"] == "choose"
     assert body["current"] is None
     assert [j["code"] for j in body["jurisdictions"]] == ["ET", "IAC"]
 
 
-def test_me_follows_the_tabs_header_and_ignores_one_the_user_no_longer_has(engine, client):
+def test_me_follows_the_tabs_header_and_ignores_one_the_user_no_longer_has(engine, jurisdiction_app):
     iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET", settings={"wording": ET_WORDING})
     user = add_user(engine, roles=())
     add_member(engine, user, iac)
     add_member(engine, user, et)
-    tab = _as(client, user)
+    tab = client_as(jurisdiction_app, engine, user)
 
     et_tab = tab.get("/api/jurisdictions/me", headers={"X-Jurisdiction": "ET"}).json()
     assert et_tab["current"]["code"] == "ET"
@@ -331,22 +315,13 @@ def test_me_follows_the_tabs_header_and_ignores_one_the_user_no_longer_has(engin
 # Routes work in the request's jurisdiction ----------------------------------------------
 
 
-@pytest.fixture
-def dictation_app():
-    import transcribe_api.api.routes_dictation
-
-    app = FastAPI()
-    app.include_router(transcribe_api.api.routes_dictation.router, prefix="/api")
-    return app
-
-
-def test_the_list_route_lists_the_jurisdiction_named_by_the_header(engine, dictation_app, mocker):
+def test_the_list_route_lists_the_jurisdiction_named_by_the_header(engine, jurisdiction_app, mocker):
     iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
     user = add_user(engine)
     add_member(engine, user, iac)
     add_member(engine, user, et)
     fetch = mocker.patch("transcribe_api.api.routes_dictation.fetch_transcriptions_metadata", return_value=[])
-    client = _as(dictation_app, user)
+    client = client_as(jurisdiction_app, engine, user)
 
     assert client.get("/api/transcriptions-metadata", headers={"X-Jurisdiction": "ET"}).status_code == 200
     assert fetch.call_args.args[2] == et.id
@@ -357,15 +332,15 @@ def test_the_list_route_lists_the_jurisdiction_named_by_the_header(engine, dicta
     assert fetch.call_count == 1
 
 
-def test_routes_refuse_a_user_with_no_jurisdiction(engine, dictation_app, mocker):
+def test_routes_refuse_a_user_with_no_jurisdiction(engine, jurisdiction_app, mocker):
     fetch = mocker.patch("transcribe_api.api.routes_dictation.fetch_transcriptions_metadata", return_value=[])
-    response = _as(dictation_app, add_user(engine)).get("/api/transcriptions-metadata")
+    response = client_as(jurisdiction_app, engine, add_user(engine)).get("/api/transcriptions-metadata")
     assert response.status_code == 403
     assert response.json()["detail"]["code"] == NO_JURISDICTION
     fetch.assert_not_called()
 
 
-def test_document_content_is_the_iac_templates_only(engine, dictation_app, mocker):
+def test_document_content_is_the_iac_templates_only(engine, jurisdiction_app, mocker):
     iac = add_jurisdiction(engine, "IAC", settings={"template": "iac_decision"})
     et = add_jurisdiction(engine, "ET")
     user = add_user(engine)
@@ -375,20 +350,20 @@ def test_document_content_is_the_iac_templates_only(engine, dictation_app, mocke
         "transcribe_api.api.routes_dictation.get_document_content",
         return_value={"hearing_types": [], "legal_frameworks": [], "anonymity": {}},
     )
-    client = _as(dictation_app, user)
+    client = client_as(jurisdiction_app, engine, user)
 
     assert client.get("/api/document-content", headers={"X-Jurisdiction": "IAC"}).status_code == 200
     assert client.get("/api/document-content", headers={"X-Jurisdiction": "ET"}).status_code == 404
 
 
-def test_the_live_draft_is_the_jurisdictions_own(engine, dictation_app, mocker):
+def test_the_live_draft_is_the_jurisdictions_own(engine, jurisdiction_app, mocker):
     iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
     user = add_user(engine)
     add_member(engine, user, iac)
     add_member(engine, user, et)
     upsert = mocker.patch("transcribe_api.api.routes_dictation.upsert_live_draft")
     get = mocker.patch("transcribe_api.api.routes_dictation.get_live_draft", return_value=None)
-    client = _as(dictation_app, user)
+    client = client_as(jurisdiction_app, engine, user)
     body = {"transcript": {"general": []}, "form_data": {}}
 
     assert client.put("/api/live-draft", json=body, headers={"X-Jurisdiction": "ET"}).status_code == 204
@@ -411,14 +386,14 @@ def test_first_login_through_the_resolver_enrols_the_user(engine, monkeypatch):
 # An upload's transcription is made in the tab's jurisdiction ---------------------------
 
 
-def test_an_upload_is_transcribed_in_the_jurisdiction_it_was_started_in(engine, dictation_app, mocker):
+def test_an_upload_is_transcribed_in_the_jurisdiction_it_was_started_in(engine, jurisdiction_app, mocker):
     iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
     user = add_user(engine)
     add_member(engine, user, iac)
     add_member(engine, user, et)
     mocker.patch("transcribe_api.api.routes_dictation.get_settings").return_value.DIRECT_SDK_ACCESS = False
 
-    response = _as(dictation_app, user).post(
+    response = client_as(jurisdiction_app, engine, user).post(
         "/api/get-upload-url", json={"file_extension": "mp3"}, headers={"X-Jurisdiction": "ET"}
     )
 
@@ -462,7 +437,7 @@ def test_the_jurisdiction_of_an_existing_transcription_is_not_looked_up(engine):
     assert interface_dictation.load_or_create_transcription(saved.id, user.id, must_not_ask).id == saved.id
 
 
-def test_only_a_jurisdiction_with_the_decision_template_can_submit_a_decision(engine, dictation_app, mocker):
+def test_only_a_jurisdiction_with_the_decision_template_can_submit_a_decision(engine, jurisdiction_app, mocker):
     et = add_jurisdiction(engine, "ET")
     user = add_user(engine)
     add_member(engine, user, et)
@@ -482,7 +457,7 @@ def test_only_a_jurisdiction_with_the_decision_template_can_submit_a_decision(en
         "messages": {"background": [], "evidence": [], "facts": []},
     }
 
-    response = _as(dictation_app, user).post("/api/live-transcription/submission", json=body)
+    response = client_as(jurisdiction_app, engine, user).post("/api/live-transcription/submission", json=body)
 
     assert response.status_code == 404
     render.assert_not_called()

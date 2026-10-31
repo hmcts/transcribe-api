@@ -131,3 +131,36 @@ def add_member(engine, user: User | None, jurisdiction: Jurisdiction, role="judg
             )
         )
         session.commit()
+
+
+def jurisdiction_route_app():
+    """The dictation and jurisdiction routes, as the API mounts them."""
+    from fastapi import FastAPI
+
+    import transcribe_api.api.routes_dictation
+    from transcribe_api.api.routes_jurisdictions import router
+
+    app = FastAPI()
+    app.include_router(transcribe_api.api.routes_dictation.router, prefix="/api")
+    app.include_router(router, prefix="/api")
+    return app
+
+
+def client_as(app, engine, user: User):
+    """A client signed in as ``user``, read afresh on each request as the auth resolver
+    does (so a remembered choice is seen). The sign-in is the app's: a second
+    client_as on the same app signs every client in as the second user."""
+    from fastapi.testclient import TestClient
+
+    from transcribe_api.domain.auth.dependencies_dictation import get_current_user
+
+    roles = user.__dict__.get("app_roles", ["Judge"])
+
+    def current_user():
+        with Session(engine) as session:
+            fresh = session.get(User, user.id)
+        fresh.__dict__["app_roles"] = roles
+        return fresh
+
+    app.dependency_overrides[get_current_user] = current_user
+    return TestClient(app)

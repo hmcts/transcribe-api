@@ -3,23 +3,30 @@
 ``GET /api/jurisdictions/me`` never fails for a signed-in user: it says whether they
 are ready to work (and in which jurisdiction, with its wording), have no jurisdiction
 (the web app shows how to ask for access) or must choose one.
+
+``PUT /api/jurisdictions/active`` records the one a judge in several chose to work in
+(DIAAT-332): requests that name none use it, and so does their next sign-in.
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, StringConstraints
 
 from transcribe_api.domain.auth.dependencies_dictation import get_current_user
 from transcribe_api.domain.jurisdictions import (
     HEADER,
     NOT_AVAILABLE,
+    ActiveJurisdiction,
     JurisdictionFeatures,
     Membership,
     choose,
     load_memberships,
+    not_available,
+    remember_choice,
+    resolve,
 )
 from transcribe_api.domain.models_dictation import User
 
@@ -44,6 +51,11 @@ class MyJurisdictionsResponse(BaseModel):
     status: Literal["ready", "no_jurisdiction", "choose"]
     current: CurrentJurisdiction | None
     jurisdictions: list[JurisdictionSummary]
+
+
+class ChooseJurisdictionRequest(BaseModel):
+    # Stripped before the length check, as the code is matched (choose).
+    code: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=16)]
 
 
 def _summary(membership: Membership) -> JurisdictionSummary:
@@ -74,7 +86,6 @@ def my_jurisdictions(
     """
     response.headers["Cache-Control"] = "no-store"
     memberships = tuple(load_memberships(current_user.id))
-    summaries = [_summary(m) for m in memberships]
     if not memberships:
         return MyJurisdictionsResponse(status="no_jurisdiction", current=None, jurisdictions=[])
     requested = request.headers.get(HEADER)
@@ -87,5 +98,32 @@ def my_jurisdictions(
             active = choose(memberships, current_user.active_jurisdiction_id, None)
     except HTTPException:
         # With memberships, the only refusal left is "choose one".
-        return MyJurisdictionsResponse(status="choose", current=None, jurisdictions=summaries)
-    return MyJurisdictionsResponse(status="ready", current=_current(active.current), jurisdictions=summaries)
+        return MyJurisdictionsResponse(
+            status="choose", current=None, jurisdictions=[_summary(m) for m in memberships]
+        )
+    return _ready(active)
+
+
+def _ready(active: ActiveJurisdiction) -> MyJurisdictionsResponse:
+    return MyJurisdictionsResponse(
+        status="ready", current=_current(active.current), jurisdictions=[_summary(m) for m in active.memberships]
+    )
+
+
+# A plain def, as above.
+@router.put("/jurisdictions/active", response_model=MyJurisdictionsResponse)
+def choose_jurisdiction(
+    body: ChooseJurisdictionRequest,
+    response: Response,
+    current_user: User = Depends(get_current_user),
+) -> MyJurisdictionsResponse:
+    """Work in ``code``, one of the user's jurisdictions, from now on (DIAAT-332).
+
+    403 ``no_jurisdiction`` or ``jurisdiction_not_available`` as for any request: a
+    user cannot choose a jurisdiction they do not belong to.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    active = resolve(current_user.id, None, body.code)
+    if not remember_choice(current_user.id, active.id):
+        raise not_available()  # the user is gone
+    return _ready(active)

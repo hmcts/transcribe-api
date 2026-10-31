@@ -155,6 +155,15 @@ def jurisdiction_db(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPa
     engine.dispose()
 
 
+@pytest.fixture
+def jurisdiction_app():
+    """DIAAT-322: the dictation and jurisdiction routes; sign in with
+    jurisdiction_fixtures.client_as (one user per app)."""
+    from tests.unit.jurisdiction_fixtures import jurisdiction_route_app
+
+    return jurisdiction_route_app()
+
+
 class FakeSpeechCredential:
     """Stands in for DefaultAzureCredential in stt/speech_auth.py."""
 
