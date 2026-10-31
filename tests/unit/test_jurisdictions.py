@@ -12,11 +12,9 @@ from uuid import uuid4
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import Session, select
 
+from tests.unit.jurisdiction_fixtures import add_jurisdiction, add_member, add_user, sign_up
 from transcribe_api.domain import interface_dictation, jurisdictions
 from transcribe_api.runtime.telemetry import transcription_id_from_key
 from transcribe_api.domain.jurisdictions import (
@@ -26,7 +24,6 @@ from transcribe_api.domain.jurisdictions import (
     JurisdictionSettings,
     choose,
     default_jurisdiction_id,
-    enrol_new_user,
     load_memberships,
     parse_settings,
     resolve,
@@ -34,12 +31,7 @@ from transcribe_api.domain.jurisdictions import (
 from transcribe_api.domain.models_dictation import (
     Jurisdiction,
     JurisdictionMembership,
-    MinuteVersion,
-    Tag,
     Transcription,
-    TranscriptionJob,
-    TranscriptionTagAssociation,
-    UploadJurisdiction,
     User,
 )
 
@@ -48,60 +40,9 @@ pytestmark = pytest.mark.real_jurisdictions
 ET_WORDING = {"records.column_title": "Claim", "home.intro": "Employment Tribunal dictation."}
 
 
-@compiles(JSONB, "sqlite")
-def _jsonb_as_json(element, compiler, **kw):
-    return "JSON"
-
-
 @pytest.fixture
-def engine(monkeypatch):
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    tables = [
-        User.__table__,
-        Jurisdiction.__table__,
-        JurisdictionMembership.__table__,
-        Transcription.__table__,
-        TranscriptionJob.__table__,
-        MinuteVersion.__table__,
-        Tag.__table__,
-        TranscriptionTagAssociation.__table__,
-        UploadJurisdiction.__table__,
-    ]
-    SQLModel.metadata.create_all(engine, tables=tables)
-    monkeypatch.setattr(jurisdictions, "get_engine", lambda: engine)
-    monkeypatch.setattr(interface_dictation, "engine", engine)
-    yield engine
-    engine.dispose()
-
-
-def _jurisdiction(engine, code: str, *, enabled=True, auto_enrol=False, settings=None) -> Jurisdiction:
-    with Session(engine) as session:
-        row = Jurisdiction(
-            code=code, name=f"{code} name", enabled=enabled, auto_enrol=auto_enrol, settings=settings or {}
-        )
-        session.add(row)
-        session.commit()
-        session.refresh(row)
-        return row
-
-
-def _user(engine, email: str | None = None) -> User:
-    with Session(engine) as session:
-        user = User(email=email or f"{uuid4()}@example.test", azure_user_id=str(uuid4()))
-        session.add(user)
-        session.commit()
-        session.refresh(user)
-        return user
-
-
-def _member(engine, user: User | None, jurisdiction: Jurisdiction, role="judge", email=None) -> None:
-    with Session(engine) as session:
-        session.add(
-            JurisdictionMembership(
-                jurisdiction_id=jurisdiction.id, user_id=user.id if user else None, email=email, role=role
-            )
-        )
-        session.commit()
+def engine(jurisdiction_db):
+    return jurisdiction_db
 
 
 def _memberships(engine, user: User) -> list[tuple[str, str]]:
@@ -154,13 +95,13 @@ def test_a_stored_row_with_an_unknown_template_has_none():
 
 
 def test_memberships_are_the_users_enabled_jurisdictions_only(engine):
-    iac, et = _jurisdiction(engine, "IAC"), _jurisdiction(engine, "ET", settings={"wording": ET_WORDING})
-    off = _jurisdiction(engine, "OFF", enabled=False)
-    user, other = _user(engine), _user(engine)
-    _member(engine, user, iac)
-    _member(engine, user, et, role="admin")
-    _member(engine, user, off)
-    _member(engine, other, iac)
+    iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET", settings={"wording": ET_WORDING})
+    off = add_jurisdiction(engine, "OFF", enabled=False)
+    user, other = add_user(engine, roles=()), add_user(engine, roles=())
+    add_member(engine, user, iac)
+    add_member(engine, user, et, role="admin")
+    add_member(engine, user, off)
+    add_member(engine, other, iac)
 
     memberships = load_memberships(user.id)
 
@@ -173,24 +114,24 @@ def _error_code(excinfo) -> tuple[int, str]:
 
 
 def test_a_user_with_no_jurisdiction_is_refused(engine):
-    user = _user(engine)
+    user = add_user(engine, roles=())
     with pytest.raises(HTTPException) as excinfo:
         resolve(user.id, None, None)
     assert _error_code(excinfo) == (403, NO_JURISDICTION)
 
 
 def test_a_user_with_one_jurisdiction_works_in_it(engine):
-    iac = _jurisdiction(engine, "IAC")
-    user = _user(engine)
-    _member(engine, user, iac)
+    iac = add_jurisdiction(engine, "IAC")
+    user = add_user(engine, roles=())
+    add_member(engine, user, iac)
     assert resolve(user.id, None, None).code == "IAC"
 
 
 def test_a_user_with_several_must_choose_unless_they_have(engine):
-    iac, et = _jurisdiction(engine, "IAC"), _jurisdiction(engine, "ET")
-    user = _user(engine)
-    _member(engine, user, iac)
-    _member(engine, user, et)
+    iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
+    user = add_user(engine, roles=())
+    add_member(engine, user, iac)
+    add_member(engine, user, et)
 
     with pytest.raises(HTTPException) as excinfo:
         resolve(user.id, None, None)
@@ -199,10 +140,10 @@ def test_a_user_with_several_must_choose_unless_they_have(engine):
 
 
 def test_the_header_names_the_jurisdiction_and_must_be_one_of_the_users(engine):
-    iac, et = _jurisdiction(engine, "IAC"), _jurisdiction(engine, "ET")
-    user = _user(engine)
-    _member(engine, user, iac)
-    _member(engine, user, et)
+    iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
+    user = add_user(engine, roles=())
+    add_member(engine, user, iac)
+    add_member(engine, user, et)
 
     assert resolve(user.id, iac.id, " et ").code == "ET"  # the header wins over the remembered choice
     with pytest.raises(HTTPException) as excinfo:
@@ -211,9 +152,9 @@ def test_the_header_names_the_jurisdiction_and_must_be_one_of_the_users(engine):
 
 
 def test_a_remembered_choice_the_user_no_longer_has_is_ignored(engine):
-    iac, et = _jurisdiction(engine, "IAC"), _jurisdiction(engine, "ET")
-    user = _user(engine)
-    _member(engine, user, iac)
+    iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
+    user = add_user(engine, roles=())
+    add_member(engine, user, iac)
     assert resolve(user.id, et.id, None).code == "IAC"  # removed from the ET: their only one
 
 
@@ -224,11 +165,11 @@ def test_choose_needs_no_database():
 
 
 def test_work_without_a_request_goes_in_the_users_remembered_or_only_jurisdiction(engine):
-    iac, et = _jurisdiction(engine, "IAC"), _jurisdiction(engine, "ET")
-    single, several, none = _user(engine), _user(engine), _user(engine)
-    _member(engine, single, iac)
-    _member(engine, several, iac)
-    _member(engine, several, et)
+    iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
+    single, several, none = add_user(engine, roles=()), add_user(engine, roles=()), add_user(engine, roles=())
+    add_member(engine, single, iac)
+    add_member(engine, several, iac)
+    add_member(engine, several, et)
 
     assert default_jurisdiction_id(single.id) == iac.id
     assert default_jurisdiction_id(several.id) is None  # no choice: in no jurisdiction
@@ -244,23 +185,12 @@ def test_work_without_a_request_goes_in_the_users_remembered_or_only_jurisdictio
 # First sign-in ----------------------------------------------------------------------
 
 
-def _sign_up(engine, email: str) -> User:
-    with Session(engine) as session:
-        user = User(email=email, azure_user_id=str(uuid4()))
-        session.add(user)
-        session.flush()
-        enrol_new_user(session, user)
-        session.commit()
-        session.refresh(user)
-        return user
-
-
 def test_a_new_user_claims_memberships_added_for_their_email(engine):
-    _jurisdiction(engine, "IAC", auto_enrol=True)
-    et = _jurisdiction(engine, "ET")
-    _member(engine, None, et, role="admin", email="et.judge@example.test")
+    add_jurisdiction(engine, "IAC", auto_enrol=True)
+    et = add_jurisdiction(engine, "ET")
+    add_member(engine, None, et, role="admin", email="et.judge@example.test")
 
-    user = _sign_up(engine, "ET.Judge@Example.test")
+    user = sign_up(engine, "ET.Judge@Example.test")
 
     # Claimed, and not also put in the IAC: an ET test judge sees the ET only.
     assert _memberships(engine, user) == [("ET", "admin")]
@@ -269,26 +199,26 @@ def test_a_new_user_claims_memberships_added_for_their_email(engine):
 
 
 def test_a_new_user_with_nothing_pending_joins_the_auto_enrol_jurisdictions(engine):
-    _jurisdiction(engine, "IAC", auto_enrol=True)
-    _jurisdiction(engine, "ET")
-    _jurisdiction(engine, "OLD", auto_enrol=True, enabled=False)
+    add_jurisdiction(engine, "IAC", auto_enrol=True)
+    add_jurisdiction(engine, "ET")
+    add_jurisdiction(engine, "OLD", auto_enrol=True, enabled=False)
 
-    user = _sign_up(engine, "new.judge@example.test")
+    user = sign_up(engine, "new.judge@example.test")
 
     assert _memberships(engine, user) == [("IAC", "judge")]
 
 
 def test_without_an_auto_enrol_jurisdiction_a_new_user_has_none(engine):
-    _jurisdiction(engine, "ET")
-    assert _memberships(engine, _sign_up(engine, "someone@example.test")) == []
+    add_jurisdiction(engine, "ET")
+    assert _memberships(engine, sign_up(engine, "someone@example.test")) == []
 
 
 # Records are made in, and listed from, one jurisdiction ---------------------------------
 
 
 def test_a_new_transcription_is_made_in_the_requests_jurisdiction_and_keeps_it(engine):
-    iac, et = _jurisdiction(engine, "IAC"), _jurisdiction(engine, "ET")
-    user = _user(engine)
+    iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
+    user = add_user(engine, roles=())
 
     saved = interface_dictation.save_transcription(Transcription(title="A v B"), user.id, iac.id)
     assert saved.jurisdiction_id == iac.id
@@ -301,15 +231,15 @@ def test_a_new_transcription_is_made_in_the_requests_jurisdiction_and_keeps_it(e
 
 
 def test_a_client_cannot_choose_a_new_transcriptions_jurisdiction(engine):
-    iac, et = _jurisdiction(engine, "IAC"), _jurisdiction(engine, "ET")
-    user = _user(engine)
+    iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
+    user = add_user(engine, roles=())
     saved = interface_dictation.save_transcription(Transcription(title="x", jurisdiction_id=et.id), user.id, iac.id)
     assert saved.jurisdiction_id == iac.id
 
 
 def test_the_list_shows_the_current_jurisdictions_transcriptions_only(engine):
-    iac, et = _jurisdiction(engine, "IAC"), _jurisdiction(engine, "ET")
-    user = _user(engine)
+    iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
+    user = add_user(engine, roles=())
     interface_dictation.save_transcription(Transcription(title="IAC hearing"), user.id, iac.id)
     interface_dictation.save_transcription(Transcription(title="ET claim"), user.id, et.id)
 
@@ -340,14 +270,14 @@ def _as(app, user: User) -> TestClient:
 
 
 def test_me_gives_the_current_jurisdiction_with_its_wording(engine, client):
-    iac = _jurisdiction(
+    iac = add_jurisdiction(
         engine,
         "IAC",
         settings={"wording": {"records.column_title": "Hearing"}, "template": "iac_decision",
                   "features": {"hearing_recordings": True}},
     )
-    user = _user(engine)
-    _member(engine, user, iac)
+    user = add_user(engine, roles=())
+    add_member(engine, user, iac)
 
     response = _as(client, user).get("/api/jurisdictions/me")
 
@@ -368,15 +298,15 @@ def test_me_gives_the_current_jurisdiction_with_its_wording(engine, client):
 
 
 def test_me_says_when_the_user_has_no_jurisdiction(engine, client):
-    response = _as(client, _user(engine)).get("/api/jurisdictions/me")
+    response = _as(client, add_user(engine, roles=())).get("/api/jurisdictions/me")
     assert response.json() == {"status": "no_jurisdiction", "current": None, "jurisdictions": []}
 
 
 def test_me_asks_a_user_with_several_to_choose(engine, client):
-    iac, et = _jurisdiction(engine, "IAC"), _jurisdiction(engine, "ET")
-    user = _user(engine)
-    _member(engine, user, iac)
-    _member(engine, user, et)
+    iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
+    user = add_user(engine, roles=())
+    add_member(engine, user, iac)
+    add_member(engine, user, et)
 
     body = _as(client, user).get("/api/jurisdictions/me").json()
 
@@ -386,10 +316,10 @@ def test_me_asks_a_user_with_several_to_choose(engine, client):
 
 
 def test_me_follows_the_tabs_header_and_ignores_one_the_user_no_longer_has(engine, client):
-    iac, et = _jurisdiction(engine, "IAC"), _jurisdiction(engine, "ET", settings={"wording": ET_WORDING})
-    user = _user(engine)
-    _member(engine, user, iac)
-    _member(engine, user, et)
+    iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET", settings={"wording": ET_WORDING})
+    user = add_user(engine, roles=())
+    add_member(engine, user, iac)
+    add_member(engine, user, et)
     tab = _as(client, user)
 
     et_tab = tab.get("/api/jurisdictions/me", headers={"X-Jurisdiction": "ET"}).json()
@@ -410,17 +340,11 @@ def dictation_app():
     return app
 
 
-def _judge(engine) -> User:
-    user = _user(engine)
-    user.__dict__["app_roles"] = ["Judge"]
-    return user
-
-
 def test_the_list_route_lists_the_jurisdiction_named_by_the_header(engine, dictation_app, mocker):
-    iac, et = _jurisdiction(engine, "IAC"), _jurisdiction(engine, "ET")
-    user = _judge(engine)
-    _member(engine, user, iac)
-    _member(engine, user, et)
+    iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
+    user = add_user(engine)
+    add_member(engine, user, iac)
+    add_member(engine, user, et)
     fetch = mocker.patch("transcribe_api.api.routes_dictation.fetch_transcriptions_metadata", return_value=[])
     client = _as(dictation_app, user)
 
@@ -435,18 +359,18 @@ def test_the_list_route_lists_the_jurisdiction_named_by_the_header(engine, dicta
 
 def test_routes_refuse_a_user_with_no_jurisdiction(engine, dictation_app, mocker):
     fetch = mocker.patch("transcribe_api.api.routes_dictation.fetch_transcriptions_metadata", return_value=[])
-    response = _as(dictation_app, _judge(engine)).get("/api/transcriptions-metadata")
+    response = _as(dictation_app, add_user(engine)).get("/api/transcriptions-metadata")
     assert response.status_code == 403
     assert response.json()["detail"]["code"] == NO_JURISDICTION
     fetch.assert_not_called()
 
 
 def test_document_content_is_the_iac_templates_only(engine, dictation_app, mocker):
-    iac = _jurisdiction(engine, "IAC", settings={"template": "iac_decision"})
-    et = _jurisdiction(engine, "ET")
-    user = _judge(engine)
-    _member(engine, user, iac)
-    _member(engine, user, et)
+    iac = add_jurisdiction(engine, "IAC", settings={"template": "iac_decision"})
+    et = add_jurisdiction(engine, "ET")
+    user = add_user(engine)
+    add_member(engine, user, iac)
+    add_member(engine, user, et)
     mocker.patch(
         "transcribe_api.api.routes_dictation.get_document_content",
         return_value={"hearing_types": [], "legal_frameworks": [], "anonymity": {}},
@@ -458,10 +382,10 @@ def test_document_content_is_the_iac_templates_only(engine, dictation_app, mocke
 
 
 def test_the_live_draft_is_the_jurisdictions_own(engine, dictation_app, mocker):
-    iac, et = _jurisdiction(engine, "IAC"), _jurisdiction(engine, "ET")
-    user = _judge(engine)
-    _member(engine, user, iac)
-    _member(engine, user, et)
+    iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
+    user = add_user(engine)
+    add_member(engine, user, iac)
+    add_member(engine, user, et)
     upsert = mocker.patch("transcribe_api.api.routes_dictation.upsert_live_draft")
     get = mocker.patch("transcribe_api.api.routes_dictation.get_live_draft", return_value=None)
     client = _as(dictation_app, user)
@@ -476,7 +400,7 @@ def test_the_live_draft_is_the_jurisdictions_own(engine, dictation_app, mocker):
 def test_first_login_through_the_resolver_enrols_the_user(engine, monkeypatch):
     from transcribe_api.domain.auth import dependencies_dictation
 
-    _jurisdiction(engine, "IAC", auto_enrol=True)
+    add_jurisdiction(engine, "IAC", auto_enrol=True)
     monkeypatch.setattr(dependencies_dictation, "get_engine", lambda: engine)
 
     resolved = dependencies_dictation._resolve_user(str(uuid4()), "first.time@example.test", ["Judge"])
@@ -488,10 +412,10 @@ def test_first_login_through_the_resolver_enrols_the_user(engine, monkeypatch):
 
 
 def test_an_upload_is_transcribed_in_the_jurisdiction_it_was_started_in(engine, dictation_app, mocker):
-    iac, et = _jurisdiction(engine, "IAC"), _jurisdiction(engine, "ET")
-    user = _judge(engine)
-    _member(engine, user, iac)
-    _member(engine, user, et)
+    iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
+    user = add_user(engine)
+    add_member(engine, user, iac)
+    add_member(engine, user, et)
     mocker.patch("transcribe_api.api.routes_dictation.get_settings").return_value.DIRECT_SDK_ACCESS = False
 
     response = _as(dictation_app, user).post(
@@ -511,25 +435,25 @@ def test_an_upload_is_transcribed_in_the_jurisdiction_it_was_started_in(engine, 
 
 
 def test_an_upload_from_before_jurisdictions_goes_in_the_users_only_jurisdiction(engine):
-    iac = _jurisdiction(engine, "IAC")
-    user = _user(engine)
-    _member(engine, user, iac)
+    iac = add_jurisdiction(engine, "IAC")
+    user = add_user(engine, roles=())
+    add_member(engine, user, iac)
     assert jurisdictions.upload_jurisdiction_id(uuid4(), user.id) == iac.id
     assert jurisdictions.upload_jurisdiction_id(None, user.id) == iac.id
 
 
 def test_an_upload_started_in_a_jurisdiction_the_user_has_since_left_is_not_put_there(engine):
-    iac, et = _jurisdiction(engine, "IAC"), _jurisdiction(engine, "ET")
-    user = _user(engine)
-    _member(engine, user, iac)
+    iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
+    user = add_user(engine, roles=())
+    add_member(engine, user, iac)
     upload_id = uuid4()
     jurisdictions.record_upload_jurisdiction(upload_id, et.id)
     assert jurisdictions.upload_jurisdiction_id(upload_id, user.id) == iac.id
 
 
 def test_the_jurisdiction_of_an_existing_transcription_is_not_looked_up(engine):
-    iac = _jurisdiction(engine, "IAC")
-    user = _user(engine)
+    iac = add_jurisdiction(engine, "IAC")
+    user = add_user(engine, roles=())
     saved = interface_dictation.save_transcription(Transcription(title="x"), user.id, iac.id)
 
     def must_not_ask():
@@ -539,9 +463,9 @@ def test_the_jurisdiction_of_an_existing_transcription_is_not_looked_up(engine):
 
 
 def test_only_a_jurisdiction_with_the_decision_template_can_submit_a_decision(engine, dictation_app, mocker):
-    et = _jurisdiction(engine, "ET")
-    user = _judge(engine)
-    _member(engine, user, et)
+    et = add_jurisdiction(engine, "ET")
+    user = add_user(engine)
+    add_member(engine, user, et)
     save = mocker.patch("transcribe_api.api.routes_dictation.save_transcription")
     render = mocker.patch("transcribe_api.api.routes_dictation.render_hearing_document")
     body = {

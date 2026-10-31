@@ -126,6 +126,35 @@ def every_user_is_an_iac_judge(request: pytest.FixtureRequest, monkeypatch: pyte
     monkeypatch.setattr(jurisdictions, "_remembered_jurisdiction_id", lambda user_id: None)
 
 
+@pytest.fixture
+def jurisdiction_db(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """DIAAT-322: an in-memory SQLite database with the jurisdiction tables, used by the
+    jurisdiction lookups, the dictation interface, the auth resolver (first sign-in)
+    and the document content loader. For tests marked ``real_jurisdictions``."""
+    assert request.node.get_closest_marker("real_jurisdictions"), (
+        "mark the test real_jurisdictions: without it every user is an IAC judge, whatever is in this database"
+    )
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, create_engine
+
+    from tests.unit.jurisdiction_fixtures import JURISDICTION_TABLES
+    from transcribe_api.documents import content_loader
+    from transcribe_api.domain import interface_dictation, jurisdictions
+    from transcribe_api.domain.auth import dependencies_dictation
+    from transcribe_api.runtime import db_connection
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(engine, tables=JURISDICTION_TABLES)
+    monkeypatch.setattr(jurisdictions, "get_engine", lambda: engine)
+    monkeypatch.setattr(db_connection, "get_engine", lambda: engine)
+    monkeypatch.setattr(interface_dictation, "engine", engine)
+    monkeypatch.setattr(dependencies_dictation, "get_engine", lambda: engine)
+    content_loader.clear_cache()
+    yield engine
+    content_loader.clear_cache()
+    engine.dispose()
+
+
 class FakeSpeechCredential:
     """Stands in for DefaultAzureCredential in stt/speech_auth.py."""
 

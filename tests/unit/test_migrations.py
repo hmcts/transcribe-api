@@ -271,15 +271,10 @@ def test_0005_downgrade_keeps_one_draft_per_user(monkeypatch):
 
 def test_0004_iac_settings_are_valid_and_set_every_wording_key():
     """The IAC keeps the wording it had: every key set, and the settings validate."""
-    import importlib.util
-    from pathlib import Path
-
+    from tests.unit.jurisdiction_fixtures import load_migration
     from transcribe_api.domain.jurisdictions import WORDING_KEYS, JurisdictionSettings
 
-    path = Path(migrations.alembic_config().get_main_option("script_location")) / "versions" / "0004_jurisdictions.py"
-    spec = importlib.util.spec_from_file_location("migration_0004", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_migration("0004_jurisdictions.py")
 
     settings = JurisdictionSettings.model_validate(module.IAC_SETTINGS)
     assert set(settings.wording) == set(WORDING_KEYS)
@@ -624,3 +619,77 @@ def test_0004_and_0005_put_existing_users_and_records_in_the_iac_and_reverse():
         titles = connection.execute(text("SELECT title FROM transcription")).scalars().all()
     assert drafts == 1  # the IAC draft; the ET one is gone
     assert sorted(titles) == ["A v B", "C v D"]
+
+
+@pytest.mark.skipif(not os.getenv("TEST_POSTGRES_URL"), reason="needs TEST_POSTGRES_URL (a throwaway Postgres)")
+def test_0004_and_0005_keep_every_existing_value_unchanged():
+    """DIAAT-331: after 0004, and again after 0005, every row that existed before is
+    still there with every value it had; only the new columns are added."""
+    from sqlalchemy import create_engine, text
+
+    from alembic import command
+
+    engine = create_engine(os.environ["TEST_POSTGRES_URL"])
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public"))
+
+        def migrate(revision):
+            with engine.begin() as connection:
+                config = migrations.alembic_config()
+                config.attributes["connection"] = connection
+                command.upgrade(config, revision)
+
+        migrate("0003")
+        ids = {"u": "3f2a9c1e-8b7d-4e6f-9a1b-2c3d4e5f6a7b", "t": "0f8fad5b-d9cb-469f-a165-70867728950e"}
+        with engine.begin() as connection:
+            for statement in (
+                'INSERT INTO "user" (id, created_datetime, updated_datetime, email, azure_user_id,'
+                " has_completed_onboarding, role) VALUES (:u, '2026-01-02 03:04:05', '2026-01-03 03:04:05',"
+                " 'judge@example.test', 'oid', true, 'Judge')",
+                "INSERT INTO transcription (id, created_datetime, user_id, title)"
+                " VALUES (:t, '2026-01-02 03:04:05', :u, 'A v B')",
+                "INSERT INTO minuteversion (id, created_datetime, html_content, template, transcription_id,"
+                " star_rating) VALUES (gen_random_uuid(), now(), '<p>Decision</p>', '{\"name\": \"General\"}', :t, 4)",
+                "INSERT INTO transcriptionjob (id, created_datetime, transcription_id, dialogue_entries, s3_audio_url,"
+                " provenance, needs_cleanup) VALUES (gen_random_uuid(), now(), :t,"
+                " '[{\"speaker\": \"Judge\", \"text\": \"words\"}]', 'user-uploads/oid/hearing-document-1.docx',"
+                " '{\"output\": \"document\"}', false)",
+                "INSERT INTO transcription_job (id, created_datetime, user_id, status, audio_url, locale,"
+                " enable_diarization, needs_cleanup, metadata, dialogue_entries) VALUES (gen_random_uuid(), now(), :u,"
+                " 'SUCCEEDED', 'https://blob/a.wav', 'en-GB', true, false, '{\"case_reference\": \"PA/1/2026\"}', '[]')",
+                "INSERT INTO live_transcript_draft (id, created_datetime, user_id, transcript, form_data)"
+                " VALUES (gen_random_uuid(), now(), :u, '{\"background\": [\"words\"]}', '{\"appellantName\": \"A\"}')",
+                "INSERT INTO document_content (id, content, updated_at) VALUES (1, '{\"legal_frameworks\": [1]}', now())",
+            ):
+                connection.execute(text(statement), ids)
+
+        # Whole rows, as JSON, without the columns 0004 adds.
+        added = {"user": ["active_jurisdiction_id"]}
+        tables = (
+            "user",
+            "transcription",
+            "minuteversion",
+            "transcriptionjob",
+            "transcription_job",
+            "live_transcript_draft",
+            "document_content",
+        )
+        queries = {
+            table: f'SELECT to_jsonb(t) - ARRAY{added.get(table, []) + ["jurisdiction_id"]}::text[]'
+            f' FROM "{table}" t ORDER BY 1::text'
+            for table in tables
+        }
+
+        def snapshot():
+            with engine.connect() as connection:
+                return {name: connection.execute(text(query)).all() for name, query in queries.items()}
+
+        before = snapshot()
+        assert all(before.values()), before  # a row in every table, or the check proves nothing
+        migrate("0004")
+        assert snapshot() == before
+        migrate("head")
+        assert snapshot() == before
+    finally:
+        engine.dispose()

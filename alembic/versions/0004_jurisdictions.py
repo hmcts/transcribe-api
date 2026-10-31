@@ -44,6 +44,10 @@ depends_on = None
 
 # Fixed, so environments agree and the tests can name it.
 IAC_ID = "6a1c0f3e-3b7d-4c2a-9e51-1ac000000001"
+IAC_CODE = "IAC"
+IAC_NAME = "Immigration and Asylum Chamber"
+IAC_ENABLED = True
+IAC_AUTO_ENROL = True  # new users get in as they did before jurisdictions
 
 # The text the web app showed before DIAAT-322 (transcribe-web 00ff378), unchanged.
 IAC_SETTINGS = {
@@ -121,8 +125,15 @@ def upgrade() -> None:
     op.execute(
         sa.text(
             "INSERT INTO jurisdiction (id, code, name, enabled, auto_enrol, settings, created_datetime, updated_datetime)"
-            " VALUES (:id, 'IAC', 'Immigration and Asylum Chamber', true, true, CAST(:settings AS jsonb), now(), now())"
-        ).bindparams(id=IAC_ID, settings=json.dumps(IAC_SETTINGS))
+            " VALUES (:id, :code, :name, :enabled, :auto_enrol, CAST(:settings AS jsonb), now(), now())"
+        ).bindparams(
+            id=IAC_ID,
+            code=IAC_CODE,
+            name=IAC_NAME,
+            enabled=IAC_ENABLED,
+            auto_enrol=IAC_AUTO_ENROL,
+            settings=json.dumps(IAC_SETTINGS),
+        )
     )
     op.execute(
         sa.text(

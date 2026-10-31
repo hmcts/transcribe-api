@@ -7,10 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import Session, select
 
 from transcribe_api import jurisdictions_admin as admin
 from transcribe_api.domain.jurisdictions import JurisdictionSettings
@@ -21,20 +18,10 @@ pytestmark = pytest.mark.real_jurisdictions
 ET_EXAMPLE = Path(__file__).resolve().parents[2] / "docs" / "jurisdictions" / "et.example.json"
 
 
-@compiles(JSONB, "sqlite")
-def _jsonb_as_json(element, compiler, **kw):
-    return "JSON"
-
-
 @pytest.fixture
-def session():
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    SQLModel.metadata.create_all(
-        engine, tables=[User.__table__, Jurisdiction.__table__, JurisdictionMembership.__table__]
-    )
-    with Session(engine) as session:
+def session(jurisdiction_db):
+    with Session(jurisdiction_db) as session:
         yield session
-    engine.dispose()
 
 
 def _user(session, email: str) -> User:
