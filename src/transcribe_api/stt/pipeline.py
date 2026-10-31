@@ -19,6 +19,7 @@ from transcribe_api.documents.minutes.templates.templates_metadata import (
     general_template,
 )
 from transcribe_api.domain.exceptions import OwnershipConflictError
+from transcribe_api.domain.jurisdictions import upload_jurisdiction_id
 from transcribe_api.domain.interface_dictation import (
     get_transcription_title,
     load_or_create_transcription,
@@ -179,7 +180,13 @@ async def transcribe_and_generate_llm_output(
             # The file name's UUID is client input: another user's transcription is
             # refused (SEC-1, OwnershipConflictError); the caller's own is loaded, not
             # reset (a retry).
-            transcription = load_or_create_transcription(transcription_id, user_id)
+            # DIAAT-322: no request here, so a new one goes in the user's current
+            # jurisdiction; a retry keeps its own.
+            transcription = load_or_create_transcription(
+                transcription_id,
+                user_id,
+                lambda: upload_jurisdiction_id(transcription_id, user_id),
+            )
         except OwnershipConflictError:
             # The file name names another user's transcription (SEC-1): a rejected
             # request, not a service error (outcome failure, out of the error alerts).

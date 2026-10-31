@@ -112,6 +112,20 @@ def isolate_test_environment(monkeypatch: pytest.MonkeyPatch):
     _clear_settings_caches()
 
 
+@pytest.fixture(autouse=True)
+def every_user_is_an_iac_judge(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """DIAAT-322: every user belongs to the IAC alone, without a database: the
+    jurisdiction lookup is replaced. Tests of jurisdictions themselves mark themselves
+    ``real_jurisdictions`` and keep the real one."""
+    if request.node.get_closest_marker("real_jurisdictions"):
+        return
+    from tests.unit.jurisdiction_fixtures import iac_membership
+    from transcribe_api.domain import jurisdictions
+
+    monkeypatch.setattr(jurisdictions, "_load_memberships", lambda user_id: [iac_membership()])
+    monkeypatch.setattr(jurisdictions, "_remembered_jurisdiction_id", lambda user_id: None)
+
+
 class FakeSpeechCredential:
     """Stands in for DefaultAzureCredential in stt/speech_auth.py."""
 

@@ -408,12 +408,13 @@ class AdminTranscriptionDetail(BaseTable):
     provenance of its outputs (additive).
 
     It was ``response_model=Transcription``: the model's fields (id, created_datetime,
-    updated_datetime, user_id, title), never its relationships. Declared as the model
-    declares them (BaseTable, then user_id and title), so names, types, order and
+    updated_datetime, user_id, jurisdiction_id since DIAAT-322, title), never its
+    relationships. Declared as the model declares them, so names, types, order and
     the OpenAPI schema are unchanged.
     """
 
     user_id: UUID = Field(default=None)
+    jurisdiction_id: UUID | None = Field(default=None)
     title: str | None = Field(default=None)
     provenance: list[AdminJobProvenance] = Field(default_factory=list)
 
@@ -444,6 +445,7 @@ async def admin_get_transcription(
     return AdminTranscriptionDetail(
         id=transcription.id,
         user_id=transcription.user_id,
+        jurisdiction_id=transcription.jurisdiction_id,
         title=transcription.title,
         created_datetime=transcription.created_datetime,
         updated_datetime=transcription.updated_datetime,

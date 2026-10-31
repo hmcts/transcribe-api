@@ -279,6 +279,9 @@ class SpeechBatchJob(BaseTable, table=True):
     # Nullable FK to the User table — populated for JWT-authenticated submissions.
     # NULL on rows created before auth migration (API-key-only callers).
     user_id: UUID | None = Field(default=None, foreign_key="user.id", index=True)
+    # DIAAT-322 (0004): the jurisdiction the recording was uploaded in. NULL for API-key
+    # callers' jobs, which no user lists.
+    jurisdiction_id: UUID | None = Field(default=None, foreign_key="jurisdiction.id", index=True)
     status: JobStatus = Field(default=JobStatus.PENDING)
 
     # Submission fields

@@ -182,8 +182,9 @@ class Services:
         return path
 
     # Database
-    def _save_transcription(self, transcription, user_id):
+    def _save_transcription(self, transcription, user_id, jurisdiction_id=None):
         transcription.user_id = user_id
+        transcription.jurisdiction_id = jurisdiction_id
         transcription.__dict__["transcription_jobs"] = []
         self.transcriptions[transcription.id] = transcription
         return transcription
@@ -198,7 +199,7 @@ class Services:
             raise HTTPException(status_code=404, detail="Transcription not found")
         return found
 
-    def _upsert_draft(self, user_id, transcript, form_data):
+    def _upsert_draft(self, user_id, jurisdiction_id, transcript, form_data):
         if not self.draft_store_up:
             # A database error that quotes the row, as drivers do.
             message = f"could not write draft: {form_data['appellantName']} {transcript['background'][0]['text']}"

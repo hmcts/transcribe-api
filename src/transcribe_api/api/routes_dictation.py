@@ -55,11 +55,20 @@ from transcribe_api.domain.audit import (
     deferred_audit,
 )
 from transcribe_api.domain.auth.approles_dictation import get_role, has_any_role
-from transcribe_api.domain.auth.dependencies_dictation import get_allowlisted_user, get_current_user
+from transcribe_api.domain.auth.dependencies_dictation import (
+    get_active_jurisdiction,
+    get_allowlisted_user,
+    get_current_user,
+)
 from transcribe_api.domain.blob_ownership import (
     USER_UPLOADS_PREFIX,
     blob_owner_segment,
     segment_belongs_to_user,
+)
+from transcribe_api.domain.jurisdictions import (
+    TEMPLATE_IAC_DECISION,
+    ActiveJurisdiction,
+    record_upload_jurisdiction,
 )
 from transcribe_api.domain.exceptions import OwnershipConflictError
 from transcribe_api.domain.interface_dictation import (
@@ -239,13 +248,27 @@ async def health_check_legacy():
     return JSONResponse(status_code=200, content={"status": "ok", "version": APP_VERSION})
 
 
+def _require_decision_template(jurisdiction: ActiveJurisdiction) -> None:
+    """404 unless the jurisdiction uses the IAC decision template (DIAAT-322): its
+    form, document content and document. A jurisdiction without it dictates into the
+    general section and copies its text out (DIAAT-333)."""
+    if jurisdiction.settings.template != TEMPLATE_IAC_DECISION:
+        raise HTTPException(status_code=404, detail="Not available in this jurisdiction")
+
+
 @router.get("/document-content", response_model=DocumentContentResponse)
 async def get_document_content_route(
     response: Response,
     current_user: User = Depends(get_allowlisted_user()),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
 ) -> DocumentContentResponse:
-    """Return editable document content for allowlisted recorder users."""
+    """Return editable document content for allowlisted recorder users.
+
+    It is the IAC decision template's (legal frameworks, hearing types): a jurisdiction
+    without that template never sees it (DIAAT-330).
+    """
     response.headers["Cache-Control"] = "no-store"
+    _require_decision_template(jurisdiction)
     data = get_document_content()
     return DocumentContentResponse(
         hearing_types=data.get("hearing_types", []),
@@ -404,6 +427,7 @@ async def azure_storage_health_check():
 async def get_upload_url(
     request: UploadUrlRequest,
     current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
 ) -> UploadUrlResponse:
     """Generate an upload URL for the client.
 
@@ -417,6 +441,9 @@ async def get_upload_url(
     upload_id = uuid.uuid4()
     file_name = f"{upload_id}.{request.file_extension}"
     user_upload_blob_path = get_file_blob_path(str(current_user.azure_user_id), file_name)
+    # DIAAT-322: the poller that makes the transcription has no request: it reads the
+    # jurisdiction the upload was started in from here.
+    await asyncio.to_thread(record_upload_jurisdiction, upload_id, jurisdiction.id)
 
     # The journey covers URL generation, so a failure here is correlated too; the
     # event is recorded only once the client really has a URL.
@@ -652,6 +679,7 @@ async def get_templates(
 @router.get("/transcriptions-metadata", response_model=list[TranscriptionMetadata])
 async def get_transcriptions_metadata(
     current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
     timezone: str = "Europe/London",  # Optional parameter with UK default
 ):
     """Get metadata for all transcriptions. Requires Judge, LegalTextManager, or SystemAdministrator role."""
@@ -663,7 +691,7 @@ async def get_transcriptions_metadata(
     except pytz.exceptions.UnknownTimeZoneError:
         tz = UK_TIMEZONE
 
-    return fetch_transcriptions_metadata(current_user.id, tz)
+    return fetch_transcriptions_metadata(current_user.id, tz, jurisdiction.id)
 
 
 @router.get("/transcriptions/{transcription_id}", response_model=Transcription)
@@ -692,12 +720,13 @@ async def get_transcription(
 async def save_transcription_route(
     transcription_data: Transcription,
     current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
 ):
     """Save or update a transcription."""
     logger.info("saving transcription for user %s", _sanitize_for_log(current_user.id))
 
     try:
-        return save_transcription(transcription_data, current_user.id)
+        return save_transcription(transcription_data, current_user.id, jurisdiction.id)
     except OwnershipConflictError:
         # Someone else's transcription: same answer as for an unknown ID.
         raise HTTPException(status_code=404, detail="Transcription not found") from None
@@ -1292,9 +1321,11 @@ async def _render_hearing_document_off_loop(**kwargs) -> Path:
 async def save_live_transcription_submission(
     request: LiveTranscriptionSubmissionRequest,
     current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
     dictation_session_id: str | None = Header(default=None, alias="X-Dictation-Session-Id"),
 ) -> LiveTranscriptionSubmissionResponse:
     """Persist live transcription form and transcript data as JSON in the audio uploads bucket."""
+    _require_decision_template(jurisdiction)
     # DIAAT-276: the submission is a journey; the transcription it creates is related
     # on the transcript.available event.
     submission_id = uuid.uuid4()
@@ -1311,7 +1342,9 @@ async def save_live_transcription_submission(
             # The stage sees the original exception (one exception event, its real
             # type as the code); it is turned into the client's generic 500 outside.
             with stage("submission") as submission_stage:
-                return await _save_live_transcription_submission(request, current_user, submission_id, submission_stage)
+                return await _save_live_transcription_submission(
+                    request, current_user, jurisdiction, submission_id, submission_stage
+                )
         except HTTPException:
             raise
         except Exception:
@@ -1335,6 +1368,7 @@ def _dictation_session_id(value: str | None) -> str | None:
 async def _save_live_transcription_submission(  # NOSONAR
     request: LiveTranscriptionSubmissionRequest,
     current_user: User,
+    jurisdiction: ActiveJurisdiction,
     submission_id: uuid.UUID,
     submission_stage: StageHandle,
 ) -> LiveTranscriptionSubmissionResponse:
@@ -1467,7 +1501,7 @@ async def _save_live_transcription_submission(  # NOSONAR
             user_id=current_user.id,
             title=transcription_title,
         )
-        saved_transcription = save_transcription(transcription, current_user.id)
+        saved_transcription = save_transcription(transcription, current_user.id, jurisdiction.id)
 
         # Generate download URL for the document
         _settings = get_settings()
@@ -1778,9 +1812,10 @@ async def generate_realtime_summary_endpoint(
 @router.get("/live-draft", response_model=LiveDraftResponse)
 async def get_live_draft_route(
     current_user: User = Depends(get_allowlisted_user()),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
 ) -> LiveDraftResponse:
-    """Return the current user's in-progress draft, or 404 if none or expired."""
-    draft = get_live_draft(current_user.id)
+    """Return the current user's in-progress draft in this jurisdiction, or 404 if none or expired."""
+    draft = get_live_draft(current_user.id, jurisdiction.id)
     if draft is None:
         raise HTTPException(status_code=404, detail="No draft found")
     saved_at = draft.updated_datetime or draft.created_datetime
@@ -1797,14 +1832,16 @@ async def get_live_draft_route(
 async def upsert_live_draft_route(
     payload: LiveDraftPayload,
     current_user: User = Depends(get_allowlisted_user()),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
 ) -> None:
-    """Create or overwrite the current user's in-progress draft."""
-    upsert_live_draft(current_user.id, payload.transcript, payload.form_data)
+    """Create or overwrite the current user's in-progress draft in this jurisdiction."""
+    upsert_live_draft(current_user.id, jurisdiction.id, payload.transcript, payload.form_data)
 
 
 @router.delete("/live-draft", status_code=204)
 async def delete_live_draft_route(
     current_user: User = Depends(get_allowlisted_user()),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
 ) -> None:
-    """Delete the current user's in-progress draft (on restore, discard, or submit)."""
-    delete_live_draft(current_user.id)
+    """Delete the current user's in-progress draft in this jurisdiction (on restore, discard, or submit)."""
+    delete_live_draft(current_user.id, jurisdiction.id)
