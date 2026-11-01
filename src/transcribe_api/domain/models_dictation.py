@@ -3,7 +3,7 @@ from enum import StrEnum
 from typing import Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import CheckConstraint, Column, DateTime, select
+from sqlalchemy import CheckConstraint, Column, DateTime, Index, UniqueConstraint, select, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import Field, Relationship, SQLModel
@@ -78,7 +78,81 @@ class User(BaseTable, table=True):
     azure_user_id: str = Field(unique=True, index=True)
     has_completed_onboarding: bool = Field(default=False)
     role: str = Field(default="Normal", index=True)
+    # DIAAT-332: the jurisdiction the user last chose to work in (0004). Used when a
+    # request names none; ignored unless the user is still a member of it.
+    active_jurisdiction_id: UUID | None = Field(default=None, foreign_key="jurisdiction.id")
     transcriptions: list["Transcription"] = Relationship(back_populates="user")
+
+
+class Jurisdiction(SQLModel, table=True):
+    """A jurisdiction using BenchNotes (DIAAT-322), e.g. the IAC or the ET (0004).
+
+    A row, not code: adding a jurisdiction needs no deployment. ``settings`` holds its
+    screen wording and what it uses (domain/jurisdictions.JurisdictionSettings).
+    """
+
+    __tablename__ = "jurisdiction"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True, nullable=False)
+    # Short, stable, upper case ("IAC", "ET"): what the web app sends in X-Jurisdiction.
+    code: str = Field(unique=True, index=True, max_length=16)
+    name: str
+    # A disabled jurisdiction is invisible to its members, as if they had none.
+    enabled: bool = Field(default=True)
+    # New users with no pending membership are made judges here on first sign-in,
+    # so the IAC's sign-up works as it did before jurisdictions.
+    auto_enrol: bool = Field(default=False)
+    settings: dict = Field(sa_column=Column(JSONB, nullable=False))
+    created_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
+    updated_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
+
+
+class UploadJurisdiction(SQLModel, table=True):
+    """The jurisdiction an upload was started in (DIAAT-322, 0004).
+
+    Written when the upload URL is issued, from the tab's jurisdiction; read by the
+    poller, which has no request, when it makes the upload's transcription. Keyed by
+    the upload's ID, which becomes the transcription's. A hearing recording's upload
+    is recorded too (its ID, in the blob name): its job must be submitted in the same
+    jurisdiction (DIAAT-334).
+    """
+
+    __tablename__ = "upload_jurisdiction"
+
+    transcription_id: UUID = Field(primary_key=True)
+    jurisdiction_id: UUID = Field(foreign_key="jurisdiction.id")
+    created_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
+
+
+class JurisdictionMembership(SQLModel, table=True):
+    """A user's role in a jurisdiction (DIAAT-322, 0004).
+
+    ``user_id`` is NULL for someone added by email before their first sign-in: the row
+    is claimed (user_id set) when they first sign in (domain/jurisdictions.py).
+    """
+
+    __tablename__ = "jurisdiction_membership"
+    __table_args__ = (
+        UniqueConstraint("jurisdiction_id", "user_id", name="uq_jurisdiction_membership_user"),
+        Index(
+            "uq_jurisdiction_membership_pending_email",
+            "jurisdiction_id",
+            "email",
+            unique=True,
+            postgresql_where=text("user_id IS NULL"),
+            sqlite_where=text("user_id IS NULL"),
+        ),
+        CheckConstraint("role IN ('judge', 'admin')", name="ck_jurisdiction_membership_role"),
+        CheckConstraint("user_id IS NOT NULL OR email IS NOT NULL", name="ck_jurisdiction_membership_who"),
+    )
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True, nullable=False)
+    jurisdiction_id: UUID = Field(foreign_key="jurisdiction.id", index=True)
+    user_id: UUID | None = Field(default=None, foreign_key="user.id", index=True)
+    # Lower case. Only used to claim a pending membership on first sign-in.
+    email: str | None = Field(default=None)
+    role: str = Field(default="judge", max_length=16)
+    created_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
 
 
 # Association table for many-to-many relationship between Transcription and Tag
@@ -103,6 +177,8 @@ class Transcription(BaseTable, table=True):
     # index: dictation migration a8f2c9d5e1b3; restored by 0002
     user_id: UUID = Field(default=None, foreign_key="user.id", index=True)
     user: User | None = Relationship(back_populates="transcriptions")
+    # DIAAT-322 (0004): the jurisdiction it was made in. Set by the server only.
+    jurisdiction_id: UUID | None = Field(default=None, foreign_key="jurisdiction.id", index=True)
     title: str | None = Field(default=None)
     minute_versions: list["MinuteVersion"] = Relationship(back_populates="transcription")
     transcription_jobs: list["TranscriptionJob"] = Relationship(back_populates="transcription")
@@ -182,9 +258,13 @@ class AuditLog(SQLModel, table=True):
 
 
 class LiveTranscriptDraft(BaseTable, table=True):
-    """One draft per user — upserted on every debounced save, deleted on submit/restore/discard."""
+    """One draft per user per jurisdiction — upserted on every debounced save, deleted on
+    submit/restore/discard."""
 
     __tablename__ = "live_transcript_draft"
+    __table_args__ = (
+        UniqueConstraint("user_id", "jurisdiction_id", name="uq_live_transcript_draft_user_jurisdiction"),
+    )
 
     # timestamptz, unlike the other dictation tables (as in the old schema).
     created_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
@@ -192,7 +272,9 @@ class LiveTranscriptDraft(BaseTable, table=True):
         default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True)
     )
 
-    user_id: UUID = Field(foreign_key="user.id", unique=True)
+    user_id: UUID = Field(foreign_key="user.id")
+    # DIAAT-322 (0004): a draft belongs to the jurisdiction it was dictated in.
+    jurisdiction_id: UUID = Field(foreign_key="jurisdiction.id")
     transcript: dict = Field(sa_column=Column(JSONB, nullable=False))
     form_data: dict = Field(sa_column=Column(JSONB, nullable=False))
 

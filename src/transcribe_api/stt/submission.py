@@ -49,6 +49,7 @@ async def submit_and_queue_batch_job(
     audio_duration_seconds: float | None = None,
     audio_blob_path: str | None = None,
     user_id: UUID | None = None,
+    jurisdiction_id: UUID | None = None,
 ) -> SpeechBatchJob:
     """Submit audio to Azure Batch Transcription and persist the initial job record.
 
@@ -64,6 +65,7 @@ async def submit_and_queue_batch_job(
     job = SpeechBatchJob(
         caller_id=caller_id,
         user_id=user_id,
+        jurisdiction_id=jurisdiction_id,
         audio_url=audio_url,
         locale=locale,
         enable_diarization=enable_diarization,

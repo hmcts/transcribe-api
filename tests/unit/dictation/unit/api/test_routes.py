@@ -421,6 +421,7 @@ def test_generate_upload_url_uses_configured_ttl(client, as_user, mocker):
     settings = _mock_settings(mocker, upload_ttl=120)
     mocker.patch("transcribe_api.api.routes_dictation.get_settings", return_value=settings)
     mock_gen = mocker.patch("transcribe_api.api.routes_dictation.generate_blob_upload_url", new=AsyncMock(return_value="https://upload"))
+    mocker.patch("transcribe_api.api.routes_dictation.record_upload_jurisdiction")  # DIAAT-322
     client.post("/api/get-upload-url", json={"file_extension": "wav"})
     _, kwargs = mock_gen.call_args
     assert kwargs["expiry_hours"] == pytest.approx(120 / 60)

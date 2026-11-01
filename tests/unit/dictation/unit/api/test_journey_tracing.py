@@ -73,6 +73,7 @@ def test_upload_url_starts_the_transcription_journey(client, as_user, mocker):
     as_user(_make_user(roles=["Judge"]))
     settings = mocker.MagicMock(DIRECT_SDK_ACCESS=False, APP_URL="http://localhost:8000")
     mocker.patch("transcribe_api.api.routes_dictation.get_settings", return_value=settings)
+    mocker.patch("transcribe_api.api.routes_dictation.record_upload_jurisdiction")  # DIAAT-322
     with capture_telemetry() as telemetry:
         response = client.post("/api/get-upload-url", json={"file_extension": "mp4"})
         assert response.status_code == 200, response.text

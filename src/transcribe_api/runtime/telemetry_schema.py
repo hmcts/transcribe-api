@@ -51,6 +51,10 @@ AUDIT_ACTIONS_APP = (
     "job.delete",
     "audio.export",
     "user.delete",
+    # DIAAT-356: the admin area's jurisdiction changes.
+    "jurisdiction.edit",
+    "membership.add",
+    "membership.remove",
 )
 AUDIT_ACTIONS = AUDIT_ACTIONS_AUTH_LIBRARY + AUDIT_ACTIONS_APP
 
@@ -386,6 +390,11 @@ def _shared_events(schema: TelemetrySchema) -> None:
         "security.ownership_violation",
         attributes=("security.resource_type", "security.action", "security.outcome"),
         description="A caller reached, or tried to reach, a resource they do not own. Correlate on hmcts.request.id; hmcts.journey.id is the target job or upload.",
+    )
+    schema.event(
+        "security.jurisdiction_blocked",
+        attributes=("security.resource_type", "security.action"),
+        description="DIAAT-334: a caller tried to reach material of a jurisdiction they are not working in (another of theirs, or one they do not belong to) and was refused with the same 404 as an unknown record. No jurisdiction, record or case content: correlate on hmcts.request.id with the audit record, which names the actor and the record.",
     )
     schema.event(
         "transcript.available",

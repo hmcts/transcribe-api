@@ -24,6 +24,8 @@ EXPECTED_TABLES = {
     "caller",
     "correction_dataset_entry",
     "document_content",
+    "jurisdiction",
+    "jurisdiction_membership",
     "live_transcript_draft",
     "minuteversion",
     "tag",
@@ -31,6 +33,7 @@ EXPECTED_TABLES = {
     "transcription_job",
     "transcription_tag_association",
     "transcriptionjob",
+    "upload_jurisdiction",
     "user",
 }
 
@@ -50,6 +53,9 @@ AWARE_TIMESTAMP_COLUMNS = {
 # Timestamp columns added after 0002, created timestamptz from the start.
 ADDED_AWARE_TIMESTAMP_COLUMNS = {
     "transcription_job": ["processing_started_datetime", "stuck_reported_at"],  # 0003
+    "jurisdiction": ["created_datetime", "updated_datetime"],  # 0004
+    "jurisdiction_membership": ["created_datetime"],  # 0004
+    "upload_jurisdiction": ["created_datetime"],  # 0004
 }
 
 # Dictation migration a8f2c9d5e1b3 (fix for 15-20s p95 latency); 0001 lost them.
@@ -84,7 +90,7 @@ def _alter_type_sql(table: str, column: str, type_sql: str) -> re.Pattern[str]:
 def test_there_is_one_history_with_one_head():
     script = ScriptDirectory.from_config(migrations.alembic_config())
     assert script.get_bases() == ["0001"]
-    assert script.get_heads() == ["0003"]
+    assert script.get_heads() == ["0005"]
 
 
 def test_baseline_creates_every_table(monkeypatch):
@@ -200,6 +206,87 @@ def test_the_models_declare_the_observability_columns():
     assert tables["audit_log"].columns["email"].nullable
     indexed = {next(iter(i.columns)).name for i in tables["audit_log"].indexes}
     assert {"object_id", "request_id"} <= indexed
+
+
+# 0004: DIAAT-322 jurisdictions ---------------------------------------------------------
+
+IAC_ID = "6a1c0f3e-3b7d-4c2a-9e51-1ac000000001"
+
+
+def test_0004_creates_the_jurisdiction_tables_and_the_iac(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0003:0004")
+    assert "CREATE TABLE jurisdiction (" in sql
+    assert "CREATE TABLE jurisdiction_membership (" in sql
+    assert "CREATE UNIQUE INDEX ix_jurisdiction_code ON jurisdiction (code)" in sql
+    assert "CREATE UNIQUE INDEX uq_jurisdiction_membership_pending_email" in sql
+    assert "WHERE user_id IS NULL" in sql
+    assert "VALUES ('6a1c0f3e-3b7d-4c2a-9e51-1ac000000001', 'IAC', 'Immigration and Asylum Chamber', true, true" in sql
+    # Every existing user becomes an IAC judge.
+    assert "SELECT gen_random_uuid(), '6a1c0f3e-3b7d-4c2a-9e51-1ac000000001', id, 'judge', now() FROM \"user\"" in sql
+
+
+def test_0004_puts_every_existing_record_in_the_iac(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0003:0004")
+    for table in ("transcription", "transcription_job", "live_transcript_draft"):
+        # Defaulting to the IAC: the previous release's pods write rows without it.
+        assert f"ALTER TABLE {table} ADD COLUMN jurisdiction_id UUID DEFAULT '{IAC_ID}'::uuid;" in sql, table
+    assert f"UPDATE transcription SET jurisdiction_id = '{IAC_ID}'" in sql
+    # API-key callers' jobs too: BenchNotes served the IAC alone.
+    assert f"UPDATE transcription_job SET jurisdiction_id = '{IAC_ID}';" in sql
+    assert f"UPDATE live_transcript_draft SET jurisdiction_id = '{IAC_ID}'" in sql
+    assert "uq_live_transcript_draft_user_jurisdiction UNIQUE (user_id, jurisdiction_id)" in sql
+    assert 'ALTER TABLE "user" ADD COLUMN active_jurisdiction_id UUID;' in sql
+
+
+def test_0004_is_additive_so_the_previous_release_keeps_working_during_the_rollout(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0003:0004")
+    # The old pods' upsert key (ON CONFLICT (user_id)) and their inserts without a
+    # jurisdiction keep working until 0005.
+    assert "live_transcript_draft_user_id_key" not in sql
+    assert "SET NOT NULL" not in sql
+    assert "DROP " not in sql
+
+
+def test_0005_puts_the_rollouts_records_in_the_iac_then_allows_a_draft_per_jurisdiction(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0004:0005")
+    # Users who first signed in through an old pod during the rollout were never enrolled.
+    assert "WHERE NOT EXISTS (SELECT 1 FROM jurisdiction_membership m WHERE m.user_id = u.id)" in sql
+    for table in ("transcription", "transcription_job", "live_transcript_draft"):
+        assert f"UPDATE {table} SET jurisdiction_id = '{IAC_ID}' WHERE jurisdiction_id IS NULL" in sql, table
+    assert sql.index("UPDATE live_transcript_draft") < sql.index(
+        "ALTER TABLE live_transcript_draft ALTER COLUMN jurisdiction_id SET NOT NULL"
+    )
+    assert "ALTER TABLE live_transcript_draft DROP CONSTRAINT live_transcript_draft_user_id_key" in sql
+
+
+def test_0005_downgrade_keeps_one_draft_per_user(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0005:0004", downgrade=True)
+    assert sql.index(f"DELETE FROM live_transcript_draft WHERE jurisdiction_id <> '{IAC_ID}'") < sql.index(
+        "ADD CONSTRAINT live_transcript_draft_user_id_key UNIQUE (user_id)"
+    )
+
+
+def test_0004_iac_settings_are_valid_and_set_every_wording_key():
+    """The IAC keeps the wording it had: every key set, and the settings validate."""
+    from tests.unit.jurisdiction_fixtures import load_migration
+    from transcribe_api.domain.jurisdictions import WORDING_KEYS, JurisdictionSettings
+
+    module = load_migration("0004_jurisdictions.py")
+
+    settings = JurisdictionSettings.model_validate(module.IAC_SETTINGS)
+    assert set(settings.wording) == set(WORDING_KEYS)
+    assert settings.template == "iac_decision"
+    assert settings.features.hearing_recordings is True
+    assert module.IAC_ID == IAC_ID
+
+
+def test_0004_downgrade_reverses_it(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0004:0003", downgrade=True)
+    for table in ("transcription", "transcription_job", "live_transcript_draft"):
+        assert f"ALTER TABLE {table} DROP COLUMN jurisdiction_id;" in sql, table
+    assert 'ALTER TABLE "user" DROP COLUMN active_jurisdiction_id;' in sql
+    assert "DROP TABLE jurisdiction_membership;" in sql
+    assert "DROP TABLE jurisdiction;" in sql
 
 
 class _FakeConnection:
@@ -409,3 +496,209 @@ def test_0003_keeps_existing_rows_and_allows_app_rows_without_an_email():
     with engine.connect() as connection:
         emails = sorted(connection.execute(text("SELECT email FROM audit_log")).scalars().all())
     assert emails == ["", "judge@example.test"]
+
+
+@pytest.mark.skipif(not os.getenv("TEST_POSTGRES_URL"), reason="needs TEST_POSTGRES_URL (a throwaway Postgres)")
+def test_0004_and_0005_put_existing_users_and_records_in_the_iac_and_reverse():
+    from sqlalchemy import create_engine, text
+
+    from alembic import command
+
+    engine = create_engine(os.environ["TEST_POSTGRES_URL"])
+    with engine.begin() as connection:
+        connection.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public"))
+
+    def migrate(step, revision):
+        with engine.begin() as connection:
+            config = migrations.alembic_config()
+            config.attributes["connection"] = connection
+            step(config, revision)
+
+    user_id = "3f2a9c1e-8b7d-4e6f-9a1b-2c3d4e5f6a7b"
+    late_user_id = "4f2a9c1e-8b7d-4e6f-9a1b-2c3d4e5f6a7c"
+    migrate(command.upgrade, "0003")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                'INSERT INTO "user" (id, created_datetime, email, azure_user_id, has_completed_onboarding, role)'
+                " VALUES (:uid, now(), 'judge@example.test', 'oid-1', true, 'Judge')"
+            ),
+            {"uid": user_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO transcription (id, created_datetime, user_id, title)"
+                " VALUES (gen_random_uuid(), now(), :uid, 'A v B')"
+            ),
+            {"uid": user_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO live_transcript_draft (id, created_datetime, user_id, transcript, form_data)"
+                " VALUES (gen_random_uuid(), now(), :uid, '{}', '{}')"
+            ),
+            {"uid": user_id},
+        )
+
+    migrate(command.upgrade, "0004")
+    with engine.begin() as connection:
+        # The previous release, still running during the rollout, saves a draft with
+        # its upsert key and no jurisdiction, and makes a transcription without one.
+        connection.execute(
+            text(
+                "INSERT INTO live_transcript_draft (id, created_datetime, user_id, transcript, form_data)"
+                " VALUES (gen_random_uuid(), now(), :uid, '{}', '{}')"
+                " ON CONFLICT (user_id) DO UPDATE SET transcript = EXCLUDED.transcript"
+            ),
+            {"uid": user_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO transcription (id, created_datetime, user_id, title)"
+                " VALUES (gen_random_uuid(), now(), :uid, 'C v D')"
+            ),
+            {"uid": user_id},
+        )
+        # A judge's first sign-in through an old pod: no membership.
+        connection.execute(
+            text(
+                'INSERT INTO "user" (id, created_datetime, email, azure_user_id, has_completed_onboarding, role)'
+                " VALUES (:uid, now(), 'late@example.test', 'oid-2', false, 'Judge')"
+            ),
+            {"uid": late_user_id},
+        )
+
+    # The new code, on 0004 alone, saves over the old pod's draft (no jurisdiction).
+    from transcribe_api.domain import interface_dictation
+
+    interface_dictation.engine, saved_engine = engine, interface_dictation.engine
+    try:
+        interface_dictation.upsert_live_draft(user_id, IAC_ID, {"saved": "by the new code"}, {})
+    finally:
+        interface_dictation.engine = saved_engine
+    with engine.connect() as connection:
+        drafts = connection.execute(text("SELECT jurisdiction_id::text, transcript FROM live_transcript_draft")).all()
+    assert [tuple(d) for d in drafts] == [(IAC_ID, {"saved": "by the new code"})]
+
+    migrate(command.upgrade, "0005")
+    with engine.begin() as connection:
+        membership = connection.execute(
+            text("SELECT jurisdiction_id::text, user_id::text, role FROM jurisdiction_membership WHERE user_id = :uid"),
+            {"uid": user_id},
+        ).one()
+        assert tuple(membership) == (IAC_ID, user_id, "judge")
+        assert set(connection.execute(text("SELECT jurisdiction_id::text FROM transcription")).scalars()) == {IAC_ID}
+        late = connection.execute(
+            text("SELECT jurisdiction_id::text FROM jurisdiction_membership WHERE user_id = :uid"), {"uid": late_user_id}
+        ).scalar_one()
+        assert late == IAC_ID
+        assert connection.execute(text("SELECT jurisdiction_id::text FROM live_transcript_draft")).scalar_one() == IAC_ID
+        # A second jurisdiction's draft for the same user is allowed now.
+        connection.execute(
+            text(
+                "INSERT INTO jurisdiction (id, code, name, enabled, auto_enrol, settings, created_datetime,"
+                " updated_datetime) VALUES (gen_random_uuid(), 'ET', 'Employment Tribunal', true, false, '{}',"
+                " now(), now())"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO live_transcript_draft (id, created_datetime, user_id, jurisdiction_id, transcript,"
+                " form_data) SELECT gen_random_uuid(), now(), :uid, id, '{}', '{}' FROM jurisdiction"
+                " WHERE code = 'ET'"
+            ),
+            {"uid": user_id},
+        )
+        # 0005 runs as the first new pod starts; an old pod still serving makes a
+        # transcription without a jurisdiction. It is the IAC's, not lost.
+        connection.execute(
+            text(
+                "INSERT INTO transcription (id, created_datetime, user_id, title)"
+                " VALUES (gen_random_uuid(), now(), :uid, 'E v F')"
+            ),
+            {"uid": user_id},
+        )
+        assert connection.execute(
+            text("SELECT jurisdiction_id::text FROM transcription WHERE title = 'E v F'")
+        ).scalar_one() == IAC_ID
+
+    migrate(command.downgrade, "0003")
+    with engine.connect() as connection:
+        drafts = connection.execute(text("SELECT count(*) FROM live_transcript_draft")).scalar_one()
+        titles = connection.execute(text("SELECT title FROM transcription")).scalars().all()
+    assert drafts == 1  # the IAC draft; the ET one is gone
+    assert sorted(titles) == ["A v B", "C v D", "E v F"]
+
+
+@pytest.mark.skipif(not os.getenv("TEST_POSTGRES_URL"), reason="needs TEST_POSTGRES_URL (a throwaway Postgres)")
+def test_0004_and_0005_keep_every_existing_value_unchanged():
+    """DIAAT-331: after 0004, and again after 0005, every row that existed before is
+    still there with every value it had; only the new columns are added."""
+    from sqlalchemy import create_engine, text
+
+    from alembic import command
+
+    engine = create_engine(os.environ["TEST_POSTGRES_URL"])
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public"))
+
+        def migrate(revision):
+            with engine.begin() as connection:
+                config = migrations.alembic_config()
+                config.attributes["connection"] = connection
+                command.upgrade(config, revision)
+
+        migrate("0003")
+        ids = {"u": "3f2a9c1e-8b7d-4e6f-9a1b-2c3d4e5f6a7b", "t": "0f8fad5b-d9cb-469f-a165-70867728950e"}
+        with engine.begin() as connection:
+            for statement in (
+                'INSERT INTO "user" (id, created_datetime, updated_datetime, email, azure_user_id,'
+                " has_completed_onboarding, role) VALUES (:u, '2026-01-02 03:04:05', '2026-01-03 03:04:05',"
+                " 'judge@example.test', 'oid', true, 'Judge')",
+                "INSERT INTO transcription (id, created_datetime, user_id, title)"
+                " VALUES (:t, '2026-01-02 03:04:05', :u, 'A v B')",
+                "INSERT INTO minuteversion (id, created_datetime, html_content, template, transcription_id,"
+                " star_rating) VALUES (gen_random_uuid(), now(), '<p>Decision</p>', '{\"name\": \"General\"}', :t, 4)",
+                "INSERT INTO transcriptionjob (id, created_datetime, transcription_id, dialogue_entries, s3_audio_url,"
+                " provenance, needs_cleanup) VALUES (gen_random_uuid(), now(), :t,"
+                " '[{\"speaker\": \"Judge\", \"text\": \"words\"}]', 'user-uploads/oid/hearing-document-1.docx',"
+                " '{\"output\": \"document\"}', false)",
+                "INSERT INTO transcription_job (id, created_datetime, user_id, status, audio_url, locale,"
+                " enable_diarization, needs_cleanup, metadata, dialogue_entries) VALUES (gen_random_uuid(), now(), :u,"
+                " 'SUCCEEDED', 'https://blob/a.wav', 'en-GB', true, false, '{\"case_reference\": \"PA/1/2026\"}', '[]')",
+                "INSERT INTO live_transcript_draft (id, created_datetime, user_id, transcript, form_data)"
+                " VALUES (gen_random_uuid(), now(), :u, '{\"background\": [\"words\"]}', '{\"appellantName\": \"A\"}')",
+                "INSERT INTO document_content (id, content, updated_at) VALUES (1, '{\"legal_frameworks\": [1]}', now())",
+            ):
+                connection.execute(text(statement), ids)
+
+        # Whole rows, as JSON, without the columns 0004 adds.
+        added = {"user": ["active_jurisdiction_id"]}
+        tables = (
+            "user",
+            "transcription",
+            "minuteversion",
+            "transcriptionjob",
+            "transcription_job",
+            "live_transcript_draft",
+            "document_content",
+        )
+        queries = {
+            table: f'SELECT to_jsonb(t) - ARRAY{added.get(table, []) + ["jurisdiction_id"]}::text[]'
+            f' FROM "{table}" t ORDER BY 1::text'
+            for table in tables
+        }
+
+        def snapshot():
+            with engine.connect() as connection:
+                return {name: connection.execute(text(query)).all() for name, query in queries.items()}
+
+        before = snapshot()
+        assert all(before.values()), before  # a row in every table, or the check proves nothing
+        migrate("0004")
+        assert snapshot() == before
+        migrate("head")
+        assert snapshot() == before
+    finally:
+        engine.dispose()

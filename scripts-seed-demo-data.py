@@ -38,7 +38,7 @@ os.environ.setdefault("ENVIRONMENT", "local")
 from sqlalchemy import String, cast
 from sqlmodel import Session, col, create_engine, select
 
-from transcribe_api.domain.models_dictation import User
+from transcribe_api.domain.models_dictation import Jurisdiction, User
 from transcribe_api.domain.models_recording import (
     BatchJobStatus,
     Caller,
@@ -345,6 +345,15 @@ def main() -> int:
             _scenario_running(user.id),
             _scenario_caller_submitted(caller.id),
         ]
+
+        # DIAAT-322: every job is in a jurisdiction; the demo data is the IAC's (created by
+        # migration 0004), the only one with hearing recordings.
+        iac = session.exec(select(Jurisdiction).where(Jurisdiction.code == "IAC")).first()
+        if iac is None:
+            print("No IAC jurisdiction: run the migrations (0004 creates it) and retry.")
+            return 1
+        for scenario in scenarios:
+            scenario.jurisdiction_id = iac.id
 
         tags = [s.metadata_["seed_scenario"] for s in scenarios]
         existing = session.exec(

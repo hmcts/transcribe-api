@@ -108,6 +108,39 @@ def record_ownership_violation(
         note_ownership_violation(resource_type, action, outcome, actor_id=actor_id, object_id=object_id)
 
 
+EVENT_JURISDICTION_BLOCKED = "security.jurisdiction_blocked"
+
+
+def action_for_method(method: str) -> str:
+    """The security action of an HTTP method: read, delete, or write."""
+    return {"GET": READ, "HEAD": READ, "DELETE": DELETE}.get(method.upper(), WRITE)
+
+
+def record_jurisdiction_blocked(
+    resource_type: str,
+    action: str,
+    *,
+    journey: Journey | None = None,
+    actor_id: UUID | str | None = None,
+    object_id: UUID | str | None = None,
+) -> None:
+    """Record ``security.jurisdiction_blocked`` (DIAAT-334) and its audit record.
+
+    A record of another jurisdiction was asked for: someone changed a link, or a tab
+    in one jurisdiction named another's record. Telemetry: the two enums only, for the
+    product team; never which jurisdictions or record. The audit record (DIAAT-286)
+    has the actor and the record, as for an ownership refusal.
+    """
+    record_event(
+        EVENT_JURISDICTION_BLOCKED,
+        {ATTR_RESOURCE_TYPE: resource_type, ATTR_ACTION: action},
+        journey=journey,
+    )
+    from transcribe_api.domain.audit import note_jurisdiction_blocked
+
+    note_jurisdiction_blocked(resource_type, action, actor_id=actor_id, object_id=object_id)
+
+
 def resource_type_of(model_name: str) -> str:
     """The resource type for a dictation model name (``OwnershipConflictError.record_type``).
 

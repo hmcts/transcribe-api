@@ -5,16 +5,19 @@ All endpoints require authenticated users to pass JWT role checks.
 
 from __future__ import annotations
 
+import hashlib
+
 import logging
 import urllib.parse
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from hmcts_azure_auth.audit import AuditEvent, AuditEventType
-from pydantic import BaseModel
+from pydantic import BaseModel, StringConstraints
+from pydantic import Field as PydanticField
 from sqlmodel import Field, Session, select
 
 from transcribe_api.api.document_content_models import (
@@ -26,9 +29,17 @@ from transcribe_api.api.document_content_models import (
 from transcribe_api.documents.content_loader import clear_cache as clear_content_cache
 from transcribe_api.documents.content_loader import get_document_content as load_document_content
 from transcribe_api.documents.minutes.types import AdminTranscriptionListResponse, AdminTranscriptionRecord
-from transcribe_api.domain.audit import TRANSCRIPT_EXPORTED, TRANSCRIPT_VIEWED, USER_DELETED, audited, write_audit_event
+from transcribe_api import jurisdictions_admin
+from transcribe_api.domain.audit import (
+    TRANSCRIPT_EXPORTED,
+    TRANSCRIPT_VIEWED,
+    USER_DELETED,
+    audited,
+    record_audit,
+    write_audit_event,
+)
 from transcribe_api.domain.auth.approles_dictation import get_role, get_valid_roles
-from transcribe_api.domain.auth.dependencies_dictation import get_allowlisted_user
+from transcribe_api.domain.auth.dependencies_dictation import get_active_jurisdiction, get_allowlisted_user
 from transcribe_api.domain.exceptions import UserHasTranscriptionsError, UserNotFoundError
 from transcribe_api.domain.interface_dictation import (
     admin_delete_user,
@@ -38,7 +49,9 @@ from transcribe_api.domain.interface_dictation import (
     get_user_by_id,
     update_user,
 )
-from transcribe_api.domain.models_dictation import BaseTable, DocumentContent
+from transcribe_api.domain.jurisdictions import WORDING_KEYS, ActiveJurisdiction
+from transcribe_api.runtime.security_events import DOCUMENT, READ, TRANSCRIPTION, record_jurisdiction_blocked
+from transcribe_api.domain.models_dictation import BaseTable, DocumentContent, Transcription
 from transcribe_api.runtime.db_connection import get_engine
 from transcribe_api.runtime.log_sanitization import sanitize_for_log
 from transcribe_api.runtime.settings_dictation import get_settings
@@ -49,6 +62,16 @@ if TYPE_CHECKING:
     from transcribe_api.domain.models_dictation import User
 
 logger = logging.getLogger(__name__)
+
+def _admin_refuse_other_jurisdiction(
+    transcription: Transcription, admin_user: User, jurisdiction: ActiveJurisdiction, resource_type: str, action: str
+) -> None:
+    """DIAAT-334: an admin sees any judge's material, but only in the jurisdiction they
+    are working in; another's is the 404 of an unknown record, and recorded."""
+    if transcription.jurisdiction_id != jurisdiction.id:
+        record_jurisdiction_blocked(resource_type, action, actor_id=admin_user.id, object_id=transcription.id)
+        raise HTTPException(status_code=404, detail="Transcription not found")
+
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -360,14 +383,17 @@ async def admin_list_transcriptions(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
     admin_user: User = Depends(get_allowlisted_user(required_roles_all=[_require_role("SystemAdministrator")], audit_writer=write_audit_event)),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
 ) -> AdminTranscriptionListResponse:
-    """List all transcriptions across all judges, with optional filters. SystemAdministrator only."""
+    """List all transcriptions across all judges in the admin's jurisdiction (DIAAT-334),
+    with optional filters. SystemAdministrator only."""
     if page < 1 or page_size < 1:
         raise HTTPException(status_code=422, detail="page and page_size must be >= 1")
     if page_size > 200:
         raise HTTPException(status_code=422, detail="page_size must be <= 200")
 
     transcriptions, total = admin_fetch_all_transcriptions(
+        jurisdiction_id=jurisdiction.id,
         owner_email=owner_email,
         created_after=created_after,
         created_before=created_before,
@@ -408,12 +434,13 @@ class AdminTranscriptionDetail(BaseTable):
     provenance of its outputs (additive).
 
     It was ``response_model=Transcription``: the model's fields (id, created_datetime,
-    updated_datetime, user_id, title), never its relationships. Declared as the model
-    declares them (BaseTable, then user_id and title), so names, types, order and
+    updated_datetime, user_id, jurisdiction_id since DIAAT-322, title), never its
+    relationships. Declared as the model declares them, so names, types, order and
     the OpenAPI schema are unchanged.
     """
 
     user_id: UUID = Field(default=None)
+    jurisdiction_id: UUID | None = Field(default=None)
     title: str | None = Field(default=None)
     provenance: list[AdminJobProvenance] = Field(default_factory=list)
 
@@ -422,6 +449,7 @@ class AdminTranscriptionDetail(BaseTable):
 async def admin_get_transcription(
     transcription_id: UUID,
     admin_user: User = Depends(get_allowlisted_user(required_roles_all=[_require_role("SystemAdministrator")], audit_writer=write_audit_event)),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
 ) -> AdminTranscriptionDetail:
     """View any transcription regardless of owner, with the provenance of its outputs.
     SystemAdministrator only. Audited (DIAAT-286) as a privileged view."""
@@ -433,6 +461,7 @@ async def admin_get_transcription(
         detail={"privileged": True},
     ) as audit:
         transcription = admin_get_transcription_by_id(transcription_id)
+        _admin_refuse_other_jurisdiction(transcription, admin_user, jurisdiction, TRANSCRIPTION, READ)
         audit.authorised()
     _log_admin_transcript_access(
         admin_id=str(admin_user.id),
@@ -444,6 +473,7 @@ async def admin_get_transcription(
     return AdminTranscriptionDetail(
         id=transcription.id,
         user_id=transcription.user_id,
+        jurisdiction_id=transcription.jurisdiction_id,
         title=transcription.title,
         created_datetime=transcription.created_datetime,
         updated_datetime=transcription.updated_datetime,
@@ -455,6 +485,7 @@ async def admin_get_transcription(
 async def admin_get_document_download_url(
     transcription_id: UUID,
     admin_user: User = Depends(get_allowlisted_user(required_roles_all=[_require_role("SystemAdministrator")], audit_writer=write_audit_event)),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
 ) -> dict[str, str]:
     """Download any transcript document regardless of owner. SystemAdministrator only.
     Audited (DIAAT-286) as a privileged export."""
@@ -465,11 +496,14 @@ async def admin_get_document_download_url(
         object_id=transcription_id,
         detail={"via": "link", "privileged": True},
     ) as audit:
-        return await _admin_document_download_url(transcription_id, admin_user, audit)
+        return await _admin_document_download_url(transcription_id, admin_user, jurisdiction, audit)
 
 
-async def _admin_document_download_url(transcription_id: UUID, admin_user: User, audit: AuditedAction) -> dict[str, str]:
+async def _admin_document_download_url(
+    transcription_id: UUID, admin_user: User, jurisdiction: ActiveJurisdiction, audit: AuditedAction
+) -> dict[str, str]:
     transcription = admin_get_transcription_by_id(transcription_id)
+    _admin_refuse_other_jurisdiction(transcription, admin_user, jurisdiction, DOCUMENT, READ)
     audit.authorised()
 
     blob_path: str | None = None
@@ -660,3 +694,186 @@ async def admin_delete_user_route(
         resource=f"user:{user_id}",
         detail={"target_user_id": str(user_id), "target_email": target.email},
     ))
+
+
+# ---------------------------------------------------------------------------
+# Jurisdictions and their members (DIAAT-356, SystemAdministrator only)
+# ---------------------------------------------------------------------------
+# What jurisdictions_admin does from a command line, from the admin area, so nobody
+# runs anything on a cluster. Plain defs: the database work is synchronous, so
+# FastAPI runs them in the threadpool. Each change is audited.
+
+_SYSTEM_ADMINISTRATOR = get_allowlisted_user(
+    required_roles_all=[_require_role("SystemAdministrator")], audit_writer=write_audit_event
+)
+
+
+class JurisdictionAdminRecord(BaseModel):
+    code: str
+    name: str
+    enabled: bool
+    auto_enrol: bool
+    settings: dict[str, Any]
+    member_count: int
+    # Sent back with a save, so a change made meanwhile is not undone (409).
+    version: str
+
+
+class JurisdictionWrite(BaseModel):
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    settings: dict[str, Any]
+    # Left out: unchanged (a new jurisdiction is enabled, without auto-enrol).
+    enabled: bool | None = None
+    auto_enrol: bool | None = None
+    # The version edited ("" when adding one); left out, no check (the command line).
+    version: str | None = None
+
+
+class JurisdictionMemberRecord(BaseModel):
+    email: str
+    role: str
+    pending: bool
+
+
+class JurisdictionMemberWrite(BaseModel):
+    email: str = PydanticField(min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+$")
+    role: str = "judge"
+
+
+class WordingKeysResponse(BaseModel):
+    keys: dict[str, str]
+
+
+def _admin_session_run(operation):
+    """Run a jurisdictions_admin operation; its refusals are the caller's 400, an
+    unknown jurisdiction 404, a change made meanwhile 409."""
+    with Session(get_engine()) as session:
+        try:
+            return operation(session)
+        except jurisdictions_admin.NotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except jurisdictions_admin.ConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except jurisdictions_admin.AdminError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+def _audit_jurisdiction_change(action: str, admin_user: User, detail: dict[str, Any]) -> None:
+    record_audit(action, actor_id=admin_user.id, outcome="success", object_type="jurisdiction", detail=detail)
+
+
+def _member_target(email: str) -> dict[str, Any]:
+    """Who a membership change was for, without contact details (domain/audit.py): their
+    user IDs once they have signed in, else a hash of the email they were added by
+    (to check a known address against)."""
+    with Session(get_engine()) as session:
+        user_ids = jurisdictions_admin.user_ids_for(session, email)
+    if user_ids:
+        return {"target_user_ids": user_ids}
+    return {"target_email_sha256": hashlib.sha256(email.strip().lower().encode()).hexdigest()}
+
+
+@router.get("/jurisdictions", response_model=list[JurisdictionAdminRecord])
+def admin_list_jurisdictions(
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),  # noqa: B008
+) -> list[JurisdictionAdminRecord]:
+    """Every jurisdiction, with its settings and member count."""
+    return [JurisdictionAdminRecord(**row) for row in _admin_session_run(jurisdictions_admin.jurisdictions_overview)]
+
+
+@router.get("/jurisdictions/wording-keys", response_model=WordingKeysResponse)
+def admin_jurisdiction_wording_keys(
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),  # noqa: B008
+) -> WordingKeysResponse:
+    """The screen text a jurisdiction can set, with what each is for."""
+    return WordingKeysResponse(keys=WORDING_KEYS)
+
+
+@router.put("/jurisdictions/{code}", response_model=JurisdictionAdminRecord)
+def admin_put_jurisdiction(
+    code: str,
+    body: JurisdictionWrite,
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),  # noqa: B008
+) -> JurisdictionAdminRecord:
+    """Create or update a jurisdiction. Its settings are validated first (400); a
+    stale ``version`` is refused (409)."""
+    created = False
+
+    def put(session: Session) -> dict:
+        nonlocal created
+        outcome = jurisdictions_admin.put_jurisdiction(
+            session,
+            code,
+            body.name,
+            body.settings,
+            auto_enrol=body.auto_enrol,
+            enabled=body.enabled,
+            expected_version=body.version,
+        )
+        created = outcome.startswith("Created")
+        return next(r for r in jurisdictions_admin.jurisdictions_overview(session) if r["code"] == code.strip().upper())
+
+    record = _admin_session_run(put)
+    settings = record["settings"]
+    _audit_jurisdiction_change(
+        "jurisdiction.edit",
+        admin_user,
+        {
+            "code": record["code"],
+            "created": created,
+            "name": record["name"],
+            "enabled": record["enabled"],
+            "auto_enrol": record["auto_enrol"],
+            "template": settings.get("template"),
+            "features": settings.get("features"),
+            "wording_keys": sorted(settings.get("wording", {})),
+        },
+    )
+    return JurisdictionAdminRecord(**record)
+
+
+@router.get("/jurisdictions/{code}/members", response_model=list[JurisdictionMemberRecord])
+def admin_list_jurisdiction_members(
+    code: str,
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),  # noqa: B008
+) -> list[JurisdictionMemberRecord]:
+    """A jurisdiction's members, including people added who have not signed in yet."""
+    return [
+        JurisdictionMemberRecord(**m) for m in _admin_session_run(lambda s: jurisdictions_admin.members_of(s, code))
+    ]
+
+
+@router.post("/jurisdictions/{code}/members", response_model=JurisdictionMemberRecord, status_code=201)
+def admin_add_jurisdiction_member(
+    code: str,
+    body: JurisdictionMemberWrite,
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),  # noqa: B008
+) -> JurisdictionMemberRecord:
+    """Add someone by their sign-in email, or change their role. Someone who has not
+    signed in yet joins when they first do (pending)."""
+    email = body.email.strip().lower()
+
+    def add(session: Session) -> dict:
+        jurisdictions_admin.add_member(session, code, email, body.role)
+        return next(m for m in jurisdictions_admin.members_of(session, code) if m["email"] == email)
+
+    member = _admin_session_run(add)
+    _audit_jurisdiction_change(
+        "membership.add",
+        admin_user,
+        {"code": code.strip().upper(), **_member_target(email), "role": member["role"], "pending": member["pending"]},
+    )
+    return JurisdictionMemberRecord(**member)
+
+
+@router.delete("/jurisdictions/{code}/members", status_code=204)
+def admin_remove_jurisdiction_member(
+    code: str,
+    email: str = Query(min_length=3, max_length=320),
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),  # noqa: B008
+) -> None:
+    """Remove someone from a jurisdiction (by email, as listed)."""
+    _admin_session_run(lambda s: jurisdictions_admin.remove_member(s, code, email))
+    _audit_jurisdiction_change(
+        "membership.remove", admin_user, {"code": code.strip().upper(), **_member_target(email)}
+    )

@@ -38,6 +38,9 @@
         "audio.export",
         "job.delete",
         "job.submit",
+        "jurisdiction.edit",
+        "membership.add",
+        "membership.remove",
         "transcript.delete",
         "transcript.edit",
         "transcript.export",
@@ -1143,6 +1146,15 @@
       "browser": false,
       "class": "operational",
       "description": "Downloading the transcript from Azure Speech started."
+    },
+    "security.jurisdiction_blocked": {
+      "attributes": [
+        "security.resource_type",
+        "security.action"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "DIAAT-334: a caller tried to reach material of a jurisdiction they are not working in (another of theirs, or one they do not belong to) and was refused with the same 404 as an unknown record. No jurisdiction, record or case content: correlate on hmcts.request.id with the audit record, which names the actor and the record."
     },
     "security.ownership_violation": {
       "attributes": [

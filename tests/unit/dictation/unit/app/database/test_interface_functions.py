@@ -398,6 +398,7 @@ class TestSaveTranscription:
         from transcribe_api.domain.models_dictation import Transcription
 
         transcription = MagicMock(spec=Transcription)
+        transcription.id = uuid4()  # a record ID is a UUID (save_transcription normalises a string)
         merged = MagicMock(spec=Transcription)
         user_id = uuid4()
 
@@ -540,7 +541,7 @@ class TestGetLiveDraft:
         _, mock_ctx = self._mock_ctx(None)
 
         with patch("transcribe_api.domain.interface_dictation.Session", return_value=mock_ctx):
-            result = get_live_draft(uuid4())
+            result = get_live_draft(uuid4(), uuid4())
 
         assert result is None
 
@@ -553,7 +554,7 @@ class TestGetLiveDraft:
         mock_session, mock_ctx = self._mock_ctx(draft)
 
         with patch("transcribe_api.domain.interface_dictation.Session", return_value=mock_ctx):
-            result = get_live_draft(uuid4())
+            result = get_live_draft(uuid4(), uuid4())
 
         assert result is draft
         mock_session.delete.assert_not_called()
@@ -567,7 +568,7 @@ class TestGetLiveDraft:
         mock_session, mock_ctx = self._mock_ctx(draft)
 
         with patch("transcribe_api.domain.interface_dictation.Session", return_value=mock_ctx):
-            result = get_live_draft(uuid4())
+            result = get_live_draft(uuid4(), uuid4())
 
         assert result is None
         mock_session.delete.assert_called_once_with(draft)
@@ -585,7 +586,7 @@ class TestGetLiveDraft:
         mock_session, mock_ctx = self._mock_ctx(draft)
 
         with patch("transcribe_api.domain.interface_dictation.Session", return_value=mock_ctx):
-            result = get_live_draft(uuid4())
+            result = get_live_draft(uuid4(), uuid4())
 
         assert result is draft
         mock_session.delete.assert_not_called()
@@ -599,7 +600,7 @@ class TestGetLiveDraft:
         _, mock_ctx = self._mock_ctx(draft)
 
         with patch("transcribe_api.domain.interface_dictation.Session", return_value=mock_ctx):
-            result = get_live_draft(uuid4())
+            result = get_live_draft(uuid4(), uuid4())
 
         assert result is draft
 
@@ -612,7 +613,7 @@ class TestGetLiveDraft:
         mock_session, mock_ctx = self._mock_ctx(draft)
 
         with patch("transcribe_api.domain.interface_dictation.Session", return_value=mock_ctx):
-            result = get_live_draft(uuid4())
+            result = get_live_draft(uuid4(), uuid4())
 
         assert result is None
         mock_session.delete.assert_called_once_with(draft)
@@ -631,7 +632,7 @@ class TestDeleteLiveDraft:
         mock_ctx.__exit__ = MagicMock(return_value=False)
 
         with patch("transcribe_api.domain.interface_dictation.Session", return_value=mock_ctx):
-            delete_live_draft(uuid4())
+            delete_live_draft(uuid4(), uuid4())
 
         mock_session.delete.assert_called_once_with(draft)
         mock_session.commit.assert_called_once()
@@ -646,7 +647,7 @@ class TestDeleteLiveDraft:
         mock_ctx.__exit__ = MagicMock(return_value=False)
 
         with patch("transcribe_api.domain.interface_dictation.Session", return_value=mock_ctx):
-            delete_live_draft(uuid4())
+            delete_live_draft(uuid4(), uuid4())
 
         mock_session.delete.assert_not_called()
         mock_session.commit.assert_not_called()
@@ -662,7 +663,8 @@ class TestUpsertLiveDraft:
         mock_ctx.__exit__ = MagicMock(return_value=False)
 
         with patch("transcribe_api.domain.interface_dictation.Session", return_value=mock_ctx):
-            upsert_live_draft(uuid4(), {"background": [], "evidence": [], "facts": []}, {})
+            upsert_live_draft(uuid4(), uuid4(), {"background": [], "evidence": [], "facts": []}, {})
 
-        mock_session.execute.assert_called_once()
+        # A draft from before jurisdictions is removed, then this one upserted (DIAAT-322).
+        assert mock_session.execute.call_count == 2
         mock_session.commit.assert_called_once()

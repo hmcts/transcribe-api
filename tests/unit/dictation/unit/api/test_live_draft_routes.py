@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.unit.jurisdiction_fixtures import IAC_JURISDICTION_ID
 from transcribe_api.domain.models_dictation import LiveTranscriptDraft, User
 
 
@@ -95,7 +96,7 @@ def test_get_live_draft_passes_current_user_id(client, as_user, mocker):
 
     client.get("/api/live-draft")
 
-    mock_get.assert_called_once_with(user.id)
+    mock_get.assert_called_once_with(user.id, IAC_JURISDICTION_ID)
 
 
 def test_get_live_draft_returns_401_when_unauthenticated(client):
@@ -144,7 +145,7 @@ def test_put_live_draft_calls_upsert_with_correct_args(client, as_user, mocker):
 
     client.put("/api/live-draft", json=payload)
 
-    mock_upsert.assert_called_once_with(user.id, transcript, form_data)
+    mock_upsert.assert_called_once_with(user.id, IAC_JURISDICTION_ID, transcript, form_data)
 
 
 def test_put_live_draft_returns_401_when_unauthenticated(client):
@@ -184,7 +185,7 @@ def test_delete_live_draft_calls_delete_with_user_id(client, as_user, mocker):
 
     client.delete("/api/live-draft")
 
-    mock_delete.assert_called_once_with(user.id)
+    mock_delete.assert_called_once_with(user.id, IAC_JURISDICTION_ID)
 
 
 def test_delete_live_draft_returns_204_even_when_no_draft_exists(client, as_user, mocker):

@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.unit.jurisdiction_fixtures import IAC_JURISDICTION_ID
 from transcribe_api.domain.models_dictation import Transcription, TranscriptionJob, User
 
 
@@ -25,6 +26,7 @@ def _make_transcription(owner: User | None = None) -> Transcription:
     t = Transcription(
         id=uuid.uuid4(),
         user_id=owner.id,
+        jurisdiction_id=IAC_JURISDICTION_ID,  # the admin works in the IAC too (DIAAT-334)
         title="Test Hearing",
         created_datetime=datetime(2026, 1, 15, 10, 0, 0, tzinfo=UTC),
     )

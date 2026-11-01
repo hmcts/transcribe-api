@@ -1,19 +1,26 @@
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytz
 from fastapi import HTTPException
-from sqlalchemy import event, func, update
+from sqlalchemy import delete, event, func, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 
 from transcribe_api.documents.minutes.types import TranscriptionMetadata
-from transcribe_api.domain.exceptions import OwnershipConflictError, UserHasTranscriptionsError, UserNotFoundError
+from transcribe_api.domain.exceptions import (
+    JurisdictionConflictError,
+    OwnershipConflictError,
+    UserHasTranscriptionsError,
+    UserNotFoundError,
+)
 from transcribe_api.domain.models_dictation import (
     BaseTable,
     DialogueEntry,
+    JurisdictionMembership,
     LiveTranscriptDraft,
     MinuteVersion,
     Tag,
@@ -87,8 +94,13 @@ def get_transcription_owner(transcription_id: UUID) -> UUID | None:
         return session.exec(select(Transcription.user_id).where(Transcription.id == transcription_id)).first()
 
 
-def load_or_create_transcription(transcription_id: str | UUID | None, user_id: UUID) -> Transcription:
-    """The caller's transcription with this ID, or a new one.
+def load_or_create_transcription(
+    transcription_id: str | UUID | None,
+    user_id: UUID,
+    jurisdiction_for_new: Callable[[], UUID | None] | None = None,
+) -> Transcription:
+    """The caller's transcription with this ID, or a new one in the jurisdiction
+    ``jurisdiction_for_new`` gives (asked only when one is made: DIAAT-322).
 
     An upload may name the caller's own existing transcription (a retry): saving a
     bare ``Transcription(id=...)`` would reset its columns (title...) to defaults,
@@ -102,7 +114,8 @@ def load_or_create_transcription(transcription_id: str | UUID | None, user_id: U
                 if str(existing.user_id) != str(user_id):
                     raise _ownership_conflict(Transcription.__name__, actor_id=user_id, object_id=record_id)
                 return existing
-    return save_transcription(Transcription(id=record_id), user_id)
+    jurisdiction_id = jurisdiction_for_new() if jurisdiction_for_new is not None else None
+    return save_transcription(Transcription(id=record_id), user_id, jurisdiction_id)
 
 
 def save_transcription_title(
@@ -136,10 +149,33 @@ def get_transcription_title(transcription_id: UUID) -> str | None:
 def save_transcription(
     transcription_data: Transcription,
     user_id: UUID,
+    jurisdiction_id: UUID | None = None,
 ) -> Transcription:
+    """Save the caller's transcription. A new one is made in ``jurisdiction_id``; an
+    existing one keeps its jurisdiction (DIAAT-322): the client's value is ignored, and
+    one of another jurisdiction is refused (JurisdictionConflictError, DIAAT-334). One
+    in no jurisdiction (made in the background for a judge in several, with no choice
+    to go by) counts as another: a request cannot move it into its own."""
+    if transcription_data.id is not None and not isinstance(transcription_data.id, UUID):
+        transcription_data.id = UUID(str(transcription_data.id))  # a client's JSON gives a string
     with Session(engine) as session:
         _ensure_owner_unchanged(session, Transcription.user_id, transcription_data.id, user_id, actor_id=user_id)
         transcription_data.user_id = user_id
+        # The row, not just its jurisdiction: an existing row's may be NULL.
+        existing = (
+            session.exec(
+                select(Transcription.id, Transcription.jurisdiction_id).where(Transcription.id == transcription_data.id)
+            ).first()
+            if transcription_data.id is not None
+            else None
+        )
+        if existing is None:
+            transcription_data.jurisdiction_id = jurisdiction_id
+        else:
+            existing_jurisdiction = existing[1]
+            if jurisdiction_id is not None and existing_jurisdiction != jurisdiction_id:
+                raise JurisdictionConflictError(Transcription.__name__)
+            transcription_data.jurisdiction_id = existing_jurisdiction
         merged = session.merge(transcription_data)
         session.commit()
         session.refresh(merged)
@@ -330,11 +366,12 @@ def _extract_unique_speakers(transcription: Transcription) -> list[str]:
     return sorted(speakers)
 
 
-def fetch_transcriptions_metadata(user_id: UUID, tz) -> list[TranscriptionMetadata]:
+def fetch_transcriptions_metadata(user_id: UUID, tz, jurisdiction_id: UUID) -> list[TranscriptionMetadata]:
+    """The user's transcriptions in one jurisdiction (DIAAT-330)."""
     with Session(engine) as session:
         statement = (
             select(Transcription)
-            .where(Transcription.user_id == user_id)
+            .where(Transcription.user_id == user_id, Transcription.jurisdiction_id == jurisdiction_id)
             .options(
                 selectinload(Transcription.minute_versions),  # type: ignore[arg-type]
                 selectinload(Transcription.transcription_jobs),  # type: ignore[arg-type]
@@ -449,9 +486,11 @@ def save_transcription_job(
     """``check_owner=False`` only for IDs the server generated itself (see
     save_minute_version).
 
-    ``from_client=True`` for a job sent by a client: its ``provenance`` is ignored and
-    the stored one kept (DIAAT-286: provenance says what produced the output, so only
-    the server writes it).
+    ``from_client=True`` for a job sent by a client: its ``provenance`` and
+    ``s3_audio_url`` are ignored and the stored ones kept (none for a new job). Only
+    the server writes them: provenance says what produced the output (DIAAT-286),
+    and the audio is checked against the user, not the jurisdiction, so a client's
+    reference could put another jurisdiction's recording in this one (DIAAT-334).
     """
     with Session(engine) as session:
         if check_owner:
@@ -459,9 +498,10 @@ def save_transcription_job(
                 session, TranscriptionJob.transcription_id, job.id, job.transcription_id, actor_id=actor_id
             )
         if from_client:
-            job.provenance = session.exec(
-                select(TranscriptionJob.provenance).where(TranscriptionJob.id == job.id)
+            stored = session.exec(
+                select(TranscriptionJob.provenance, TranscriptionJob.s3_audio_url).where(TranscriptionJob.id == job.id)
             ).first()
+            job.provenance, job.s3_audio_url = stored if stored is not None else (None, None)
         job.dialogue_entries = [
             entry.model_dump() if hasattr(entry, "model_dump") else entry for entry in job.dialogue_entries
         ]
@@ -646,20 +686,22 @@ def admin_get_transcription_by_id(transcription_id: UUID) -> Transcription:
 
 def admin_fetch_all_transcriptions(
     *,
+    jurisdiction_id: UUID,
     owner_email: str | None = None,
     created_after: datetime | None = None,
     created_before: datetime | None = None,
     page: int = 1,
     page_size: int = 50,
 ) -> tuple[list[Transcription], int]:
-    """List all transcriptions across all users with optional filters and pagination."""
+    """List all users' transcriptions in one jurisdiction (DIAAT-334), with optional
+    filters and pagination."""
     if page < 1:
         raise ValueError(f"page must be >= 1, got {page}")
     if page_size < 1 or page_size > 200:
         raise ValueError(f"page_size must be between 1 and 200, got {page_size}")
 
     with Session(engine) as session:
-        filters = []
+        filters = [Transcription.jurisdiction_id == jurisdiction_id]
         if owner_email:
             filters.append(User.email == owner_email)
         if created_after:
@@ -694,11 +736,16 @@ def admin_fetch_all_transcriptions(
 _LIVE_DRAFT_MAX_AGE = timedelta(hours=24)
 
 
-def get_live_draft(user_id: UUID) -> LiveTranscriptDraft | None:
+def _live_draft_of(user_id: UUID, jurisdiction_id: UUID):
+    return select(LiveTranscriptDraft).where(
+        LiveTranscriptDraft.user_id == user_id, LiveTranscriptDraft.jurisdiction_id == jurisdiction_id
+    )
+
+
+def get_live_draft(user_id: UUID, jurisdiction_id: UUID) -> LiveTranscriptDraft | None:
+    """The user's draft in this jurisdiction: each jurisdiction has its own (DIAAT-322)."""
     with Session(engine) as session:
-        draft = session.exec(
-            select(LiveTranscriptDraft).where(LiveTranscriptDraft.user_id == user_id)
-        ).first()
+        draft = session.exec(_live_draft_of(user_id, jurisdiction_id)).first()
         if draft is None:
             return None
         saved_at = draft.updated_datetime or draft.created_datetime
@@ -711,20 +758,21 @@ def get_live_draft(user_id: UUID) -> LiveTranscriptDraft | None:
         return draft
 
 
-def upsert_live_draft(user_id: UUID, transcript: dict, form_data: dict) -> None:
+def upsert_live_draft(user_id: UUID, jurisdiction_id: UUID, transcript: dict, form_data: dict) -> None:
     now = datetime.now(UTC)
     stmt = (
         pg_insert(LiveTranscriptDraft)
         .values(
             id=uuid4(),
             user_id=user_id,
+            jurisdiction_id=jurisdiction_id,
             transcript=transcript,
             form_data=form_data,
             created_datetime=now,
             updated_datetime=now,
         )
         .on_conflict_do_update(
-            index_elements=["user_id"],
+            index_elements=["user_id", "jurisdiction_id"],
             set_={
                 "transcript": transcript,
                 "form_data": form_data,
@@ -733,15 +781,21 @@ def upsert_live_draft(user_id: UUID, transcript: dict, form_data: dict) -> None:
         )
     )
     with Session(engine) as session:
+        # Until migration 0005: a draft an old pod saved during 0004's rollout has no
+        # jurisdiction and holds the old one-per-user key, so this save would fail on
+        # it. It is this user's own draft from before, superseded by this save.
+        session.execute(
+            delete(LiveTranscriptDraft).where(
+                LiveTranscriptDraft.user_id == user_id, LiveTranscriptDraft.jurisdiction_id.is_(None)
+            )
+        )
         session.execute(stmt)
         session.commit()
 
 
-def delete_live_draft(user_id: UUID) -> None:
+def delete_live_draft(user_id: UUID, jurisdiction_id: UUID) -> None:
     with Session(engine) as session:
-        draft = session.exec(
-            select(LiveTranscriptDraft).where(LiveTranscriptDraft.user_id == user_id)
-        ).first()
+        draft = session.exec(_live_draft_of(user_id, jurisdiction_id)).first()
         if draft:
             session.delete(draft)
             session.commit()
@@ -787,7 +841,7 @@ def admin_delete_user(user_id: UUID) -> None:
 
     Raises UserNotFoundError if the user does not exist.
     Raises UserHasTranscriptionsError if the user still owns transcriptions.
-    Automatically removes any live draft belonging to the user before deletion.
+    Automatically removes the user's live drafts and jurisdiction memberships first.
     """
     with Session(engine) as session:
         user = session.get(User, user_id)
@@ -800,11 +854,13 @@ def admin_delete_user(user_id: UUID) -> None:
         if transcription_count > 0:
             raise UserHasTranscriptionsError(user_id, transcription_count)
 
-        draft = session.exec(
-            select(LiveTranscriptDraft).where(LiveTranscriptDraft.user_id == user_id)
-        ).first()
-        if draft:
+        # A draft per jurisdiction, and the user's memberships (DIAAT-322).
+        for draft in session.exec(select(LiveTranscriptDraft).where(LiveTranscriptDraft.user_id == user_id)).all():
             session.delete(draft)
+        for membership in session.exec(
+            select(JurisdictionMembership).where(JurisdictionMembership.user_id == user_id)
+        ).all():
+            session.delete(membership)
 
         session.delete(user)
         session.commit()

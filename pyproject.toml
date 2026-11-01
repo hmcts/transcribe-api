@@ -124,6 +124,9 @@ pythonpath = ["src", "."]
 # data alongside the pipeline's flag (it still warns that `app` was never
 # imported; that warning is harmless).
 addopts = "--cov=transcribe_api"
+markers = [
+    "real_jurisdictions: use the real jurisdiction lookup, not every user an IAC judge (tests/unit/conftest.py)",
+]
 
 [tool.ruff]
 line-length = 120

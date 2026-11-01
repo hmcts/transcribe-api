@@ -280,6 +280,7 @@ def test_administrators_see_the_provenance_of_each_output(mocker):
 
     import transcribe_api.api.routes_dictation_privileged
     from tests.unit.dictation.unit.api.test_routes import _make_transcription, _make_user
+    from tests.unit.jurisdiction_fixtures import IAC_JURISDICTION_ID
     from transcribe_api.domain.auth.dependencies_dictation import get_current_user
     from transcribe_api.domain.models_dictation import TranscriptionJob
 
@@ -287,6 +288,7 @@ def test_administrators_see_the_provenance_of_each_output(mocker):
     test_app.include_router(transcribe_api.api.routes_dictation_privileged.router, prefix="/api")
     test_app.dependency_overrides[get_current_user] = lambda: _make_user(roles=["SystemAdministrator"])
     transcription = _make_transcription(uuid.uuid4())
+    transcription.jurisdiction_id = IAC_JURISDICTION_ID  # where the administrator works (DIAAT-334)
     record = Provenance(output="decision_document", template="decision", template_version="0123456789ab").to_record()
     job = TranscriptionJob(transcription_id=transcription.id, dialogue_entries=[], provenance=record)
     transcription.__dict__["transcription_jobs"] = [job]

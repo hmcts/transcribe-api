@@ -296,7 +296,9 @@ def create_app() -> FastAPI:
         allow_origins=origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-        allow_headers=["Authorization", "Content-Type"],
+        # The headers the web app sends, for local development, which calls the API
+        # cross-origin: X-Jurisdiction (the tab's, DIAAT-322), X-Dictation-Session-Id.
+        allow_headers=["Authorization", "Content-Type", "X-Jurisdiction", "X-Dictation-Session-Id"],
     )
 
     # hmcts.area from the path, before routing and body parsing (AreaMiddleware).
@@ -350,6 +352,7 @@ def create_app() -> FastAPI:
     from transcribe_api.api.routes_dictation import router as dictation_router
     from transcribe_api.api.routes_dictation import telemetry_router
     from transcribe_api.api.routes_dictation_privileged import router as dictation_admin_router
+    from transcribe_api.api.routes_jurisdictions import router as jurisdictions_router
     from transcribe_api.api.routes_recording import limiter
     from transcribe_api.api.routes_recording import router as recording_router
 
@@ -367,6 +370,7 @@ def create_app() -> FastAPI:
     app.include_router(dictation_router, prefix="/api")
     app.include_router(dictation_admin_router, prefix="/api")
     app.include_router(telemetry_router, prefix="/api")
+    app.include_router(jurisdictions_router, prefix="/api")
     app.include_router(recording_router)
 
     # Polled by the CNP pipeline's startup check.

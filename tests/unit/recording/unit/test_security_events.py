@@ -168,7 +168,7 @@ def test_own_blob_name_is_not_a_violation(tel, mocker):
         "/api/v1/jobs",
         json={
             "audio_url": "https://x.example.com/a.wav",
-            "blob_name": f"uploads/{CALLER_ID}/a.wav",
+            "blob_name": f"uploads/{CALLER_ID}/5b0f1c9e-3d2a-4f6b-8c7d-9e0a1b2c3d4e-a.wav",
         },
     )
 
