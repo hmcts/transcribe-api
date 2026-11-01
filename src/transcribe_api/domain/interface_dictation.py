@@ -477,9 +477,11 @@ def save_transcription_job(
     """``check_owner=False`` only for IDs the server generated itself (see
     save_minute_version).
 
-    ``from_client=True`` for a job sent by a client: its ``provenance`` is ignored and
-    the stored one kept (DIAAT-286: provenance says what produced the output, so only
-    the server writes it).
+    ``from_client=True`` for a job sent by a client: its ``provenance`` and
+    ``s3_audio_url`` are ignored and the stored ones kept (none for a new job). Only
+    the server writes them: provenance says what produced the output (DIAAT-286),
+    and the audio is checked against the user, not the jurisdiction, so a client's
+    reference could put another jurisdiction's recording in this one (DIAAT-334).
     """
     with Session(engine) as session:
         if check_owner:
@@ -487,9 +489,10 @@ def save_transcription_job(
                 session, TranscriptionJob.transcription_id, job.id, job.transcription_id, actor_id=actor_id
             )
         if from_client:
-            job.provenance = session.exec(
-                select(TranscriptionJob.provenance).where(TranscriptionJob.id == job.id)
+            stored = session.exec(
+                select(TranscriptionJob.provenance, TranscriptionJob.s3_audio_url).where(TranscriptionJob.id == job.id)
             ).first()
+            job.provenance, job.s3_audio_url = stored if stored is not None else (None, None)
         job.dialogue_entries = [
             entry.model_dump() if hasattr(entry, "model_dump") else entry for entry in job.dialogue_entries
         ]

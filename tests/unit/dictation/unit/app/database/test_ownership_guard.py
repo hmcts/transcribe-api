@@ -157,3 +157,32 @@ def test_title_update_never_overwrites_a_rename_and_respects_the_owner(engine):
 
     assert db.save_transcription_title(saved.id, other.id, "hijack", "Renamed by the judge") is False
     assert db.get_transcription_title(saved.id) == "Renamed by the judge"
+
+
+def test_a_client_cannot_set_or_change_a_jobs_audio(engine):
+    """DIAAT-334: the audio is checked against the user, not the jurisdiction, so a
+    client's reference to their own recording from another jurisdiction must not be
+    stored under this one. Only the server sets it; an edit keeps it."""
+    user = _user(engine)
+    transcription = db.save_transcription(Transcription(), user.id)
+    own = f"user-uploads/{user.azure_user_id}/{uuid4()}.webm"
+    elsewhere = f"user-uploads/{user.azure_user_id}/{uuid4()}.webm"
+    job = db.save_transcription_job(
+        TranscriptionJob(transcription_id=transcription.id, dialogue_entries=[], s3_audio_url=own)
+    )
+
+    edited = db.save_transcription_job(
+        TranscriptionJob(id=job.id, transcription_id=transcription.id, dialogue_entries=[], s3_audio_url=elsewhere),
+        from_client=True,
+    )
+    assert edited.s3_audio_url == own  # kept, e.g. after a speaker rename
+    renamed = db.save_transcription_job(
+        TranscriptionJob(id=job.id, transcription_id=transcription.id, dialogue_entries=[], s3_audio_url=None),
+        from_client=True,
+    )
+    assert renamed.s3_audio_url == own
+    new = db.save_transcription_job(
+        TranscriptionJob(transcription_id=transcription.id, dialogue_entries=[], s3_audio_url=elsewhere),
+        from_client=True,
+    )
+    assert new.s3_audio_url is None
