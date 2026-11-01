@@ -112,7 +112,9 @@ class UploadJurisdiction(SQLModel, table=True):
 
     Written when the upload URL is issued, from the tab's jurisdiction; read by the
     poller, which has no request, when it makes the upload's transcription. Keyed by
-    the upload's ID, which becomes the transcription's.
+    the upload's ID, which becomes the transcription's. A hearing recording's upload
+    is recorded too (its ID, in the blob name): its job must be submitted in the same
+    jurisdiction (DIAAT-334).
     """
 
     __tablename__ = "upload_jurisdiction"

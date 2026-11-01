@@ -262,25 +262,35 @@ def job_owner_and_jurisdiction(job_id: UUID) -> tuple[bool, UUID | None, UUID | 
     return _job_owner_and_jurisdiction(job_id)
 
 
-def record_upload_jurisdiction(transcription_id: UUID, jurisdiction_id: UUID) -> None:
-    """Remember the jurisdiction an upload is started in, for the poller."""
+def _record_upload_jurisdiction(upload_id: UUID, jurisdiction_id: UUID) -> None:
     with Session(get_engine()) as session:
-        session.merge(UploadJurisdiction(transcription_id=transcription_id, jurisdiction_id=jurisdiction_id))
+        session.merge(UploadJurisdiction(transcription_id=upload_id, jurisdiction_id=jurisdiction_id))
         session.commit()
+
+
+def record_upload_jurisdiction(transcription_id: UUID, jurisdiction_id: UUID) -> None:
+    """Remember the jurisdiction an upload is started in: for the poller (dictation),
+    and for the job a recording upload is submitted as (DIAAT-334)."""
+    _record_upload_jurisdiction(transcription_id, jurisdiction_id)
+
+
+def _recorded_upload_jurisdiction(upload_id: UUID) -> UUID | None:
+    with Session(get_engine()) as session:
+        return session.exec(
+            select(UploadJurisdiction.jurisdiction_id).where(UploadJurisdiction.transcription_id == upload_id)
+        ).first()
+
+
+def recorded_upload_jurisdiction(upload_id: str | UUID) -> UUID | None:
+    """The jurisdiction an upload was started in, if it was recorded."""
+    return _recorded_upload_jurisdiction(UUID(str(upload_id)))
 
 
 def upload_jurisdiction_id(transcription_id: str | UUID | None, user_id: UUID) -> UUID | None:
     """The jurisdiction for an upload's new transcription: the one it was started in,
     if the user still belongs to it, else default_jurisdiction_id (an upload from
     before DIAAT-322, or a file not named by its upload ID)."""
-    started_in = None
-    if transcription_id is not None:
-        with Session(get_engine()) as session:
-            started_in = session.exec(
-                select(UploadJurisdiction.jurisdiction_id).where(
-                    UploadJurisdiction.transcription_id == UUID(str(transcription_id))
-                )
-            ).first()
+    started_in = recorded_upload_jurisdiction(transcription_id) if transcription_id is not None else None
     if started_in is not None and any(m.jurisdiction_id == started_in for m in load_memberships(user_id)):
         return started_in
     return default_jurisdiction_id(user_id)

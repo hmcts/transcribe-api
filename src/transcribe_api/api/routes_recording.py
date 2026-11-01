@@ -64,12 +64,18 @@ from transcribe_api.domain.models_recording import (
 )
 from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
 from transcribe_api.runtime.db_recording import get_session
-from transcribe_api.domain.jurisdictions import ActiveJurisdiction, job_owner_and_jurisdiction
+from transcribe_api.domain.jurisdictions import (
+    ActiveJurisdiction,
+    job_owner_and_jurisdiction,
+    record_upload_jurisdiction,
+    recorded_upload_jurisdiction,
+)
 from transcribe_api.runtime.security_events import (
     AUDIO,
     JOB,
     SUBMIT,
     TRANSCRIPT,
+    UPLOAD,
     action_for_method,
     record_jurisdiction_blocked,
     record_ownership_violation,
@@ -699,7 +705,7 @@ async def upload_audio(
     request: Request,
     file: UploadFile = File(...),
     current_user: AuthenticatedUser = Depends(get_current_user),
-    _jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),  # noqa: B008
     x_hearing_id: Annotated[str | None, Header()] = None,
     x_hearing_file_count: Annotated[str | None, Header()] = None,
 ) -> UploadResponse:
@@ -708,6 +714,8 @@ async def upload_audio(
     # DIAAT-280: the hearing (X-Hearing-Id) is the upload's parent, relating the files
     # of a multi-file hearing.
     upload_id = uuid4()
+    # DIAAT-334: its job is accepted only in the jurisdiction it was uploaded in.
+    await asyncio.to_thread(record_upload_jurisdiction, upload_id, jurisdiction.id)
     extension = PurePosixPath(file.filename or "").suffix.lower()
     metadata = _upload_metadata(file, extension, _hearing_file_count(x_hearing_file_count))
     with (
@@ -887,6 +895,20 @@ async def _submit_job(
         write_audit(denied("job.submit", current_user.id, upload_id, "not_owner", "upload"))
         audit.skip()
         raise HTTPException(status_code=422, detail="blob_name does not belong to this user")
+
+    # DIAAT-334: the user's own upload, but it must be from this jurisdiction. The
+    # job takes the request's jurisdiction, and its audio is checked against the user
+    # alone, so another jurisdiction's recording would be played here. An upload with
+    # no record (made before this release) is refused too: upload it again.
+    if body.blob_name is not None:
+        upload_id = _upload_uuid(body.blob_name)
+        started_in = await asyncio.to_thread(recorded_upload_jurisdiction, upload_id) if upload_id else None
+        if started_in != jurisdiction.id:
+            record_jurisdiction_blocked(UPLOAD, SUBMIT, actor_id=current_user.id, object_id=upload_id)
+            audit.skip()
+            raise HTTPException(
+                status_code=422, detail="This recording was not uploaded in this jurisdiction. Upload it again here."
+            )
 
     try:
         job = await submit_and_queue_batch_job(

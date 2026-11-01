@@ -371,3 +371,55 @@ def test_an_idempotency_key_from_another_jurisdiction_does_not_return_its_job(
     assert response.status_code == 409
     assert str(in_sscs.id) not in response.text
     assert [(e["security.resource_type"], e["security.action"]) for e in _blocked(telemetry)] == [("job", "submit")]
+
+
+def test_a_recording_uploaded_in_one_jurisdiction_cannot_be_submitted_in_another(
+    jurisdiction_db, judge_in_two, recording_app, mocker
+):
+    """The job takes the request's jurisdiction and its audio is checked against the
+    user alone: an SSCS upload submitted in the IAC would be played there."""
+    from transcribe_api.domain.jurisdictions import record_upload_jurisdiction
+
+    judge, iac, sscs, *_ = judge_in_two
+    submit = mocker.patch("transcribe_api.api.routes_recording.submit_and_queue_batch_job")
+    upload_id = uuid4()
+    record_upload_jurisdiction(upload_id, sscs.id)  # as POST /uploads does
+    body = {"audio_url": "https://blob/a.wav", "blob_name": f"uploads/{judge.id}/{upload_id}-hearing.wav"}
+    client = _recording_client(recording_app, judge)
+
+    with capture_telemetry() as telemetry:
+        refused = client.post("/api/v1/jobs", json=body, headers={"X-Jurisdiction": "IAC"})
+        unrecorded = client.post(
+            "/api/v1/jobs",
+            json={**body, "blob_name": f"uploads/{judge.id}/{uuid4()}-hearing.wav"},
+            headers={"X-Jurisdiction": "IAC"},
+        )
+
+    assert (refused.status_code, unrecorded.status_code) == (422, 422)
+    assert [(e["security.resource_type"], e["security.action"]) for e in _blocked(telemetry)] == [
+        ("upload", "submit"),
+        ("upload", "submit"),
+    ]
+    submit.assert_not_called()
+
+    submit.return_value = _job(jurisdiction_db, judge, sscs)
+    accepted = client.post("/api/v1/jobs", json=body, headers={"X-Jurisdiction": "SSCS"})
+    assert accepted.status_code == 201
+    assert submit.call_args.kwargs["jurisdiction_id"] == sscs.id
+
+
+def test_an_upload_records_the_jurisdiction_it_was_made_in(jurisdiction_db, judge_in_two, recording_app, mocker):
+    from transcribe_api.api import routes_recording
+    from transcribe_api.domain.jurisdictions import recorded_upload_jurisdiction
+
+    judge, _iac, sscs, *_ = judge_in_two
+    mocker.patch.object(routes_recording, "_upload_audio", side_effect=lambda *a: routes_recording.UploadResponse(
+        audio_url="https://blob/x.wav", blob_name=f"uploads/{judge.id}/{a[3]}-x.wav"
+    ))
+    response = _recording_client(recording_app, judge).post(
+        "/api/v1/uploads", files={"file": ("x.wav", b"RIFF", "audio/wav")}, headers={"X-Jurisdiction": "SSCS"}
+    )
+
+    assert response.status_code == 201
+    upload_id = response.json()["blob_name"].split("/")[2][:36]
+    assert recorded_upload_jurisdiction(upload_id) == sscs.id

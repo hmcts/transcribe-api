@@ -849,7 +849,8 @@ class TestSubmitJob:
         )
 
         # as_current_user's id is 00000000-0000-0000-0000-000000000002 (see _make_user).
-        own_blob_name = "uploads/00000000-0000-0000-0000-000000000002/audio.wav"
+        # As upload_audio names it: the upload's ID, then the file name.
+        own_blob_name = "uploads/00000000-0000-0000-0000-000000000002/5b0f1c9e-3d2a-4f6b-8c7d-9e0a1b2c3d4e-audio.wav"
         response = client.post(
             "/api/v1/jobs",
             json={
