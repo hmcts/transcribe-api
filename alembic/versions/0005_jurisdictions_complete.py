@@ -1,13 +1,15 @@
 """Jurisdictions, completed: one draft per user per jurisdiction (DIAAT-322).
 
-The second half of 0004, for once no pod runs the release before DIAAT-322 (deploy it
-in a later release than 0004, or accept that a rollout of both together can fail the
-old pods' draft saves for its few minutes):
+The second half of 0004. Every pod migrates to head as it starts, so both run in the
+same release, before its rollout: keeping the old one-per-user key any longer would
+refuse a judge's draft in their second jurisdiction (a 500 on every autosave there).
+While the rollout lasts (a few minutes), the old pods' draft saves fail, as their
+upsert names that key; the page keeps the text and saves again. Their other writes
+land in the IAC (0004's column defaults).
 
-- records the old pods wrote during 0004's rollout, without a jurisdiction, are put
-  in the IAC, as 0004 put the earlier ones;
-- users who first signed in through an old pod then, and so were never enrolled,
-  are made IAC judges, as 0004 made the earlier ones;
+- any record without a jurisdiction is put in the IAC, as 0004 put the earlier ones;
+- any user with no membership is made an IAC judge, as 0004 made the earlier ones
+  (run with 0004, before anyone can be removed from a jurisdiction);
 - live_transcript_draft.jurisdiction_id becomes NOT NULL, and the one-draft-per-user
   key goes: a judge in two jurisdictions has a draft in each.
 

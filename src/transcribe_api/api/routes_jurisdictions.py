@@ -190,16 +190,13 @@ def _wording(active: ActiveJurisdiction, wording: dict[str, str], version: str) 
     )
 
 
-def _current_version(code: str) -> str:
-    with Session(get_engine()) as session:
-        return jurisdictions_admin.current_version(session, code)
-
-
 # Plain defs, as above.
 @router.get("/jurisdictions/wording", response_model=JurisdictionWording)
 def jurisdiction_wording(active: ActiveJurisdiction = Depends(_as_its_admin)) -> JurisdictionWording:  # noqa: B008
     """The wording of the jurisdiction the admin is working in."""
-    return _wording(active, active.settings.wording, _current_version(active.code))
+    with Session(get_engine()) as session:
+        wording, version = jurisdictions_admin.wording_and_version(session, active.code)
+    return _wording(active, wording, version)
 
 
 @router.put("/jurisdictions/wording", response_model=JurisdictionWording)
@@ -217,6 +214,8 @@ def update_jurisdiction_wording(
             )
         except jurisdictions_admin.ConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
+        except jurisdictions_admin.NotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
         except jurisdictions_admin.AdminError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         saved_version = jurisdictions_admin.current_version(session, active.code)

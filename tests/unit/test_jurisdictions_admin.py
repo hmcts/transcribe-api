@@ -172,3 +172,24 @@ def test_a_jurisdiction_created_by_someone_else_at_the_same_moment_is_a_conflict
     with pytest.raises(admin.ConflictError, match="ET already exists"):
         admin.put_jurisdiction(session, "ET", "Mine", {}, expected_version="")
     assert admin.jurisdictions_overview(session)[0]["name"] == "Theirs"
+
+
+@pytest.mark.parametrize("save", ["wording", "jurisdiction"])
+def test_a_change_made_after_this_session_read_the_row_is_a_conflict(session, jurisdiction_db, save):
+    """The version is checked against the row as it is once locked, not as this
+    session read it before: else two saves of one version could both pass."""
+    admin.put_jurisdiction(session, "ET", "Employment Tribunal", {})
+    # This session holds the row as read now (an object it keeps, as a caller would).
+    held = session.exec(select(Jurisdiction).where(Jurisdiction.code == "ET")).one()
+    opened = admin.version(held)
+    with Session(jurisdiction_db) as other:
+        admin.set_wording(other, "ET", {"help.subtitle": "Theirs"}, expected_version=opened)
+
+    with pytest.raises(admin.ConflictError):
+        if save == "wording":
+            admin.set_wording(session, "ET", {"help.subtitle": "Mine"}, expected_version=opened)
+        else:
+            admin.put_jurisdiction(session, "ET", "Employment Tribunal", {}, expected_version=opened)
+    session.rollback()
+    with Session(jurisdiction_db) as fresh:
+        assert admin.wording_and_version(fresh, "ET")[0] == {"help.subtitle": "Theirs"}

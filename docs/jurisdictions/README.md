@@ -5,11 +5,12 @@ the `jurisdiction` table. Its screen wording and the parts of BenchNotes it uses
 stored in `settings`, so adding a jurisdiction does not need a deployment. The IAC is
 created by migration `0004`, with the wording the web app showed before DIAAT-322.
 
-`0004` is additive, so the previous release keeps working while the new one rolls
-out. `0005` completes it: it allows a draft per jurisdiction, and puts any records
-the old pods wrote during the rollout in the IAC. Deploy `0005` in a later release
-than `0004`. If they are deployed together, the old pods' draft saves can fail for
-the few minutes of the rollout.
+`0004` is additive, and `0005` completes it by allowing a draft per jurisdiction.
+Both run in the same release: each pod migrates to head as it starts. While the
+rollout lasts, the previous release's pods keep serving. Their draft saves fail
+for those few minutes (the page keeps the text and saves again), and everything
+else they write lands in the IAC. Someone signing in for the first time through
+one of those pods gets no jurisdiction; add them on the Jurisdictions tab.
 
 A SystemAdministrator manages them in the admin area, on the **Jurisdictions** tab
 (DIAAT-356): add or edit a jurisdiction (its name, wording, template, hearing

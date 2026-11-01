@@ -228,7 +228,8 @@ def test_0004_creates_the_jurisdiction_tables_and_the_iac(monkeypatch):
 def test_0004_puts_every_existing_record_in_the_iac(monkeypatch):
     sql = _offline_sql(monkeypatch, "0003:0004")
     for table in ("transcription", "transcription_job", "live_transcript_draft"):
-        assert f"ALTER TABLE {table} ADD COLUMN jurisdiction_id UUID;" in sql, table
+        # Defaulting to the IAC: the previous release's pods write rows without it.
+        assert f"ALTER TABLE {table} ADD COLUMN jurisdiction_id UUID DEFAULT '{IAC_ID}'::uuid;" in sql, table
     assert f"UPDATE transcription SET jurisdiction_id = '{IAC_ID}'" in sql
     # API-key callers' jobs too: BenchNotes served the IAC alone.
     assert f"UPDATE transcription_job SET jurisdiction_id = '{IAC_ID}';" in sql
@@ -608,13 +609,25 @@ def test_0004_and_0005_put_existing_users_and_records_in_the_iac_and_reverse():
             ),
             {"uid": user_id},
         )
+        # 0005 runs as the first new pod starts; an old pod still serving makes a
+        # transcription without a jurisdiction. It is the IAC's, not lost.
+        connection.execute(
+            text(
+                "INSERT INTO transcription (id, created_datetime, user_id, title)"
+                " VALUES (gen_random_uuid(), now(), :uid, 'E v F')"
+            ),
+            {"uid": user_id},
+        )
+        assert connection.execute(
+            text("SELECT jurisdiction_id::text FROM transcription WHERE title = 'E v F'")
+        ).scalar_one() == IAC_ID
 
     migrate(command.downgrade, "0003")
     with engine.connect() as connection:
         drafts = connection.execute(text("SELECT count(*) FROM live_transcript_draft")).scalar_one()
         titles = connection.execute(text("SELECT title FROM transcription")).scalars().all()
     assert drafts == 1  # the IAC draft; the ET one is gone
-    assert sorted(titles) == ["A v B", "C v D"]
+    assert sorted(titles) == ["A v B", "C v D", "E v F"]
 
 
 @pytest.mark.skipif(not os.getenv("TEST_POSTGRES_URL"), reason="needs TEST_POSTGRES_URL (a throwaway Postgres)")

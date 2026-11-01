@@ -44,9 +44,14 @@ class ConflictError(AdminError):
     """Changed by someone else meanwhile: load it again and retry."""
 
 
-def _jurisdiction(session: Session, code: str) -> Jurisdiction:
+def _jurisdiction(session: Session, code: str, *, lock: bool = False) -> Jurisdiction:
+    """``lock``: locked until the commit, and read afresh once the lock is held, not
+    taken from what this session read before (which may predate a change)."""
     code = code.strip().upper()
-    row = session.exec(select(Jurisdiction).where(Jurisdiction.code == code)).first()
+    query = select(Jurisdiction).where(Jurisdiction.code == code)
+    if lock:
+        query = query.with_for_update().execution_options(populate_existing=True)
+    row = session.exec(query).first()
     if row is None:
         msg = f"No jurisdiction {code}"
         raise NotFoundError(msg)
@@ -66,6 +71,13 @@ def user_ids_for(session: Session, email: str) -> list[str]:
 
 def current_version(session: Session, code: str) -> str:
     return version(_jurisdiction(session, code))
+
+
+def wording_and_version(session: Session, code: str) -> tuple[dict[str, str], str]:
+    """A jurisdiction's stored wording and its version, from the one read: a version
+    newer than the wording shown would let a save undo the change between them."""
+    row = _jurisdiction(session, code)
+    return dict((row.settings or {}).get("wording") or {}), version(row)
 
 
 def version(row: Jurisdiction) -> str:
@@ -105,7 +117,12 @@ def put_jurisdiction(
         msg = f"Invalid settings: {exc}"
         raise AdminError(msg) from None
     # Locked until the commit, so two saves of the same version cannot both pass.
-    row = session.exec(select(Jurisdiction).where(Jurisdiction.code == code).with_for_update()).first()
+    row = session.exec(
+        select(Jurisdiction)
+        .where(Jurisdiction.code == code)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).first()
     created = row is None
     if expected_version is not None and (version(row) if row is not None else "") != expected_version:
         msg = (
@@ -141,7 +158,7 @@ def set_wording(
     of the stored settings is kept as stored, including anything this release does
     not know (a newer release's template, during a rolling deploy). A stale
     ``expected_version`` is refused (ConflictError), as for put_jurisdiction."""
-    row = session.exec(select(Jurisdiction).where(Jurisdiction.id == _jurisdiction(session, code).id).with_for_update()).one()
+    row = _jurisdiction(session, code, lock=True)
     if expected_version is not None and version(row) != expected_version:
         msg = f"{row.code}'s wording was changed by someone else meanwhile; load it again"
         raise ConflictError(msg)

@@ -24,6 +24,12 @@ Additive only, so pods still running the previous release keep working while the
 new one rolls out: the draft's old one-per-user key stays, and the new columns stay
 nullable (the previous release writes rows without them). 0005 completes it.
 
+Every pod migrates to head as it starts, so 0005 runs straight after this, while
+the previous release's pods are still serving. The new columns therefore default
+to the IAC: what those pods write during the rollout is the IAC's, and must not be
+left in no jurisdiction (hidden from its owner, and an opening of it logged as a
+blocked attempt). The new code always names the jurisdiction.
+
 Revision ID: 0004
 Revises: 0003
 Create Date: 2026-10-31
@@ -80,6 +86,8 @@ IAC_SETTINGS = {
 }
 
 _MATERIAL = ("transcription", "transcription_job")
+# Rows the previous release writes during the rollout (see above).
+_IAC_DEFAULT = sa.text(f"'{IAC_ID}'::uuid")
 
 
 def upgrade() -> None:
@@ -155,13 +163,15 @@ def upgrade() -> None:
     op.create_foreign_key(None, "user", "jurisdiction", ["active_jurisdiction_id"], ["id"])
 
     for table in _MATERIAL:
-        op.add_column(table, sa.Column("jurisdiction_id", sa.Uuid(), nullable=True))
+        op.add_column(table, sa.Column("jurisdiction_id", sa.Uuid(), nullable=True, server_default=_IAC_DEFAULT))
         op.create_foreign_key(None, table, "jurisdiction", ["jurisdiction_id"], ["id"])
         op.create_index(f"ix_{table}_jurisdiction_id", table, ["jurisdiction_id"])
     op.execute(sa.text("UPDATE transcription SET jurisdiction_id = :iac").bindparams(iac=IAC_ID))
     op.execute(sa.text("UPDATE transcription_job SET jurisdiction_id = :iac").bindparams(iac=IAC_ID))
 
-    op.add_column("live_transcript_draft", sa.Column("jurisdiction_id", sa.Uuid(), nullable=True))
+    op.add_column(
+        "live_transcript_draft", sa.Column("jurisdiction_id", sa.Uuid(), nullable=True, server_default=_IAC_DEFAULT)
+    )
     op.execute(sa.text("UPDATE live_transcript_draft SET jurisdiction_id = :iac").bindparams(iac=IAC_ID))
     op.create_foreign_key(None, "live_transcript_draft", "jurisdiction", ["jurisdiction_id"], ["id"])
     # The new code's upsert key. The old one-per-user key stays until 0005.

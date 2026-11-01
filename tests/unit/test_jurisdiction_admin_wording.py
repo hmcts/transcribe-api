@@ -208,3 +208,30 @@ def test_a_stale_wording_form_does_not_undo_a_change_made_meanwhile(jurisdiction
         json={"wording": {"help.subtitle": "Mine"}, "version": first.json()["version"]},
     )
     assert again.status_code == 200
+
+
+def test_the_wording_shown_is_the_version_it_names(jurisdiction_db, jurisdiction_app, setup, monkeypatch):
+    """A change saved after the request's jurisdiction was read is the one shown, with
+    its version: an older wording with the newer version would let a save undo it."""
+    from transcribe_api import jurisdictions_admin
+
+    et_admin, _ = setup
+    client = client_as(jurisdiction_app, jurisdiction_db, et_admin)
+    real = jurisdictions_admin.wording_and_version
+
+    def changed_meanwhile(session, code):
+        with Session(jurisdiction_db) as other:
+            jurisdictions_admin.set_wording(other, code, {"help.subtitle": "Theirs"})
+        return real(session, code)
+
+    monkeypatch.setattr(jurisdictions_admin, "wording_and_version", changed_meanwhile)
+    shown = client.get("/api/jurisdictions/wording", headers={"X-Jurisdiction": "ET"}).json()
+    monkeypatch.setattr(jurisdictions_admin, "wording_and_version", real)
+
+    assert shown["wording"] == {"help.subtitle": "Theirs"}
+    saved = client.put(
+        "/api/jurisdictions/wording",
+        headers={"X-Jurisdiction": "ET"},
+        json={"wording": {"help.subtitle": "Mine"}, "version": shown["version"]},
+    )
+    assert saved.status_code == 200
