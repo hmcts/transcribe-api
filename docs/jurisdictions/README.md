@@ -11,8 +11,22 @@ the old pods wrote during the rollout in the IAC. Deploy `0005` in a later relea
 than `0004`. If they are deployed together, the old pods' draft saves can fail for
 the few minutes of the rollout.
 
-Until the admin area can do this (DIAAT-328), add jurisdictions and members from an API
-pod:
+A SystemAdministrator manages them in the admin area, on the **Jurisdictions** tab
+(DIAAT-356): add or edit a jurisdiction (its name, wording, template, hearing
+recordings, auto-enrol, enabled), and add or remove its members by email, as judge
+or admin. Behind it is `/api/admin/jurisdictions`. Every change is audited. A save
+made from a form opened before someone else's change is refused (409), not applied
+over it.
+
+A member who is an **admin** of a jurisdiction changes that jurisdiction's wording,
+and nothing else, from the **Wording** link in the header (`/jurisdiction-wording`,
+behind it `/api/jurisdictions/wording`). Being an admin in one jurisdiction gives
+nothing in another.
+
+A membership does not replace the BenchNotes app role in Entra: someone with neither
+role cannot sign in, whatever their memberships.
+
+The same operations run from a command line, for local development:
 
 ```sh
 python -m transcribe_api.jurisdictions_admin put ET --name "Employment Tribunal" --settings - < et.json

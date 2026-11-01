@@ -51,6 +51,10 @@ AUDIT_ACTIONS_APP = (
     "job.delete",
     "audio.export",
     "user.delete",
+    # DIAAT-356: the admin area's jurisdiction changes.
+    "jurisdiction.edit",
+    "membership.add",
+    "membership.remove",
 )
 AUDIT_ACTIONS = AUDIT_ACTIONS_AUTH_LIBRARY + AUDIT_ACTIONS_APP
 

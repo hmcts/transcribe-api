@@ -27,7 +27,7 @@ from uuid import UUID
 
 from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import update
+from sqlalchemy import func, update
 from sqlmodel import Session, select
 
 from transcribe_api.domain.models_dictation import (
@@ -213,7 +213,7 @@ def enrol_new_user(session: Session, user: User) -> None:
     if email:
         claimed = session.execute(
             update(JurisdictionMembership)
-            .where(JurisdictionMembership.user_id.is_(None), JurisdictionMembership.email == email)
+            .where(JurisdictionMembership.user_id.is_(None), func.lower(JurisdictionMembership.email) == email)
             .values(user_id=user.id, email=None)
         ).rowcount
     if claimed:

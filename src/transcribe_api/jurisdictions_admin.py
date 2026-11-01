@@ -1,6 +1,8 @@
-"""Add jurisdictions and their members without a deployment (DIAAT-322, "manual first").
+"""Add jurisdictions and their members without a deployment (DIAAT-322).
 
-Until the admin area does this (DIAAT-328), the product team runs it in an API pod:
+The admin area does this through the API (DIAAT-356: /api/admin/jurisdictions,
+routes_dictation_privileged.py), with the functions here. Locally, or where a pod
+can be reached, the same from the command line:
 
     python -m transcribe_api.jurisdictions_admin list
     python -m transcribe_api.jurisdictions_admin put ET --name "Employment Tribunal" --settings et.json
@@ -23,6 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from transcribe_api.domain.jurisdictions import ROLES, JurisdictionSettings
@@ -33,20 +36,47 @@ class AdminError(Exception):
     """A refusal to show the operator, not a crash."""
 
 
+class NotFoundError(AdminError):
+    """No such jurisdiction, or no such member of it."""
+
+
+class ConflictError(AdminError):
+    """Changed by someone else meanwhile: load it again and retry."""
+
+
 def _jurisdiction(session: Session, code: str) -> Jurisdiction:
-    row = session.exec(select(Jurisdiction).where(Jurisdiction.code == code.upper())).first()
+    code = code.strip().upper()
+    row = session.exec(select(Jurisdiction).where(Jurisdiction.code == code)).first()
     if row is None:
-        msg = f"No jurisdiction {code.upper()}"
-        raise AdminError(msg)
+        msg = f"No jurisdiction {code}"
+        raise NotFoundError(msg)
     return row
 
 
-def _user_by_email(session: Session, email: str) -> User | None:
-    users = session.exec(select(User).where(func.lower(User.email) == email)).all()
-    if len(users) > 1:
-        msg = f"{len(users)} users have that email; add them in the database"
-        raise AdminError(msg)
-    return users[0] if users else None
+def _users_by_email(session: Session, email: str) -> list[User]:
+    """Every user row with that sign-in email. Usually one; an Entra account that was
+    deleted and recreated leaves two, and the same person is meant either way."""
+    return list(session.exec(select(User).where(func.lower(User.email) == email)).all())
+
+
+def user_ids_for(session: Session, email: str) -> list[str]:
+    """The user IDs with that sign-in email (none until they first sign in)."""
+    return sorted(str(user.id) for user in _users_by_email(session, email.strip().lower()))
+
+
+def current_version(session: Session, code: str) -> str:
+    return version(_jurisdiction(session, code))
+
+
+def version(row: Jurisdiction) -> str:
+    """When ``row`` last changed, as the admin area's editor saw it: a save naming an
+    older version is refused (ConflictError) instead of undoing someone's change."""
+    stamp = row.updated_datetime
+    if stamp is None:
+        return ""
+    if stamp.tzinfo is not None:
+        stamp = stamp.astimezone(UTC).replace(tzinfo=None)
+    return stamp.isoformat()
 
 
 def put_jurisdiction(
@@ -57,10 +87,14 @@ def put_jurisdiction(
     *,
     auto_enrol: bool | None = None,
     enabled: bool | None = None,
+    expected_version: str | None = None,
 ) -> str:
     """Create or update a jurisdiction. A flag left as None keeps its current value (a
     new jurisdiction: enabled, not auto-enrol), so updating the wording cannot turn
-    the IAC's auto-enrol off or re-enable a disabled jurisdiction."""
+    the IAC's auto-enrol off or re-enable a disabled jurisdiction.
+
+    ``expected_version``: the version the caller edited ("" for a new one). If the
+    jurisdiction has changed since (or exists already), nothing is written."""
     code = code.strip().upper()
     if not code.isalnum() or len(code) > 16:
         msg = "The code must be letters and digits, at most 16"
@@ -70,8 +104,16 @@ def put_jurisdiction(
     except ValueError as exc:
         msg = f"Invalid settings: {exc}"
         raise AdminError(msg) from None
-    row = session.exec(select(Jurisdiction).where(Jurisdiction.code == code)).first()
+    # Locked until the commit, so two saves of the same version cannot both pass.
+    row = session.exec(select(Jurisdiction).where(Jurisdiction.code == code).with_for_update()).first()
     created = row is None
+    if expected_version is not None and (version(row) if row is not None else "") != expected_version:
+        msg = (
+            f"{code} already exists"
+            if not expected_version
+            else f"{code} was changed by someone else meanwhile; load it again"
+        )
+        raise ConflictError(msg)
     if created:
         row = Jurisdiction(code=code, name=name, settings=validated, auto_enrol=False, enabled=True)
     row.name = name
@@ -82,63 +124,155 @@ def put_jurisdiction(
         row.enabled = enabled
     row.updated_datetime = datetime.now(UTC)
     session.add(row)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:  # created by someone else at the same moment
+        session.rollback()
+        msg = f"{code} already exists"
+        raise ConflictError(msg) from None
     return f"{'Created' if created else 'Updated'} {code}"
 
 
+def set_wording(
+    session: Session, code: str, wording: dict[str, str], *, expected_version: str | None = None
+) -> dict[str, str]:
+    """Replace a jurisdiction's wording only (DIAAT-356: what its own admins change).
+    Every key sent is checked, blank or not; blank text means the default. The rest
+    of the stored settings is kept as stored, including anything this release does
+    not know (a newer release's template, during a rolling deploy). A stale
+    ``expected_version`` is refused (ConflictError), as for put_jurisdiction."""
+    row = session.exec(select(Jurisdiction).where(Jurisdiction.id == _jurisdiction(session, code).id).with_for_update()).one()
+    if expected_version is not None and version(row) != expected_version:
+        msg = f"{row.code}'s wording was changed by someone else meanwhile; load it again"
+        raise ConflictError(msg)
+    trimmed = {key: text.strip() for key, text in wording.items()}
+    try:
+        JurisdictionSettings(wording=trimmed)
+    except ValueError as exc:
+        msg = f"Invalid wording: {exc}"
+        raise AdminError(msg) from None
+    kept = {key: text for key, text in trimmed.items() if text}
+    row.settings = {**(row.settings or {}), "wording": kept}
+    row.updated_datetime = datetime.now(UTC)
+    session.add(row)
+    session.commit()
+    return kept
+
+
 def add_member(session: Session, code: str, email: str, role: str = "judge") -> str:
+    """Add someone by sign-in email, or change their role. Someone who has not signed in
+    yet is added pending, and joins when they first do."""
     if role not in ROLES:
         msg = f"The role must be one of {', '.join(ROLES)}"
         raise AdminError(msg)
     jurisdiction = _jurisdiction(session, code)
     email = email.strip().lower()
-    user = _user_by_email(session, email)
-    if user is not None:
-        existing = session.exec(
-            select(JurisdictionMembership).where(
-                JurisdictionMembership.jurisdiction_id == jurisdiction.id, JurisdictionMembership.user_id == user.id
-            )
-        ).first()
-        member = existing or JurisdictionMembership(jurisdiction_id=jurisdiction.id, user_id=user.id)
+    users = _users_by_email(session, email)
+    found: list[JurisdictionMembership | None]
+    if users:
+        found = [
+            session.exec(
+                select(JurisdictionMembership).where(
+                    JurisdictionMembership.jurisdiction_id == jurisdiction.id, JurisdictionMembership.user_id == user.id
+                )
+            ).first()
+            for user in users
+        ]
+        rows = [
+            member or JurisdictionMembership(jurisdiction_id=jurisdiction.id, user_id=user.id)
+            for member, user in zip(found, users, strict=True)
+        ]
         what = "signed-in user"
     else:
-        existing = session.exec(
-            select(JurisdictionMembership).where(
-                JurisdictionMembership.jurisdiction_id == jurisdiction.id,
-                JurisdictionMembership.user_id.is_(None),
-                JurisdictionMembership.email == email,
-            )
-        ).first()
-        member = existing or JurisdictionMembership(jurisdiction_id=jurisdiction.id, email=email)
+        found = [
+            session.exec(
+                select(JurisdictionMembership).where(
+                    JurisdictionMembership.jurisdiction_id == jurisdiction.id,
+                    JurisdictionMembership.user_id.is_(None),
+                    func.lower(JurisdictionMembership.email) == email,
+                )
+            ).first()
+        ]
+        rows = [found[0] or JurisdictionMembership(jurisdiction_id=jurisdiction.id, email=email)]
         what = "pending until they sign in"
-    member.role = role
-    session.add(member)
-    session.commit()
-    return f"{'Updated' if existing else 'Added'} {role} in {jurisdiction.code} ({what})"
+    existed = all(member is not None for member in found)
+    for row in rows:
+        row.role = role
+        session.add(row)
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        msg = f"{email} was added to {jurisdiction.code} at the same moment; load the members again"
+        raise ConflictError(msg) from None
+    return f"{'Updated' if existed else 'Added'} {role} in {jurisdiction.code} ({what})"
 
 
 def remove_member(session: Session, code: str, email: str) -> str:
+    """Remove someone, signed in or pending, by sign-in email."""
     jurisdiction = _jurisdiction(session, code)
     email = email.strip().lower()
-    user = _user_by_email(session, email)
-    who = (
-        JurisdictionMembership.user_id == user.id
-        if user is not None
-        else (JurisdictionMembership.user_id.is_(None) & (JurisdictionMembership.email == email))
-    )
+    users = _users_by_email(session, email)
+    who = JurisdictionMembership.user_id.is_(None) & (func.lower(JurisdictionMembership.email) == email)
+    if users:
+        who = who | JurisdictionMembership.user_id.in_([user.id for user in users])
     rows = session.exec(
         select(JurisdictionMembership).where(JurisdictionMembership.jurisdiction_id == jurisdiction.id, who)
     ).all()
     if not rows:
         msg = f"Not a member of {jurisdiction.code}"
-        raise AdminError(msg)
+        raise NotFoundError(msg)
     for row in rows:
         session.delete(row)
-    if user is not None and user.active_jurisdiction_id == jurisdiction.id:
-        user.active_jurisdiction_id = None
-        session.add(user)
+    for user in users:
+        if user.active_jurisdiction_id == jurisdiction.id:
+            user.active_jurisdiction_id = None
+            session.add(user)
     session.commit()
     return f"Removed from {jurisdiction.code}"
+
+
+def jurisdictions_overview(session: Session) -> list[dict]:
+    """Every jurisdiction, with its settings and how many members it has."""
+    counts = dict(
+        session.exec(
+            select(JurisdictionMembership.jurisdiction_id, func.count(JurisdictionMembership.id)).group_by(
+                JurisdictionMembership.jurisdiction_id
+            )
+        ).all()
+    )
+    return [
+        {
+            "code": row.code,
+            "name": row.name,
+            "enabled": row.enabled,
+            "auto_enrol": row.auto_enrol,
+            "settings": row.settings,
+            "member_count": counts.get(row.id, 0),
+            "version": version(row),
+        }
+        for row in session.exec(select(Jurisdiction).order_by(Jurisdiction.name)).all()
+    ]
+
+
+def members_of(session: Session, code: str) -> list[dict]:
+    """A jurisdiction's members: who (their sign-in email), their role, and whether they
+    have yet to sign in (pending)."""
+    jurisdiction = _jurisdiction(session, code)
+    rows = session.exec(
+        select(JurisdictionMembership, User.email)
+        .join(User, User.id == JurisdictionMembership.user_id, isouter=True)
+        .where(JurisdictionMembership.jurisdiction_id == jurisdiction.id)
+    ).all()
+    # One entry per person: a pending row left beside their membership, or two user
+    # rows with one email, is still one member (signed in, if any row is).
+    members: dict[str, dict] = {}
+    for membership, user_email in rows:
+        email = (user_email or membership.email or "").lower()
+        member = {"email": email, "role": membership.role, "pending": user_email is None}
+        if email not in members or (members[email]["pending"] and not member["pending"]):
+            members[email] = member
+    return sorted(members.values(), key=lambda m: m["email"])
 
 
 def list_jurisdictions(session: Session) -> str:

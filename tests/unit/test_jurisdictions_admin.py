@@ -120,16 +120,25 @@ def test_removing_a_member_forgets_their_choice_of_that_jurisdiction(session):
         admin.remove_member(session, "ET", "judge@example.test")
 
 
-def test_unknown_jurisdictions_roles_and_ambiguous_emails_are_refused(session):
+def test_unknown_jurisdictions_and_roles_are_refused(session):
     with pytest.raises(admin.AdminError, match="No jurisdiction ET"):
         admin.add_member(session, "ET", "a@example.test")
     admin.put_jurisdiction(session, "ET", "Employment Tribunal", {})
     with pytest.raises(admin.AdminError, match="role"):
         admin.add_member(session, "ET", "a@example.test", "clerk")
+
+
+def test_two_user_rows_with_one_email_are_one_person(session):
+    """An Entra account deleted and recreated leaves two rows: no developer is needed
+    to add or remove that judge (DIAAT-356)."""
+    admin.put_jurisdiction(session, "ET", "Employment Tribunal", {})
     _user(session, "twin@example.test")
     _user(session, "TWIN@example.test")
-    with pytest.raises(admin.AdminError, match="2 users have that email"):
-        admin.add_member(session, "ET", "twin@example.test")
+
+    admin.add_member(session, "ET", "twin@example.test")
+    assert admin.members_of(session, "ET") == [{"email": "twin@example.test", "role": "judge", "pending": False}]
+    assert admin.remove_member(session, "ET", "Twin@example.test") == "Removed from ET"
+    assert admin.members_of(session, "ET") == []
 
 
 def test_list_shows_each_jurisdiction(session):
@@ -146,3 +155,20 @@ def test_main_reports_a_refusal_without_a_traceback(monkeypatch, capsys, session
     monkeypatch.setattr("transcribe_api.runtime.db_connection.get_engine", lambda: session.get_bind())
     assert admin.main(["add-member", "ET", "a@example.test"]) == 1
     assert "Refused: No jurisdiction ET" in capsys.readouterr().err
+
+
+def test_a_jurisdiction_created_by_someone_else_at_the_same_moment_is_a_conflict(session, monkeypatch):
+    """Both saves saw no ET; the second to commit is told it exists, not given a 500."""
+    real_commit = session.commit
+
+    def commit_after_the_other_admin():
+        with Session(session.get_bind()) as other:
+            other.add(Jurisdiction(code="ET", name="Theirs", settings={}, auto_enrol=False, enabled=True))
+            other.commit()
+        monkeypatch.setattr(session, "commit", real_commit)
+        real_commit()
+
+    monkeypatch.setattr(session, "commit", commit_after_the_other_admin)
+    with pytest.raises(admin.ConflictError, match="ET already exists"):
+        admin.put_jurisdiction(session, "ET", "Mine", {}, expected_version="")
+    assert admin.jurisdictions_overview(session)[0]["name"] == "Theirs"
