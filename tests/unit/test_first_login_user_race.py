@@ -73,16 +73,23 @@ def _losing_session(engine) -> type[Session]:
     """Session class for the request that loses the race.
 
     Its lookup runs against the empty table; the winner then commits the same
-    user before this request's INSERT is flushed.
+    user before this request's INSERT is flushed. Only a flush with the insert
+    pending: the lookup's autoflush, with nothing pending, comes first and would
+    commit the winner before the lookup, which would then simply find it.
     """
 
     class LosingSession(Session):
         winner: User | None = None
+        rolled_back = False
 
         def flush(self, *args, **kwargs):
-            if LosingSession.winner is None:
+            if LosingSession.winner is None and self.new:
                 LosingSession.winner = _commit_user(engine)
             super().flush(*args, **kwargs)
+
+        def rollback(self):
+            LosingSession.rolled_back = True
+            super().rollback()
 
     return LosingSession
 
@@ -112,6 +119,8 @@ def test_the_request_that_loses_the_insert_gets_the_winners_row(module_name, sql
     ):
         result = deps._resolve_user(AZURE_USER_ID, EMAIL, ["Normal"])
 
+    # The race really happened: this request's insert failed and it recovered.
+    assert losing_session.rolled_back
     assert result.db_user.id == losing_session.winner.id
     assert result.db_user.azure_user_id == AZURE_USER_ID
     assert len(_users(sqlite_engine)) == 1
@@ -143,15 +152,23 @@ def test_concurrent_first_logins_on_postgres_resolve_to_one_user(module_name):
 
     # Both requests must miss the lookup before either inserts. The insert is flushed
     # before the commit (the jurisdictions go in the same transaction, DIAAT-322), so
-    # they meet before their first flush: the second then waits on the first's row.
+    # they meet at the flush of their insert: the second then waits on the first's
+    # row. Not at the lookup's autoflush (nothing pending), which comes first: one
+    # could then insert and commit before the other looked, and there is no race.
     both_looked_up = threading.Barrier(2, timeout=10)
+
+    rollbacks = []
 
     class RacingSession(Session):
         def flush(self, *args, **kwargs):
-            if not getattr(self, "_met", False):
+            if self.new and not getattr(self, "_met", False):
                 self._met = True
                 both_looked_up.wait()
             super().flush(*args, **kwargs)
+
+        def rollback(self):
+            rollbacks.append(1)
+            super().rollback()
 
     try:
         with (
@@ -164,5 +181,7 @@ def test_concurrent_first_logins_on_postgres_resolve_to_one_user(module_name):
 
         assert first.db_user.id == second.db_user.id
         assert len(_users(engine)) == 1
+        # The race really happened: one insert failed and that request recovered.
+        assert len(rollbacks) == 1
     finally:
         engine.dispose()
