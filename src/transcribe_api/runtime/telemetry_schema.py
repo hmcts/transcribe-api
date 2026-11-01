@@ -388,6 +388,11 @@ def _shared_events(schema: TelemetrySchema) -> None:
         description="A caller reached, or tried to reach, a resource they do not own. Correlate on hmcts.request.id; hmcts.journey.id is the target job or upload.",
     )
     schema.event(
+        "security.jurisdiction_blocked",
+        attributes=("security.resource_type", "security.action"),
+        description="DIAAT-334: a caller tried to reach material of a jurisdiction they are not working in (another of theirs, or one they do not belong to) and was refused with the same 404 as an unknown record. No jurisdiction, record or case content: correlate on hmcts.request.id with the audit record, which names the actor and the record.",
+    )
+    schema.event(
         "transcript.available",
         attributes=("transcript.segment_count", "transcript.speaker_count", "dictation.transcription_id"),
         description="A transcript was saved and can be opened. Dictation: dictation.transcription_id is the transcription created (live submission). Recording: segment and speaker counts.",

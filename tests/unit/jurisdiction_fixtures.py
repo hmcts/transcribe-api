@@ -19,7 +19,9 @@ from sqlalchemy.ext.compiler import compiles
 from sqlmodel import Session
 
 from transcribe_api.domain.jurisdictions import JurisdictionFeatures, JurisdictionSettings, Membership
+from transcribe_api.domain.models_recording import Caller, SpeechBatchJob
 from transcribe_api.domain.models_dictation import (
+    AuditLog,
     DocumentContent,
     Jurisdiction,
     JurisdictionMembership,
@@ -46,6 +48,9 @@ JURISDICTION_TABLES = [
     Tag.__table__,
     TranscriptionTagAssociation.__table__,
     DocumentContent.__table__,
+    AuditLog.__table__,
+    Caller.__table__,
+    SpeechBatchJob.__table__,
 ]
 
 

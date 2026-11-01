@@ -43,13 +43,15 @@ def list_jobs_paginated(
     status: JobStatus | None = None,
     limit: int = 20,
     offset: int = 0,
+    *,
+    jurisdiction_id: UUID,
 ) -> tuple[list[SpeechBatchJob], int]:
-    """List jobs with optional user_id filter.
+    """List jobs in one jurisdiction (DIAAT-334), with an optional user_id filter.
 
     Pass user_id=None to return all jobs regardless of owner (admin use).
     Pass a specific user_id to return only that user's jobs.
     """
-    conditions = []
+    conditions = [SpeechBatchJob.jurisdiction_id == jurisdiction_id]
     if user_id is not None:
         conditions.append(SpeechBatchJob.user_id == user_id)
     if status is not None:

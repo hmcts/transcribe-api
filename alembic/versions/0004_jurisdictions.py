@@ -16,9 +16,9 @@ it (domain/jurisdictions.py):
   minute versions, jobs and tags hang off it), live_transcript_draft (one draft per
   user per jurisdiction: a unique key on both) and transcription_job (recording).
 
-Every existing user is made an IAC judge, and every existing record an IAC one
-(recording jobs of API-key callers, which have no user, stay NULL). Small tables:
-the backfill takes brief locks.
+Every existing user is made an IAC judge, and every existing record an IAC one,
+recording jobs of API-key callers included (BenchNotes served the IAC alone). Small
+tables: the backfill takes brief locks.
 
 Additive only, so pods still running the previous release keep working while the
 new one rolls out: the draft's old one-per-user key stays, and the new columns stay
@@ -159,9 +159,7 @@ def upgrade() -> None:
         op.create_foreign_key(None, table, "jurisdiction", ["jurisdiction_id"], ["id"])
         op.create_index(f"ix_{table}_jurisdiction_id", table, ["jurisdiction_id"])
     op.execute(sa.text("UPDATE transcription SET jurisdiction_id = :iac").bindparams(iac=IAC_ID))
-    op.execute(
-        sa.text("UPDATE transcription_job SET jurisdiction_id = :iac WHERE user_id IS NOT NULL").bindparams(iac=IAC_ID)
-    )
+    op.execute(sa.text("UPDATE transcription_job SET jurisdiction_id = :iac").bindparams(iac=IAC_ID))
 
     op.add_column("live_transcript_draft", sa.Column("jurisdiction_id", sa.Uuid(), nullable=True))
     op.execute(sa.text("UPDATE live_transcript_draft SET jurisdiction_id = :iac").bindparams(iac=IAC_ID))

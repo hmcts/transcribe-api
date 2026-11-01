@@ -17,6 +17,7 @@ from sqlmodel import Session, select
 from tests.unit.jurisdiction_fixtures import add_jurisdiction, add_member, add_user, client_as, sign_up
 from transcribe_api.api.routes_dictation import TEMPLATE_NOT_AVAILABLE
 from transcribe_api.domain import interface_dictation, jurisdictions
+from transcribe_api.domain.exceptions import JurisdictionConflictError
 from transcribe_api.runtime.telemetry import transcription_id_from_key
 from transcribe_api.domain.jurisdictions import (
     CHOICE_REQUIRED,
@@ -224,11 +225,14 @@ def test_a_new_transcription_is_made_in_the_requests_jurisdiction_and_keeps_it(e
     saved = interface_dictation.save_transcription(Transcription(title="A v B"), user.id, iac.id)
     assert saved.jurisdiction_id == iac.id
 
-    # A later save from another jurisdiction, or naming one, does not move it.
+    # A later save naming another jurisdiction does not move it...
     resaved = interface_dictation.save_transcription(
-        Transcription(id=saved.id, title="renamed", jurisdiction_id=et.id), user.id, et.id
+        Transcription(id=saved.id, title="renamed", jurisdiction_id=et.id), user.id, iac.id
     )
     assert resaved.jurisdiction_id == iac.id
+    # ...and one made from another jurisdiction is refused (DIAAT-334).
+    with pytest.raises(JurisdictionConflictError):
+        interface_dictation.save_transcription(Transcription(id=saved.id, title="moved"), user.id, et.id)
 
 
 def test_a_client_cannot_choose_a_new_transcriptions_jurisdiction(engine):

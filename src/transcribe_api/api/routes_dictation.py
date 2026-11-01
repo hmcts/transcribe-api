@@ -68,9 +68,10 @@ from transcribe_api.domain.blob_ownership import (
 from transcribe_api.domain.jurisdictions import (
     TEMPLATE_IAC_DECISION,
     ActiveJurisdiction,
+    owned_transcription_jurisdiction,
     record_upload_jurisdiction,
 )
-from transcribe_api.domain.exceptions import OwnershipConflictError
+from transcribe_api.domain.exceptions import JurisdictionConflictError, OwnershipConflictError
 from transcribe_api.domain.interface_dictation import (
     add_tag_to_transcription,
     delete_live_draft,
@@ -108,11 +109,15 @@ from transcribe_api.runtime.logger import logger
 from transcribe_api.runtime.security_events import (
     AUDIO,
     DOCUMENT,
+    MINUTE_VERSION,
     READ,
     TEST,
     TRANSCRIPTION,
+    TRANSCRIPTION_JOB,
     WRITE,
+    action_for_method,
     owner_matches,
+    record_jurisdiction_blocked,
     record_ownership_violation,
 )
 from transcribe_api.runtime.settings_dictation import get_settings
@@ -124,6 +129,14 @@ from transcribe_api.stt.utils import (
     generate_blob_upload_url,
     get_file_blob_path,
 )
+
+# The app roles nearly every route requires. One dependency, so FastAPI resolves it
+# once a request, and the jurisdiction check (DIAAT-334), which depends on it, runs
+# after it: a caller without a role is refused as before, not recorded.
+_ANY_APP_ROLE = get_allowlisted_user(
+    required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")]
+)
+
 
 router = APIRouter()
 
@@ -177,6 +190,41 @@ def _validate_blob_ownership(
         # object_id: the transcription the request named (DIAAT-286 audit record only).
         record_ownership_violation(resource_type, action, actor_id=current_user.id, object_id=object_id)
         raise HTTPException(status_code=403, detail="Access denied")
+
+
+def _refuse_other_jurisdiction(
+    transcription_id: UUID | str,
+    current_user: User,
+    jurisdiction: ActiveJurisdiction,
+    resource_type: str = TRANSCRIPTION,
+    action: str = READ,
+) -> None:
+    """DIAAT-334: the caller's record, but in a jurisdiction this request is not working
+    in, is refused with the 404 of an unknown record, and recorded. Someone else's
+    record, or none, is left to the ownership checks."""
+    owned, record_jurisdiction = owned_transcription_jurisdiction(UUID(str(transcription_id)), current_user.id)
+    if owned and record_jurisdiction != jurisdiction.id:
+        record_jurisdiction_blocked(resource_type, action, actor_id=current_user.id, object_id=transcription_id)
+        raise HTTPException(status_code=404, detail="Transcription not found")
+
+
+def _in_jurisdiction(resource_type: str):
+    """A route dependency for a route naming a transcription (path or query): its
+    material is reachable only in its own jurisdiction (DIAAT-334). ``resource_type``
+    is the route's, stated, not read from the URL. A plain def: the lookup is
+    synchronous, so FastAPI runs it in the threadpool."""
+
+    def check(
+        request: Request,
+        transcription_id: UUID,
+        current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
+        jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
+    ) -> None:
+        _refuse_other_jurisdiction(
+            transcription_id, current_user, jurisdiction, resource_type, action_for_method(request.method)
+        )
+
+    return Depends(check)
 
 
 def _assert_owned(transcription: Transcription, current_user: User, resource_type: str) -> None:
@@ -430,7 +478,7 @@ async def azure_storage_health_check():
 @router.post("/get-upload-url", response_model=UploadUrlResponse)
 async def get_upload_url(
     request: UploadUrlRequest,
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
     jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
 ) -> UploadUrlResponse:
     """Generate an upload URL for the client.
@@ -500,7 +548,8 @@ async def _verified_upload_transcription_id(key: str, current_user: User) -> str
 async def upload_audio_proxy(
     key: str,
     request: Request,
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
 ):
     """Receive a raw audio upload and write it to blob storage.
 
@@ -524,6 +573,10 @@ async def upload_audio_proxy(
         code = "upload.forbidden" if exc.status_code == 403 else "upload.invalid_key"
         record_event("upload.rejected", {c.OUTCOME: "failure", c.ERROR_CODE: code})
         raise
+    # DIAAT-334: a retry naming the caller's transcription of another jurisdiction (its
+    # own security event, not a malformed key).
+    if transcription_id is not None:
+        await asyncio.to_thread(_refuse_other_jurisdiction, transcription_id, current_user, jurisdiction, AUDIO, WRITE)
 
     with (
         transcription_journey(transcription_id),
@@ -599,7 +652,8 @@ def _validate_transcription_for_minutes(transcription_id: UUID, user_id: UUID) -
 @router.post("/generate-or-edit-minutes")
 async def generate_or_edit_minutes(
     request: GenerateMinutesRequest,
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
 ):
     """
     Initiate minute generation or editing as an async background task.
@@ -629,6 +683,10 @@ async def generate_or_edit_minutes(
     user_id = current_user.id
 
     # Validate and get dialogue entries (raises HTTPException if invalid)
+    # DIAAT-334: only a transcription of this request's jurisdiction.
+    await asyncio.to_thread(
+        _refuse_other_jurisdiction, request.transcription_id, current_user, jurisdiction, MINUTE_VERSION, WRITE
+    )
     dialogue_entries = _validate_transcription_for_minutes(request.transcription_id, user_id)
 
     # Validate edit_instructions BEFORE creating minute_version_id
@@ -682,7 +740,7 @@ async def get_templates(
 
 @router.get("/transcriptions-metadata", response_model=list[TranscriptionMetadata])
 async def get_transcriptions_metadata(
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
     jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
     timezone: str = "Europe/London",  # Optional parameter with UK default
 ):
@@ -698,10 +756,10 @@ async def get_transcriptions_metadata(
     return fetch_transcriptions_metadata(current_user.id, tz, jurisdiction.id)
 
 
-@router.get("/transcriptions/{transcription_id}", response_model=Transcription)
+@router.get("/transcriptions/{transcription_id}", dependencies=[_in_jurisdiction(TRANSCRIPTION)], response_model=Transcription)
 async def get_transcription(
     transcription_id: UUID,
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
     timezone: str = "Europe/London",  # Optional parameter with UK default
 ):
     """Get a specific transcription by ID."""
@@ -723,7 +781,7 @@ async def get_transcription(
 @router.post("/transcriptions", response_model=Transcription)
 async def save_transcription_route(
     transcription_data: Transcription,
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
     jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
 ):
     """Save or update a transcription."""
@@ -731,15 +789,21 @@ async def save_transcription_route(
 
     try:
         return save_transcription(transcription_data, current_user.id, jurisdiction.id)
+    except JurisdictionConflictError:
+        # DIAAT-334: the caller's record of another jurisdiction, as for an unknown ID.
+        record_jurisdiction_blocked(
+            TRANSCRIPTION, WRITE, actor_id=current_user.id, object_id=transcription_data.id
+        )
+        raise HTTPException(status_code=404, detail="Transcription not found") from None
     except OwnershipConflictError:
         # Someone else's transcription: same answer as for an unknown ID.
         raise HTTPException(status_code=404, detail="Transcription not found") from None
 
 
-@router.get("/transcriptions/{transcription_id}/document-download")
+@router.get("/transcriptions/{transcription_id}/document-download", dependencies=[_in_jurisdiction(DOCUMENT)])
 async def get_document_download_url(
     transcription_id: UUID,
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
 ):
     """Generate a fresh, time-limited download URL for a hearing document.
 
@@ -815,11 +879,11 @@ async def _document_download_url(transcription_id: UUID, current_user: User, aud
     return {"download_url": download_url}
 
 
-@router.get("/download")
+@router.get("/download", dependencies=[_in_jurisdiction(DOCUMENT)])
 async def download_document(
     transcription_id: UUID,
     request: Request,
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
 ):
     """Stream a transcript document from blob storage, verifying ownership before serving."""
     async with audited(
@@ -902,10 +966,10 @@ async def _stream_document(
     return audit.streaming_response(generate(), status_code=blob_response.status_code, headers=response_headers)
 
 
-@router.delete("/transcriptions/{transcription_id}", status_code=204)
+@router.delete("/transcriptions/{transcription_id}", dependencies=[_in_jurisdiction(TRANSCRIPTION)], status_code=204)
 async def delete_transcription(
     transcription_id: UUID,
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
 ):
     """Delete a specific transcription by ID. Audited (DIAAT-286); a refusal (404:
     unknown or another user's) is ``denied``, an error ``failed``."""
@@ -914,13 +978,13 @@ async def delete_transcription(
 
 
 @router.get(
-    "/transcriptions/{transcription_id}/minute-versions/{minute_version_id}",
+    "/transcriptions/{transcription_id}/minute-versions/{minute_version_id}", dependencies=[_in_jurisdiction(MINUTE_VERSION)],
     response_model=MinuteVersion,
 )
 async def get_minute_version_by_id_route(
     transcription_id: UUID,
     minute_version_id: UUID,
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
 ):
     """Get a specific minute version by its ID for a given transcription."""
     # Verify user has access to the associated transcription
@@ -934,12 +998,12 @@ async def get_minute_version_by_id_route(
 
 
 @router.get(
-    "/transcriptions/{transcription_id}/minute-versions",
+    "/transcriptions/{transcription_id}/minute-versions", dependencies=[_in_jurisdiction(MINUTE_VERSION)],
     response_model=list[MinuteVersion],
 )
 async def get_minute_versions_route(
     transcription_id: UUID,
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
 ):
     """Get all minute versions for a specific transcription."""
     # Verify user has access to this transcription
@@ -950,11 +1014,11 @@ async def get_minute_versions_route(
     return get_minute_versions(transcription_id)
 
 
-@router.post("/transcriptions/{transcription_id}/minute-versions", response_model=MinuteVersion)
+@router.post("/transcriptions/{transcription_id}/minute-versions", dependencies=[_in_jurisdiction(MINUTE_VERSION)], response_model=MinuteVersion)
 async def save_minute_version_route(
     transcription_id: UUID,
     minute_data: MinuteVersion,
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
 ):
     """Create or update a minute version for a transcription."""
     transcription = get_transcription_by_id(transcription_id, current_user.id, UK_TIMEZONE)
@@ -976,11 +1040,11 @@ async def save_minute_version_route(
     return saved_minute
 
 
-@router.post("/transcriptions/{transcription_id}/jobs", response_model=TranscriptionJob)
+@router.post("/transcriptions/{transcription_id}/jobs", dependencies=[_in_jurisdiction(TRANSCRIPTION_JOB)], response_model=TranscriptionJob)
 async def save_transcription_job_route(
     transcription_id: UUID,
     job_data: TranscriptionJob,
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
 ) -> TranscriptionJob:
     """Create a new transcription job for a transcription."""
     # Verify user has access to this transcription
@@ -1004,10 +1068,10 @@ async def save_transcription_job_route(
     return job
 
 
-@router.get("/transcriptions/{transcription_id}/jobs", response_model=list[TranscriptionJob])
+@router.get("/transcriptions/{transcription_id}/jobs", dependencies=[_in_jurisdiction(TRANSCRIPTION_JOB)], response_model=list[TranscriptionJob])
 async def get_transcription_jobs_route(
     transcription_id: UUID,
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
 ) -> list[TranscriptionJob]:
     """Get all transcription jobs for a specific transcription: the transcript text,
     so audited as a view of the transcript (DIAAT-286)."""
@@ -1020,12 +1084,12 @@ async def get_transcription_jobs_route(
         return get_transcription_jobs(transcription_id)
 
 
-@router.get("/transcriptions/{transcription_id}/jobs/{job_id}/audio")
+@router.get("/transcriptions/{transcription_id}/jobs/{job_id}/audio", dependencies=[_in_jurisdiction(AUDIO)])
 async def stream_audio(
     transcription_id: UUID,
     job_id: UUID,
     request: Request,
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
 ):
     """Stream audio from blob storage with HTTP Range support for seekable playback.
 
@@ -1215,12 +1279,12 @@ class LiveDraftResponse(BaseModel):
 
 
 @router.get(
-    "/transcriptions/{transcription_id}/sectioned-transcript",
+    "/transcriptions/{transcription_id}/sectioned-transcript", dependencies=[_in_jurisdiction(TRANSCRIPTION)],
     response_model=TranscriptViewerResponse,
 )
 async def get_sectioned_transcript_route(
     transcription_id: UUID,
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
 ) -> TranscriptViewerResponse:
     """Get the recorder-style sectioned transcript for a hearing if available.
 
@@ -1324,7 +1388,7 @@ async def _render_hearing_document_off_loop(**kwargs) -> Path:
 @router.post("/live-transcription/submission", response_model=LiveTranscriptionSubmissionResponse)
 async def save_live_transcription_submission(
     request: LiveTranscriptionSubmissionRequest,
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
     jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
     dictation_session_id: str | None = Header(default=None, alias="X-Dictation-Session-Id"),
 ) -> LiveTranscriptionSubmissionResponse:
@@ -1591,30 +1655,30 @@ class AddTagRequest(BaseModel):
     name: str
 
 
-@router.get("/transcriptions/{transcription_id}/tags", response_model=list[Tag])
+@router.get("/transcriptions/{transcription_id}/tags", dependencies=[_in_jurisdiction(TRANSCRIPTION)], response_model=list[Tag])
 async def get_transcription_tags_route(
     transcription_id: UUID,
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
 ) -> list[Tag]:
     """Get all tags for a specific transcription."""
     return get_tags_for_transcription(transcription_id, current_user.id)
 
 
-@router.post("/transcriptions/{transcription_id}/tags", response_model=Tag)
+@router.post("/transcriptions/{transcription_id}/tags", dependencies=[_in_jurisdiction(TRANSCRIPTION)], response_model=Tag)
 async def add_tag_to_transcription_route(
     transcription_id: UUID,
     tag_request: AddTagRequest,
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
 ) -> Tag:
     """Add a tag to a transcription."""
     return add_tag_to_transcription(transcription_id, tag_request.name, current_user.id)
 
 
-@router.delete("/transcriptions/{transcription_id}/tags/{tag_name}", status_code=204)
+@router.delete("/transcriptions/{transcription_id}/tags/{tag_name}", dependencies=[_in_jurisdiction(TRANSCRIPTION)], status_code=204)
 async def remove_tag_from_transcription_route(
     transcription_id: UUID,
     tag_name: str,
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
 ):
     """Remove a tag from a transcription."""
     remove_tag_from_transcription(transcription_id, tag_name, current_user.id)
@@ -1719,7 +1783,7 @@ async def submit_langfuse_score(
 
 @router.get("/get-speech-token")
 async def get_speech_token(
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
 ):
     """
     Get Azure Speech Services token for real-time transcription.
@@ -1775,7 +1839,7 @@ async def get_speech_token(
 @router.post("/generate-realtime-summary")
 async def generate_realtime_summary_endpoint(
     request: GenerateSummaryRequest,
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
 ) -> GenerateSummaryResponse:
     """
     Generate a real-time summary of conversation transcript entries.

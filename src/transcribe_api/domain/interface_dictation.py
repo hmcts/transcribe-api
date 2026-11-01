@@ -11,7 +11,12 @@ from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 
 from transcribe_api.documents.minutes.types import TranscriptionMetadata
-from transcribe_api.domain.exceptions import OwnershipConflictError, UserHasTranscriptionsError, UserNotFoundError
+from transcribe_api.domain.exceptions import (
+    JurisdictionConflictError,
+    OwnershipConflictError,
+    UserHasTranscriptionsError,
+    UserNotFoundError,
+)
 from transcribe_api.domain.models_dictation import (
     BaseTable,
     DialogueEntry,
@@ -147,7 +152,10 @@ def save_transcription(
     jurisdiction_id: UUID | None = None,
 ) -> Transcription:
     """Save the caller's transcription. A new one is made in ``jurisdiction_id``; an
-    existing one keeps its jurisdiction (DIAAT-322): the client's value is ignored."""
+    existing one keeps its jurisdiction (DIAAT-322): the client's value is ignored, and
+    one of another jurisdiction is refused (JurisdictionConflictError, DIAAT-334)."""
+    if transcription_data.id is not None and not isinstance(transcription_data.id, UUID):
+        transcription_data.id = UUID(str(transcription_data.id))  # a client's JSON gives a string
     with Session(engine) as session:
         _ensure_owner_unchanged(session, Transcription.user_id, transcription_data.id, user_id, actor_id=user_id)
         transcription_data.user_id = user_id
@@ -156,6 +164,8 @@ def save_transcription(
             if transcription_data.id is not None
             else None
         )
+        if existing_jurisdiction is not None and jurisdiction_id is not None and existing_jurisdiction != jurisdiction_id:
+            raise JurisdictionConflictError(Transcription.__name__)
         transcription_data.jurisdiction_id = existing_jurisdiction or jurisdiction_id
         merged = session.merge(transcription_data)
         session.commit()
@@ -664,20 +674,22 @@ def admin_get_transcription_by_id(transcription_id: UUID) -> Transcription:
 
 def admin_fetch_all_transcriptions(
     *,
+    jurisdiction_id: UUID,
     owner_email: str | None = None,
     created_after: datetime | None = None,
     created_before: datetime | None = None,
     page: int = 1,
     page_size: int = 50,
 ) -> tuple[list[Transcription], int]:
-    """List all transcriptions across all users with optional filters and pagination."""
+    """List all users' transcriptions in one jurisdiction (DIAAT-334), with optional
+    filters and pagination."""
     if page < 1:
         raise ValueError(f"page must be >= 1, got {page}")
     if page_size < 1 or page_size > 200:
         raise ValueError(f"page_size must be between 1 and 200, got {page_size}")
 
     with Session(engine) as session:
-        filters = []
+        filters = [Transcription.jurisdiction_id == jurisdiction_id]
         if owner_email:
             filters.append(User.email == owner_email)
         if created_after:

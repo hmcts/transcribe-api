@@ -30,7 +30,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import update
 from sqlmodel import Session, select
 
-from transcribe_api.domain.models_dictation import Jurisdiction, JurisdictionMembership, UploadJurisdiction, User
+from transcribe_api.domain.models_dictation import (
+    Jurisdiction,
+    JurisdictionMembership,
+    Transcription,
+    UploadJurisdiction,
+    User,
+)
 from transcribe_api.runtime.db_connection import get_engine
 
 logger = logging.getLogger(__name__)
@@ -222,6 +228,38 @@ def enrol_new_user(session: Session, user: User) -> None:
 def _remembered_jurisdiction_id(user_id: UUID) -> UUID | None:
     with Session(get_engine()) as session:
         return session.exec(select(User.active_jurisdiction_id).where(User.id == user_id)).first()
+
+
+def _owned_transcription_jurisdiction(transcription_id: UUID, user_id: UUID) -> tuple[bool, UUID | None]:
+    with Session(get_engine()) as session:
+        row = session.exec(
+            select(Transcription.id, Transcription.jurisdiction_id).where(
+                Transcription.id == transcription_id, Transcription.user_id == user_id
+            )
+        ).first()
+    return (False, None) if row is None else (True, row[1])
+
+
+def owned_transcription_jurisdiction(transcription_id: UUID, user_id: UUID) -> tuple[bool, UUID | None]:
+    """DIAAT-334: whether the user owns this transcription, and its jurisdiction (None
+    for a record in none). (False, None) when it is not theirs or does not exist: the
+    ownership checks answer for those."""
+    return _owned_transcription_jurisdiction(transcription_id, user_id)
+
+
+def _job_owner_and_jurisdiction(job_id: UUID) -> tuple[bool, UUID | None, UUID | None]:
+    from transcribe_api.domain.models_recording import SpeechBatchJob  # recording's model
+
+    with Session(get_engine()) as session:
+        row = session.exec(
+            select(SpeechBatchJob.user_id, SpeechBatchJob.jurisdiction_id).where(SpeechBatchJob.id == job_id)
+        ).first()
+    return (False, None, None) if row is None else (True, row[0], row[1])
+
+
+def job_owner_and_jurisdiction(job_id: UUID) -> tuple[bool, UUID | None, UUID | None]:
+    """DIAAT-334: whether the recording job exists, its owner and its jurisdiction."""
+    return _job_owner_and_jurisdiction(job_id)
 
 
 def record_upload_jurisdiction(transcription_id: UUID, jurisdiction_id: UUID) -> None:

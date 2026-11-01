@@ -18,6 +18,7 @@ from sqlmodel import Session, select
 from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
 from transcribe_api.domain.auth.token_auth import build_token_user_dep
 from transcribe_api.domain.auth.user_creation import insert_user_or_load_existing
+from transcribe_api.domain.jurisdictions import jurisdiction_dependency
 from transcribe_api.domain.models_recording import User
 from transcribe_api.runtime.db_recording import get_engine
 
@@ -76,6 +77,9 @@ def _resolve_user(azure_user_id: str, email: str, roles: list[str]) -> Authentic
 # verified bearer token only — see domain/auth/token_auth.py for why this is not
 # the library's Easy Auth based dependency.
 get_current_user = build_token_user_dep(_resolve_user)
+
+# The request's jurisdiction (DIAAT-322), bound to this area's user.
+get_active_jurisdiction = jurisdiction_dependency(get_current_user)
 
 
 def get_allowlisted_user(

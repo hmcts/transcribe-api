@@ -5,8 +5,7 @@ in a later release than 0004, or accept that a rollout of both together can fail
 old pods' draft saves for its few minutes):
 
 - records the old pods wrote during 0004's rollout, without a jurisdiction, are put
-  in the IAC, as 0004 put the earlier ones (recording jobs of API-key callers, which
-  have no user, stay NULL);
+  in the IAC, as 0004 put the earlier ones;
 - users who first signed in through an old pod then, and so were never enrolled,
   are made IAC judges, as 0004 made the earlier ones;
 - live_transcript_draft.jurisdiction_id becomes NOT NULL, and the one-draft-per-user
@@ -43,7 +42,7 @@ def upgrade() -> None:
     )
     op.execute(
         sa.text(
-            "UPDATE transcription_job SET jurisdiction_id = :iac WHERE jurisdiction_id IS NULL AND user_id IS NOT NULL"
+            "UPDATE transcription_job SET jurisdiction_id = :iac WHERE jurisdiction_id IS NULL"
         ).bindparams(iac=IAC_ID)
     )
     op.execute(

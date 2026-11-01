@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.unit.jurisdiction_fixtures import IAC_JURISDICTION_ID
 from transcribe_api.api.app import create_app
 from transcribe_api.domain.models_recording import JobStatus, SpeechBatchJob, User
 from transcribe_api.runtime.settings_recording import get_settings
@@ -770,6 +771,7 @@ class TestSubmitJob:
 
     def test_returns_existing_job_on_idempotency_hit(self, client, as_current_user, mocker):
         existing = _make_job(status=JobStatus.SUCCEEDED)
+        existing.jurisdiction_id = IAC_JURISDICTION_ID  # this request's (DIAAT-334)
         mocker.patch(
             "transcribe_api.api.routes_recording.get_job_by_idempotency_key_for_user",
             return_value=existing,
@@ -2670,7 +2672,9 @@ class TestListJobs:
         assert response.status_code == 200
         from transcribe_api.domain.models_recording import JobStatus as JS
 
-        mock.assert_called_once_with(mocker.ANY, as_current_user.id, JS.SUCCEEDED, 20, 0)
+        mock.assert_called_once_with(
+            mocker.ANY, as_current_user.id, JS.SUCCEEDED, 20, 0, jurisdiction_id=IAC_JURISDICTION_ID
+        )
 
     def test_rejects_invalid_status(self, client, as_current_user):
         response = client.get("/api/v1/jobs?status=notastate")
@@ -2684,7 +2688,7 @@ class TestListJobs:
 
         response = client.get("/api/v1/jobs?limit=5&offset=10")
         assert response.status_code == 200
-        mock.assert_called_once_with(mocker.ANY, as_current_user.id, None, 5, 10)
+        mock.assert_called_once_with(mocker.ANY, as_current_user.id, None, 5, 10, jurisdiction_id=IAC_JURISDICTION_ID)
 
     def test_returns_empty_list_when_no_jobs(self, client, as_current_user, mocker):
         mocker.patch(

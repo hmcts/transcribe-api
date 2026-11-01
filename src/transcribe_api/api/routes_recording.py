@@ -48,7 +48,7 @@ from transcribe_api.domain.audit_recording import (
 )
 from transcribe_api.domain.auth.approles_recording import get_valid_roles
 from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
-from transcribe_api.domain.auth.dependencies_recording import get_current_user
+from transcribe_api.domain.auth.dependencies_recording import get_active_jurisdiction, get_current_user
 from transcribe_api.domain.interface_recording import (
     get_job_by_id,
     get_job_by_idempotency_key_for_user,
@@ -64,7 +64,16 @@ from transcribe_api.domain.models_recording import (
 )
 from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
 from transcribe_api.runtime.db_recording import get_session
-from transcribe_api.runtime.security_events import record_ownership_violation
+from transcribe_api.domain.jurisdictions import ActiveJurisdiction, job_owner_and_jurisdiction
+from transcribe_api.runtime.security_events import (
+    AUDIO,
+    JOB,
+    SUBMIT,
+    TRANSCRIPT,
+    action_for_method,
+    record_jurisdiction_blocked,
+    record_ownership_violation,
+)
 from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.runtime.telemetry import (
     EVENT_UPLOAD_VALIDATION_FAILED,
@@ -543,6 +552,41 @@ def _to_response(job: SpeechBatchJob) -> JobResponse:
 # ---------------------------------------------------------------------------
 
 
+def _recording_jurisdiction(
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
+) -> ActiveJurisdiction:
+    """The request's jurisdiction, which must use hearing recordings (DIAAT-334): the
+    area answers 404 to any other, as if it were not there."""
+    if not jurisdiction.settings.features.hearing_recordings:
+        raise HTTPException(status_code=404, detail="Not available in this jurisdiction")
+    return jurisdiction
+
+
+def _job_in_jurisdiction(resource_type: str):
+    """A route dependency for a route naming a job: a job the caller may reach (theirs,
+    or any, for an administrator) but of another jurisdiction is refused with the 404
+    of an unknown job, and recorded (DIAAT-334); others are left to _check_job_access.
+    ``resource_type`` is the route's, as it passes to _check_job_access. A plain def:
+    the lookup is synchronous, so FastAPI runs it in the threadpool."""
+
+    def check(
+        request: Request,
+        job_id: UUID,
+        current_user: AuthenticatedUser = Depends(get_current_user),  # noqa: B008
+        jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),  # noqa: B008
+    ) -> None:
+        exists, owner_id, job_jurisdiction = job_owner_and_jurisdiction(job_id)
+        if not exists or not (_is_admin(current_user) or owner_id == current_user.id):
+            return
+        if job_jurisdiction != jurisdiction.id:
+            record_jurisdiction_blocked(
+                resource_type, action_for_method(request.method), actor_id=current_user.id, object_id=job_id
+            )
+            raise HTTPException(status_code=404, detail="Job not found")
+
+    return Depends(check)
+
+
 @router.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
@@ -655,6 +699,7 @@ async def upload_audio(
     request: Request,
     file: UploadFile = File(...),
     current_user: AuthenticatedUser = Depends(get_current_user),
+    _jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),  # noqa: B008
     x_hearing_id: Annotated[str | None, Header()] = None,
     x_hearing_file_count: Annotated[str | None, Header()] = None,
 ) -> UploadResponse:
@@ -790,18 +835,34 @@ async def submit_job(
     body: Annotated[SubmitJobRequest, Body()],
     session: Session = Depends(get_session),
     current_user: AuthenticatedUser = Depends(get_current_user),
+    jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),  # noqa: B008
 ) -> JobResponse:
     # DIAAT-286: "did X submit Y". An idempotent replay is recorded too (detail.replayed).
     with audited("job.submit", current_user.id) as audit:
-        job = await _submit_job(body, session, current_user, audit)
+        job = await _submit_job(body, session, current_user, jurisdiction, audit)
         audit.object_id = job.id
     return _to_response(job)
+
+
+def _replay(
+    existing: SpeechBatchJob, current_user: AuthenticatedUser, jurisdiction: ActiveJurisdiction, audit: AuditScope
+) -> SpeechBatchJob:
+    """The job an idempotent resubmission already made, if it is in this request's
+    jurisdiction (DIAAT-334): a key reused from another jurisdiction is refused, and
+    recorded, rather than handing back that jurisdiction's job."""
+    if existing.jurisdiction_id != jurisdiction.id:
+        record_jurisdiction_blocked(JOB, SUBMIT, actor_id=current_user.id, object_id=existing.id)
+        audit.skip()
+        raise HTTPException(status_code=409, detail="This idempotency key has already been used")
+    audit.detail["replayed"] = True
+    return existing
 
 
 async def _submit_job(
     body: SubmitJobRequest,
     session: Session,
     current_user: AuthenticatedUser,
+    jurisdiction: ActiveJurisdiction,
     audit: AuditScope,
 ) -> SpeechBatchJob:
     if body.idempotency_key:
@@ -809,8 +870,7 @@ async def _submit_job(
             session, body.idempotency_key, current_user.id
         )
         if existing:
-            audit.detail["replayed"] = True
-            return existing
+            return _replay(existing, current_user, jurisdiction, audit)
 
     # blob_name is later trusted by GET /jobs/{id}/audio to read straight from
     # storage — without this check a caller could point it at another user's
@@ -839,6 +899,7 @@ async def _submit_job(
             audio_duration_seconds=body.audio_duration_seconds,
             audio_blob_path=body.blob_name,
             user_id=current_user.id,
+            jurisdiction_id=jurisdiction.id,  # DIAAT-334
         )
     except IntegrityError:
         # Two concurrent requests with the same idempotency_key both passed the
@@ -850,8 +911,7 @@ async def _submit_job(
                 session, body.idempotency_key, current_user.id
             )
             if existing:
-                audit.detail["replayed"] = True
-                return existing
+                return _replay(existing, current_user, jurisdiction, audit)
         raise HTTPException(
             status_code=409, detail="Concurrent submission conflict; retry"
         ) from None
@@ -871,6 +931,7 @@ async def _submit_job(
 async def list_jobs(
     session: Session = Depends(get_session),
     current_user: AuthenticatedUser = Depends(get_current_user),
+    jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),  # noqa: B008
     status: str | None = Query(default=None, description="Filter by job status"),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
@@ -890,7 +951,10 @@ async def list_jobs(
     # pre-migration jobs are restricted to SystemAdministrator everywhere.
     is_admin = get_valid_roles()["SystemAdministrator"] in current_user.app_roles
     filter_user_id = None if is_admin else current_user.id
-    jobs, total = list_jobs_paginated(session, filter_user_id, parsed_status, limit, offset)
+    # DIAAT-334: administrators too see only the jurisdiction they are working in.
+    jobs, total = list_jobs_paginated(
+        session, filter_user_id, parsed_status, limit, offset, jurisdiction_id=jurisdiction.id
+    )
     audit_records: list[AuditRecord] = []
     if not is_admin:
         # DIAAT-285: defence in depth. The query is already filtered by user, so a
@@ -916,7 +980,7 @@ async def list_jobs(
     return response
 
 
-@router.get("/jobs/{job_id}", response_model=JobResponse)
+@router.get("/jobs/{job_id}", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
 async def get_job(
     job_id: UUID,
     session: Session = Depends(get_session),
@@ -935,7 +999,7 @@ async def get_job(
     return response
 
 
-@router.post("/jobs/{job_id}/baseline", response_model=JobResponse)
+@router.post("/jobs/{job_id}/baseline", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
 async def upload_baseline_transcript(
     job_id: UUID,
     file: UploadFile = File(...),
@@ -1152,7 +1216,7 @@ def _save_corrected_entry(
     session.refresh(job)
 
 
-@router.patch("/jobs/{job_id}/segments/{index}", response_model=JobResponse)
+@router.patch("/jobs/{job_id}/segments/{index}", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
 async def correct_segment(
     job_id: UUID,
     index: int,
@@ -1203,7 +1267,7 @@ async def correct_segment(
     return _to_response(job)
 
 
-@router.patch("/jobs/{job_id}/segments/{index}/words", response_model=JobResponse)
+@router.patch("/jobs/{job_id}/segments/{index}/words", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
 async def correct_word_range(
     job_id: UUID,
     index: int,
@@ -1316,7 +1380,7 @@ async def correct_word_range(
     return _to_response(job)
 
 
-@router.post("/jobs/{job_id}/segments/{index}/rollback", response_model=JobResponse)
+@router.post("/jobs/{job_id}/segments/{index}/rollback", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
 async def rollback_segment(
     job_id: UUID,
     index: int,
@@ -1346,7 +1410,7 @@ async def rollback_segment(
     return _to_response(job)
 
 
-@router.post("/jobs/{job_id}/segments/{index}/accept", response_model=JobResponse)
+@router.post("/jobs/{job_id}/segments/{index}/accept", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
 async def accept_segment(
     job_id: UUID,
     index: int,
@@ -1391,7 +1455,7 @@ async def accept_segment(
 
 
 @router.post(
-    "/jobs/{job_id}/segments/{index}/history/{history_index}/rollback",
+    "/jobs/{job_id}/segments/{index}/history/{history_index}/rollback", dependencies=[_job_in_jurisdiction(TRANSCRIPT)],
     response_model=JobResponse,
 )
 async def rollback_to_history_entry(
@@ -1507,7 +1571,7 @@ async def rollback_to_history_entry(
     return _to_response(job)
 
 
-@router.get("/jobs/{job_id}/audio")
+@router.get("/jobs/{job_id}/audio", dependencies=[_job_in_jurisdiction(AUDIO)])
 async def get_job_audio(
     job_id: UUID,
     request: Request,
@@ -1606,7 +1670,7 @@ async def _stream_blob_range(blob_name: str, start: int, length: int) -> AsyncGe
             yield chunk
 
 
-@router.delete("/jobs/{job_id}", status_code=204)
+@router.delete("/jobs/{job_id}", dependencies=[_job_in_jurisdiction(JOB)], status_code=204)
 async def delete_job(
     job_id: UUID,
     session: Session = Depends(get_session),

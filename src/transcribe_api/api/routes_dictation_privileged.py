@@ -28,7 +28,7 @@ from transcribe_api.documents.content_loader import get_document_content as load
 from transcribe_api.documents.minutes.types import AdminTranscriptionListResponse, AdminTranscriptionRecord
 from transcribe_api.domain.audit import TRANSCRIPT_EXPORTED, TRANSCRIPT_VIEWED, USER_DELETED, audited, write_audit_event
 from transcribe_api.domain.auth.approles_dictation import get_role, get_valid_roles
-from transcribe_api.domain.auth.dependencies_dictation import get_allowlisted_user
+from transcribe_api.domain.auth.dependencies_dictation import get_active_jurisdiction, get_allowlisted_user
 from transcribe_api.domain.exceptions import UserHasTranscriptionsError, UserNotFoundError
 from transcribe_api.domain.interface_dictation import (
     admin_delete_user,
@@ -38,7 +38,9 @@ from transcribe_api.domain.interface_dictation import (
     get_user_by_id,
     update_user,
 )
-from transcribe_api.domain.models_dictation import BaseTable, DocumentContent
+from transcribe_api.domain.jurisdictions import ActiveJurisdiction
+from transcribe_api.runtime.security_events import DOCUMENT, READ, TRANSCRIPTION, record_jurisdiction_blocked
+from transcribe_api.domain.models_dictation import BaseTable, DocumentContent, Transcription
 from transcribe_api.runtime.db_connection import get_engine
 from transcribe_api.runtime.log_sanitization import sanitize_for_log
 from transcribe_api.runtime.settings_dictation import get_settings
@@ -49,6 +51,16 @@ if TYPE_CHECKING:
     from transcribe_api.domain.models_dictation import User
 
 logger = logging.getLogger(__name__)
+
+def _admin_refuse_other_jurisdiction(
+    transcription: Transcription, admin_user: User, jurisdiction: ActiveJurisdiction, resource_type: str, action: str
+) -> None:
+    """DIAAT-334: an admin sees any judge's material, but only in the jurisdiction they
+    are working in; another's is the 404 of an unknown record, and recorded."""
+    if transcription.jurisdiction_id != jurisdiction.id:
+        record_jurisdiction_blocked(resource_type, action, actor_id=admin_user.id, object_id=transcription.id)
+        raise HTTPException(status_code=404, detail="Transcription not found")
+
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -360,14 +372,17 @@ async def admin_list_transcriptions(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
     admin_user: User = Depends(get_allowlisted_user(required_roles_all=[_require_role("SystemAdministrator")], audit_writer=write_audit_event)),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
 ) -> AdminTranscriptionListResponse:
-    """List all transcriptions across all judges, with optional filters. SystemAdministrator only."""
+    """List all transcriptions across all judges in the admin's jurisdiction (DIAAT-334),
+    with optional filters. SystemAdministrator only."""
     if page < 1 or page_size < 1:
         raise HTTPException(status_code=422, detail="page and page_size must be >= 1")
     if page_size > 200:
         raise HTTPException(status_code=422, detail="page_size must be <= 200")
 
     transcriptions, total = admin_fetch_all_transcriptions(
+        jurisdiction_id=jurisdiction.id,
         owner_email=owner_email,
         created_after=created_after,
         created_before=created_before,
@@ -423,6 +438,7 @@ class AdminTranscriptionDetail(BaseTable):
 async def admin_get_transcription(
     transcription_id: UUID,
     admin_user: User = Depends(get_allowlisted_user(required_roles_all=[_require_role("SystemAdministrator")], audit_writer=write_audit_event)),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
 ) -> AdminTranscriptionDetail:
     """View any transcription regardless of owner, with the provenance of its outputs.
     SystemAdministrator only. Audited (DIAAT-286) as a privileged view."""
@@ -434,6 +450,7 @@ async def admin_get_transcription(
         detail={"privileged": True},
     ) as audit:
         transcription = admin_get_transcription_by_id(transcription_id)
+        _admin_refuse_other_jurisdiction(transcription, admin_user, jurisdiction, TRANSCRIPTION, READ)
         audit.authorised()
     _log_admin_transcript_access(
         admin_id=str(admin_user.id),
@@ -457,6 +474,7 @@ async def admin_get_transcription(
 async def admin_get_document_download_url(
     transcription_id: UUID,
     admin_user: User = Depends(get_allowlisted_user(required_roles_all=[_require_role("SystemAdministrator")], audit_writer=write_audit_event)),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
 ) -> dict[str, str]:
     """Download any transcript document regardless of owner. SystemAdministrator only.
     Audited (DIAAT-286) as a privileged export."""
@@ -467,11 +485,14 @@ async def admin_get_document_download_url(
         object_id=transcription_id,
         detail={"via": "link", "privileged": True},
     ) as audit:
-        return await _admin_document_download_url(transcription_id, admin_user, audit)
+        return await _admin_document_download_url(transcription_id, admin_user, jurisdiction, audit)
 
 
-async def _admin_document_download_url(transcription_id: UUID, admin_user: User, audit: AuditedAction) -> dict[str, str]:
+async def _admin_document_download_url(
+    transcription_id: UUID, admin_user: User, jurisdiction: ActiveJurisdiction, audit: AuditedAction
+) -> dict[str, str]:
     transcription = admin_get_transcription_by_id(transcription_id)
+    _admin_refuse_other_jurisdiction(transcription, admin_user, jurisdiction, DOCUMENT, READ)
     audit.authorised()
 
     blob_path: str | None = None

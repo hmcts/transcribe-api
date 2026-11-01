@@ -230,8 +230,8 @@ def test_0004_puts_every_existing_record_in_the_iac(monkeypatch):
     for table in ("transcription", "transcription_job", "live_transcript_draft"):
         assert f"ALTER TABLE {table} ADD COLUMN jurisdiction_id UUID;" in sql, table
     assert f"UPDATE transcription SET jurisdiction_id = '{IAC_ID}'" in sql
-    # API-key callers' jobs have no user, and so no jurisdiction.
-    assert f"UPDATE transcription_job SET jurisdiction_id = '{IAC_ID}' WHERE user_id IS NOT NULL" in sql
+    # API-key callers' jobs too: BenchNotes served the IAC alone.
+    assert f"UPDATE transcription_job SET jurisdiction_id = '{IAC_ID}';" in sql
     assert f"UPDATE live_transcript_draft SET jurisdiction_id = '{IAC_ID}'" in sql
     assert "uq_live_transcript_draft_user_jurisdiction UNIQUE (user_id, jurisdiction_id)" in sql
     assert 'ALTER TABLE "user" ADD COLUMN active_jurisdiction_id UUID;' in sql
@@ -250,12 +250,8 @@ def test_0005_puts_the_rollouts_records_in_the_iac_then_allows_a_draft_per_juris
     sql = _offline_sql(monkeypatch, "0004:0005")
     # Users who first signed in through an old pod during the rollout were never enrolled.
     assert "WHERE NOT EXISTS (SELECT 1 FROM jurisdiction_membership m WHERE m.user_id = u.id)" in sql
-    for table in ("transcription", "live_transcript_draft"):
+    for table in ("transcription", "transcription_job", "live_transcript_draft"):
         assert f"UPDATE {table} SET jurisdiction_id = '{IAC_ID}' WHERE jurisdiction_id IS NULL" in sql, table
-    assert (
-        f"UPDATE transcription_job SET jurisdiction_id = '{IAC_ID}' WHERE jurisdiction_id IS NULL AND user_id IS NOT NULL"
-        in sql
-    )
     assert sql.index("UPDATE live_transcript_draft") < sql.index(
         "ALTER TABLE live_transcript_draft ALTER COLUMN jurisdiction_id SET NOT NULL"
     )

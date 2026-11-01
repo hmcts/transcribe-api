@@ -398,6 +398,7 @@ class TestSaveTranscription:
         from transcribe_api.domain.models_dictation import Transcription
 
         transcription = MagicMock(spec=Transcription)
+        transcription.id = uuid4()  # a record ID is a UUID (save_transcription normalises a string)
         merged = MagicMock(spec=Transcription)
         user_id = uuid4()
 

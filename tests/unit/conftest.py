@@ -124,6 +124,9 @@ def every_user_is_an_iac_judge(request: pytest.FixtureRequest, monkeypatch: pyte
 
     monkeypatch.setattr(jurisdictions, "_load_memberships", lambda user_id: [iac_membership()])
     monkeypatch.setattr(jurisdictions, "_remembered_jurisdiction_id", lambda user_id: None)
+    # Every record is in the IAC too (DIAAT-334): left to the ownership checks.
+    monkeypatch.setattr(jurisdictions, "_owned_transcription_jurisdiction", lambda transcription_id, user_id: (False, None))
+    monkeypatch.setattr(jurisdictions, "_job_owner_and_jurisdiction", lambda job_id: (False, None, None))
 
 
 @pytest.fixture
@@ -139,7 +142,7 @@ def jurisdiction_db(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPa
 
     from tests.unit.jurisdiction_fixtures import JURISDICTION_TABLES
     from transcribe_api.documents import content_loader
-    from transcribe_api.domain import interface_dictation, jurisdictions
+    from transcribe_api.domain import audit, interface_dictation, jurisdictions
     from transcribe_api.domain.auth import dependencies_dictation
     from transcribe_api.runtime import db_connection
 
@@ -149,6 +152,7 @@ def jurisdiction_db(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(db_connection, "get_engine", lambda: engine)
     monkeypatch.setattr(interface_dictation, "engine", engine)
     monkeypatch.setattr(dependencies_dictation, "get_engine", lambda: engine)
+    monkeypatch.setattr(audit, "get_engine", lambda: engine)  # audit rows land here too
     content_loader.clear_cache()
     yield engine
     content_loader.clear_cache()

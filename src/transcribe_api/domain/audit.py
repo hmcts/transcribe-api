@@ -344,10 +344,6 @@ class AuditedAction:
         if reason:
             self.detail["reason"] = reason
 
-    def ownership_violation(self, outcome: str) -> None:
-        """Called by the DIAAT-285 checks (``blocked`` or ``detected``)."""
-        self.deny()
-        self.detail["ownership_violation"] = outcome
 
     def skip_if_successful(self) -> None:
         """Do not write a success (e.g. a seek within a playback already recorded)."""
@@ -556,22 +552,20 @@ class audited:
             await asyncio.to_thread(_persist, row)
 
 
-def note_ownership_violation(
+def _note_denial(
     resource_type: str,
     action: str,
-    outcome: str,
+    detail: dict[str, Any],
     *,
     actor_id: UUID | str | None,
     object_id: UUID | str | None,
 ) -> None:
-    """Audit a DIAAT-285 ownership refusal (called by security_events).
-
-    Inside an audited action, that action is marked denied (one row per request).
-    Otherwise an ``ACCESS_DENIED`` row is written when the actor is known.
-    """
+    """Inside an audited action, it is marked denied, with ``detail`` (one row per
+    request). Otherwise an ``ACCESS_DENIED`` row is written when the actor is known."""
     current = _current.get()
     if current is not None and not current.finished:  # (a task spawned by it may outlive it)
-        current.ownership_violation(outcome)
+        current.deny()
+        current.detail.update(detail)
         return
     if actor_id is None:
         return
@@ -581,5 +575,41 @@ def note_ownership_violation(
         outcome=DENIED,
         object_type=resource_type,
         object_id=object_id,
-        detail={"action": action, "ownership_violation": outcome},
+        detail={"action": action, **detail},
+    )
+
+
+def note_ownership_violation(
+    resource_type: str,
+    action: str,
+    outcome: str,
+    *,
+    actor_id: UUID | str | None,
+    object_id: UUID | str | None,
+) -> None:
+    """Audit a DIAAT-285 ownership refusal (called by security_events)."""
+    _note_denial(
+        resource_type,
+        action,
+        {"ownership_violation": outcome},
+        actor_id=actor_id,
+        object_id=object_id,
+    )
+
+
+def note_jurisdiction_blocked(
+    resource_type: str,
+    action: str,
+    *,
+    actor_id: UUID | str | None,
+    object_id: UUID | str | None,
+) -> None:
+    """Audit a DIAAT-334 refusal: the record is in a jurisdiction the request is not
+    working in."""
+    _note_denial(
+        resource_type,
+        action,
+        {"jurisdiction_blocked": True},
+        actor_id=actor_id,
+        object_id=object_id,
     )

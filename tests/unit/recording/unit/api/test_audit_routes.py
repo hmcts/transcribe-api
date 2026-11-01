@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from hmcts_otel import conventions as c
 from hmcts_otel.testing import capture_telemetry
 
+from tests.unit.jurisdiction_fixtures import IAC_JURISDICTION_ID
 from transcribe_api.domain import audit_recording as audit
 from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.domain.models_recording import JobStatus, SpeechBatchJob, User
@@ -343,6 +344,7 @@ def test_submission_is_audited_with_the_new_job(mocker, audit_capture):
 
 def test_idempotent_replay_is_audited_as_a_replay(mocker, audit_capture):
     job = _job(status=JobStatus.SUBMITTED)
+    job.jurisdiction_id = IAC_JURISDICTION_ID  # this request's (DIAAT-334)
     mocker.patch(f"{ROUTES}.get_job_by_idempotency_key_for_user", return_value=job)
     submit = mocker.patch(f"{ROUTES}.submit_and_queue_batch_job")
 
