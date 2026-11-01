@@ -423,13 +423,21 @@ def test_an_upload_from_before_jurisdictions_goes_in_the_users_only_jurisdiction
     assert jurisdictions.upload_jurisdiction_id(None, user.id) == iac.id
 
 
-def test_an_upload_started_in_a_jurisdiction_the_user_has_since_left_is_not_put_there(engine):
+def test_an_upload_started_in_a_jurisdiction_the_user_has_since_left_stays_there(engine):
+    """Not moved to the jurisdiction they still have, where its admins could read it:
+    the ET's material stays the ET's, out of the user's reach until they are added back."""
     iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
     user = add_user(engine, roles=())
-    add_member(engine, user, iac)
+    add_member(engine, user, iac)  # and no longer the ET
     upload_id = uuid4()
     jurisdictions.record_upload_jurisdiction(upload_id, et.id)
-    assert jurisdictions.upload_jurisdiction_id(upload_id, user.id) == iac.id
+    assert jurisdictions.upload_jurisdiction_id(upload_id, user.id) == et.id
+
+    made = interface_dictation.load_or_create_transcription(
+        upload_id, user.id, lambda: jurisdictions.upload_jurisdiction_id(upload_id, user.id)
+    )
+    assert made.jurisdiction_id == et.id
+    assert jurisdictions.owned_transcription_jurisdiction(made.id, user.id) == (True, et.id)
 
 
 def test_the_jurisdiction_of_an_existing_transcription_is_not_looked_up(engine):

@@ -288,12 +288,12 @@ def recorded_upload_jurisdiction(upload_id: str | UUID) -> UUID | None:
 
 def upload_jurisdiction_id(transcription_id: str | UUID | None, user_id: UUID) -> UUID | None:
     """The jurisdiction for an upload's new transcription: the one it was started in,
-    if the user still belongs to it, else default_jurisdiction_id (an upload from
-    before DIAAT-322, or a file not named by its upload ID)."""
+    whatever the user's memberships now (DIAAT-334: material stays in its own
+    jurisdiction; a user removed from it meanwhile does not take it to another, and
+    has it back if added again). default_jurisdiction_id only for an upload with no
+    record (from before DIAAT-322, or a file not named by its upload ID)."""
     started_in = recorded_upload_jurisdiction(transcription_id) if transcription_id is not None else None
-    if started_in is not None and any(m.jurisdiction_id == started_in for m in load_memberships(user_id)):
-        return started_in
-    return default_jurisdiction_id(user_id)
+    return started_in if started_in is not None else default_jurisdiction_id(user_id)
 
 
 def default_jurisdiction_id(user_id: UUID) -> UUID | None:
