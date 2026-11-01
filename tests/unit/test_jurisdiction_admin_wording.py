@@ -235,3 +235,61 @@ def test_the_wording_shown_is_the_version_it_names(jurisdiction_db, jurisdiction
         json={"wording": {"help.subtitle": "Mine"}, "version": shown["version"]},
     )
     assert saved.status_code == 200
+
+
+def test_a_save_answers_with_its_own_version_not_one_saved_just_after(
+    jurisdiction_db, jurisdiction_app, setup, monkeypatch
+):
+    """Another admin's save landing right after this one commits must not lend this
+    response its version: the editor would then hold this wording with that version,
+    and its next save would undo the other change instead of being refused (409)."""
+    from transcribe_api import jurisdictions_admin
+
+    et_admin, _ = setup
+    client = client_as(jurisdiction_app, jurisdiction_db, et_admin)
+    headers = {"X-Jurisdiction": "ET"}
+    opened = client.get("/api/jurisdictions/wording", headers=headers).json()
+    real = jurisdictions_admin.set_wording
+
+    def then_another_admin_saves(session, code, wording, **kwargs):
+        saved = real(session, code, wording, **kwargs)
+        with Session(jurisdiction_db) as other:
+            real(other, code, {"help.subtitle": "Theirs"})
+        return saved
+
+    monkeypatch.setattr(jurisdictions_admin, "set_wording", then_another_admin_saves)
+    mine = client.put(
+        "/api/jurisdictions/wording", headers=headers, json={"wording": {"help.subtitle": "Mine"}, "version": opened["version"]}
+    ).json()
+    monkeypatch.setattr(jurisdictions_admin, "set_wording", real)
+
+    assert mine["wording"] == {"help.subtitle": "Mine"}
+    again = client.put(
+        "/api/jurisdictions/wording", headers=headers, json={"wording": {"help.subtitle": "Mine, again"}, "version": mine["version"]}
+    )
+    assert again.status_code == 409
+    assert _settings(jurisdiction_db, "ET")["wording"] == {"help.subtitle": "Theirs"}
+
+
+def test_the_audit_compares_with_the_wording_the_save_replaced(
+    jurisdiction_db, jurisdiction_app, setup, monkeypatch
+):
+    """Not the wording read when the request began: a change saved in between counts."""
+    from transcribe_api import jurisdictions_admin
+
+    et_admin, _ = setup
+    real = jurisdictions_admin.set_wording
+
+    def another_admin_saves_first(session, code, wording, **kwargs):
+        with Session(jurisdiction_db) as other:
+            real(other, code, {"help.subtitle": "Employment Tribunal", "home.intro": "Hi"})
+        return real(session, code, wording, **kwargs)
+
+    monkeypatch.setattr(jurisdictions_admin, "set_wording", another_admin_saves_first)
+    client_as(jurisdiction_app, jurisdiction_db, et_admin).put(
+        "/api/jurisdictions/wording", headers={"X-Jurisdiction": "ET"}, json={"wording": {"help.subtitle": "Employment Tribunal"}}
+    )
+    with Session(jurisdiction_db) as session:
+        [audit] = session.exec(select(AuditLog).where(AuditLog.event_type == "jurisdiction.edit")).all()
+    # This save removed home.intro; the request began before it was added.
+    assert audit.detail["wording_keys_changed"] == ["home.intro"]

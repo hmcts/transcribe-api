@@ -218,9 +218,8 @@ def update_jurisdiction_wording(
             raise HTTPException(status_code=404, detail=str(exc)) from None
         except jurisdictions_admin.AdminError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
-        saved_version = jurisdictions_admin.current_version(session, active.code)
-    before = active.settings.wording
-    changed = sorted(key for key in set(before) | set(saved) if before.get(key) != saved.get(key))
+    before, wording = saved.before, saved.wording
+    changed = sorted(key for key in set(before) | set(wording) if before.get(key) != wording.get(key))
     record_audit(
         "jurisdiction.edit",
         actor_id=current_user.id,
@@ -228,4 +227,4 @@ def update_jurisdiction_wording(
         object_type="jurisdiction",
         detail={"code": active.code, "fields": ["wording"], "wording_keys_changed": changed},
     )
-    return _wording(active, saved, saved_version)
+    return _wording(active, wording, saved.version)

@@ -23,6 +23,7 @@ import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NamedTuple
 
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
@@ -67,10 +68,6 @@ def _users_by_email(session: Session, email: str) -> list[User]:
 def user_ids_for(session: Session, email: str) -> list[str]:
     """The user IDs with that sign-in email (none until they first sign in)."""
     return sorted(str(user.id) for user in _users_by_email(session, email.strip().lower()))
-
-
-def current_version(session: Session, code: str) -> str:
-    return version(_jurisdiction(session, code))
 
 
 def wording_and_version(session: Session, code: str) -> tuple[dict[str, str], str]:
@@ -150,9 +147,18 @@ def put_jurisdiction(
     return f"{'Created' if created else 'Updated'} {code}"
 
 
+class WordingSaved(NamedTuple):
+    """A wording save, all read under its lock: the wording it replaced, the wording
+    stored, and the version that names it (a later read could name someone else's)."""
+
+    before: dict[str, str]
+    wording: dict[str, str]
+    version: str
+
+
 def set_wording(
     session: Session, code: str, wording: dict[str, str], *, expected_version: str | None = None
-) -> dict[str, str]:
+) -> WordingSaved:
     """Replace a jurisdiction's wording only (DIAAT-356: what its own admins change).
     Every key sent is checked, blank or not; blank text means the default. The rest
     of the stored settings is kept as stored, including anything this release does
@@ -169,11 +175,15 @@ def set_wording(
         msg = f"Invalid wording: {exc}"
         raise AdminError(msg) from None
     kept = {key: text for key, text in trimmed.items() if text}
+    before = dict((row.settings or {}).get("wording") or {})
     row.settings = {**(row.settings or {}), "wording": kept}
     row.updated_datetime = datetime.now(UTC)
     session.add(row)
+    session.flush()
+    session.refresh(row)  # the version as stored, still under the lock
+    saved = WordingSaved(before, kept, version(row))
     session.commit()
-    return kept
+    return saved
 
 
 def add_member(session: Session, code: str, email: str, role: str = "judge") -> str:
