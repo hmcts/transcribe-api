@@ -146,6 +146,34 @@ def test_a_save_naming_another_jurisdictions_record_changes_nothing(jurisdiction
         assert session.get(Transcription, in_sscs.id).title == "PIP appeal"
 
 
+def test_a_save_cannot_move_a_record_in_no_jurisdiction_into_its_own(jurisdiction_db, judge_in_two, jurisdiction_app):
+    """The background makes a judge in several jurisdictions, with no choice to go by,
+    a record in none: a request naming it must not claim it for its jurisdiction."""
+    from transcribe_api.domain.jurisdictions import upload_jurisdiction_id
+
+    judge, *_ = judge_in_two
+    unplaced = interface_dictation.load_or_create_transcription(
+        uuid4(), judge.id, lambda: upload_jurisdiction_id(None, judge.id)
+    )
+    assert unplaced.jurisdiction_id is None
+    client = client_as(jurisdiction_app, jurisdiction_db, judge)
+
+    with capture_telemetry() as telemetry:
+        response = client.post(
+            "/api/transcriptions", json={"id": str(unplaced.id), "title": "claimed"}, headers={"X-Jurisdiction": "IAC"}
+        )
+
+    assert response.status_code == 404
+    assert [(e["security.resource_type"], e["security.action"]) for e in _blocked(telemetry)] == [
+        ("transcription", "write")
+    ]
+    with Session(jurisdiction_db) as session:
+        row = session.get(Transcription, unplaced.id)
+        assert (row.jurisdiction_id, row.title) == (None, None)
+    # The background may still save it, where it is.
+    assert interface_dictation.save_transcription(row, judge.id).jurisdiction_id is None
+
+
 def test_minutes_for_another_jurisdictions_record_are_refused(jurisdiction_db, judge_in_two, jurisdiction_app):
     judge, _iac, _sscs, _in_iac, in_sscs = judge_in_two
     body = {

@@ -153,20 +153,29 @@ def save_transcription(
 ) -> Transcription:
     """Save the caller's transcription. A new one is made in ``jurisdiction_id``; an
     existing one keeps its jurisdiction (DIAAT-322): the client's value is ignored, and
-    one of another jurisdiction is refused (JurisdictionConflictError, DIAAT-334)."""
+    one of another jurisdiction is refused (JurisdictionConflictError, DIAAT-334). One
+    in no jurisdiction (made in the background for a judge in several, with no choice
+    to go by) counts as another: a request cannot move it into its own."""
     if transcription_data.id is not None and not isinstance(transcription_data.id, UUID):
         transcription_data.id = UUID(str(transcription_data.id))  # a client's JSON gives a string
     with Session(engine) as session:
         _ensure_owner_unchanged(session, Transcription.user_id, transcription_data.id, user_id, actor_id=user_id)
         transcription_data.user_id = user_id
-        existing_jurisdiction = (
-            session.exec(select(Transcription.jurisdiction_id).where(Transcription.id == transcription_data.id)).first()
+        # The row, not just its jurisdiction: an existing row's may be NULL.
+        existing = (
+            session.exec(
+                select(Transcription.id, Transcription.jurisdiction_id).where(Transcription.id == transcription_data.id)
+            ).first()
             if transcription_data.id is not None
             else None
         )
-        if existing_jurisdiction is not None and jurisdiction_id is not None and existing_jurisdiction != jurisdiction_id:
-            raise JurisdictionConflictError(Transcription.__name__)
-        transcription_data.jurisdiction_id = existing_jurisdiction or jurisdiction_id
+        if existing is None:
+            transcription_data.jurisdiction_id = jurisdiction_id
+        else:
+            existing_jurisdiction = existing[1]
+            if jurisdiction_id is not None and existing_jurisdiction != jurisdiction_id:
+                raise JurisdictionConflictError(Transcription.__name__)
+            transcription_data.jurisdiction_id = existing_jurisdiction
         merged = session.merge(transcription_data)
         session.commit()
         session.refresh(merged)
