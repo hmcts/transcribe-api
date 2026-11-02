@@ -1,6 +1,8 @@
 """Unit tests for accuracy/needs-review computation."""
 
-from transcribe_api.domain.models_recording import DialogueEntry, merge_dialogue_entries
+import pytest
+
+from transcribe_api.domain.models_recording import DialogueEntry, EntryPart, merge_dialogue_entries
 from transcribe_api.stt.accuracy import DEFAULT_CONFIDENCE_THRESHOLD, compute_accuracy
 
 
@@ -239,3 +241,73 @@ class TestAccuracyAcrossMerges:
         merged.corrected_text = "please sit down thank you very much"
         separate = [sit.model_copy(update={"corrected_text": "please sit down"}), thanks]
         assert self._summary([merged]).word_error_rate == self._summary(separate).word_error_rate
+
+    def test_a_capitalisation_only_correction_scores_the_same_before_and_after_a_merge(self):
+        case = _entry(text="hello world", start=0, end=1, confidence=0.9, corrected="Hello world")
+        untouched = _entry(text="this is fine", start=1, end=2, confidence=0.9)
+        before = self._summary([case, untouched])
+        after = self._summary([merge_dialogue_entries(case, untouched)])
+        assert before.corrected_percent == 50.0
+        assert after.corrected_percent == before.corrected_percent
+        assert after.word_error_rate == before.word_error_rate
+
+    def test_merging_two_corrections_one_of_them_capitalisation_only_keeps_both_scored(self):
+        first = _entry(text="hello world", start=0, end=1, confidence=0.9, corrected="Hello world")
+        second = _entry(text="this iz", start=1, end=2, confidence=0.9, corrected="this is")
+        before = self._summary([first, second])
+        after = self._summary([merge_dialogue_entries(first, second)])
+        assert before.word_error_rate == 25.0
+        assert before.corrected_percent == 100.0
+        assert after.word_error_rate == 25.0
+        assert after.corrected_percent == 100.0
+
+    def test_untouched_parts_stay_out_of_the_score_after_a_merge(self):
+        entries = [
+            _entry(text="hello world", start=0, end=1, confidence=0.9, corrected="Hello world"),
+            _entry(text="this iz", start=1, end=2, confidence=0.9),
+            _entry(text="all rise", start=2, end=3, confidence=0.9),
+        ]
+        merged = merge_dialogue_entries(merge_dialogue_entries(entries[0], entries[1]), entries[2])
+        assert [p.corrected for p in merged.parts] == [True, False, False]
+        assert self._summary([merged]).corrected_percent == self._summary(entries).corrected_percent
+        assert self._summary([merged]).corrected_percent == pytest.approx(100 / 3)
+
+    def test_a_capitalisation_only_edit_after_a_merge_counts_for_that_part(self):
+        a = _entry(text="hello world", start=0, end=1, confidence=0.9)
+        b = _entry(text="this is fine", start=1, end=2, confidence=0.9)
+        merged = merge_dialogue_entries(a, b)
+        merged.corrected_text = "Hello world this is fine"
+        separate = [a.model_copy(update={"corrected_text": "Hello world"}), b]
+        assert self._summary([merged]).corrected_percent == self._summary(separate).corrected_percent == 50.0
+        assert self._summary([merged]).word_error_rate == self._summary(separate).word_error_rate
+
+    def test_the_correction_state_survives_a_second_merge(self):
+        a = _entry(text="hello world", start=0, end=1, confidence=0.9, corrected="Hello world")
+        b = _entry(text="this is fine", start=1, end=2, confidence=0.9)
+        c = _entry(text="all rise", start=2, end=3, confidence=0.9)
+        merged = merge_dialogue_entries(merge_dialogue_entries(a, b), c)
+        assert self._summary([merged]).corrected_percent == self._summary([a, b, c]).corrected_percent
+
+    def test_parts_stored_without_a_correction_state_are_judged_by_their_wording_as_before(self):
+        legacy = DialogueEntry(
+            speaker="0",
+            text="hello world this iz",
+            start_time=0,
+            end_time=2,
+            confidence=0.9,
+            corrected_text="Hello world this is",
+            merged=True,
+            parts=[
+                EntryPart(text="hello world", current_text="Hello world", confidence=0.9),
+                EntryPart(text="this iz", current_text="this is", confidence=0.9),
+            ],
+        )
+        assert all(p.corrected is None for p in legacy.parts)
+        summary = self._summary([legacy])
+        # Only the part whose words changed is scored, exactly as before the state existed.
+        assert summary.corrected_percent == 50.0
+        assert summary.word_error_rate == 50.0
+
+    def test_legacy_parts_round_trip_without_gaining_a_correction_state(self):
+        part = EntryPart.model_validate({"text": "a b", "current_text": "a b", "confidence": 0.5})
+        assert part.corrected is None
