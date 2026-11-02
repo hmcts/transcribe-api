@@ -289,6 +289,104 @@ def test_0004_downgrade_reverses_it(monkeypatch):
     assert "DROP TABLE jurisdiction;" in sql
 
 
+# DIAAT-343: a deployment never overwrites what an admin changed in the live service -------
+#
+# The screen wording and per-jurisdiction settings (jurisdiction.settings) and the legal
+# wording (document_content) are edited live. 0004 only inserts the IAC row, and the
+# document_content row is seeded by the app when absent, so no migration after 0004 may
+# write either table: an upgrade would replace an admin's edit. Run without a database.
+
+LIVE_EDITED_TABLES = ("jurisdiction", "document_content")
+_LIVE_WRITE = re.compile(
+    rf'^\s*(?:INSERT\s+INTO|UPDATE(?:\s+ONLY)?|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?)\s+"?({"|".join(LIVE_EDITED_TABLES)})"?(?![\w.])',
+    re.IGNORECASE,
+)
+
+# Revisions allowed to write a live table, and the one statement shape each may use.
+# DIAAT-342 adds document_content.jurisdiction_id in 0006 and backfills that column
+# alone: it may set jurisdiction_id (one assignment, optionally with a WHERE) and
+# nothing else, so the admin's wording in `content` is never touched.
+ALLOWED_LIVE_WRITES = {
+    "0006": re.compile(
+        r'^\s*UPDATE\s+"?document_content"?\s+SET\s+"?jurisdiction_id"?\s*=\s*[^,]+?(?:\s+WHERE\s.+)?$', re.I | re.S
+    ),
+}
+
+
+def _forbidden_live_writes(revision: str, sql: str) -> list[str]:
+    """The statements of one migration's SQL that write a live-edited table, less the
+    ones its revision is allowed (ALLOWED_LIVE_WRITES)."""
+    uncommented = re.sub(r"^\s*--.*$", "", sql, flags=re.MULTILINE)  # "-- Running upgrade" heads the first statement
+    statements = (statement.strip() for statement in re.split(r";\s*\n", uncommented))
+    writes = [statement for statement in statements if _LIVE_WRITE.match(statement)]
+    allowed = ALLOWED_LIVE_WRITES.get(revision)
+    return [statement for statement in writes if not (allowed and allowed.match(statement))]
+
+
+def _revisions_after_0004() -> list[tuple[str, str]]:
+    """(previous revision, revision) for every migration after 0004, oldest first."""
+    script = ScriptDirectory.from_config(migrations.alembic_config())
+    history = [(revision.down_revision, revision.revision) for revision in script.walk_revisions()][::-1]
+    revisions = [revision for _down, revision in history]
+    return history[revisions.index("0004") + 1 :]
+
+
+def test_no_migration_after_0004_writes_the_live_settings_or_content(monkeypatch):
+    for previous, revision in _revisions_after_0004():
+        sql = _offline_sql(monkeypatch, f"{previous}:{revision}")
+        assert _forbidden_live_writes(revision, sql) == [], revision
+
+
+def test_the_live_write_guard_sees_what_0004_does(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0003:0004")
+    [insert] = _forbidden_live_writes("0004", sql)
+    assert insert.startswith("INSERT INTO jurisdiction (")
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "INSERT INTO jurisdiction (id) VALUES (1)",
+        "UPDATE jurisdiction SET settings = '{}'",
+        "UPDATE ONLY jurisdiction SET name = 'x'",
+        'DELETE FROM "jurisdiction" WHERE code = 1',
+        "INSERT INTO document_content (id, content) VALUES (1, '{}')",
+        "UPDATE document_content SET content = '{}'",
+        "UPDATE document_content SET jurisdiction_id = 'a', content = '{}'",
+        "DELETE FROM document_content",
+        "TRUNCATE document_content",
+    ],
+)
+def test_the_live_write_guard_catches_every_kind_of_write(statement):
+    assert _forbidden_live_writes("0006", f"{statement};\n") == [statement]
+
+
+def test_the_live_write_guard_sees_a_first_statement_under_the_revision_comment():
+    sql = "-- Running upgrade 0005 -> 0006\n\nUPDATE jurisdiction SET settings = '{}';\n"
+    assert _forbidden_live_writes("0006", sql) == ["UPDATE jurisdiction SET settings = '{}'"]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "INSERT INTO jurisdiction_membership (id) VALUES (1)",
+        "UPDATE transcription SET jurisdiction_id = 'a'",
+        "ALTER TABLE document_content ADD COLUMN jurisdiction_id UUID",
+        "CREATE INDEX ix_document_content_jurisdiction_id ON document_content (jurisdiction_id)",
+        "SELECT * FROM jurisdiction",
+    ],
+)
+def test_the_live_write_guard_ignores_other_tables_and_schema_changes(statement):
+    assert _forbidden_live_writes("0006", f"{statement};\n") == []
+
+
+def test_only_the_revision_that_backfills_a_new_jurisdiction_column_may_write_document_content():
+    backfill = "UPDATE document_content SET jurisdiction_id = '6a1c0f3e-3b7d-4c2a-9e51-1ac000000001'::uuid WHERE id = 1"
+    assert _forbidden_live_writes("0006", f"{backfill};\n") == []
+    assert _forbidden_live_writes("0007", f"{backfill};\n") == [backfill]
+    assert _forbidden_live_writes("0006", "UPDATE jurisdiction SET settings = '{}';\n") != []
+
+
 class _FakeConnection:
     def __init__(self, log: list[str]):
         self.log = log
@@ -589,10 +687,13 @@ def test_0004_and_0005_put_existing_users_and_records_in_the_iac_and_reverse():
         assert tuple(membership) == (IAC_ID, user_id, "judge")
         assert set(connection.execute(text("SELECT jurisdiction_id::text FROM transcription")).scalars()) == {IAC_ID}
         late = connection.execute(
-            text("SELECT jurisdiction_id::text FROM jurisdiction_membership WHERE user_id = :uid"), {"uid": late_user_id}
+            text("SELECT jurisdiction_id::text FROM jurisdiction_membership WHERE user_id = :uid"),
+            {"uid": late_user_id},
         ).scalar_one()
         assert late == IAC_ID
-        assert connection.execute(text("SELECT jurisdiction_id::text FROM live_transcript_draft")).scalar_one() == IAC_ID
+        assert (
+            connection.execute(text("SELECT jurisdiction_id::text FROM live_transcript_draft")).scalar_one() == IAC_ID
+        )
         # A second jurisdiction's draft for the same user is allowed now.
         connection.execute(
             text(
@@ -618,9 +719,12 @@ def test_0004_and_0005_put_existing_users_and_records_in_the_iac_and_reverse():
             ),
             {"uid": user_id},
         )
-        assert connection.execute(
-            text("SELECT jurisdiction_id::text FROM transcription WHERE title = 'E v F'")
-        ).scalar_one() == IAC_ID
+        assert (
+            connection.execute(
+                text("SELECT jurisdiction_id::text FROM transcription WHERE title = 'E v F'")
+            ).scalar_one()
+            == IAC_ID
+        )
 
     migrate(command.downgrade, "0003")
     with engine.connect() as connection:
@@ -662,13 +766,13 @@ def test_0004_and_0005_keep_every_existing_value_unchanged():
                 " star_rating) VALUES (gen_random_uuid(), now(), '<p>Decision</p>', '{\"name\": \"General\"}', :t, 4)",
                 "INSERT INTO transcriptionjob (id, created_datetime, transcription_id, dialogue_entries, s3_audio_url,"
                 " provenance, needs_cleanup) VALUES (gen_random_uuid(), now(), :t,"
-                " '[{\"speaker\": \"Judge\", \"text\": \"words\"}]', 'user-uploads/oid/hearing-document-1.docx',"
-                " '{\"output\": \"document\"}', false)",
+                ' \'[{"speaker": "Judge", "text": "words"}]\', \'user-uploads/oid/hearing-document-1.docx\','
+                ' \'{"output": "document"}\', false)',
                 "INSERT INTO transcription_job (id, created_datetime, user_id, status, audio_url, locale,"
                 " enable_diarization, needs_cleanup, metadata, dialogue_entries) VALUES (gen_random_uuid(), now(), :u,"
                 " 'SUCCEEDED', 'https://blob/a.wav', 'en-GB', true, false, '{\"case_reference\": \"PA/1/2026\"}', '[]')",
                 "INSERT INTO live_transcript_draft (id, created_datetime, user_id, transcript, form_data)"
-                " VALUES (gen_random_uuid(), now(), :u, '{\"background\": [\"words\"]}', '{\"appellantName\": \"A\"}')",
+                ' VALUES (gen_random_uuid(), now(), :u, \'{"background": ["words"]}\', \'{"appellantName": "A"}\')',
                 "INSERT INTO document_content (id, content, updated_at) VALUES (1, '{\"legal_frameworks\": [1]}', now())",
             ):
                 connection.execute(text(statement), ids)
@@ -685,7 +789,7 @@ def test_0004_and_0005_keep_every_existing_value_unchanged():
             "document_content",
         )
         queries = {
-            table: f'SELECT to_jsonb(t) - ARRAY{added.get(table, []) + ["jurisdiction_id"]}::text[]'
+            table: f"SELECT to_jsonb(t) - ARRAY{added.get(table, []) + ['jurisdiction_id']}::text[]"
             f' FROM "{table}" t ORDER BY 1::text'
             for table in tables
         }
