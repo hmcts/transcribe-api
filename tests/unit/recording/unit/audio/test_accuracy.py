@@ -430,3 +430,33 @@ class TestAccuracyAcrossMerges:
         assert [p.corrected for p in parts] == [False, True, False]
         assert self._summary([again]).word_error_rate == self._summary(separate).word_error_rate == 50.0
         assert self._summary([again]).corrected_percent == self._summary(separate).corrected_percent
+
+    @pytest.mark.parametrize(("replacement", "wer"), [("one two three four", 0.0), ("one two three for", 25.0)])
+    def test_a_word_range_edit_across_merged_parts_is_split_between_them(self, replacement, wer):
+        first = self._with_words("one two", "one two", 0)
+        second = self._with_words("three four", "three four", 1)
+        merged = merge_dialogue_entries(first, second)
+        merged.word_corrections = [WordCorrection(start_word_index=0, end_word_index=3, text=replacement)]
+        parts = merged.current_parts()
+        assert [p.current_text for p in parts] == ["one two", replacement.removeprefix("one two ")]
+        assert [p.corrected for p in parts] == [True, True]
+        assert self._summary([merged]).word_error_rate == wer
+
+    def test_a_word_range_edit_counts_for_a_new_part_merged_with_legacy_parts(self):
+        legacy = DialogueEntry(
+            speaker="0",
+            text="one two",
+            start_time=0,
+            end_time=2,
+            confidence=0.9,
+            words=[WordInfo(text=w, start_time=0, end_time=2, confidence=0.9) for w in ["one", "two"]],
+            merged=True,
+            parts=[
+                EntryPart(text="one", current_text="one", confidence=0.9),
+                EntryPart(text="two", current_text="two", confidence=0.9),
+            ],
+        )
+        merged = merge_dialogue_entries(legacy, self._with_words("Three", "three", 2))
+        merged.word_corrections = [WordCorrection(start_word_index=2, end_word_index=2, text="Three")]
+        assert [p.corrected for p in merged.current_parts()] == [None, None, True]
+        assert self._summary([merged]).corrected_percent == pytest.approx(100 / 3)
