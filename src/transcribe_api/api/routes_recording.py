@@ -412,12 +412,10 @@ class RenameSpeakerRequest(BaseModel):
     speaker: str = Field(min_length=1, max_length=200)
     apply_to_all: bool = False
 
-    @field_validator("speaker")
+    @field_validator("speaker", mode="before")
     @classmethod
-    def validate_speaker(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("speaker must not be blank")
-        return v.strip()
+    def strip_speaker(cls, v: object) -> object:
+        return v.strip() if isinstance(v, str) else v
 
 
 class RollbackHistoryRequest(BaseModel):

@@ -2156,7 +2156,17 @@ class TestRenameSpeaker:
         assert response.status_code == 200
         mock_session.commit.assert_not_called()
 
-    @pytest.mark.parametrize("speaker", ["", "   ", "x" * 201])
+    def test_length_limit_applies_to_trimmed_name(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+
+        with self._session(client):
+            response = self._rename(client, job, 0, {"speaker": f"  {'x' * 200}  "})
+
+        assert response.status_code == 200
+        assert response.json()["dialogue_entries"][0]["speaker"] == "x" * 200
+
+    @pytest.mark.parametrize("speaker", ["", "   ", "x" * 201, 7])
     def test_rejects_invalid_name(self, client, as_current_user, mocker, speaker):
         job = self._job()
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
