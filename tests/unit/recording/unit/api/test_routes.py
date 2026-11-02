@@ -2367,6 +2367,43 @@ class TestMergeSegmentWithNext:
         assert response.status_code == 200
         assert response.json()["needs_review"] == [{"speaker": "Speaker 1", "start_time": 0.0, "confidence": 0.5}]
 
+    @pytest.mark.parametrize("path", ["rollback", "history/0/rollback"])
+    def test_rolled_back_merged_part_is_not_counted_as_corrected_when_merged_again(
+        self, client, as_current_user, mocker, path
+    ):
+        from transcribe_api.domain.models_recording import DialogueEntry
+        from transcribe_api.runtime.db_recording import get_session
+        from transcribe_api.stt.accuracy import compute_accuracy
+
+        job = self._job()
+        job.dialogue_entries[0].update(text="hello world", corrected_text="Hello world")
+        job.dialogue_entries[0]["correction_history"] = [
+            {"timestamp": "2026-01-01T09:00:00+00:00", "kind": "segment", "previous_text": "hello world", "new_text": "Hello world"}
+        ]
+        job.dialogue_entries[1].update(text="this is fine")
+        job.dialogue_entries[2].update(text="all rize", corrected_text="all rise")
+        response, _ = self._post(client, mocker, job, 0)
+        assert response.status_code == 200
+        client.app.dependency_overrides[get_session] = lambda: MagicMock()
+        try:
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/{path}")
+        finally:
+            client.app.dependency_overrides.pop(get_session, None)
+        assert response.status_code == 200
+        if path == "rollback":
+            assert [p["corrected"] for p in job.dialogue_entries[0]["parts"]] == [False, False]
+
+        response, _ = self._post(client, mocker, job, 0)
+        assert response.status_code == 200
+        entries = [DialogueEntry(**e) for e in job.dialogue_entries]
+        never_corrected = [
+            DialogueEntry(speaker="s", text=t, start_time=i, end_time=i + 1, confidence=0.9, corrected_text=c)
+            for i, (t, c) in enumerate([("hello world", None), ("this is fine", None), ("all rize", "all rise")])
+        ]
+        summary, expected = compute_accuracy(entries), compute_accuracy(never_corrected)
+        assert summary.corrected_percent == expected.corrected_percent
+        assert summary.word_error_rate == expected.word_error_rate
+
 
 class TestRollbackSegment:
     def _patch_session(self, client, mocker):

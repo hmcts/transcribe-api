@@ -243,10 +243,15 @@ class DialogueEntry(SQLModel):
 
 
 def _with_share(part: EntryPart, share: str) -> EntryPart:
-    """`part` with a new share of the current text, marked corrected if the share changed since the merge."""
+    """`part` with a new share of the current text.
+
+    Marked corrected if the share changed since the merge, and not corrected if it is
+    back to the segment's own ASR wording (a rollback), so a later merge doesn't count it.
+    """
     update: dict[str, object] = {"current_text": share}
     if part.corrected is not None:
-        update["corrected"] = part.corrected or share.split() != part.current_text.split()
+        reverted = share.split() == part.text.split()
+        update["corrected"] = not reverted and (part.corrected or share.split() != part.current_text.split())
     return part.model_copy(update=update)
 
 

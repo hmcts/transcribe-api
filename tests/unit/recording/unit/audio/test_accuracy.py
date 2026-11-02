@@ -311,3 +311,34 @@ class TestAccuracyAcrossMerges:
     def test_legacy_parts_round_trip_without_gaining_a_correction_state(self):
         part = EntryPart.model_validate({"text": "a b", "current_text": "a b", "confidence": 0.5})
         assert part.corrected is None
+
+    def _rolled_back_then_merged(self, *, hard):
+        a = _entry(text="hello world", start=0, end=1, confidence=0.9, corrected="Hello world")
+        b = _entry(text="this is fine", start=1, end=2, confidence=0.9)
+        c = _entry(text="all rize", start=2, end=3, confidence=0.9, corrected="all rise")
+        merged = merge_dialogue_entries(a, b)
+        merged.corrected_text = None
+        if hard:  # what rollback_segment does
+            merged.parts = [p.model_copy(update={"current_text": p.text, "corrected": False}) for p in merged.parts]
+        never_corrected = [a.model_copy(update={"corrected_text": None}), b, c]
+        return merge_dialogue_entries(merged, c), never_corrected
+
+    @pytest.mark.parametrize("hard", [True, False])
+    def test_a_rolled_back_merged_part_is_not_counted_again_when_merged_with_a_corrected_segment(self, hard):
+        again, never_corrected = self._rolled_back_then_merged(hard=hard)
+        assert [p.corrected for p in again.parts] == [False, False, True]
+        assert self._summary([again]).word_error_rate == self._summary(never_corrected).word_error_rate
+        assert self._summary([again]).corrected_percent == self._summary(never_corrected).corrected_percent
+        assert self._summary([again]).corrected_percent == pytest.approx(100 / 3)
+
+    def test_editing_a_part_again_after_a_rollback_counts_it_again(self):
+        again, _ = self._rolled_back_then_merged(hard=True)
+        again.corrected_text = "Hello world this is fine all rise"
+        assert [p.corrected for p in again.current_parts()] == [True, False, True]
+        assert self._summary([again]).corrected_percent == pytest.approx(200 / 3)
+
+    def test_a_rollback_leaves_legacy_parts_without_a_correction_state(self):
+        part = EntryPart(text="a b", current_text="A b", confidence=0.5)
+        merged = DialogueEntry(speaker="0", text="a b c", start_time=0, end_time=1, merged=True, parts=[part, EntryPart(text="c", current_text="c")])
+        merged.corrected_text = "a b c"
+        assert [p.corrected for p in merged.current_parts()] == [None, None]
