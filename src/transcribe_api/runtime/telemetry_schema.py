@@ -151,6 +151,17 @@ def _shared_attributes(schema: TelemetrySchema) -> None:
 
 def _dictation_attributes(schema: TelemetrySchema) -> None:
     """Dictation service (heritage courtstranscribe)."""
+    schema.attribute(
+        "content.default_only_count",
+        int,
+        description="Items in the bundled document content defaults that are missing from the live content.",
+    )
+    schema.attribute(
+        "content.edited_count", int, description="Items whose live document content differs from the bundled defaults."
+    )
+    schema.attribute(
+        "content.live_only_count", int, description="Items in the live document content that are not in the defaults."
+    )
     schema.attribute("dictation.autosave_failures", int, description="Failed autosaves in the dictation session.")
     schema.attribute(
         "dictation.collapses_in_window", int, description="Unexpected speech session ends in the health window."
@@ -378,6 +389,11 @@ def _shared_events(schema: TelemetrySchema) -> None:
 
 def _dictation_events(schema: TelemetrySchema) -> None:
     """Dictation service (heritage courtstranscribe)."""
+    schema.event(
+        "content.drift_detected",
+        attributes=("content.edited_count", "content.live_only_count", "content.default_only_count"),
+        description="At startup, the live document content (hearing types, legal frameworks, anonymity statuses) differs from the bundled defaults. The live content is kept; the item ids are in the warning log. Counts only, never the wording.",
+    )
     schema.event(
         "document.available",
         attributes=("document.template", "document.template_version"),

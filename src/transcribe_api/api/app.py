@@ -170,6 +170,12 @@ async def lifespan(app: FastAPI):
 
         await run_in_threadpool(migrations.run_migrations)
 
+        # DIAAT-343: a deployment never writes the live document content. Tell the
+        # product team where it differs from the new defaults. Never raises.
+        from transcribe_api.documents.content_drift import check_content_drift
+
+        await run_in_threadpool(check_content_drift)
+
     tasks: list[asyncio.Task] = []
     if settings.ENVIRONMENT != "test" and _run_workers_in_web_process():
         tasks = await start_background_workers()
