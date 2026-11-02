@@ -89,12 +89,14 @@ class TestComputeAccuracy:
 
     def test_corrected_segment_with_an_unreviewed_merged_part_stays_in_needs_review(self):
         entry = _entry(confidence=0.9, corrected="fixed text")
+        entry.merged = True
         entry.unreviewed_confidence = 0.4
         summary = compute_accuracy([entry], confidence_threshold=0.85)
         assert [item.confidence for item in summary.needs_review] == [0.4]
 
     def test_unreviewed_merged_part_above_threshold_does_not_need_review(self):
         entry = _entry(confidence=0.9, corrected="fixed text")
+        entry.merged = True
         entry.unreviewed_confidence = 0.9
         assert compute_accuracy([entry], confidence_threshold=0.85).needs_review == []
 

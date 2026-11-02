@@ -440,6 +440,7 @@ def _to_dialogue_entry(raw) -> DialogueEntry:
         words=_entry_field(raw, "words"),
         alternatives=_entry_field(raw, "alternatives"),
         accepted=_entry_field(raw, "accepted", False),
+        merged=_entry_field(raw, "merged", False),
         unreviewed_confidence=_entry_field(raw, "unreviewed_confidence"),
     )
 
@@ -1458,6 +1459,8 @@ async def rollback_segment(
     entry.word_corrections = None
     entry.correction_history = None
     entry.accepted = False
+    if entry.merged:
+        entry.unreviewed_confidence = entry.confidence
 
     _save_corrected_entry(session, job, index, entry)
     return _to_response(job)
@@ -1579,6 +1582,8 @@ async def rollback_to_history_entry(
 
     target = history[history_index]
     previous_text = entry.effective_text()
+    if entry.merged:
+        entry.unreviewed_confidence = entry.confidence
 
     # Anything currently overlapping the targeted range at all — not just an
     # exact match. An empty overlap means the range is presently untouched

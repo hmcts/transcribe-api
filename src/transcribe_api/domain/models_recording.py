@@ -154,10 +154,12 @@ class DialogueEntry(SQLModel):
     # audio/accuracy.py (nothing was actually corrected), but it must still
     # remove the segment from "needs review" (see compute_accuracy()).
     accepted: bool = False
-    # Set when this entry was combined from others (merge_dialogue_entries): the lowest
-    # confidence of a part that was neither corrected nor accepted, so that a
-    # correction to another part doesn't take it out of "needs review". Cleared by
-    # the next correction to this entry.
+    # Set on an entry combined from others (merge_dialogue_entries). Its own confidence
+    # and corrections no longer say whether every part has been reviewed, so its review
+    # state is unreviewed_confidence instead: the lowest confidence of a part not yet
+    # corrected or accepted, None once all are. Cleared by a correction; reset to the
+    # whole entry's confidence by a rollback, which can restore unreviewed text.
+    merged: bool = False
     unreviewed_confidence: float | None = None
 
     def has_corrections(self) -> bool:
@@ -167,9 +169,9 @@ class DialogueEntry(SQLModel):
         """The confidence that decides whether this entry still needs review; None once reviewed."""
         if self.accepted:
             return None
-        if not self.has_corrections():
-            return self.confidence
-        return self.unreviewed_confidence
+        if self.merged:
+            return self.unreviewed_confidence
+        return None if self.has_corrections() else self.confidence
 
     def effective_text(self) -> str:
         """Current text after any corrections — what a clerk would read today."""
@@ -206,8 +208,8 @@ def merge_dialogue_entries(first: DialogueEntry, second: DialogueEntry) -> Dialo
     the raw words); failing that, corrections are flattened into corrected_text. Each
     history snapshot gets the other entry's current text added, so rolling back to it
     undoes that one edit without dropping the other half. The lower confidence is kept,
-    unreviewed_confidence carries an unreviewed half's confidence past the other half's
-    corrections, and the result is accepted only if both halves were.
+    unreviewed_confidence carries the review state of each half (see DialogueEntry.merged),
+    and the result is accepted only if both halves were.
     """
     words = [*first.words, *second.words] if first.words and second.words else None
     offset = len(first.words) if words and first.words else None
@@ -282,6 +284,7 @@ def merge_dialogue_entries(first: DialogueEntry, second: DialogueEntry) -> Dialo
         words=words,
         alternatives=alternatives or None,
         accepted=first.accepted and second.accepted,
+        merged=True,
         unreviewed_confidence=min(unreviewed) if unreviewed else None,
     )
     current_text = _join(first_text, second_text)

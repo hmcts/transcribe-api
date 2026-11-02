@@ -357,10 +357,16 @@ class TestReviewConfidence:
         entry = DialogueEntry(speaker="0", text="hi", start_time=0, end_time=1, confidence=0.4, accepted=True)
         assert entry.review_confidence() is None
 
-    def test_corrected_entry_uses_unreviewed_confidence(self):
+    def test_corrected_entry_needs_no_review(self):
         entry = DialogueEntry(speaker="0", text="hi", start_time=0, end_time=1, confidence=0.4, corrected_text="hey")
         assert entry.review_confidence() is None
+
+    def test_merged_entry_uses_unreviewed_confidence_whatever_its_corrections(self):
+        entry = DialogueEntry(speaker="0", text="hi", start_time=0, end_time=1, confidence=0.4, merged=True)
+        assert entry.review_confidence() is None
         entry.unreviewed_confidence = 0.3
+        assert entry.review_confidence() == 0.3
+        entry.corrected_text = "hey"
         assert entry.review_confidence() == 0.3
 
 
@@ -379,6 +385,18 @@ class TestMergeKeepsUnreviewedHalves:
     def test_accepted_half_is_not_carried(self):
         accepted = self.unreviewed.model_copy(update={"accepted": True})
         assert merge_dialogue_entries(self.corrected, accepted).review_confidence() is None
+
+    def test_accepted_low_half_with_untouched_high_half_needs_no_review_in_both_directions(self):
+        accepted = self.unreviewed.model_copy(update={"accepted": True})
+        untouched = DialogueEntry(speaker="0", text="Please sit.", start_time=2, end_time=3, confidence=0.9)
+        for a, b in [(accepted, untouched), (untouched, accepted)]:
+            merged = merge_dialogue_entries(a, b)
+            assert merged.confidence == 0.4
+            assert merged.review_confidence() == 0.9
+
+    def test_two_untouched_halves_need_review_at_the_lower_confidence(self):
+        untouched = DialogueEntry(speaker="0", text="Please sit.", start_time=2, end_time=3, confidence=0.9)
+        assert merge_dialogue_entries(untouched, self.unreviewed).review_confidence() == 0.4
 
     def test_carried_through_a_second_merge(self):
         merged = merge_dialogue_entries(self.corrected, self.unreviewed)

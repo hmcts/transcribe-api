@@ -2276,6 +2276,30 @@ class TestMergeSegmentWithNext:
         assert response.status_code == 200
         assert response.json()["needs_review"] == []
 
+    def _merged_with_corrected_halves(self, client, mocker):
+        job = self._job()
+        job.dialogue_entries[0]["corrected_text"] = "Good"
+        job.dialogue_entries[0]["correction_history"] = [
+            {"timestamp": "2026-01-01T09:00:00+00:00", "kind": "segment", "previous_text": "Gud", "new_text": "Good"}
+        ]
+        job.dialogue_entries[1]["corrected_text"] = "morning!"
+        response, _ = self._post(client, mocker, job, 0)
+        assert response.json()["needs_review"] == []
+        return job
+
+    @pytest.mark.parametrize("path", ["rollback", "history/0/rollback"])
+    def test_rollback_on_merged_segment_puts_it_back_in_review(self, client, as_current_user, mocker, path):
+        from transcribe_api.runtime.db_recording import get_session
+
+        job = self._merged_with_corrected_halves(client, mocker)
+        client.app.dependency_overrides[get_session] = lambda: MagicMock()
+        try:
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/0/{path}")
+        finally:
+            client.app.dependency_overrides.pop(get_session, None)
+        assert response.status_code == 200
+        assert response.json()["needs_review"] == [{"speaker": "Speaker 1", "start_time": 0.0, "confidence": 0.5}]
+
 
 class TestRollbackSegment:
     def _patch_session(self, client, mocker):
