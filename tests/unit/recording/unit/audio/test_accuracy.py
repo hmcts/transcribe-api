@@ -87,6 +87,17 @@ class TestComputeAccuracy:
         assert summary.low_confidence_count == 0
         assert summary.needs_review == []
 
+    def test_corrected_segment_with_an_unreviewed_merged_part_stays_in_needs_review(self):
+        entry = _entry(confidence=0.9, corrected="fixed text")
+        entry.unreviewed_confidence = 0.4
+        summary = compute_accuracy([entry], confidence_threshold=0.85)
+        assert [item.confidence for item in summary.needs_review] == [0.4]
+
+    def test_unreviewed_merged_part_above_threshold_does_not_need_review(self):
+        entry = _entry(confidence=0.9, corrected="fixed text")
+        entry.unreviewed_confidence = 0.9
+        assert compute_accuracy([entry], confidence_threshold=0.85).needs_review == []
+
     def test_accepting_a_segment_does_not_count_as_a_correction(self):
         """Accept-all is distinct from a real correction: it must not
         contribute to has_corrections()/word_error_rate — there is no

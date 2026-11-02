@@ -311,3 +311,76 @@ class TestMergeDialogueEntries:
         assert merge_dialogue_entries(first, second).accepted is False
         first, second = self._pair(first={"accepted": True}, second={"accepted": True})
         assert merge_dialogue_entries(first, second).accepted is True
+
+    def test_keeps_word_corrections_when_the_untouched_half_reads_the_same_from_its_words(self):
+        first, second = self._pair(
+            first={"word_corrections": [WordCorrection(start_word_index=0, end_word_index=0, text="a")]},
+            second={"text": "brown fox"},
+        )
+        merged = merge_dialogue_entries(first, second)
+        assert merged.word_corrections is not None
+        assert merged.corrected_text is None
+        assert merged.effective_text() == "a quick brown fox"
+
+    def test_flattens_when_rebuilding_from_words_would_change_the_untouched_half(self):
+        first = DialogueEntry(
+            speaker="0",
+            text="My favourite colour.",
+            start_time=0,
+            end_time=1,
+            words=_words("my", "favorite", "color"),
+        )
+        second = DialogueEntry(
+            speaker="1",
+            text="Is blue.",
+            start_time=1,
+            end_time=2,
+            words=_words("is", "blue"),
+            word_corrections=[WordCorrection(start_word_index=1, end_word_index=1, text="green")],
+        )
+        for a, b, expected in [
+            (first, second, "My favourite colour. is green"),
+            (second, first, "is green My favourite colour."),
+        ]:
+            merged = merge_dialogue_entries(a, b)
+            assert merged.word_corrections is None
+            assert merged.corrected_text == expected
+            assert merged.effective_text() == expected
+
+
+class TestReviewConfidence:
+    def test_uncorrected_entry_uses_its_confidence(self):
+        entry = DialogueEntry(speaker="0", text="hi", start_time=0, end_time=1, confidence=0.4)
+        assert entry.review_confidence() == 0.4
+
+    def test_none_once_accepted(self):
+        entry = DialogueEntry(speaker="0", text="hi", start_time=0, end_time=1, confidence=0.4, accepted=True)
+        assert entry.review_confidence() is None
+
+    def test_corrected_entry_uses_unreviewed_confidence(self):
+        entry = DialogueEntry(speaker="0", text="hi", start_time=0, end_time=1, confidence=0.4, corrected_text="hey")
+        assert entry.review_confidence() is None
+        entry.unreviewed_confidence = 0.3
+        assert entry.review_confidence() == 0.3
+
+
+class TestMergeKeepsUnreviewedHalves:
+    corrected = DialogueEntry(
+        speaker="0", text="The hering", start_time=0, end_time=1, confidence=0.9, corrected_text="The hearing"
+    )
+    unreviewed = DialogueEntry(speaker="1", text="is adjourned.", start_time=1, end_time=2, confidence=0.4)
+
+    def test_unreviewed_half_still_needs_review_in_both_directions(self):
+        for a, b in [(self.corrected, self.unreviewed), (self.unreviewed, self.corrected)]:
+            merged = merge_dialogue_entries(a, b)
+            assert merged.has_corrections() is True
+            assert merged.review_confidence() == 0.4
+
+    def test_accepted_half_is_not_carried(self):
+        accepted = self.unreviewed.model_copy(update={"accepted": True})
+        assert merge_dialogue_entries(self.corrected, accepted).review_confidence() is None
+
+    def test_carried_through_a_second_merge(self):
+        merged = merge_dialogue_entries(self.corrected, self.unreviewed)
+        again = merge_dialogue_entries(self.corrected, merged)
+        assert again.review_confidence() == 0.4

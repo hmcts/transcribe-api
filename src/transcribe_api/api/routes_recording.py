@@ -440,6 +440,7 @@ def _to_dialogue_entry(raw) -> DialogueEntry:
         words=_entry_field(raw, "words"),
         alternatives=_entry_field(raw, "alternatives"),
         accepted=_entry_field(raw, "accepted", False),
+        unreviewed_confidence=_entry_field(raw, "unreviewed_confidence"),
     )
 
 
@@ -1261,6 +1262,7 @@ async def correct_segment(
     previous_text = entry.effective_text()
     entry.corrected_text = body.corrected_text
     entry.word_corrections = None
+    entry.unreviewed_confidence = None
     entry.correction_history = [
         *(entry.correction_history or []),
         CorrectionEntry(
@@ -1355,6 +1357,7 @@ async def correct_word_range(
         )
     )
     entry.word_corrections = non_overlapping
+    entry.unreviewed_confidence = None
 
     entry.correction_history = [
         *(entry.correction_history or []),

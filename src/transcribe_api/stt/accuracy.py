@@ -80,12 +80,9 @@ def compute_accuracy(
     has_corrections = any(e.has_corrections() for e in entries)
 
     needs_review = [
-        NeedsReviewItem(speaker=e.speaker, start_time=e.start_time, confidence=e.confidence)
+        NeedsReviewItem(speaker=e.speaker, start_time=e.start_time, confidence=confidence)
         for e in entries
-        if e.confidence is not None
-        and e.confidence < confidence_threshold
-        and not e.has_corrections()
-        and not e.accepted
+        if (confidence := e.review_confidence()) is not None and confidence < confidence_threshold
     ]
 
     wer = None

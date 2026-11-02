@@ -2255,6 +2255,27 @@ class TestMergeSegmentWithNext:
         response, _ = self._post(client, mocker, self._job(), 0)
         assert [item["start_time"] for item in response.json()["needs_review"]] == [0.0]
 
+    def test_unreviewed_half_stays_in_review_until_the_merged_segment_is_corrected(
+        self, client, as_current_user, mocker
+    ):
+        from transcribe_api.runtime.db_recording import get_session
+
+        job = self._job()
+        job.dialogue_entries[0]["confidence"] = 0.95
+        job.dialogue_entries[0]["corrected_text"] = "Good"
+        response, _ = self._post(client, mocker, job, 0)
+        assert response.json()["needs_review"] == [{"speaker": "Speaker 1", "start_time": 0.0, "confidence": 0.5}]
+
+        client.app.dependency_overrides[get_session] = lambda: MagicMock()
+        try:
+            response = client.patch(
+                f"/api/v1/jobs/{job.id}/segments/0", json={"corrected_text": "Good morning."}
+            )
+        finally:
+            client.app.dependency_overrides.pop(get_session, None)
+        assert response.status_code == 200
+        assert response.json()["needs_review"] == []
+
 
 class TestRollbackSegment:
     def _patch_session(self, client, mocker):

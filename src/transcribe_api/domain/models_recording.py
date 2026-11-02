@@ -154,9 +154,22 @@ class DialogueEntry(SQLModel):
     # audio/accuracy.py (nothing was actually corrected), but it must still
     # remove the segment from "needs review" (see compute_accuracy()).
     accepted: bool = False
+    # Set when this entry was combined from others (merge_dialogue_entries): the lowest
+    # confidence of a part that was neither corrected nor accepted, so that a
+    # correction to another part doesn't take it out of "needs review". Cleared by
+    # the next correction to this entry.
+    unreviewed_confidence: float | None = None
 
     def has_corrections(self) -> bool:
         return self.corrected_text is not None or bool(self.word_corrections)
+
+    def review_confidence(self) -> float | None:
+        """The confidence that decides whether this entry still needs review; None once reviewed."""
+        if self.accepted:
+            return None
+        if not self.has_corrections():
+            return self.confidence
+        return self.unreviewed_confidence
 
     def effective_text(self) -> str:
         """Current text after any corrections — what a clerk would read today."""
@@ -187,12 +200,14 @@ def _shift(start: int | None, end: int | None, offset: int | None) -> tuple[int 
 def merge_dialogue_entries(first: DialogueEntry, second: DialogueEntry) -> DialogueEntry:
     """Combine two adjacent entries into one, keeping `first`'s speaker and start and `second`'s end.
 
-    Word indices are positions in the combined `words` list, so per-word data and
-    word-range corrections survive only when both entries have words; otherwise any
-    correction is flattened into corrected_text. Each history snapshot gets the other
-    entry's current text added, so rolling back to it undoes that one edit without
-    dropping the other half. The lower confidence is kept so that a low-confidence
-    half still needs review, and the result is accepted only if both halves were.
+    Word indices are positions in the combined `words` list, so word-range corrections
+    survive only when both entries have words and rebuilding from them reproduces both
+    halves' current text (an untouched half otherwise switches from its display text to
+    the raw words); failing that, corrections are flattened into corrected_text. Each
+    history snapshot gets the other entry's current text added, so rolling back to it
+    undoes that one edit without dropping the other half. The lower confidence is kept,
+    unreviewed_confidence carries an unreviewed half's confidence past the other half's
+    corrections, and the result is accepted only if both halves were.
     """
     words = [*first.words, *second.words] if first.words and second.words else None
     offset = len(first.words) if words and first.words else None
@@ -253,8 +268,9 @@ def merge_dialogue_entries(first: DialogueEntry, second: DialogueEntry) -> Dialo
         alternatives.append(group.model_copy(update={"start_word_index": start, "end_word_index": end}))
 
     confidences = [c for c in (first.confidence, second.confidence) if c is not None]
+    unreviewed = [c for c in (first.review_confidence(), second.review_confidence()) if c is not None]
 
-    return DialogueEntry(
+    merged = DialogueEntry(
         speaker=first.speaker,
         text=_join(first.text, second.text),
         start_time=first.start_time,
@@ -266,7 +282,13 @@ def merge_dialogue_entries(first: DialogueEntry, second: DialogueEntry) -> Dialo
         words=words,
         alternatives=alternatives or None,
         accepted=first.accepted and second.accepted,
+        unreviewed_confidence=min(unreviewed) if unreviewed else None,
     )
+    current_text = _join(first_text, second_text)
+    if merged.word_corrections and merged.effective_text() != current_text:
+        merged.corrected_text = current_text
+        merged.word_corrections = None
+    return merged
 
 
 class CorrectionDatasetEntry(BaseTable, table=True):
