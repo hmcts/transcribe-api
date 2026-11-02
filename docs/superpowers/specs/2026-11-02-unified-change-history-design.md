@@ -135,7 +135,7 @@ The log must no longer be folded into sections, and combines must no longer rewr
 
 A rolled-back entry is deleted (decision 6). A section reset deletes the section's entries that it undoes. A whole-transcription reset deletes every entry.
 
-Legacy entries are the `correction_history` entries saved before this ships. They are shown with an unknown user and cannot be undone individually (our call). They are always older than any new entry, so they sit at the bottom of the stack and never block an undo.
+Legacy entries are the `correction_history` entries saved before this ships. They are shown with an unknown user and cannot be undone individually (our call). They are always older than any new entry, so they sit at the bottom of the stack and never block an undo. Entries made at or before the barrier version are treated the same way (see "Concurrency").
 
 Recommended approach (the builder decides): a new table, for example `transcription_change`, with columns `job_id`, `seq`, `user_id`, `created_at`, `kind`, `segment_ids` and a JSONB `payload`, with a unique constraint on (`job_id`, `seq`). Each change writes its log row and its dialogue entries in one transaction. A table gives a real foreign key to `user`, cheap deletes, and lookups such as "the latest entry touching section X" without loading the whole transcript. A JSONB log column on `transcription_job` would also work. It is simpler to migrate, but every write must rewrite it.
 
@@ -183,8 +183,12 @@ Anyone who passes `_check_job_access(job, user, "transcript", "write")` and the 
 Rollout order matters, for the web and for old API pods.
 
 - Web: the API first returns the version and accepts writes without one. Then the web sends it. Then the API requires it. Otherwise a web deploy that lags the API would fail every write.
-- API: old pods rewrite the transcript without the version or the log. A new pod could then undo a logged change whose before-state predates an old pod's edit, and lose that edit without anyone seeing it. Two releases prevent this. The first release only makes every transcript write bump the version, and checks the version when one is sent. It does not change history. The second release adds the log and the new undo and reset operations. During its rollout, the only other writers are first-release pods, which bump the version.
-- Each log entry records the version before and after it. When an entry's "before" version is not the "after" version of the entry below it, a write happened that the log did not record. Undo stops at that gap: the entries below it become non-undoable, like legacy entries, and the API says why. A section reset or whole-transcription reset is still exact, because it works from the AI text or the stored original output rather than from those entries. An edit made by an old pod during the transition is therefore never discarded by an undo.
+- API: old pods rewrite the transcript without the version or the log. A new pod could then undo or reset a logged change whose before-state predates an old pod's edit, and lose that edit or partly undo an unlogged multi-section change. Two releases prevent this.
+  - The first release changes no history behaviour. It makes every transcript write bump the version, checks the version when one is sent, and records each of its writes as a barrier by setting a job column, for example `history_barrier_version`, to the version that write produced.
+  - The second release adds the log and the new undo and reset operations. Its own writes, including undos and resets, never move the barrier. During its rollout, the only other writers are first-release pods, and every write they make moves the barrier.
+- A logged entry made at or before the barrier version is treated as a legacy entry: it is shown, but cannot be undone, and the API says why. An undo is allowed only for entries made after the barrier, so it never restores a before-state older than an unlogged write. This holds whether the unlogged write came before or after the latest logged entry. A legitimate undo or reset bumps the version without moving the barrier, so a new edit after an undo never makes older entries look unrecorded.
+- A section reset treats changes made at or before the barrier the same way it treats changes made before this ships on a legacy job (see "Resets"). It refuses to split a combine made at or before the barrier. It does not restore labels from renames made at or before the barrier. It keeps the rename-all rebasing and refusal rules for later changes. So an unlogged rename-all is never partly undone. Whole-transcription reset on a new job stays exact, because it replaces everything with the stored original output.
+- After the second release has fully rolled out, nothing moves the barrier again.
 
 ### Training dataset
 
@@ -205,7 +209,7 @@ The flag has been off everywhere, so the table should be empty. The builder shou
 
 The job response carries the following:
 
-- the version;
+- the version, and the barrier version if there is one;
 - the transcription's change log, unless a separate endpoint serves it;
 - whether an exact whole-transcription reset is possible, and the reason when it is not (decision 8);
 - per section, whether a reset is possible and the reason when it is not.
@@ -222,8 +226,8 @@ The new operations are: undo the latest change for a section, undo the latest ch
 
 ## Constraints
 
-- Migrations go only through master (README "Branches and environments"). The schema changes land first as additive Alembic migrations in their own PR to master: the stored original AI output, the version column, the log storage, and the dataset's segment id and original and final speaker columns. Then master is merged into develop, and then the feature goes in. The next revision is `0006`. `tests/unit/test_migrations.py` covers migrations.
-- Old and new pods run side by side during a rollout. New code must read jobs whose history is still inline `correction_history`, and old pods' writes in that window must not corrupt the log or be lost to an undo (see "Concurrency" for the two releases and the version gap rule). A job whose results an old pod saves during the rollout has no stored copy, so it is legacy.
+- Migrations go only through master (README "Branches and environments"). The schema changes land first as additive Alembic migrations in their own PR to master: the stored original AI output, the version and barrier columns, the log storage, and the dataset's segment id and original and final speaker columns. Then master is merged into develop, and then the feature goes in. The next revision is `0006`. `tests/unit/test_migrations.py` covers migrations.
+- Old and new pods run side by side during a rollout. New code must read jobs whose history is still inline `correction_history`, and old pods' writes in that window must not corrupt the log or be lost to an undo (see "Concurrency" for the two releases and the barrier rule). A job whose results an old pod saves during the rollout has no stored copy, so it is legacy.
 - Both repos have tests, and this work must extend them. transcribe-api uses pytest under `tests/unit/` (for example `recording/unit/api/test_routes.py`, `recording/unit/database/test_correction_dataset.py` and `recording/integration/test_dialogue_entries_persistence.py`). transcribe-web uses Vitest under `tests/recording/unit/` (the segment, speaker and merge-next route tests, `modification-history.test.ts` and `modification-history-table.test.tsx`) and Playwright under `tests/recording/e2e/` (`modification-history.spec.ts` and `speaker-rename.spec.ts`).
 - The web calls the API only through Next.js API routes, which must pass through the version, the reset flags and the new 409 code.
 
@@ -235,7 +239,8 @@ Tests should cover at least the following:
 - Undoing a combine gives back both original sections exactly as they were, with their ids.
 - An undo or reset that would affect a dependent change is refused, and the message names the section.
 - A section reset restores single renames, keeps a covering rename-all and rebases its previous label, and splits a combined section.
-- An unrecorded write between two log entries stops undo at that point.
+- A first-release write, before or after the latest logged entry, makes every entry at or before it non-undoable, and a section reset across it does not split earlier combines or restore earlier renames.
+- An undo followed by a new edit leaves the older entries undoable.
 - A combine of two sections with different speakers produces training rows that keep each source's original speaker.
 - Whole-transcription reset on a new job gives back the stored original AI output and an empty log. The web asks for confirmation first.
 - On a legacy job, whole-transcription reset and undoing or resetting a legacy combine are refused with the reason, and the web hides those controls.
