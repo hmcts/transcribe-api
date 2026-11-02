@@ -1,11 +1,13 @@
 """Unit tests for DialogueEntry's correction/effective-text logic."""
 
 from transcribe_api.domain.models_recording import (
+    CorrectionEntry,
     DialogueEntry,
     NBestCandidate,
     PhraseAlternatives,
     WordCorrection,
     WordInfo,
+    merge_dialogue_entries,
 )
 
 
@@ -171,3 +173,141 @@ class TestAlternatives:
         assert group.end_word_index == 1
         assert [c.text for c in group.candidates] == ["Hello world.", "helloworld"]
         assert group.candidates[1].confidence == 0.18
+
+
+class TestMergeDialogueEntries:
+    def _pair(self, **overrides):
+        first = DialogueEntry(
+            speaker="Speaker 1",
+            text="The quick",
+            start_time=1.0,
+            end_time=2.0,
+            confidence=0.9,
+            words=_words("the", "quick"),
+        )
+        second = DialogueEntry(
+            speaker="Speaker 2",
+            text="brown fox.",
+            start_time=2.5,
+            end_time=4.0,
+            confidence=0.6,
+            words=_words("brown", "fox"),
+        )
+        return first.model_copy(update=overrides.get("first", {})), second.model_copy(
+            update=overrides.get("second", {})
+        )
+
+    def test_keeps_first_speaker_and_start_and_second_end(self):
+        merged = merge_dialogue_entries(*self._pair())
+        assert merged.speaker == "Speaker 1"
+        assert merged.start_time == 1.0
+        assert merged.end_time == 4.0
+
+    def test_joins_text_with_a_single_space(self):
+        first, second = self._pair(first={"text": "The quick "}, second={"text": " brown fox."})
+        assert merge_dialogue_entries(first, second).text == "The quick brown fox."
+
+    def test_keeps_the_lower_confidence(self):
+        assert merge_dialogue_entries(*self._pair()).confidence == 0.6
+
+    def test_confidence_from_the_only_half_that_has_one(self):
+        first, second = self._pair(second={"confidence": None})
+        assert merge_dialogue_entries(first, second).confidence == 0.9
+
+    def test_concatenates_words(self):
+        merged = merge_dialogue_entries(*self._pair())
+        assert [w.text for w in merged.words] == ["the", "quick", "brown", "fox"]
+
+    def test_drops_words_when_one_half_has_none(self):
+        first, second = self._pair(second={"words": None})
+        assert merge_dialogue_entries(first, second).words is None
+
+    def test_shifts_second_word_corrections_past_first_words(self):
+        first, second = self._pair(
+            first={"word_corrections": [WordCorrection(start_word_index=0, end_word_index=0, text="a")]},
+            second={"word_corrections": [WordCorrection(start_word_index=1, end_word_index=1, text="dog")]},
+        )
+        merged = merge_dialogue_entries(first, second)
+        assert [(wc.start_word_index, wc.end_word_index, wc.text) for wc in merged.word_corrections] == [
+            (0, 0, "a"),
+            (3, 3, "dog"),
+        ]
+        assert merged.corrected_text is None
+        assert merged.effective_text() == "a quick brown dog"
+
+    def test_flattens_corrections_when_either_half_has_a_whole_segment_correction(self):
+        first, second = self._pair(
+            first={"word_corrections": [WordCorrection(start_word_index=0, end_word_index=0, text="a")]},
+            second={"corrected_text": "red fox."},
+        )
+        merged = merge_dialogue_entries(first, second)
+        assert merged.corrected_text == "a quick red fox."
+        assert merged.word_corrections is None
+
+    def test_flattens_word_corrections_when_words_are_dropped(self):
+        first, second = self._pair(
+            first={"word_corrections": [WordCorrection(start_word_index=0, end_word_index=0, text="a")]},
+            second={"words": None},
+        )
+        merged = merge_dialogue_entries(first, second)
+        assert merged.corrected_text == "a quick brown fox."
+        assert merged.word_corrections is None
+
+    def test_no_corrections_when_neither_half_was_corrected(self):
+        merged = merge_dialogue_entries(*self._pair())
+        assert merged.corrected_text is None
+        assert merged.word_corrections is None
+        assert merged.has_corrections() is False
+
+    def test_history_snapshots_include_the_other_half(self):
+        first, second = self._pair(
+            first={
+                "corrected_text": "A quick",
+                "correction_history": [
+                    CorrectionEntry(
+                        timestamp="2026-01-01T10:00:00+00:00",
+                        kind="segment",
+                        previous_text="The quick",
+                        new_text="A quick",
+                    )
+                ],
+            },
+            second={
+                "word_corrections": [WordCorrection(start_word_index=1, end_word_index=1, text="dog")],
+                "correction_history": [
+                    CorrectionEntry(
+                        timestamp="2026-01-01T09:00:00+00:00",
+                        kind="word_range",
+                        previous_text="brown fox.",
+                        new_text="brown dog",
+                        start_word_index=1,
+                        end_word_index=1,
+                        previous_phrase="fox",
+                        new_phrase="dog",
+                    )
+                ],
+            },
+        )
+        history = merge_dialogue_entries(first, second).correction_history
+        assert [h.kind for h in history] == ["word_range", "segment"]
+        assert history[0].previous_text == "A quick brown fox."
+        assert history[0].new_text == "A quick brown dog"
+        assert (history[0].start_word_index, history[0].end_word_index) == (3, 3)
+        assert history[1].previous_text == "The quick brown dog"
+        assert history[1].new_text == "A quick brown dog"
+
+    def test_shifts_second_alternatives_and_clears_indices_without_words(self):
+        group = PhraseAlternatives(start_word_index=0, end_word_index=1, candidates=[NBestCandidate(text="x")])
+        first, second = self._pair(first={"alternatives": [group]}, second={"alternatives": [group]})
+        merged = merge_dialogue_entries(first, second)
+        assert [(g.start_word_index, g.end_word_index) for g in merged.alternatives] == [(0, 1), (2, 3)]
+
+        first, second = self._pair(first={"alternatives": [group]}, second={"words": None})
+        merged = merge_dialogue_entries(first, second)
+        assert [(g.start_word_index, g.end_word_index) for g in merged.alternatives] == [(None, None)]
+
+    def test_accepted_only_when_both_halves_were(self):
+        first, second = self._pair(first={"accepted": True})
+        assert merge_dialogue_entries(first, second).accepted is False
+        first, second = self._pair(first={"accepted": True}, second={"accepted": True})
+        assert merge_dialogue_entries(first, second).accepted is True
