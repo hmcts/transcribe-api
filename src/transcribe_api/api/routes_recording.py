@@ -8,13 +8,14 @@ import re
 import socket
 import tempfile
 import wave
+from collections import Counter
 from collections.abc import AsyncGenerator
 from contextlib import aclosing
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Annotated
 from urllib.parse import urlparse
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 import aiofiles
 from fastapi import (
@@ -317,6 +318,7 @@ class CorrectionEntryResponse(BaseModel):
 
 
 class DialogueEntryResponse(BaseModel):
+    id: str
     speaker: str
     text: str
     start_time: float
@@ -419,6 +421,11 @@ class RenameSpeakerRequest(BaseModel):
         return v.strip() if isinstance(v, str) else v
 
 
+class MergeNextRequest(BaseModel):
+    # The segment the caller expects to follow; another must not be combined in its place.
+    next_segment_id: str | None = None
+
+
 class RollbackHistoryRequest(BaseModel):
     history_index: int = Field(ge=0)
 
@@ -429,6 +436,7 @@ def _entry_field(entry, field: str, default=None):
 
 def _to_dialogue_entry(raw) -> DialogueEntry:
     return DialogueEntry(
+        id=_entry_field(raw, "id"),
         speaker=_entry_field(raw, "speaker", ""),
         text=_entry_field(raw, "text", ""),
         start_time=_entry_field(raw, "start_time", 0.0),
@@ -442,13 +450,39 @@ def _to_dialogue_entry(raw) -> DialogueEntry:
         accepted=_entry_field(raw, "accepted", False),
         merged=_entry_field(raw, "merged", False),
         unreviewed_confidence=_entry_field(raw, "unreviewed_confidence"),
+        parts=_entry_field(raw, "parts"),
     )
+
+
+def _content_key(raw) -> tuple:
+    # What never changes for a segment (a merge makes a new one), so a segment rewritten
+    # without its id, e.g. by an older pod mid-deploy, can't take another's.
+    return tuple(_entry_field(raw, f, "") for f in ("start_time", "end_time", "text"))
+
+
+def _entries_with_ids(job: SpeechBatchJob) -> list:
+    """job.dialogue_entries, giving any entry saved without an id one derived from its content.
+
+    The derived id stays the same on every read until the next write saves it with
+    the entry, so jobs from before segment ids need no migration.
+    """
+    entries = []
+    seen: Counter[tuple] = Counter()
+    for raw in job.dialogue_entries:
+        key = _content_key(raw)
+        repeat = seen[key]
+        seen[key] += 1
+        if not _entry_field(raw, "id"):
+            derived = uuid5(job.id, json.dumps([*key, repeat]))
+            raw = {**(raw if isinstance(raw, dict) else raw.model_dump()), "id": f"seg_{derived.hex}"}
+        entries.append(raw)
+    return entries
 
 
 def _to_dialogue_entries(job: SpeechBatchJob) -> list[DialogueEntry] | None:
     if job.status != JobStatus.SUCCEEDED or not job.dialogue_entries:
         return None
-    return [_to_dialogue_entry(e) for e in job.dialogue_entries]
+    return [_to_dialogue_entry(e) for e in _entries_with_ids(job)]
 
 
 def _to_response(job: SpeechBatchJob) -> JobResponse:
@@ -493,6 +527,7 @@ def _to_response(job: SpeechBatchJob) -> JobResponse:
         updated_at=job.updated_datetime.isoformat() if job.updated_datetime else None,
         dialogue_entries=[
             DialogueEntryResponse(
+                id=e.id,
                 speaker=e.speaker,
                 text=e.text,
                 start_time=e.start_time,
@@ -1209,18 +1244,32 @@ def _assert_job_owner(
 
 
 def _load_entry_for_correction(
-    session: Session, job_id: UUID, index: int, current_user: AuthenticatedUser
-) -> tuple[SpeechBatchJob, DialogueEntry]:
+    session: Session, job_id: UUID, segment: str, current_user: AuthenticatedUser
+) -> tuple[SpeechBatchJob, int, DialogueEntry]:
+    """Load the job and the segment named by `segment`: its id, or (until the web has moved to ids) its index."""
     job = get_job_by_id(session, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     _check_job_access(job, current_user, "transcript", "write")
     if job.status != JobStatus.SUCCEEDED or not job.dialogue_entries:
         raise HTTPException(status_code=422, detail="Job has no transcript to correct")
-    if index < 0 or index >= len(job.dialogue_entries):
-        raise HTTPException(status_code=404, detail="Segment not found")
 
-    return job, _to_dialogue_entry(job.dialogue_entries[index])
+    job.dialogue_entries = _entries_with_ids(job)
+    if segment.isdigit():
+        index = int(segment)
+        if index >= len(job.dialogue_entries):
+            raise HTTPException(status_code=404, detail="Segment not found")
+    else:
+        index = next((i for i, raw in enumerate(job.dialogue_entries) if _entry_field(raw, "id") == segment), -1)
+        if index < 0:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This segment no longer exists: it may have been combined with another. "
+                    "Reload the transcript and try again."
+                ),
+            )
+    return job, index, _to_dialogue_entry(job.dialogue_entries[index])
 
 
 def _save_corrected_entry(
@@ -1242,10 +1291,10 @@ def _save_entries(session: Session, job: SpeechBatchJob, entries: list) -> None:
     session.refresh(job)
 
 
-@router.patch("/jobs/{job_id}/segments/{index}", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
+@router.patch("/jobs/{job_id}/segments/{segment}", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
 async def correct_segment(
     job_id: UUID,
-    index: int,
+    segment: str,
     body: CorrectSegmentRequest,
     session: Session = Depends(get_session),
     current_user: AuthenticatedUser = Depends(get_current_user),
@@ -1258,7 +1307,7 @@ async def correct_segment(
     whole-segment override takes full precedence over any prior word-range
     corrections, so those are cleared.
     """
-    job, entry = _load_entry_for_correction(session, job_id, index, current_user)
+    job, index, entry = _load_entry_for_correction(session, job_id, segment, current_user)
 
     previous_text = entry.effective_text()
     entry.corrected_text = body.corrected_text
@@ -1294,10 +1343,10 @@ async def correct_segment(
     return _to_response(job)
 
 
-@router.patch("/jobs/{job_id}/segments/{index}/words", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
+@router.patch("/jobs/{job_id}/segments/{segment}/words", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
 async def correct_word_range(
     job_id: UUID,
-    index: int,
+    segment: str,
     body: CorrectWordRangeRequest,
     session: Session = Depends(get_session),
     current_user: AuthenticatedUser = Depends(get_current_user),
@@ -1307,7 +1356,7 @@ async def correct_word_range(
     Unlike a whole-segment correction, this keeps confidence highlighting
     and playback-sync intact for every word outside the corrected range.
     """
-    job, entry = _load_entry_for_correction(session, job_id, index, current_user)
+    job, index, entry = _load_entry_for_correction(session, job_id, segment, current_user)
 
     if not entry.words:
         raise HTTPException(status_code=422, detail="Segment has no word-level data to correct")
@@ -1409,12 +1458,13 @@ async def correct_word_range(
 
 
 @router.post(
-    "/jobs/{job_id}/segments/{index}/merge-next", dependencies=[_job_in_jurisdiction(TRANSCRIPT)],
+    "/jobs/{job_id}/segments/{segment}/merge-next", dependencies=[_job_in_jurisdiction(TRANSCRIPT)],
     response_model=JobResponse,
 )
 async def merge_segment_with_next(
     job_id: UUID,
-    index: int,
+    segment: str,
+    body: MergeNextRequest | None = None,
     session: Session = Depends(get_session),
     current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> JobResponse:
@@ -1423,21 +1473,30 @@ async def merge_segment_with_next(
     Segments after the pair move up one index. See merge_dialogue_entries for how
     corrections, history and per-word data are carried over.
     """
-    job, entry = _load_entry_for_correction(session, job_id, index, current_user)
+    job, index, entry = _load_entry_for_correction(session, job_id, segment, current_user)
     if index + 1 >= len(job.dialogue_entries):
         raise HTTPException(status_code=422, detail="Segment has no next segment to combine with")
+    next_raw = job.dialogue_entries[index + 1]
+    if body and body.next_segment_id and _entry_field(next_raw, "id") != body.next_segment_id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The segment after this one has changed: it may have been combined with another. "
+                "Reload the transcript and try again."
+            ),
+        )
 
-    merged = merge_dialogue_entries(entry, _to_dialogue_entry(job.dialogue_entries[index + 1]))
+    merged = merge_dialogue_entries(entry, _to_dialogue_entry(next_raw))
     entries = list(job.dialogue_entries)
     entries[index : index + 2] = [merged.model_dump()]
     _save_entries(session, job, entries)
     return _to_response(job)
 
 
-@router.post("/jobs/{job_id}/segments/{index}/rollback", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
+@router.post("/jobs/{job_id}/segments/{segment}/rollback", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
 async def rollback_segment(
     job_id: UUID,
-    index: int,
+    segment: str,
     session: Session = Depends(get_session),
     current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> JobResponse:
@@ -1449,7 +1508,7 @@ async def rollback_segment(
     Batch produced it. It's a deliberate "start over" action, not one more
     logged change.
     """
-    job, entry = _load_entry_for_correction(session, job_id, index, current_user)
+    job, index, entry = _load_entry_for_correction(session, job_id, segment, current_user)
 
     previous_text = entry.effective_text()
     if previous_text == entry.text and not entry.accepted:
@@ -1459,6 +1518,8 @@ async def rollback_segment(
     entry.word_corrections = None
     entry.correction_history = None
     entry.accepted = False
+    if entry.parts:
+        entry.parts = [p.model_copy(update={"current_text": p.text}) for p in entry.parts]
     if entry.merged:
         entry.unreviewed_confidence = entry.confidence
 
@@ -1466,10 +1527,10 @@ async def rollback_segment(
     return _to_response(job)
 
 
-@router.post("/jobs/{job_id}/segments/{index}/accept", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
+@router.post("/jobs/{job_id}/segments/{segment}/accept", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
 async def accept_segment(
     job_id: UUID,
-    index: int,
+    segment: str,
     session: Session = Depends(get_session),
     current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> JobResponse:
@@ -1489,7 +1550,7 @@ async def accept_segment(
     compare against — no correction was made). needs_review filtering
     additionally excludes entries with accepted=True (see compute_accuracy).
     """
-    job, entry = _load_entry_for_correction(session, job_id, index, current_user)
+    job, index, entry = _load_entry_for_correction(session, job_id, segment, current_user)
 
     if entry.accepted:
         raise HTTPException(status_code=422, detail="Segment has already been accepted")
@@ -1511,13 +1572,13 @@ async def accept_segment(
 
 
 @router.patch(
-    "/jobs/{job_id}/segments/{index}/speaker",
+    "/jobs/{job_id}/segments/{segment}/speaker",
     dependencies=[_job_in_jurisdiction(TRANSCRIPT)],
     response_model=JobResponse,
 )
 async def rename_speaker(
     job_id: UUID,
-    index: int,
+    segment: str,
     body: RenameSpeakerRequest,
     session: Session = Depends(get_session),
     current_user: AuthenticatedUser = Depends(get_current_user),
@@ -1529,7 +1590,7 @@ async def rename_speaker(
     A speaker name is not a text correction, so it is not recorded in
     correction_history and a segment rollback leaves it alone.
     """
-    job, entry = _load_entry_for_correction(session, job_id, index, current_user)
+    job, index, entry = _load_entry_for_correction(session, job_id, segment, current_user)
 
     if body.speaker == entry.speaker:
         return _to_response(job)
@@ -1551,12 +1612,12 @@ async def rename_speaker(
 
 
 @router.post(
-    "/jobs/{job_id}/segments/{index}/history/{history_index}/rollback", dependencies=[_job_in_jurisdiction(TRANSCRIPT)],
+    "/jobs/{job_id}/segments/{segment}/history/{history_index}/rollback", dependencies=[_job_in_jurisdiction(TRANSCRIPT)],
     response_model=JobResponse,
 )
 async def rollback_to_history_entry(
     job_id: UUID,
-    index: int,
+    segment: str,
     history_index: int,
     session: Session = Depends(get_session),
     current_user: AuthenticatedUser = Depends(get_current_user),
@@ -1574,7 +1635,7 @@ async def rollback_to_history_entry(
     since reverting to an arbitrary point in time no longer has a clean
     correspondence to the original word positions in that case.
     """
-    job, entry = _load_entry_for_correction(session, job_id, index, current_user)
+    job, index, entry = _load_entry_for_correction(session, job_id, segment, current_user)
 
     history = entry.correction_history or []
     if history_index < 0 or history_index >= len(history):

@@ -3161,3 +3161,162 @@ class TestDeleteJob:
         assert response.status_code == 204
         mock_session.delete.assert_called_once_with(job)
         mock_session.commit.assert_called_once()
+
+
+class TestSegmentIds:
+    def _job(self):
+        job = _make_job(status=JobStatus.SUCCEEDED)
+        job.dialogue_entries = [
+            {"speaker": "Speaker 1", "text": "Good", "start_time": 0.0, "end_time": 1.0, "confidence": 0.9},
+            {"speaker": "Speaker 2", "text": "morning.", "start_time": 1.2, "end_time": 2.0, "confidence": 0.5},
+            {"speaker": "Speaker 1", "text": "Please sit.", "start_time": 3.0, "end_time": 4.0, "confidence": 0.95},
+        ]
+        return job
+
+    @contextmanager
+    def _session(self, client):
+        from transcribe_api.runtime.db_recording import get_session
+
+        mock_session = MagicMock()
+        client.app.dependency_overrides[get_session] = lambda: mock_session
+        try:
+            yield mock_session
+        finally:
+            client.app.dependency_overrides.pop(get_session, None)
+
+    def _ids(self, client, job):
+        return [e["id"] for e in client.get(f"/api/v1/jobs/{job.id}").json()["dialogue_entries"]]
+
+    def test_entries_saved_without_ids_get_the_same_ids_on_every_read(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        first = self._ids(client, job)
+        assert len(set(first)) == 3
+        assert all(i.startswith("seg_") for i in first)
+        assert self._ids(client, job) == first
+
+    def test_a_write_saves_the_ids_it_was_read_with(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        ids = self._ids(client, job)
+        with self._session(client):
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/{ids[2]}/accept")
+        assert response.status_code == 200
+        assert [e["id"] for e in job.dialogue_entries] == ids
+        assert self._ids(client, job) == ids
+
+    @pytest.mark.parametrize(
+        ("method", "path", "body"),
+        [
+            ("patch", "", {"corrected_text": "Good evening."}),
+            ("post", "/accept", None),
+            ("patch", "/speaker", {"speaker": "Judge"}),
+            ("post", "/merge-next", None),
+        ],
+    )
+    def test_every_segment_endpoint_takes_an_id(self, client, as_current_user, mocker, method, path, body):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        ids = self._ids(client, job)
+        with self._session(client) as session:
+            response = getattr(client, method)(f"/api/v1/jobs/{job.id}/segments/{ids[1]}{path}", json=body)
+        assert response.status_code == 200
+        session.commit.assert_called_once()
+        entries = response.json()["dialogue_entries"]
+        assert entries[0]["text"] == "Good"
+        assert entries[1]["text"].startswith("morning.")
+
+    def test_edits_keep_the_id_and_a_merge_replaces_both(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        ids = self._ids(client, job)
+        with self._session(client):
+            edited = client.patch(f"/api/v1/jobs/{job.id}/segments/{ids[0]}", json={"corrected_text": "Good,"})
+            merged = client.post(f"/api/v1/jobs/{job.id}/segments/{ids[0]}/merge-next")
+        assert [e["id"] for e in edited.json()["dialogue_entries"]] == ids
+        after = [e["id"] for e in merged.json()["dialogue_entries"]]
+        assert after[1] == ids[2]
+        assert after[0] not in ids
+
+    @pytest.mark.parametrize("path", ["", "/accept", "/rollback", "/speaker", "/merge-next", "/history/0/rollback"])
+    def test_an_absorbed_segment_is_a_409_and_nothing_is_saved(self, client, as_current_user, mocker, path):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        ids = self._ids(client, job)
+        with self._session(client):
+            client.post(f"/api/v1/jobs/{job.id}/segments/{ids[0]}/merge-next")
+        method = "patch" if path in ("", "/speaker") else "post"
+        body = {"corrected_text": "x"} if path == "" else {"speaker": "Judge"} if path == "/speaker" else None
+        with self._session(client) as session:
+            response = getattr(client, method)(f"/api/v1/jobs/{job.id}/segments/{ids[1]}{path}", json=body)
+        assert response.status_code == 409
+        assert "combined" in response.json()["detail"]
+        session.commit.assert_not_called()
+
+    def test_index_routes_still_work(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        with self._session(client):
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/2/accept")
+        assert response.status_code == 200
+        assert response.json()["dialogue_entries"][2]["accepted"] is True
+
+    def test_combining_returns_the_same_job_score(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        before = client.get(f"/api/v1/jobs/{job.id}").json()["accuracy"]
+        with self._session(client):
+            after = client.post(f"/api/v1/jobs/{job.id}/segments/0/merge-next").json()["accuracy"]
+        assert after["confidence_score"] == before["confidence_score"]
+        assert after["words_transcribed"] == before["words_transcribed"]
+
+    def test_merge_checks_the_segment_the_caller_expects_next(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        ids = self._ids(client, job)
+        with self._session(client) as session:
+            wrong = client.post(
+                f"/api/v1/jobs/{job.id}/segments/{ids[0]}/merge-next", json={"next_segment_id": ids[2]}
+            )
+            session.commit.assert_not_called()
+            right = client.post(
+                f"/api/v1/jobs/{job.id}/segments/{ids[0]}/merge-next", json={"next_segment_id": ids[1]}
+            )
+        assert wrong.status_code == 409
+        assert "after this one has changed" in wrong.json()["detail"]
+        assert right.status_code == 200
+        assert len(right.json()["dialogue_entries"]) == 2
+
+    def test_derived_ids_follow_the_segment_not_its_position(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        ids = self._ids(client, job)
+        job.dialogue_entries = [job.dialogue_entries[0], job.dialogue_entries[2]]
+        assert self._ids(client, job) == [ids[0], ids[2]]
+
+    def test_a_full_rollback_of_a_merged_segment_resets_its_parts(self, client, as_current_user, mocker):
+        job = self._job()
+        job.dialogue_entries[0]["corrected_text"] = "Good day"
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        with self._session(client):
+            merged_id = client.post(f"/api/v1/jobs/{job.id}/segments/0/merge-next").json()["dialogue_entries"][0]["id"]
+            client.post(f"/api/v1/jobs/{job.id}/segments/{merged_id}/rollback")
+        assert [p["current_text"] for p in job.dialogue_entries[0]["parts"]] == ["Good", "morning."]
+
+    def test_identical_legacy_entries_get_distinct_ids(self, client, as_current_user, mocker):
+        job = self._job()
+        twin = {**job.dialogue_entries[1], "speaker": "Speaker 3"}
+        job.dialogue_entries = [job.dialogue_entries[1], twin]
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        ids = self._ids(client, job)
+        assert len(set(ids)) == 2
+        with self._session(client):
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/{ids[1]}/accept")
+        assert [e["accepted"] for e in response.json()["dialogue_entries"]] == [False, True]
+
+    def test_text_that_looks_like_an_occurrence_count_does_not_collide(self, client, as_current_user, mocker):
+        job = self._job()
+        base = job.dialogue_entries[1]
+        job.dialogue_entries = [base, dict(base), {**base, "text": f"{base['text']}|1"}]
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        assert len(set(self._ids(client, job))) == 3

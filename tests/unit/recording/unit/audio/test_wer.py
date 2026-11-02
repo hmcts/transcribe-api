@@ -3,6 +3,7 @@
 import time
 
 from transcribe_api.stt.wer import (
+    split_by_alignment,
     aggregate_word_error_rate,
     baseline_word_error_rate,
     word_error_rate,
@@ -126,3 +127,23 @@ class TestBaselineWordErrorRate:
         start = time.monotonic()
         baseline_word_error_rate(long_ref, long_hyp)
         assert time.monotonic() - start < 5.0
+
+
+class TestSplitByAlignment:
+    def test_unchanged_text_splits_back_into_the_references(self):
+        assert split_by_alignment(["The quick", "brown fox."], "The quick brown fox.") == ["The quick", "brown fox."]
+
+    def test_substitution_stays_with_its_reference(self):
+        assert split_by_alignment(["The quick", "brown fox."], "The quick brown dog.") == ["The quick", "brown dog."]
+
+    def test_inserted_words_go_with_the_word_before_them(self):
+        assert split_by_alignment(["a b", "c d"], "x a b y c d z") == ["x a b y", "c d z"]
+
+    def test_deleted_reference_gets_an_empty_share(self):
+        assert split_by_alignment(["a b", "c d"], "a b") == ["a b", ""]
+
+    def test_all_empty_references_with_words_left_is_total_error(self):
+        from transcribe_api.stt.wer import aggregate_word_error_rate
+
+        assert aggregate_word_error_rate([("", "three four")]) == 1.0
+        assert aggregate_word_error_rate([("", "")]) == 0.0

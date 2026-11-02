@@ -3,6 +3,7 @@
 from transcribe_api.domain.models_recording import (
     CorrectionEntry,
     DialogueEntry,
+    EntryPart,
     NBestCandidate,
     PhraseAlternatives,
     WordCorrection,
@@ -406,3 +407,41 @@ class TestMergeKeepsUnreviewedHalves:
         merged = merge_dialogue_entries(self.corrected, self.unreviewed)
         again = merge_dialogue_entries(self.corrected, merged)
         assert again.review_confidence() == 0.4
+
+
+class TestSegmentIdsAndParts:
+    def _entry(self, text, confidence, start=0.0, **kw):
+        return DialogueEntry(id=f"seg_{text[:3]}", speaker="0", text=text, start_time=start, end_time=start + 1,
+                             confidence=confidence, **kw)
+
+    def test_merge_gives_the_result_a_new_id(self):
+        a, b = self._entry("one two", 0.9), self._entry("three", 0.5, 1)
+        merged = merge_dialogue_entries(a, b)
+        assert merged.id.startswith("seg_")
+        assert merged.id not in {a.id, b.id}
+
+    def test_unmerged_entry_is_one_part(self):
+        entry = self._entry("one two", 0.9, corrected_text="one too")
+        assert entry.current_parts() == [EntryPart(text="one two", current_text="one too", confidence=0.9)]
+
+    def test_merge_keeps_each_original_segment_as_a_part_through_a_second_merge(self):
+        a, b, c = self._entry("one two", 0.9), self._entry("three", 0.5, 1), self._entry("four", 0.7, 2)
+        merged = merge_dialogue_entries(merge_dialogue_entries(a, b), c)
+        assert [(p.text, p.confidence) for p in merged.parts] == [("one two", 0.9), ("three", 0.5), ("four", 0.7)]
+
+    def test_parts_follow_an_edit_made_after_the_merge(self):
+        merged = merge_dialogue_entries(self._entry("one two", 0.9), self._entry("three four", 0.5, 1))
+        merged.corrected_text = "one two three for"
+        assert [p.current_text for p in merged.current_parts()] == ["one two", "three for"]
+
+    def test_a_later_edit_keeps_an_earlier_correction_in_its_own_part(self):
+        sit = self._entry("please sit", 0.9, corrected_text="please sit down")
+        merged = merge_dialogue_entries(sit, self._entry("thank you", 0.8, 1))
+        merged.corrected_text = "please sit down thank you all"
+        assert [p.current_text for p in merged.current_parts()] == ["please sit down", "thank you all"]
+
+    def test_rolling_back_to_the_asr_text_gives_each_part_its_own(self):
+        sit = self._entry("please sit", 0.9, corrected_text="please sit down")
+        merged = merge_dialogue_entries(sit, self._entry("thank you", 0.8, 1))
+        merged.corrected_text = None
+        assert [p.current_text for p in merged.current_parts()] == ["please sit", "thank you"]

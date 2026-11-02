@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from transcribe_api.domain.models_recording import DialogueEntry
+from transcribe_api.domain.models_recording import DialogueEntry, EntryPart
 from transcribe_api.stt.wer import aggregate_word_error_rate, baseline_word_error_rate
 
 # Azure's per-word confidence often sits in the high 70s/low 80s for
@@ -62,17 +62,36 @@ class AccuracySummary:
     baseline_word_error_rate: float | None
 
 
+def _original_parts(entry: DialogueEntry) -> list[EntryPart]:
+    return entry.parts or [EntryPart(text=entry.text, current_text=entry.text, confidence=entry.confidence)]
+
+
+def _corrected_parts(entry: DialogueEntry) -> list[EntryPart]:
+    """The original segments in an entry that have a clerk's text to measure against.
+
+    Scored per original segment, so that merging a corrected segment with an
+    untouched one doesn't count the untouched words as corrected.
+    """
+    if not entry.has_corrections():
+        return []
+    parts = entry.current_parts()
+    if not entry.parts:
+        return parts
+    return [p for p in parts if p.current_text.lower().split() != p.text.lower().split()]
+
+
 def compute_accuracy(
     entries: list[DialogueEntry],
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
     baseline_transcript: str | None = None,
 ) -> AccuracySummary:
-    scored = [e for e in entries if e.confidence is not None]
+    parts = [p for e in entries for p in _original_parts(e)]
+    scored = [p for p in parts if p.confidence is not None]
     total_words = sum(len(e.text.split()) for e in entries)
 
-    weighted_words = sum(len(e.text.split()) for e in scored)
+    weighted_words = sum(len(p.text.split()) for p in scored)
     confidence_score = (
-        sum(e.confidence * len(e.text.split()) for e in scored) / weighted_words
+        sum(p.confidence * len(p.text.split()) for p in scored) / weighted_words
         if weighted_words
         else 0.0
     )
@@ -93,10 +112,10 @@ def compute_accuracy(
         # edit-distance computation cheap (short segments, not the whole
         # transcript) and the metric honest (uncorrected segments would
         # otherwise contribute zero error and dilute the result).
-        corrected = [e for e in entries if e.has_corrections()]
-        pairs = [(e.effective_text(), e.text) for e in corrected]
+        corrected = [p for e in entries for p in _corrected_parts(e)]
+        pairs = [(p.current_text, p.text) for p in corrected]
         wer = aggregate_word_error_rate(pairs) * 100
-        corrected_percent = (len(corrected) / len(entries)) * 100 if entries else 0.0
+        corrected_percent = (len(corrected) / len(parts)) * 100 if parts else 0.0
 
     has_baseline = bool(baseline_transcript and baseline_transcript.strip())
     baseline_wer = None
