@@ -81,8 +81,9 @@ spec:
               signal.pause()
           env:
             # Azurite in this pod, over localhost: the Service has no endpoints
-            # until this container is Ready. The SDK does not expand
-            # UseDevelopmentStorage=true, so the full connection string is needed.
+            # until this container is Ready. The full connection string, rather than
+            # UseDevelopmentStorage=true, so it does not depend on the sidecar image's
+            # SDK expanding the shorthand.
             - name: AZURE_STORAGE_CONNECTION_STRING
               value: DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;
             - name: CONTAINERS
