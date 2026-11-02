@@ -1514,7 +1514,11 @@ async def rollback_segment(
     entry.correction_history = None
     entry.accepted = False
     if entry.parts:
-        entry.parts = [p.model_copy(update={"current_text": p.text}) for p in entry.parts]
+        # A part with no recorded correction state (None) is left that way, as stored.
+        entry.parts = [
+            p.model_copy(update={"current_text": p.text, "corrected": None if p.corrected is None else False})
+            for p in entry.parts
+        ]
     if entry.merged:
         entry.unreviewed_confidence = entry.confidence
 
