@@ -126,11 +126,17 @@ class EntryPart(SQLModel):
     `text` is its ASR text, `current_text` its text when it was merged, and
     `confidence` its own confidence. The job's confidence score and WER are computed
     per part, so combining segments doesn't change them.
+
+    `corrected` records whether the clerk edited this original segment (set when it is
+    merged, and updated if the merged text is edited later), so scoring doesn't have to
+    infer it from the wording: a change of capitalisation alone is still a correction.
+    None on parts stored before it existed, which are then judged by their wording.
     """
 
     text: str
     current_text: str
     confidence: float | None = None
+    corrected: bool | None = None
 
 
 class DialogueEntry(SQLModel):
@@ -205,13 +211,20 @@ class DialogueEntry(SQLModel):
         """
         current = self.effective_text()
         if not self.parts:
-            return [EntryPart(text=self.text, current_text=current, confidence=self.confidence)]
+            return [
+                EntryPart(
+                    text=self.text,
+                    current_text=current,
+                    confidence=self.confidence,
+                    corrected=self.has_corrections(),
+                )
+            ]
         if current == _join(*(p.current_text for p in self.parts)):
             return self.parts
         if current == _join(*(p.text for p in self.parts)):
-            return [p.model_copy(update={"current_text": p.text}) for p in self.parts]
+            return [_with_share(p, p.text) for p in self.parts]
         shares = split_by_alignment([p.current_text for p in self.parts], current)
-        return [p.model_copy(update={"current_text": share}) for p, share in zip(self.parts, shares, strict=True)]
+        return [_with_share(p, share) for p, share in zip(self.parts, shares, strict=True)]
 
     def effective_text(self) -> str:
         """Current text after any corrections — what a clerk would read today."""
@@ -227,6 +240,14 @@ class DialogueEntry(SQLModel):
             parts.append(" ".join(w.text for w in self.words[cursor:]))
             return " ".join(p for p in parts if p)
         return self.text
+
+
+def _with_share(part: EntryPart, share: str) -> EntryPart:
+    """`part` with a new share of the current text, marked corrected if the share changed since the merge."""
+    update: dict[str, object] = {"current_text": share}
+    if part.corrected is not None:
+        update["corrected"] = part.corrected or share.split() != part.current_text.split()
+    return part.model_copy(update=update)
 
 
 def _join(*parts: str) -> str:
