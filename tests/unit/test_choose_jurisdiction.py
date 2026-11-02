@@ -55,7 +55,7 @@ def test_they_can_switch_later(jurisdiction_db, judge_in_both, jurisdiction_app,
 
     monkeypatch.setattr(
         "transcribe_api.api.routes_dictation.get_document_content",
-        lambda: {"hearing_types": [], "legal_frameworks": [], "anonymity": {}},
+        lambda _jurisdiction_id: {"hearing_types": [], "legal_frameworks": [], "anonymity": {}},
     )
     # The template follows the switch: the IAC's document content is not the ET's...
     assert client.get("/api/document-content").status_code == 404
