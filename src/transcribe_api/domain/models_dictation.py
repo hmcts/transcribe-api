@@ -191,14 +191,23 @@ class Transcription(BaseTable, table=True):
 class DocumentContent(SQLModel, table=True):
     """Singleton row storing the full document_content JSON.
 
-    Always id=1. All instances read and write the same row via the
-    shared PostgreSQL database, replacing the previous per-container
-    JSON file approach.
+    Always id=1, the IAC's legal wording. All instances read and write the same row via
+    the shared PostgreSQL database, replacing the previous per-container JSON file approach.
     """
 
     __tablename__ = "document_content"
+    # Declared as 0006 makes it (PostgreSQL only: SQLite stores a UUID without dashes).
+    __table_args__ = (
+        CheckConstraint(
+            "id <> 1 OR jurisdiction_id = '6a1c0f3e-3b7d-4c2a-9e51-1ac000000001'", name="ck_document_content_id_1_is_iac"
+        ).ddl_if(dialect="postgresql"),
+    )
 
     id: int = Field(default=1, primary_key=True)
+    # 0006 (DIAAT-342): the schema for legal wording per jurisdiction, ahead of the feature.
+    jurisdiction_id: UUID = Field(
+        default=UUID("6a1c0f3e-3b7d-4c2a-9e51-1ac000000001"), foreign_key="jurisdiction.id", unique=True
+    )
     content: dict = Field(sa_column=Column(JSONB, nullable=False))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
 
