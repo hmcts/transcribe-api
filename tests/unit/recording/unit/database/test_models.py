@@ -292,7 +292,7 @@ class TestMergeDialogueEntries:
         assert [h.kind for h in history] == ["word_range", "segment"]
         assert history[0].previous_text == "A quick brown fox."
         assert history[0].new_text == "A quick brown dog"
-        assert (history[0].start_word_index, history[0].end_word_index) == (3, 3)
+        assert all(h.start_word_index is None and h.end_word_index is None for h in history)
         assert history[1].previous_text == "The quick brown dog"
         assert history[1].new_text == "A quick brown dog"
 

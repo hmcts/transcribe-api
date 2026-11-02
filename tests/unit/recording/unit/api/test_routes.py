@@ -2287,6 +2287,66 @@ class TestMergeSegmentWithNext:
         assert response.json()["needs_review"] == []
         return job
 
+    def test_history_rollback_on_accepted_merged_segment_puts_it_back_in_review(
+        self, client, as_current_user, mocker
+    ):
+        from transcribe_api.runtime.db_recording import get_session
+
+        job = self._merged_with_corrected_halves(client, mocker)
+        job.dialogue_entries[0]["accepted"] = True
+        client.app.dependency_overrides[get_session] = lambda: MagicMock()
+        try:
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/0/history/0/rollback")
+        finally:
+            client.app.dependency_overrides.pop(get_session, None)
+        assert response.json()["dialogue_entries"][0]["accepted"] is False
+        assert response.json()["needs_review"] == [{"speaker": "Speaker 1", "start_time": 0.0, "confidence": 0.5}]
+
+    def test_history_rollback_on_merged_word_corrections_keeps_display_text(self, client, as_current_user, mocker):
+        from transcribe_api.runtime.db_recording import get_session
+
+        def words(*texts):
+            return [{"text": t, "start_time": 0.0, "end_time": 0.1, "confidence": 0.9} for t in texts]
+
+        def word_fix(index, old, new, text, fixed):
+            return {
+                "word_corrections": [{"start_word_index": index, "end_word_index": index, "text": new}],
+                "correction_history": [
+                    {
+                        "timestamp": "2026-01-01T09:00:00+00:00",
+                        "kind": "word_range",
+                        "previous_text": text,
+                        "new_text": fixed,
+                        "start_word_index": index,
+                        "end_word_index": index,
+                        "previous_phrase": old,
+                        "new_phrase": new,
+                    }
+                ],
+            }
+
+        job = self._job()
+        job.dialogue_entries = [
+            {
+                "speaker": "Speaker 1", "text": "My favourite colour.", "start_time": 0.0, "end_time": 1.0,
+                "words": words("my", "favorite", "color"),
+                **word_fix(2, "color", "hue", "My favourite colour.", "my favorite hue"),
+            },
+            {
+                "speaker": "Speaker 1", "text": "Is blue.", "start_time": 1.0, "end_time": 2.0,
+                "words": words("is", "blue"),
+                **word_fix(1, "blue", "green", "Is blue.", "is green"),
+            },
+        ]
+        self._post(client, mocker, job, 0)
+
+        client.app.dependency_overrides[get_session] = lambda: MagicMock()
+        try:
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/0/history/0/rollback")
+        finally:
+            client.app.dependency_overrides.pop(get_session, None)
+        assert response.json()["dialogue_entries"][0]["corrected_text"] == "My favourite colour. is green"
+
     @pytest.mark.parametrize("path", ["rollback", "history/0/rollback"])
     def test_rollback_on_merged_segment_puts_it_back_in_review(self, client, as_current_user, mocker, path):
         from transcribe_api.runtime.db_recording import get_session

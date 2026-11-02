@@ -1583,6 +1583,7 @@ async def rollback_to_history_entry(
     target = history[history_index]
     previous_text = entry.effective_text()
     if entry.merged:
+        entry.accepted = False
         entry.unreviewed_confidence = entry.confidence
 
     # Anything currently overlapping the targeted range at all — not just an

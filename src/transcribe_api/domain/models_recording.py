@@ -206,8 +206,9 @@ def merge_dialogue_entries(first: DialogueEntry, second: DialogueEntry) -> Dialo
     survive only when both entries have words and rebuilding from them reproduces both
     halves' current text (an untouched half otherwise switches from its display text to
     the raw words); failing that, corrections are flattened into corrected_text. Each
-    history snapshot gets the other entry's current text added, so rolling back to it
-    undoes that one edit without dropping the other half. The lower confidence is kept,
+    history snapshot gets the other entry's current text added and loses its word range,
+    so rolling back to it restores that whole snapshot: undoing one edit without dropping
+    the other half or rebuilding it from raw words. The lower confidence is kept,
     unreviewed_confidence carries the review state of each half (see DialogueEntry.merged),
     and the result is accepted only if both halves were.
     """
@@ -231,29 +232,27 @@ def merge_dialogue_entries(first: DialogueEntry, second: DialogueEntry) -> Dialo
             start, end = _shift(wc.start_word_index, wc.end_word_index, offset)
             word_corrections.append(WordCorrection(start_word_index=start, end_word_index=end, text=wc.text))
 
+    unlocated = {"start_word_index": None, "end_word_index": None}
     history = [
         h.model_copy(
             update={
                 "previous_text": _join(h.previous_text, second_text),
                 "new_text": _join(h.new_text, second_text),
-                "start_word_index": h.start_word_index if offset is not None else None,
-                "end_word_index": h.end_word_index if offset is not None else None,
+                **unlocated,
             }
         )
         for h in first.correction_history or []
     ]
-    for h in second.correction_history or []:
-        start, end = _shift(h.start_word_index, h.end_word_index, offset)
-        history.append(
-            h.model_copy(
-                update={
-                    "previous_text": _join(first_text, h.previous_text),
-                    "new_text": _join(first_text, h.new_text),
-                    "start_word_index": start,
-                    "end_word_index": end,
-                }
-            )
+    history += [
+        h.model_copy(
+            update={
+                "previous_text": _join(first_text, h.previous_text),
+                "new_text": _join(first_text, h.new_text),
+                **unlocated,
+            }
         )
+        for h in second.correction_history or []
+    ]
     history.sort(key=lambda h: h.timestamp)
 
     alternatives = [
