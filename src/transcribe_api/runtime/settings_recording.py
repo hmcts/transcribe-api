@@ -7,15 +7,9 @@ from pydantic import ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-
 class Settings(BaseSettings):
     # Core
     ENVIRONMENT: str = "local"
-    # Git commit SHA of the deployed build, baked into the container image at
-    # build time (Dockerfile ARG GIT_SHA -> ENV GIT_SHA). Defaults to "unknown"
-    # so local/dev runs without the build arg still work. Exposed via
-    # GET /api/v1/version so post-deploy checks can confirm the live build.
-    GIT_SHA: str = "unknown"
     DATABASE_CONNECTION_STRING: str = (
         "postgresql://dev:devpass@localhost:5432/transcription_svc"  # pragma: allowlist secret
     )
@@ -44,7 +38,7 @@ class Settings(BaseSettings):
 
     # Local audio storage (dev only — never set in deployed envs)
     AUDIO_STORAGE_BACKEND: Literal["azure", "local"] = "azure"
-    LOCAL_AUDIO_STORAGE_DIR: str = "/tmp/local-audio"  # noqa: S108  # nosec B108
+    LOCAL_AUDIO_STORAGE_DIR: str = "/tmp/local-audio"  # nosec B108  # NOSONAR
     LOCAL_AUDIO_BASE_URL: str = ""
 
     # Batch transcription backend (dev only — never set in deployed envs).
@@ -64,6 +58,12 @@ class Settings(BaseSettings):
     JOB_STUCK_WAITING_SECONDS: int = 30 * 60
     JOB_STUCK_RUNNING_SECONDS: int = 3 * 60 * 60
 
+    # DIAAT-277: how often the background checker probes the database, Blob Storage
+    # and Azure Speech (Speech at most once per 300 s whatever this is), and how long
+    # one probe may take before the dependency is reported down (dependency.timeout).
+    DEPENDENCY_HEALTH_INTERVAL_SECONDS: int = 60
+    DEPENDENCY_HEALTH_TIMEOUT_SECONDS: float = 10.0
+
     # Azure AD / JWT authentication
     AZURE_AD_CLIENT_ID: str = ""
     AZURE_AD_TENANT_ID: str = ""
@@ -74,9 +74,9 @@ class Settings(BaseSettings):
     # Auth
     LOCAL_API_KEY: str = "local-dev-key-change-me"
     # Fernet key (URL-safe base64, 32 bytes) used to encrypt webhook_secret at rest.
-    # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"  # noqa: E501
+    # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     # The default is a fixed all-zeros key for local development only.
-    WEBHOOK_SECRET_ENCRYPTION_KEY: str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="  # noqa: S105  # gitleaks:allow
+    WEBHOOK_SECRET_ENCRYPTION_KEY: str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="  # gitleaks:allow
 
     # Webhook delivery
     WEBHOOK_TIMEOUT_SECONDS: float = 30.0
@@ -102,10 +102,22 @@ class Settings(BaseSettings):
     # stays off so no real transcript content is silently captured.
     CORRECTIONS_DATASET_EXPORT_ENABLED: bool = False
 
-    # Observability
-    SENTRY_DSN: str | None = None
+    # DIAAT-285: enables POST /api/security/alert-test (SystemAdministrator), which
+    # emits a security.ownership_violation event with outcome "test" to prove the
+    # Security alert route. No effect unless ENVIRONMENT is in
+    # SECURITY_ALERT_TEST_ENVIRONMENTS (routes_dictation.py: local, dev, test), so it
+    # cannot be turned on in a deployed CNP environment. Leave false except during a
+    # controlled test.
+    SECURITY_ALERT_TEST_TRIGGER_ENABLED: bool = False
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @field_validator("SECURITY_ALERT_TEST_TRIGGER_ENABLED", mode="before")
+    @classmethod
+    def blank_security_alert_trigger_is_disabled(cls, v: object) -> object:
+        if isinstance(v, str) and not v.strip():
+            return False
+        return v
 
     @field_validator("BATCH_TRANSCRIPTION_THRESHOLD_HOURS")
     @classmethod
@@ -128,6 +140,22 @@ class Settings(BaseSettings):
     def validate_stuck_threshold(cls, v: int) -> int:
         if v <= 0:
             raise ValueError("Stuck-job thresholds must be greater than 0 seconds")
+        return v
+
+    @field_validator(
+        "DEPENDENCY_HEALTH_INTERVAL_SECONDS", "DEPENDENCY_HEALTH_TIMEOUT_SECONDS", mode="before"
+    )
+    @classmethod
+    def blank_dependency_health_setting_is_default(cls, v: object, info: ValidationInfo) -> object:
+        if isinstance(v, str) and not v.strip():
+            return cls.model_fields[info.field_name].default
+        return v
+
+    @field_validator("DEPENDENCY_HEALTH_INTERVAL_SECONDS", "DEPENDENCY_HEALTH_TIMEOUT_SECONDS")
+    @classmethod
+    def validate_dependency_health_setting(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("Dependency health interval and timeout must be greater than 0")
         return v
 
     @field_validator("SPEECH_CONCURRENT_JOBS_LIMIT", mode="before")

@@ -20,9 +20,10 @@ cnp-telemetry-schema.md``):
 * the browser's ``upload.validation_failed`` is renamed ``upload.file_rejected``;
   ``upload.validation_failed`` is the recording API's file checks (decision 3).
 
-Not here yet: ``hmcts.area`` (decision 1), registered with the code that sets it,
-and dictation's stage events, registered with the code that emits them (api-4):
-registered now, without their attribute lists, they would drop those attributes.
+``hmcts.area`` (decision 1) is hmcts-otel's own metadata attribute (0.3.0), set per
+router and poller in api/app.py. Not here yet: dictation's stage events, registered
+with the code that emits them (api-4): registered now, without their attribute lists,
+they would drop those attributes.
 
 ``telemetry-contract.json`` at the repository root is this schema as JSON, for
 transcribe-web and the shared infrastructure's query checks; a unit test fails when
@@ -50,6 +51,10 @@ AUDIT_ACTIONS_APP = (
     "job.delete",
     "audio.export",
     "user.delete",
+    # DIAAT-356: the admin area's jurisdiction changes.
+    "jurisdiction.edit",
+    "membership.add",
+    "membership.remove",
 )
 AUDIT_ACTIONS = AUDIT_ACTIONS_AUTH_LIBRARY + AUDIT_ACTIONS_APP
 
@@ -246,6 +251,23 @@ def _dictation_attributes(schema: TelemetrySchema) -> None:
     )
     schema.attribute("upload.method", allowed_values=("direct", "proxy"), description="How the browser uploads audio.")
     schema.attribute("upload.retry_attempt", int, description="Upload attempt number.")
+    # Client-side errors (DIAAT-205: replace browser Sentry). The error's class name and
+    # where it was caught, never its message or stack.
+    schema.attribute(
+        "ui.error_type",
+        pattern="[A-Za-z][A-Za-z0-9_.]{0,63}",
+        description="Class name of a client-side error (e.g. TypeError, ChunkLoadError). Never the message.",
+    )
+    schema.attribute(
+        "ui.error_source",
+        allowed_values=("render", "window_error", "unhandled_rejection"),
+        description="Where a client-side error was caught: the error page (render), window.onerror, or an unhandled promise rejection.",
+    )
+    schema.attribute(
+        "next.error.digest",
+        pattern="[A-Za-z0-9]{1,32}",
+        description="Next.js error digest: links a client-side error page to the server error that caused it.",
+    )
     schema.attribute(
         "upload.source",
         allowed_values=("backup_retry", "recording", "upload"),
@@ -381,6 +403,11 @@ def _shared_events(schema: TelemetrySchema) -> None:
         description="A caller reached, or tried to reach, a resource they do not own. Correlate on hmcts.request.id; hmcts.journey.id is the target job or upload.",
     )
     schema.event(
+        "security.jurisdiction_blocked",
+        attributes=("security.resource_type", "security.action"),
+        description="DIAAT-334: a caller tried to reach material of a jurisdiction they are not working in (another of theirs, or one they do not belong to) and was refused with the same 404 as an unknown record. No jurisdiction, record or case content: correlate on hmcts.request.id with the audit record, which names the actor and the record.",
+    )
+    schema.event(
         "transcript.available",
         attributes=("transcript.segment_count", "transcript.speaker_count", "dictation.transcription_id"),
         description="A transcript was saved and can be opened. Dictation: dictation.transcription_id is the transcription created (live submission). Recording: segment and speaker counts.",
@@ -513,9 +540,6 @@ def _recording_events(schema: TelemetrySchema) -> None:
 
 def _browser_events(schema: TelemetrySchema) -> None:
     """Browser events accepted by the telemetry relay (transcribe-web)."""
-    schema.event(
-        "auth.token_refresh_failed", browser=True, description="The browser could not obtain a fresh sign-in token."
-    )
     schema.event(
         "dictation.no_speech_warning",
         attributes=("dictation.elapsed_seconds",),
@@ -814,6 +838,29 @@ def _browser_events(schema: TelemetrySchema) -> None:
         attributes=("hmcts.error.code", "file.type", "file.size_bytes"),
         browser=True,
         description="A file the user picked was rejected in the browser, before upload (count, size or type).",
+    )
+    schema.event(
+        "upload.transfer_failed",
+        attributes=(
+            "hmcts.error.code",
+            "http.response.status_code",
+            "file.type",
+            "file.size_bytes",
+            "upload.retry_attempt",
+            "upload.source",
+        ),
+        browser=True,
+        description=(
+            "The browser could not send an audio file to storage after its retries (dictation uploads). "
+            "hmcts.error.code: upload.network, upload.timeout, upload.url_unavailable or http.<status>. "
+            "Not upload.failed (recording's server-side upload stage)."
+        ),
+    )
+    schema.event(
+        "ui.error",
+        attributes=("ui.error_type", "ui.error_source", "page.route", "next.error.digest"),
+        browser=True,
+        description="A client-side error reached the error page or the window's handlers (transcribe-web). Type only, never the message.",
     )
     schema.event(
         "upload.file_selected",

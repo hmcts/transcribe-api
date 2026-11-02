@@ -19,6 +19,7 @@ import asyncio
 import logging
 import math
 import os
+from collections.abc import Callable, Coroutine
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -94,6 +95,57 @@ def _json_safe(obj: Any) -> Any:
     return obj
 
 
+# Shared paths under /api: no hmcts.area (every page sends to the relay; the OpenAPI
+# document describes both areas).
+_SHARED_API_PATHS = frozenset({"/api/telemetry", "/api/openapi.json"})
+
+
+def area_for_path(path: str) -> str | None:
+    """The hmcts.area of a request path: the recording router is mounted at /api/v1,
+    the dictation routers at /api. The top-level /health and the shared paths have
+    none."""
+    from transcribe_api.runtime.telemetry import AREA_DICTATION, AREA_RECORDING
+
+    if path in _SHARED_API_PATHS:
+        return None
+    if path == "/api/v1" or path.startswith("/api/v1/"):
+        return AREA_RECORDING
+    if path.startswith("/api/"):
+        return AREA_DICTATION
+    return None
+
+
+class AreaMiddleware:
+    """Sets hmcts.area (decision 1) for the whole request, from its path.
+
+    A middleware rather than a router dependency: FastAPI parses and validates the
+    body before dependencies run, so a malformed request (a 422), a 404 or a 405
+    would otherwise carry no area. Covers the streamed body and background tasks
+    (both run inside the app call), and stamps the request span, which the
+    instrumentation started outside. An unhandled exception's 500 handler runs in
+    Starlette's outermost middleware, after this: it sets the area again itself.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        name = area_for_path(scope.get("path", "")) if scope.get("type") in ("http", "websocket") else None
+        if name is None:
+            await self.app(scope, receive, send)
+            return
+        from hmcts_otel import area
+        from hmcts_otel import conventions as c
+        from opentelemetry import trace
+
+        with area(name):
+            try:
+                trace.get_current_span().set_attribute(c.AREA, name)
+            except Exception:  # noqa: BLE001 - telemetry never fails the request
+                log.debug("Could not stamp the request span with its area")
+            await self.app(scope, receive, send)
+
+
 async def _validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     return JSONResponse(status_code=422, content={"detail": _json_safe(jsonable_encoder(exc.errors()))})
 
@@ -118,8 +170,18 @@ def build_cors_origins(settings: Any) -> list[str]:
     return LOCAL_DEV_ORIGINS
 
 
+async def _in_area(name: str, start: Callable[[], Coroutine[Any, Any, None]]) -> None:
+    """Build and run a poller loop in its hmcts.area: its construction, its loop and
+    the tasks it starts all carry it."""
+    from hmcts_otel import area
+
+    with area(name):
+        await start()
+
+
 async def start_background_workers() -> list[asyncio.Task]:
     """Start both pollers. Used by the worker entrypoint and, optionally, the web process."""
+    from transcribe_api.runtime.telemetry import AREA_DICTATION, AREA_RECORDING
     from transcribe_api.stt.job_telemetry import register_job_gauges
     from transcribe_api.stt.polling_service import BatchPollingService
     from transcribe_api.stt.work_poller import TranscriptionPollingService
@@ -128,8 +190,8 @@ async def start_background_workers() -> list[asyncio.Task]:
     # export. With the pollers, so the process that polls also reports the queue.
     register_job_gauges()
     tasks = [
-        asyncio.create_task(BatchPollingService().run_polling_loop()),
-        asyncio.create_task(TranscriptionPollingService().run_polling_loop()),
+        asyncio.create_task(_in_area(AREA_RECORDING, lambda: BatchPollingService().run_polling_loop())),
+        asyncio.create_task(_in_area(AREA_DICTATION, lambda: TranscriptionPollingService().run_polling_loop())),
     ]
     log.info("Started %d background poller(s)", len(tasks))
     return tasks
@@ -177,12 +239,27 @@ async def lifespan(app: FastAPI):
         await run_in_threadpool(check_content_drift)
 
     tasks: list[asyncio.Task] = []
+    if settings.ENVIRONMENT != "test":
+        # DIAAT-277: database, storage and Azure Speech health, checked in the
+        # background of each API pod and read from cache by /api/health/dependencies.
+        # Not in tests: the checks would reach for real dependencies.
+        from transcribe_api.runtime.dependency_health import (
+            get_dependency_checker,
+            register_dependency_gauge,
+        )
+
+        register_dependency_gauge()
+        tasks.append(asyncio.create_task(get_dependency_checker().run()))
     if settings.ENVIRONMENT != "test" and _run_workers_in_web_process():
-        tasks = await start_background_workers()
+        tasks += await start_background_workers()
 
     yield
 
     await stop_background_workers(tasks)
+    # Audit rows handed to worker threads from the event loop (DIAAT-286): not lost.
+    from transcribe_api.domain.audit import drain_pending_writes
+
+    await drain_pending_writes()
 
 
 def create_app() -> FastAPI:
@@ -225,29 +302,34 @@ def create_app() -> FastAPI:
         allow_origins=origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-        allow_headers=["Authorization", "Content-Type"],
+        # The headers the web app sends, for local development, which calls the API
+        # cross-origin: X-Jurisdiction (the tab's, DIAAT-322), X-Dictation-Session-Id.
+        allow_headers=["Authorization", "Content-Type", "X-Jurisdiction", "X-Dictation-Session-Id"],
     )
+
+    # hmcts.area from the path, before routing and body parsing (AreaMiddleware).
+    app.add_middleware(AreaMiddleware)
 
     # Added last, so outermost.
     app.add_middleware(RequestIdMiddleware)
 
     # --- exception handlers ---
-    from transcribe_api.runtime.exception_handlers import (
-        http_exception_handler,
-        unhandled_exception_handler,
-    )
-
     # MERGE NOTE: these two handlers take (exc, request_id), not (request, exc). The
     # dictation app wrapped them so it could record the exception on the current
     # OpenTelemetry span before delegating. Registering them bare gives
     # "takes 1 positional argument but 2 were given" on every error path.
     from opentelemetry import trace
 
+    from transcribe_api.runtime.exception_handlers import (
+        http_exception_handler,
+        unhandled_exception_handler,
+    )
+
     async def _http_exception_wrapper(request: Request, exc: FastAPIHTTPException):
         # 4xx are expected outcomes (not found, forbidden, validation); only server
         # errors fail the span. The status carries the type only: messages can
         # include content.
-        if exc.status_code >= 500:  # noqa: PLR2004
+        if exc.status_code >= 500:
             span = trace.get_current_span()
             span.record_exception(exc)
             span.set_status(trace.StatusCode.ERROR, type(exc).__name__)
@@ -258,8 +340,15 @@ def create_app() -> FastAPI:
         span.record_exception(exc)
         span.set_status(trace.StatusCode.ERROR, type(exc).__name__)
         # Runs in Starlette's ServerErrorMiddleware, outside the request-ID
-        # middleware: request_id_for reads the ID from the request scope.
-        return await unhandled_exception_handler(exc, request_id_for(request))
+        # middleware: request_id_for reads the ID from the request scope. Outside
+        # AreaMiddleware too: the request's area is set again for the error's log.
+        name = area_for_path(request.url.path)
+        if name is None:
+            return await unhandled_exception_handler(exc, request_id_for(request))
+        from hmcts_otel import area
+
+        with area(name):
+            return await unhandled_exception_handler(exc, request_id_for(request))
 
     app.add_exception_handler(FastAPIHTTPException, _http_exception_wrapper)
     app.add_exception_handler(Exception, _unhandled_exception_wrapper)
@@ -267,7 +356,9 @@ def create_app() -> FastAPI:
 
     # --- routers ---
     from transcribe_api.api.routes_dictation import router as dictation_router
+    from transcribe_api.api.routes_dictation import telemetry_router
     from transcribe_api.api.routes_dictation_privileged import router as dictation_admin_router
+    from transcribe_api.api.routes_jurisdictions import router as jurisdictions_router
     from transcribe_api.api.routes_recording import limiter
     from transcribe_api.api.routes_recording import router as recording_router
 
@@ -277,8 +368,15 @@ def create_app() -> FastAPI:
     #   dictation admin declares prefix="/admin", also under "/api"
     # So the surfaces are /api/v1/* and /api/* (+ /api/admin/*) and do NOT
     # collide — including /health, which exists in both but at different paths.
+    #
+    # hmcts.area comes from these mount points (area_for_path, AreaMiddleware):
+    # /api/v1 is recording, the rest of /api dictation (each area's own health and
+    # version routes, and dictation's security alert test, included). The browser
+    # relay is shared (every page sends to it), as is the top-level /health.
     app.include_router(dictation_router, prefix="/api")
     app.include_router(dictation_admin_router, prefix="/api")
+    app.include_router(telemetry_router, prefix="/api")
+    app.include_router(jurisdictions_router, prefix="/api")
     app.include_router(recording_router)
 
     # Polled by the CNP pipeline's startup check.

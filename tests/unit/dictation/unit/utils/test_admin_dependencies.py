@@ -1,11 +1,12 @@
 """Unit tests for role-based authorization dependencies."""
 
-import pytest
-from fastapi import HTTPException
 from unittest.mock import MagicMock
 
-from transcribe_api.domain.models_dictation import User
+import pytest
+from fastapi import HTTPException
+
 from transcribe_api.domain.auth.approles_dictation import get_role
+from transcribe_api.domain.models_dictation import User
 
 
 def _make_user(email: str, roles: list[str]) -> User:

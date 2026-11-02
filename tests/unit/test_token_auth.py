@@ -221,8 +221,10 @@ def test_user_without_an_access_role_is_never_resolved(client, monkeypatch):
         resolved.append(azure_user_id)
         return {"id": azure_user_id}
 
+    token_user = token_auth.build_token_user_dep(resolver)
+
     @client.app.get("/me")
-    async def me(user=Depends(token_auth.build_token_user_dep(resolver))):
+    async def me(user=Depends(token_user)):
         return user
 
     r = client.get("/me", headers={"Authorization": f"Bearer {_token(roles=[])}"})

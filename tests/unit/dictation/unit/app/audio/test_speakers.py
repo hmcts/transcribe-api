@@ -1,7 +1,7 @@
 """Unit tests for pure speaker processing functions."""
 
 import sys
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 # Block the deep import chain triggered by speakers.py -> llm_calls -> interface_functions -> postgres_database
 _mock_llm = MagicMock()
@@ -9,6 +9,7 @@ sys.modules.setdefault("transcribe_api.documents.minutes.llm_calls", _mock_llm)
 
 import pytest  # noqa: E402
 
+from transcribe_api.domain.models_dictation import DialogueEntry  # noqa: E402
 from transcribe_api.stt.speakers_dictation import (  # noqa: E402
     add_speaker_labels_to_dialogue_entries,
     convert_input_dialogue_entries_to_dialogue_entries,
@@ -16,7 +17,6 @@ from transcribe_api.stt.speakers_dictation import (  # noqa: E402
     normalize_speaker_labels,
     process_speakers_and_dialogue_entries,
 )
-from transcribe_api.domain.models_dictation import DialogueEntry  # noqa: E402
 
 
 class TestGroupDialogueEntriesBySpeaker:
@@ -174,11 +174,6 @@ class TestConvertInputDialogueEntriesFromSpeakers:
 
 @pytest.mark.asyncio
 class TestProcessSpeakersAndDialogueEntries:
-    @pytest.fixture(autouse=True)
-    def _mock_sentry(self):
-        with patch("transcribe_api.stt.speakers_dictation.sentry_sdk") as mock:
-            yield mock
-
     @pytest.fixture(autouse=True)
     def _mock_predictions(self, monkeypatch):
         """Ensure generate_speaker_predictions is always an AsyncMock."""

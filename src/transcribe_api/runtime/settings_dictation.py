@@ -5,7 +5,6 @@ from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-
 class Settings(BaseSettings):
     API_PORT: int = 8080
     APP_URL: str
@@ -51,7 +50,6 @@ class Settings(BaseSettings):
     DOWNLOAD_URL_TTL_MINUTES: int = 60
     UPLOAD_URL_TTL_MINUTES: int = 120
     RUN_MIGRATIONS: bool = False
-    SENTRY_DSN: str | None = None
     # CORS configuration from infrastructure
     CORS_ALLOWED_ORIGINS: str | None = None
     # Transcription polling service configuration

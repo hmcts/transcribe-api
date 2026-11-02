@@ -9,11 +9,19 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.unit.jurisdiction_fixtures import IAC_JURISDICTION_ID
 from transcribe_api.api.app import create_app
-from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.domain.models_recording import JobStatus, SpeechBatchJob, User
+from transcribe_api.runtime.settings_recording import get_settings
 
 _TEST_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000002")
+_MISSING_SEGMENT = f"seg_{'0' * 32}"
+
+
+def _sid(job: SpeechBatchJob, index: int = 0) -> str:
+    from transcribe_api.api.routes_recording import _entries_with_ids
+
+    return _entries_with_ids(job)[index]["id"]
 
 
 def _make_job(
@@ -92,30 +100,41 @@ class TestHealth:
 
 
 class TestVersion:
-    def test_defaults_to_unknown(self, client, monkeypatch):
-        # No GIT_SHA in the environment -> the "unknown" default.
-        monkeypatch.delenv("GIT_SHA", raising=False)
-        from transcribe_api.runtime.settings_recording import get_settings
-
-        get_settings.cache_clear()
+    def test_returns_local_version_without_a_build(self, client, monkeypatch, tmp_path):
+        self._reload_version(monkeypatch, tmp_path, app_version=None, build_version=None)
         response = client.get("/api/v1/version")
         assert response.status_code == 200
-        assert response.json() == {"version": "unknown"}
-        get_settings.cache_clear()
+        assert response.json() == {"version": "0.0.999"}
 
-    def test_returns_baked_git_sha(self, client, monkeypatch):
-        monkeypatch.setenv("GIT_SHA", "abc123def456")
-        from transcribe_api.runtime.settings_recording import get_settings
+    def test_returns_baked_build_version(self, client, monkeypatch, tmp_path):
+        self._reload_version(monkeypatch, tmp_path, app_version=None, build_version="1112c85\n")
+        assert client.get("/api/v1/version").json() == {"version": "1112c85"}
 
-        get_settings.cache_clear()
-        response = client.get("/api/v1/version")
-        assert response.status_code == 200
-        assert response.json() == {"version": "abc123def456"}
-        get_settings.cache_clear()
+    def test_app_version_overrides_build_version(self, client, monkeypatch, tmp_path):
+        self._reload_version(monkeypatch, tmp_path, app_version="1.2.3", build_version="1112c85")
+        assert client.get("/api/v1/version").json() == {"version": "1.2.3"}
+
+    def test_matches_health_version(self, client):
+        assert client.get("/api/v1/version").json()["version"] == client.get("/api/health").json()["version"]
 
     def test_no_auth_required(self, client):
         response = client.get("/api/v1/version")
         assert response.status_code == 200
+
+    @staticmethod
+    def _reload_version(monkeypatch, tmp_path, *, app_version, build_version):
+        from transcribe_api.api import routes_recording
+        from transcribe_api.runtime import version
+
+        build_file = tmp_path / "BUILD_VERSION"
+        if build_version is not None:
+            build_file.write_text(build_version)
+        monkeypatch.setattr(version, "BUILD_VERSION_FILE", build_file)
+        if app_version is None:
+            monkeypatch.delenv("APP_VERSION", raising=False)
+        else:
+            monkeypatch.setenv("APP_VERSION", app_version)
+        monkeypatch.setattr(routes_recording, "APP_VERSION", version.read_version())
 
 
 def _patch_normalize(mocker, wav_bytes=b"WAVDATA"):
@@ -365,8 +384,8 @@ class TestGetJobAudio:
     def test_streams_full_content_from_local_backend(
         self, client, as_current_user, mocker, tmp_path, monkeypatch
     ):
-        from transcribe_api.stt import local_storage
         from transcribe_api.runtime.settings_recording import get_settings
+        from transcribe_api.stt import local_storage
 
         monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
         monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path))
@@ -391,8 +410,8 @@ class TestGetJobAudio:
     def test_streams_partial_range_from_local_backend(
         self, client, as_current_user, mocker, tmp_path, monkeypatch
     ):
-        from transcribe_api.stt import local_storage
         from transcribe_api.runtime.settings_recording import get_settings
+        from transcribe_api.stt import local_storage
 
         monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
         monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path))
@@ -436,8 +455,8 @@ class TestGetJobAudio:
     def test_supports_suffix_range_for_the_last_n_bytes(
         self, client, as_current_user, mocker, tmp_path, monkeypatch
     ):
-        from transcribe_api.stt import local_storage
         from transcribe_api.runtime.settings_recording import get_settings
+        from transcribe_api.stt import local_storage
 
         monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
         monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path))
@@ -462,8 +481,8 @@ class TestGetJobAudio:
     def test_returns_416_for_a_malformed_range_header(
         self, client, as_current_user, mocker, tmp_path, monkeypatch
     ):
-        from transcribe_api.stt import local_storage
         from transcribe_api.runtime.settings_recording import get_settings
+        from transcribe_api.stt import local_storage
 
         monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
         monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path))
@@ -488,8 +507,8 @@ class TestGetJobAudio:
     def test_returns_416_for_an_out_of_bounds_range(
         self, client, as_current_user, mocker, tmp_path, monkeypatch
     ):
-        from transcribe_api.stt import local_storage
         from transcribe_api.runtime.settings_recording import get_settings
+        from transcribe_api.stt import local_storage
 
         monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
         monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path))
@@ -512,8 +531,8 @@ class TestGetJobAudio:
     def test_returns_200_with_empty_body_for_a_zero_byte_file(
         self, client, as_current_user, mocker, tmp_path, monkeypatch
     ):
-        from transcribe_api.stt import local_storage
         from transcribe_api.runtime.settings_recording import get_settings
+        from transcribe_api.stt import local_storage
 
         monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
         monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path))
@@ -537,8 +556,8 @@ class TestGetJobAudio:
     def test_returns_416_for_a_range_request_against_a_zero_byte_file(
         self, client, as_current_user, mocker, tmp_path, monkeypatch
     ):
-        from transcribe_api.stt import local_storage
         from transcribe_api.runtime.settings_recording import get_settings
+        from transcribe_api.stt import local_storage
 
         monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
         monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path))
@@ -759,6 +778,7 @@ class TestSubmitJob:
 
     def test_returns_existing_job_on_idempotency_hit(self, client, as_current_user, mocker):
         existing = _make_job(status=JobStatus.SUCCEEDED)
+        existing.jurisdiction_id = IAC_JURISDICTION_ID  # this request's (DIAAT-334)
         mocker.patch(
             "transcribe_api.api.routes_recording.get_job_by_idempotency_key_for_user",
             return_value=existing,
@@ -836,7 +856,8 @@ class TestSubmitJob:
         )
 
         # as_current_user's id is 00000000-0000-0000-0000-000000000002 (see _make_user).
-        own_blob_name = "uploads/00000000-0000-0000-0000-000000000002/audio.wav"
+        # As upload_audio names it: the upload's ID, then the file name.
+        own_blob_name = "uploads/00000000-0000-0000-0000-000000000002/5b0f1c9e-3d2a-4f6b-8c7d-9e0a1b2c3d4e-audio.wav"
         response = client.post(
             "/api/v1/jobs",
             json={
@@ -1417,7 +1438,7 @@ class TestCorrectSegment:
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
         response = client.patch(
-            f"/api/v1/jobs/{job.id}/segments/0", json={"corrected_text": "fixed"}
+            f"/api/v1/jobs/{job.id}/segments/{_sid(job)}", json={"corrected_text": "fixed"}
         )
         assert response.status_code == 404
 
@@ -1427,20 +1448,20 @@ class TestCorrectSegment:
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
         response = client.patch(
-            f"/api/v1/jobs/{job.id}/segments/0", json={"corrected_text": "fixed"}
+            f"/api/v1/jobs/{job.id}/segments/{_MISSING_SEGMENT}", json={"corrected_text": "fixed"}
         )
         assert response.status_code == 422
 
-    def test_returns_404_for_out_of_range_index(self, client, as_current_user, mocker):
+    def test_returns_409_for_an_unknown_segment(self, client, as_current_user, mocker):
         job = _make_job(status=JobStatus.SUCCEEDED)
         job.caller_id = uuid.UUID("00000000-0000-0000-0000-000000000001")
         job.dialogue_entries = [{"speaker": "0", "text": "hi", "start_time": 0, "end_time": 1}]
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
         response = client.patch(
-            f"/api/v1/jobs/{job.id}/segments/5", json={"corrected_text": "fixed"}
+            f"/api/v1/jobs/{job.id}/segments/{_MISSING_SEGMENT}", json={"corrected_text": "fixed"}
         )
-        assert response.status_code == 404
+        assert response.status_code == 409
 
     def test_stores_correction_and_returns_updated_job(self, client, as_current_user, mocker):
         from transcribe_api.runtime.db_recording import get_session
@@ -1461,7 +1482,7 @@ class TestCorrectSegment:
 
         try:
             response = client.patch(
-                f"/api/v1/jobs/{job.id}/segments/0",
+                f"/api/v1/jobs/{job.id}/segments/{_sid(job)}",
                 json={"corrected_text": "the slow brown fox"},
             )
         finally:
@@ -1478,9 +1499,9 @@ class TestCorrectSegment:
         self, client, as_current_user, mocker, monkeypatch
     ):
         """DIAAT-231: default-off flag means no row in correction_dataset_entry."""
-        from transcribe_api.runtime.settings_recording import get_settings
-        from transcribe_api.runtime.db_recording import get_session
         from transcribe_api.domain.models_recording import CorrectionDatasetEntry
+        from transcribe_api.runtime.db_recording import get_session
+        from transcribe_api.runtime.settings_recording import get_settings
 
         monkeypatch.setenv("CORRECTIONS_DATASET_EXPORT_ENABLED", "false")
         get_settings.cache_clear()
@@ -1500,7 +1521,7 @@ class TestCorrectSegment:
 
         try:
             client.patch(
-                f"/api/v1/jobs/{job.id}/segments/0",
+                f"/api/v1/jobs/{job.id}/segments/{_sid(job)}",
                 json={"corrected_text": "the slow brown fox"},
             )
         finally:
@@ -1517,9 +1538,9 @@ class TestCorrectSegment:
         self, client, as_current_user, mocker, monkeypatch
     ):
         """DIAAT-231: enabling the flag stages a row capturing the correction."""
-        from transcribe_api.runtime.settings_recording import get_settings
-        from transcribe_api.runtime.db_recording import get_session
         from transcribe_api.domain.models_recording import CorrectionDatasetEntry
+        from transcribe_api.runtime.db_recording import get_session
+        from transcribe_api.runtime.settings_recording import get_settings
 
         monkeypatch.setenv("CORRECTIONS_DATASET_EXPORT_ENABLED", "true")
         get_settings.cache_clear()
@@ -1539,7 +1560,7 @@ class TestCorrectSegment:
 
         try:
             response = client.patch(
-                f"/api/v1/jobs/{job.id}/segments/0",
+                f"/api/v1/jobs/{job.id}/segments/{_sid(job)}",
                 json={"corrected_text": "the slow brown fox"},
             )
         finally:
@@ -1570,7 +1591,7 @@ class TestCorrectSegment:
         job.dialogue_entries = [{"speaker": "0", "text": "hi", "start_time": 0, "end_time": 1}]
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
-        response = client.patch(f"/api/v1/jobs/{job.id}/segments/0", json={"corrected_text": ""})
+        response = client.patch(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}", json={"corrected_text": ""})
         assert response.status_code == 422
 
     def test_rejects_whitespace_only_correction(self, client, as_current_user, mocker):
@@ -1579,7 +1600,7 @@ class TestCorrectSegment:
         job.dialogue_entries = [{"speaker": "0", "text": "hi", "start_time": 0, "end_time": 1}]
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
-        response = client.patch(f"/api/v1/jobs/{job.id}/segments/0", json={"corrected_text": "   "})
+        response = client.patch(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}", json={"corrected_text": "   "})
         assert response.status_code == 422
 
 
@@ -1621,7 +1642,7 @@ class TestCorrectWordRange:
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
         response = client.patch(
-            f"/api/v1/jobs/{job.id}/segments/0/words",
+            f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/words",
             json={"start_word_index": 0, "end_word_index": 0, "corrected_text": "fixed"},
         )
         assert response.status_code == 404
@@ -1632,22 +1653,22 @@ class TestCorrectWordRange:
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
         response = client.patch(
-            f"/api/v1/jobs/{job.id}/segments/0/words",
+            f"/api/v1/jobs/{job.id}/segments/{_MISSING_SEGMENT}/words",
             json={"start_word_index": 0, "end_word_index": 0, "corrected_text": "fixed"},
         )
         assert response.status_code == 422
 
-    def test_returns_404_for_out_of_range_index(self, client, as_current_user, mocker):
+    def test_returns_409_for_an_unknown_segment(self, client, as_current_user, mocker):
         job = _make_job(status=JobStatus.SUCCEEDED)
         job.caller_id = uuid.UUID("00000000-0000-0000-0000-000000000001")
         job.dialogue_entries = [{"speaker": "0", "text": "hi", "start_time": 0, "end_time": 1}]
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
         response = client.patch(
-            f"/api/v1/jobs/{job.id}/segments/5/words",
+            f"/api/v1/jobs/{job.id}/segments/{_MISSING_SEGMENT}/words",
             json={"start_word_index": 0, "end_word_index": 0, "corrected_text": "fixed"},
         )
-        assert response.status_code == 404
+        assert response.status_code == 409
 
     def test_returns_422_when_segment_has_no_words(self, client, as_current_user, mocker):
         job = _make_job(status=JobStatus.SUCCEEDED)
@@ -1658,7 +1679,7 @@ class TestCorrectWordRange:
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
         response = client.patch(
-            f"/api/v1/jobs/{job.id}/segments/0/words",
+            f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/words",
             json={"start_word_index": 0, "end_word_index": 0, "corrected_text": "fixed"},
         )
         assert response.status_code == 422
@@ -1678,13 +1699,13 @@ class TestCorrectWordRange:
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
         response = client.patch(
-            f"/api/v1/jobs/{job.id}/segments/0/words",
+            f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/words",
             json={"start_word_index": 2, "end_word_index": 1, "corrected_text": "fixed"},
         )
         assert response.status_code == 422
 
         response = client.patch(
-            f"/api/v1/jobs/{job.id}/segments/0/words",
+            f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/words",
             json={"start_word_index": 0, "end_word_index": 10, "corrected_text": "fixed"},
         )
         assert response.status_code == 422
@@ -1704,7 +1725,7 @@ class TestCorrectWordRange:
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
         response = client.patch(
-            f"/api/v1/jobs/{job.id}/segments/0/words",
+            f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/words",
             json={"start_word_index": 0, "end_word_index": 0, "corrected_text": "   "},
         )
         assert response.status_code == 422
@@ -1727,7 +1748,7 @@ class TestCorrectWordRange:
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
         response = client.patch(
-            f"/api/v1/jobs/{job.id}/segments/0/words",
+            f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/words",
             json={"start_word_index": 0, "end_word_index": 0, "corrected_text": "fixed"},
         )
         assert response.status_code == 422
@@ -1754,7 +1775,7 @@ class TestCorrectWordRange:
 
         try:
             response = client.patch(
-                f"/api/v1/jobs/{job.id}/segments/0/words",
+                f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/words",
                 json={"start_word_index": 1, "end_word_index": 1, "corrected_text": "slow"},
             )
         finally:
@@ -1782,9 +1803,9 @@ class TestCorrectWordRange:
         self, client, as_current_user, mocker, monkeypatch
     ):
         """DIAAT-231: default-off flag means no row in correction_dataset_entry."""
-        from transcribe_api.runtime.settings_recording import get_settings
-        from transcribe_api.runtime.db_recording import get_session
         from transcribe_api.domain.models_recording import CorrectionDatasetEntry
+        from transcribe_api.runtime.db_recording import get_session
+        from transcribe_api.runtime.settings_recording import get_settings
 
         monkeypatch.setenv("CORRECTIONS_DATASET_EXPORT_ENABLED", "false")
         get_settings.cache_clear()
@@ -1805,7 +1826,7 @@ class TestCorrectWordRange:
 
         try:
             client.patch(
-                f"/api/v1/jobs/{job.id}/segments/0/words",
+                f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/words",
                 json={"start_word_index": 1, "end_word_index": 1, "corrected_text": "slow"},
             )
         finally:
@@ -1826,9 +1847,9 @@ class TestCorrectWordRange:
         phrase (from entry.words, not any prior correction) paired with the
         clerk's corrected phrase and the per-word confidence for that range.
         """
-        from transcribe_api.runtime.settings_recording import get_settings
-        from transcribe_api.runtime.db_recording import get_session
         from transcribe_api.domain.models_recording import CorrectionDatasetEntry
+        from transcribe_api.runtime.db_recording import get_session
+        from transcribe_api.runtime.settings_recording import get_settings
 
         monkeypatch.setenv("CORRECTIONS_DATASET_EXPORT_ENABLED", "true")
         get_settings.cache_clear()
@@ -1849,7 +1870,7 @@ class TestCorrectWordRange:
 
         try:
             response = client.patch(
-                f"/api/v1/jobs/{job.id}/segments/0/words",
+                f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/words",
                 json={"start_word_index": 1, "end_word_index": 1, "corrected_text": "slow"},
             )
         finally:
@@ -1894,7 +1915,7 @@ class TestCorrectWordRange:
 
         try:
             response = client.patch(
-                f"/api/v1/jobs/{job.id}/segments/0/words",
+                f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/words",
                 json={"start_word_index": 2, "end_word_index": 2, "corrected_text": "grey"},
             )
         finally:
@@ -1929,7 +1950,7 @@ class TestCorrectWordRange:
 
         try:
             response = client.patch(
-                f"/api/v1/jobs/{job.id}/segments/0/words",
+                f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/words",
                 json={"start_word_index": 1, "end_word_index": 1, "corrected_text": "sluggish"},
             )
         finally:
@@ -1963,7 +1984,7 @@ class TestAcceptSegment:
         job.dialogue_entries = [{"speaker": "0", "text": "hi", "start_time": 0, "end_time": 1}]
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
-        response = client.post(f"/api/v1/jobs/{job.id}/segments/0/accept")
+        response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/accept")
         assert response.status_code == 404
 
     def test_returns_422_when_job_not_succeeded(self, client, as_current_user, mocker):
@@ -1971,17 +1992,17 @@ class TestAcceptSegment:
         job.caller_id = uuid.UUID("00000000-0000-0000-0000-000000000001")
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
-        response = client.post(f"/api/v1/jobs/{job.id}/segments/0/accept")
+        response = client.post(f"/api/v1/jobs/{job.id}/segments/{_MISSING_SEGMENT}/accept")
         assert response.status_code == 422
 
-    def test_returns_404_for_out_of_range_index(self, client, as_current_user, mocker):
+    def test_returns_409_for_an_unknown_segment(self, client, as_current_user, mocker):
         job = _make_job(status=JobStatus.SUCCEEDED)
         job.caller_id = uuid.UUID("00000000-0000-0000-0000-000000000001")
         job.dialogue_entries = [{"speaker": "0", "text": "hi", "start_time": 0, "end_time": 1}]
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
-        response = client.post(f"/api/v1/jobs/{job.id}/segments/5/accept")
-        assert response.status_code == 404
+        response = client.post(f"/api/v1/jobs/{job.id}/segments/{_MISSING_SEGMENT}/accept")
+        assert response.status_code == 409
 
     def test_marks_segment_accepted_without_changing_text(self, client, as_current_user, mocker):
         from transcribe_api.runtime.db_recording import get_session
@@ -2001,7 +2022,7 @@ class TestAcceptSegment:
         mock_session = self._patch_session(client, mocker)
 
         try:
-            response = client.post(f"/api/v1/jobs/{job.id}/segments/0/accept")
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/accept")
         finally:
             client.app.dependency_overrides.pop(get_session, None)
 
@@ -2045,7 +2066,7 @@ class TestAcceptSegment:
         ]
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
-        response = client.post(f"/api/v1/jobs/{job.id}/segments/0/accept")
+        response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/accept")
         assert response.status_code == 422
 
     def test_high_confidence_segment_not_in_needs_review_after_accept(
@@ -2069,12 +2090,282 @@ class TestAcceptSegment:
         self._patch_session(client, mocker)
 
         try:
-            response = client.post(f"/api/v1/jobs/{job.id}/segments/0/accept")
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/accept")
         finally:
             client.app.dependency_overrides.pop(get_session, None)
 
         assert response.status_code == 200
         assert response.json()["dialogue_entries"][0]["accepted"] is True
+
+
+class TestRenameSpeaker:
+    def _job(self):
+        job = _make_job(status=JobStatus.SUCCEEDED)
+        job.dialogue_entries = [
+            {"speaker": "Speaker 1", "text": "first", "start_time": 0.0, "end_time": 1.0},
+            {"speaker": "Speaker 2", "text": "second", "start_time": 1.0, "end_time": 2.0},
+            {
+                "speaker": "Speaker 1",
+                "text": "third",
+                "start_time": 2.0,
+                "end_time": 3.0,
+                "corrected_text": "third, corrected",
+            },
+        ]
+        return job
+
+    @contextmanager
+    def _session(self, client):
+        from transcribe_api.runtime.db_recording import get_session
+
+        mock_session = MagicMock()
+        client.app.dependency_overrides[get_session] = lambda: mock_session
+        try:
+            yield mock_session
+        finally:
+            client.app.dependency_overrides.pop(get_session, None)
+
+    def _rename(self, client, job, index, body):
+        return client.patch(f"/api/v1/jobs/{job.id}/segments/{_sid(job, index) if isinstance(index, int) else index}/speaker", json=body)
+
+    def test_replace_one_renames_only_that_segment(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+
+        with self._session(client) as mock_session:
+            response = self._rename(client, job, 0, {"speaker": "Judge Smith"})
+
+        assert response.status_code == 200
+        speakers = [e["speaker"] for e in response.json()["dialogue_entries"]]
+        assert speakers == ["Judge Smith", "Speaker 2", "Speaker 1"]
+        mock_session.commit.assert_called_once()
+
+    def test_replace_all_renames_every_segment_with_that_speaker(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+
+        with self._session(client):
+            response = self._rename(client, job, 2, {"speaker": "  Judge Smith ", "apply_to_all": True})
+
+        assert response.status_code == 200
+        entries = response.json()["dialogue_entries"]
+        assert [e["speaker"] for e in entries] == ["Judge Smith", "Speaker 2", "Judge Smith"]
+        assert entries[2]["corrected_text"] == "third, corrected"
+        assert entries[2]["correction_history"] is None
+
+    def test_unchanged_name_is_not_saved(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+
+        with self._session(client) as mock_session:
+            response = self._rename(client, job, 1, {"speaker": "Speaker 2"})
+
+        assert response.status_code == 200
+        mock_session.commit.assert_not_called()
+
+    def test_length_limit_applies_to_trimmed_name(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+
+        with self._session(client):
+            response = self._rename(client, job, 0, {"speaker": f"  {'x' * 200}  "})
+
+        assert response.status_code == 200
+        assert response.json()["dialogue_entries"][0]["speaker"] == "x" * 200
+
+    @pytest.mark.parametrize("speaker", ["", "   ", "x" * 201, 7])
+    def test_rejects_invalid_name(self, client, as_current_user, mocker, speaker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+
+        response = self._rename(client, job, 0, {"speaker": speaker})
+        assert response.status_code == 422
+
+    def test_returns_404_for_other_users_job(self, client, as_current_user, mocker):
+        job = self._job()
+        job.user_id = uuid.uuid4()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+
+        response = self._rename(client, job, 0, {"speaker": "Judge Smith"})
+        assert response.status_code == 404
+
+    def test_returns_409_for_an_unknown_segment(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+
+        response = self._rename(client, job, _MISSING_SEGMENT, {"speaker": "Judge Smith"})
+        assert response.status_code == 409
+
+
+class TestMergeSegmentWithNext:
+    def _job(self):
+        job = _make_job(status=JobStatus.SUCCEEDED)
+        job.dialogue_entries = [
+            {"speaker": "Speaker 1", "text": "Good", "start_time": 0.0, "end_time": 1.0, "confidence": 0.9},
+            {"speaker": "Speaker 2", "text": "morning.", "start_time": 1.2, "end_time": 2.0, "confidence": 0.5},
+            {"speaker": "Speaker 1", "text": "Please sit.", "start_time": 3.0, "end_time": 4.0, "confidence": 0.95},
+        ]
+        return job
+
+    def _post(self, client, mocker, job, index):
+        from transcribe_api.runtime.db_recording import get_session
+
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        mock_session = MagicMock()
+        client.app.dependency_overrides[get_session] = lambda: mock_session
+        try:
+            return client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job, index) if isinstance(index, int) else index}/merge-next"), mock_session
+        finally:
+            client.app.dependency_overrides.pop(get_session, None)
+
+    def test_returns_404_for_unknown_job(self, client, as_current_user, mocker):
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=None)
+        response = client.post(f"/api/v1/jobs/{uuid.uuid4()}/segments/0/merge-next")
+        assert response.status_code == 404
+
+    def test_returns_404_for_other_callers_job(self, client, as_current_user, mocker):
+        job = self._job()
+        job.user_id = uuid.uuid4()
+        response, _ = self._post(client, mocker, job, 0)
+        assert response.status_code == 404
+
+    def test_returns_422_when_job_not_succeeded(self, client, as_current_user, mocker):
+        job = self._job()
+        job.status = JobStatus.SUBMITTED
+        response, _ = self._post(client, mocker, job, 0)
+        assert response.status_code == 422
+
+    def test_returns_409_for_an_unknown_segment(self, client, as_current_user, mocker):
+        response, _ = self._post(client, mocker, self._job(), _MISSING_SEGMENT)
+        assert response.status_code == 409
+
+    def test_returns_422_for_last_segment(self, client, as_current_user, mocker):
+        response, session = self._post(client, mocker, self._job(), 2)
+        assert response.status_code == 422
+        session.commit.assert_not_called()
+
+    def test_combines_segment_with_the_next_one(self, client, as_current_user, mocker):
+        response, session = self._post(client, mocker, self._job(), 0)
+
+        assert response.status_code == 200
+        entries = response.json()["dialogue_entries"]
+        assert len(entries) == 2
+        assert entries[0]["speaker"] == "Speaker 1"
+        assert entries[0]["text"] == "Good morning."
+        assert entries[0]["start_time"] == 0.0
+        assert entries[0]["end_time"] == 2.0
+        assert entries[0]["confidence"] == 0.5
+        assert entries[1]["text"] == "Please sit."
+        session.commit.assert_called_once()
+
+    def test_merged_low_confidence_segment_still_needs_review(self, client, as_current_user, mocker):
+        response, _ = self._post(client, mocker, self._job(), 0)
+        assert [item["start_time"] for item in response.json()["needs_review"]] == [0.0]
+
+    def test_unreviewed_half_stays_in_review_until_the_merged_segment_is_corrected(
+        self, client, as_current_user, mocker
+    ):
+        from transcribe_api.runtime.db_recording import get_session
+
+        job = self._job()
+        job.dialogue_entries[0]["confidence"] = 0.95
+        job.dialogue_entries[0]["corrected_text"] = "Good"
+        response, _ = self._post(client, mocker, job, 0)
+        assert response.json()["needs_review"] == [{"speaker": "Speaker 1", "start_time": 0.0, "confidence": 0.5}]
+
+        client.app.dependency_overrides[get_session] = lambda: MagicMock()
+        try:
+            response = client.patch(
+                f"/api/v1/jobs/{job.id}/segments/{_sid(job)}", json={"corrected_text": "Good morning."}
+            )
+        finally:
+            client.app.dependency_overrides.pop(get_session, None)
+        assert response.status_code == 200
+        assert response.json()["needs_review"] == []
+
+    def _merged_with_corrected_halves(self, client, mocker):
+        job = self._job()
+        job.dialogue_entries[0]["corrected_text"] = "Good"
+        job.dialogue_entries[0]["correction_history"] = [
+            {"timestamp": "2026-01-01T09:00:00+00:00", "kind": "segment", "previous_text": "Gud", "new_text": "Good"}
+        ]
+        job.dialogue_entries[1]["corrected_text"] = "morning!"
+        response, _ = self._post(client, mocker, job, 0)
+        assert response.json()["needs_review"] == []
+        return job
+
+    def test_history_rollback_on_accepted_merged_segment_puts_it_back_in_review(
+        self, client, as_current_user, mocker
+    ):
+        from transcribe_api.runtime.db_recording import get_session
+
+        job = self._merged_with_corrected_halves(client, mocker)
+        job.dialogue_entries[0]["accepted"] = True
+        client.app.dependency_overrides[get_session] = lambda: MagicMock()
+        try:
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/history/0/rollback")
+        finally:
+            client.app.dependency_overrides.pop(get_session, None)
+        assert response.json()["dialogue_entries"][0]["accepted"] is False
+        assert response.json()["needs_review"] == [{"speaker": "Speaker 1", "start_time": 0.0, "confidence": 0.5}]
+
+    def test_history_rollback_on_merged_word_corrections_keeps_display_text(self, client, as_current_user, mocker):
+        from transcribe_api.runtime.db_recording import get_session
+
+        def words(*texts):
+            return [{"text": t, "start_time": 0.0, "end_time": 0.1, "confidence": 0.9} for t in texts]
+
+        def word_fix(index, old, new, text, fixed):
+            return {
+                "word_corrections": [{"start_word_index": index, "end_word_index": index, "text": new}],
+                "correction_history": [
+                    {
+                        "timestamp": "2026-01-01T09:00:00+00:00",
+                        "kind": "word_range",
+                        "previous_text": text,
+                        "new_text": fixed,
+                        "start_word_index": index,
+                        "end_word_index": index,
+                        "previous_phrase": old,
+                        "new_phrase": new,
+                    }
+                ],
+            }
+
+        job = self._job()
+        job.dialogue_entries = [
+            {
+                "speaker": "Speaker 1", "text": "My favourite colour.", "start_time": 0.0, "end_time": 1.0,
+                "words": words("my", "favorite", "color"),
+                **word_fix(2, "color", "hue", "My favourite colour.", "my favorite hue"),
+            },
+            {
+                "speaker": "Speaker 1", "text": "Is blue.", "start_time": 1.0, "end_time": 2.0,
+                "words": words("is", "blue"),
+                **word_fix(1, "blue", "green", "Is blue.", "is green"),
+            },
+        ]
+        self._post(client, mocker, job, 0)
+
+        client.app.dependency_overrides[get_session] = lambda: MagicMock()
+        try:
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/history/0/rollback")
+        finally:
+            client.app.dependency_overrides.pop(get_session, None)
+        assert response.json()["dialogue_entries"][0]["corrected_text"] == "My favourite colour. is green"
+
+    @pytest.mark.parametrize("path", ["rollback", "history/0/rollback"])
+    def test_rollback_on_merged_segment_puts_it_back_in_review(self, client, as_current_user, mocker, path):
+        from transcribe_api.runtime.db_recording import get_session
+
+        job = self._merged_with_corrected_halves(client, mocker)
+        client.app.dependency_overrides[get_session] = lambda: MagicMock()
+        try:
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/{path}")
+        finally:
+            client.app.dependency_overrides.pop(get_session, None)
+        assert response.status_code == 200
+        assert response.json()["needs_review"] == [{"speaker": "Speaker 1", "start_time": 0.0, "confidence": 0.5}]
 
 
 class TestRollbackSegment:
@@ -2096,7 +2387,7 @@ class TestRollbackSegment:
         job.dialogue_entries = [{"speaker": "0", "text": "hi", "start_time": 0, "end_time": 1}]
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
-        response = client.post(f"/api/v1/jobs/{job.id}/segments/0/rollback")
+        response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/rollback")
         assert response.status_code == 404
 
     def test_returns_422_for_uncorrected_segment(self, client, as_current_user, mocker):
@@ -2107,7 +2398,7 @@ class TestRollbackSegment:
         ]
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
-        response = client.post(f"/api/v1/jobs/{job.id}/segments/0/rollback")
+        response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/rollback")
         assert response.status_code == 422
 
     def test_rolls_back_whole_segment_correction(self, client, as_current_user, mocker):
@@ -2136,7 +2427,7 @@ class TestRollbackSegment:
         mock_session = self._patch_session(client, mocker)
 
         try:
-            response = client.post(f"/api/v1/jobs/{job.id}/segments/0/rollback")
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/rollback")
         finally:
             client.app.dependency_overrides.pop(get_session, None)
 
@@ -2168,7 +2459,7 @@ class TestRollbackSegment:
         mock_session = self._patch_session(client, mocker)
 
         try:
-            response = client.post(f"/api/v1/jobs/{job.id}/segments/0/rollback")
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/rollback")
         finally:
             client.app.dependency_overrides.pop(get_session, None)
 
@@ -2207,7 +2498,7 @@ class TestRollbackSegment:
         mock_session = self._patch_session(client, mocker)
 
         try:
-            response = client.post(f"/api/v1/jobs/{job.id}/segments/0/rollback")
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/rollback")
         finally:
             client.app.dependency_overrides.pop(get_session, None)
 
@@ -2239,7 +2530,7 @@ class TestRollbackToHistoryEntry:
         job.dialogue_entries = [{"speaker": "0", "text": "hi", "start_time": 0, "end_time": 1}]
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
-        response = client.post(f"/api/v1/jobs/{job.id}/segments/0/history/0/rollback")
+        response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/history/0/rollback")
         assert response.status_code == 404
 
     def test_returns_404_for_out_of_range_history_index(self, client, as_current_user, mocker):
@@ -2264,7 +2555,7 @@ class TestRollbackToHistoryEntry:
         ]
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
-        response = client.post(f"/api/v1/jobs/{job.id}/segments/0/history/5/rollback")
+        response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/history/5/rollback")
         assert response.status_code == 404
 
     def test_rolls_back_to_a_specific_history_entry(self, client, as_current_user, mocker):
@@ -2301,7 +2592,7 @@ class TestRollbackToHistoryEntry:
         try:
             # Roll back to the state immediately before the second edit —
             # i.e. restore its previous_text, "the slow brown fox".
-            response = client.post(f"/api/v1/jobs/{job.id}/segments/0/history/1/rollback")
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/history/1/rollback")
         finally:
             client.app.dependency_overrides.pop(get_session, None)
 
@@ -2341,7 +2632,7 @@ class TestRollbackToHistoryEntry:
         mock_session = self._patch_session(client, mocker)
 
         try:
-            response = client.post(f"/api/v1/jobs/{job.id}/segments/0/history/0/rollback")
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/history/0/rollback")
         finally:
             client.app.dependency_overrides.pop(get_session, None)
 
@@ -2383,7 +2674,7 @@ class TestRollbackToHistoryEntry:
         mock_session = self._patch_session(client, mocker)
 
         try:
-            response = client.post(f"/api/v1/jobs/{job.id}/segments/0/history/0/rollback")
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/history/0/rollback")
         finally:
             client.app.dependency_overrides.pop(get_session, None)
 
@@ -2451,7 +2742,7 @@ class TestRollbackToHistoryEntry:
         try:
             # Roll back to before the SECOND edit — should restore "slow"
             # (the first correction), not the original word "quick".
-            response = client.post(f"/api/v1/jobs/{job.id}/segments/0/history/1/rollback")
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/history/1/rollback")
         finally:
             client.app.dependency_overrides.pop(get_session, None)
 
@@ -2507,7 +2798,7 @@ class TestRollbackToHistoryEntry:
         mock_session = self._patch_session(client, mocker)
 
         try:
-            response = client.post(f"/api/v1/jobs/{job.id}/segments/0/history/0/rollback")
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/history/0/rollback")
         finally:
             client.app.dependency_overrides.pop(get_session, None)
 
@@ -2571,7 +2862,7 @@ class TestRollbackToHistoryEntry:
             # itself, which should restore the "slow" correction rather
             # than falling back to a whole-segment flat snapshot just
             # because no WordCorrection currently exists for this range.
-            response = client.post(f"/api/v1/jobs/{job.id}/segments/0/history/1/rollback")
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/history/1/rollback")
         finally:
             client.app.dependency_overrides.pop(get_session, None)
 
@@ -2622,7 +2913,7 @@ class TestRollbackToHistoryEntry:
         mock_session = self._patch_session(client, mocker)
 
         try:
-            response = client.post(f"/api/v1/jobs/{job.id}/segments/0/history/0/rollback")
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/history/0/rollback")
         finally:
             client.app.dependency_overrides.pop(get_session, None)
 
@@ -2659,7 +2950,9 @@ class TestListJobs:
         assert response.status_code == 200
         from transcribe_api.domain.models_recording import JobStatus as JS
 
-        mock.assert_called_once_with(mocker.ANY, as_current_user.id, JS.SUCCEEDED, 20, 0)
+        mock.assert_called_once_with(
+            mocker.ANY, as_current_user.id, JS.SUCCEEDED, 20, 0, jurisdiction_id=IAC_JURISDICTION_ID
+        )
 
     def test_rejects_invalid_status(self, client, as_current_user):
         response = client.get("/api/v1/jobs?status=notastate")
@@ -2673,7 +2966,7 @@ class TestListJobs:
 
         response = client.get("/api/v1/jobs?limit=5&offset=10")
         assert response.status_code == 200
-        mock.assert_called_once_with(mocker.ANY, as_current_user.id, None, 5, 10)
+        mock.assert_called_once_with(mocker.ANY, as_current_user.id, None, 5, 10, jurisdiction_id=IAC_JURISDICTION_ID)
 
     def test_returns_empty_list_when_no_jobs(self, client, as_current_user, mocker):
         mocker.patch(
@@ -2875,3 +3168,162 @@ class TestDeleteJob:
         assert response.status_code == 204
         mock_session.delete.assert_called_once_with(job)
         mock_session.commit.assert_called_once()
+
+
+class TestSegmentIds:
+    def _job(self):
+        job = _make_job(status=JobStatus.SUCCEEDED)
+        job.dialogue_entries = [
+            {"speaker": "Speaker 1", "text": "Good", "start_time": 0.0, "end_time": 1.0, "confidence": 0.9},
+            {"speaker": "Speaker 2", "text": "morning.", "start_time": 1.2, "end_time": 2.0, "confidence": 0.5},
+            {"speaker": "Speaker 1", "text": "Please sit.", "start_time": 3.0, "end_time": 4.0, "confidence": 0.95},
+        ]
+        return job
+
+    @contextmanager
+    def _session(self, client):
+        from transcribe_api.runtime.db_recording import get_session
+
+        mock_session = MagicMock()
+        client.app.dependency_overrides[get_session] = lambda: mock_session
+        try:
+            yield mock_session
+        finally:
+            client.app.dependency_overrides.pop(get_session, None)
+
+    def _ids(self, client, job):
+        return [e["id"] for e in client.get(f"/api/v1/jobs/{job.id}").json()["dialogue_entries"]]
+
+    def test_entries_saved_without_ids_get_the_same_ids_on_every_read(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        first = self._ids(client, job)
+        assert len(set(first)) == 3
+        assert all(i.startswith("seg_") for i in first)
+        assert self._ids(client, job) == first
+
+    def test_a_write_saves_the_ids_it_was_read_with(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        ids = self._ids(client, job)
+        with self._session(client):
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/{ids[2]}/accept")
+        assert response.status_code == 200
+        assert [e["id"] for e in job.dialogue_entries] == ids
+        assert self._ids(client, job) == ids
+
+    @pytest.mark.parametrize(
+        ("method", "path", "body"),
+        [
+            ("patch", "", {"corrected_text": "Good evening."}),
+            ("post", "/accept", None),
+            ("patch", "/speaker", {"speaker": "Judge"}),
+            ("post", "/merge-next", None),
+        ],
+    )
+    def test_every_segment_endpoint_takes_an_id(self, client, as_current_user, mocker, method, path, body):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        ids = self._ids(client, job)
+        with self._session(client) as session:
+            response = getattr(client, method)(f"/api/v1/jobs/{job.id}/segments/{ids[1]}{path}", json=body)
+        assert response.status_code == 200
+        session.commit.assert_called_once()
+        entries = response.json()["dialogue_entries"]
+        assert entries[0]["text"] == "Good"
+        assert entries[1]["text"].startswith("morning.")
+
+    def test_edits_keep_the_id_and_a_merge_replaces_both(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        ids = self._ids(client, job)
+        with self._session(client):
+            edited = client.patch(f"/api/v1/jobs/{job.id}/segments/{ids[0]}", json={"corrected_text": "Good,"})
+            merged = client.post(f"/api/v1/jobs/{job.id}/segments/{ids[0]}/merge-next")
+        assert [e["id"] for e in edited.json()["dialogue_entries"]] == ids
+        after = [e["id"] for e in merged.json()["dialogue_entries"]]
+        assert after[1] == ids[2]
+        assert after[0] not in ids
+
+    @pytest.mark.parametrize("path", ["", "/accept", "/rollback", "/speaker", "/merge-next", "/history/0/rollback"])
+    def test_an_absorbed_segment_is_a_409_and_nothing_is_saved(self, client, as_current_user, mocker, path):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        ids = self._ids(client, job)
+        with self._session(client):
+            client.post(f"/api/v1/jobs/{job.id}/segments/{ids[0]}/merge-next")
+        method = "patch" if path in ("", "/speaker") else "post"
+        body = {"corrected_text": "x"} if path == "" else {"speaker": "Judge"} if path == "/speaker" else None
+        with self._session(client) as session:
+            response = getattr(client, method)(f"/api/v1/jobs/{job.id}/segments/{ids[1]}{path}", json=body)
+        assert response.status_code == 409
+        assert "combined" in response.json()["detail"]
+        session.commit.assert_not_called()
+
+    def test_a_segment_index_is_not_accepted(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        with self._session(client) as session:
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/2/accept")
+        assert response.status_code == 409
+        session.commit.assert_not_called()
+
+    def test_combining_returns_the_same_job_score(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        before = client.get(f"/api/v1/jobs/{job.id}").json()["accuracy"]
+        with self._session(client):
+            after = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/merge-next").json()["accuracy"]
+        assert after["confidence_score"] == before["confidence_score"]
+        assert after["words_transcribed"] == before["words_transcribed"]
+
+    def test_merge_checks_the_segment_the_caller_expects_next(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        ids = self._ids(client, job)
+        with self._session(client) as session:
+            wrong = client.post(
+                f"/api/v1/jobs/{job.id}/segments/{ids[0]}/merge-next", json={"next_segment_id": ids[2]}
+            )
+            session.commit.assert_not_called()
+            right = client.post(
+                f"/api/v1/jobs/{job.id}/segments/{ids[0]}/merge-next", json={"next_segment_id": ids[1]}
+            )
+        assert wrong.status_code == 409
+        assert "after this one has changed" in wrong.json()["detail"]
+        assert right.status_code == 200
+        assert len(right.json()["dialogue_entries"]) == 2
+
+    def test_derived_ids_follow_the_segment_not_its_position(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        ids = self._ids(client, job)
+        job.dialogue_entries = [job.dialogue_entries[0], job.dialogue_entries[2]]
+        assert self._ids(client, job) == [ids[0], ids[2]]
+
+    def test_a_full_rollback_of_a_merged_segment_resets_its_parts(self, client, as_current_user, mocker):
+        job = self._job()
+        job.dialogue_entries[0]["corrected_text"] = "Good day"
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        with self._session(client):
+            merged_id = client.post(f"/api/v1/jobs/{job.id}/segments/{_sid(job)}/merge-next").json()["dialogue_entries"][0]["id"]
+            client.post(f"/api/v1/jobs/{job.id}/segments/{merged_id}/rollback")
+        assert [p["current_text"] for p in job.dialogue_entries[0]["parts"]] == ["Good", "morning."]
+
+    def test_identical_legacy_entries_get_distinct_ids(self, client, as_current_user, mocker):
+        job = self._job()
+        twin = {**job.dialogue_entries[1], "speaker": "Speaker 3"}
+        job.dialogue_entries = [job.dialogue_entries[1], twin]
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        ids = self._ids(client, job)
+        assert len(set(ids)) == 2
+        with self._session(client):
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/{ids[1]}/accept")
+        assert [e["accepted"] for e in response.json()["dialogue_entries"]] == [False, True]
+
+    def test_text_that_looks_like_an_occurrence_count_does_not_collide(self, client, as_current_user, mocker):
+        job = self._job()
+        base = job.dialogue_entries[1]
+        job.dialogue_entries = [base, dict(base), {**base, "text": f"{base['text']}|1"}]
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        assert len(set(self._ids(client, job))) == 3

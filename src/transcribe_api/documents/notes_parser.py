@@ -9,7 +9,12 @@ from __future__ import annotations
 
 from html.parser import HTMLParser
 
-from transcribe_api.documents.lib.docx_style_profile import INDENT_INCREMENT_CM, STYLE_NUM_NORMAL, STYLE_QUOTATION, cm_to_pt
+from transcribe_api.documents.lib.docx_style_profile import (
+    INDENT_INCREMENT_CM,
+    STYLE_NUM_NORMAL,
+    STYLE_QUOTATION,
+    cm_to_pt,
+)
 from transcribe_api.documents.lib.models import Paragraph
 
 _LIST_ITEM_ILVL = 1
@@ -121,7 +126,7 @@ class _TipTapHTMLParser(HTMLParser):
     # HTMLParser callbacks
     # ------------------------------------------------------------------
 
-    def handle_starttag(self, tag: str, attrs: list) -> None:  # noqa: ARG002
+    def handle_starttag(self, tag: str, attrs: list) -> None:
         if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
             self._reset_block()
             self._in_heading = True

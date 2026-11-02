@@ -1,6 +1,11 @@
 """Tests for Markdown-to-block conversion helpers."""
 
-from transcribe_api.documents.lib.docx_style_profile import INDENT_INCREMENT_CM, STYLE_NUM_NORMAL, STYLE_QUOTATION, cm_to_pt
+from transcribe_api.documents.lib.docx_style_profile import (
+    INDENT_INCREMENT_CM,
+    STYLE_NUM_NORMAL,
+    STYLE_QUOTATION,
+    cm_to_pt,
+)
 from transcribe_api.documents.lib.markdown_to_blocks import markdown_to_blocks, markdown_to_plain_text
 from transcribe_api.documents.lib.models import Heading, Paragraph
 

@@ -219,8 +219,6 @@ class TestIsTranscriptionShowable:
         assert _is_transcription_showable(t, datetime.now(UTC)) is False
 
     def test_returns_true_on_exception(self):
-        import sentry_sdk
-
         from transcribe_api.domain.interface_dictation import _is_transcription_showable
 
         class BadTranscription:
@@ -229,9 +227,7 @@ class TestIsTranscriptionShowable:
                 msg = "simulated failure"
                 raise AttributeError(msg)
 
-        with patch.object(sentry_sdk, "capture_exception"):
-            result = _is_transcription_showable(BadTranscription(), datetime.now(UTC))
-        assert result is True
+        assert _is_transcription_showable(BadTranscription(), datetime.now(UTC)) is True
 
     def test_aware_datetime_used_directly(self):
         from transcribe_api.domain.interface_dictation import _is_transcription_showable
@@ -250,7 +246,7 @@ class TestIsTranscriptionShowable:
         t.minute_versions = []
         t.transcription_jobs = []
         # naive datetime — pytz.utc.localize() should be called on it
-        t.created_datetime = dt.datetime(2020, 1, 1, 0, 0, 0)  # noqa: DTZ001  # naive, very old
+        t.created_datetime = dt.datetime(2020, 1, 1, 0, 0, 0)  # naive, very old
         assert _is_transcription_showable(t, datetime.now(UTC)) is True
 
 
@@ -328,7 +324,7 @@ class TestCreateErrorMinuteVersionFunction:
         tid = uuid4()
         template = TemplateMetadata(name=TemplateName.GENERAL, description="d", category="common")
         result = create_error_minute_version(str(mid), tid, ValueError("oops"), template=template, trace_id="trace-123")
-        assert result.error_message == "oops"
+        assert result.error_message.startswith("Minutes generation failed (ValueError)")
         assert result.template == template
         assert result.trace_id == "trace-123"
         assert result.is_generating is False
@@ -338,7 +334,7 @@ class TestCreateErrorMinuteVersionFunction:
         mid = uuid4()
         tid = uuid4()
         result = create_error_minute_version(str(mid), tid, RuntimeError("fail"))
-        assert result.error_message == "fail"
+        assert result.error_message.startswith("Minutes generation failed (RuntimeError)")
         assert not hasattr(result, "template") or result.template is None
 
     def test_creates_without_trace_id_when_not_provided(self):
@@ -402,6 +398,7 @@ class TestSaveTranscription:
         from transcribe_api.domain.models_dictation import Transcription
 
         transcription = MagicMock(spec=Transcription)
+        transcription.id = uuid4()  # a record ID is a UUID (save_transcription normalises a string)
         merged = MagicMock(spec=Transcription)
         user_id = uuid4()
 
@@ -541,10 +538,10 @@ class TestGetLiveDraft:
     def test_returns_none_when_no_draft_exists(self):
         from transcribe_api.domain.interface_dictation import get_live_draft
 
-        mock_session, mock_ctx = self._mock_ctx(None)
+        _, mock_ctx = self._mock_ctx(None)
 
         with patch("transcribe_api.domain.interface_dictation.Session", return_value=mock_ctx):
-            result = get_live_draft(uuid4())
+            result = get_live_draft(uuid4(), uuid4())
 
         assert result is None
 
@@ -557,7 +554,7 @@ class TestGetLiveDraft:
         mock_session, mock_ctx = self._mock_ctx(draft)
 
         with patch("transcribe_api.domain.interface_dictation.Session", return_value=mock_ctx):
-            result = get_live_draft(uuid4())
+            result = get_live_draft(uuid4(), uuid4())
 
         assert result is draft
         mock_session.delete.assert_not_called()
@@ -571,7 +568,7 @@ class TestGetLiveDraft:
         mock_session, mock_ctx = self._mock_ctx(draft)
 
         with patch("transcribe_api.domain.interface_dictation.Session", return_value=mock_ctx):
-            result = get_live_draft(uuid4())
+            result = get_live_draft(uuid4(), uuid4())
 
         assert result is None
         mock_session.delete.assert_called_once_with(draft)
@@ -583,13 +580,13 @@ class TestGetLiveDraft:
         from transcribe_api.domain.interface_dictation import get_live_draft
 
         draft = MagicMock()
-        draft.updated_datetime = _dt.datetime.now() - timedelta(hours=1)  # noqa: DTZ005
+        draft.updated_datetime = _dt.datetime.now() - timedelta(hours=1)
         assert draft.updated_datetime.tzinfo is None
         draft.created_datetime = datetime.now(UTC) - timedelta(hours=1)
         mock_session, mock_ctx = self._mock_ctx(draft)
 
         with patch("transcribe_api.domain.interface_dictation.Session", return_value=mock_ctx):
-            result = get_live_draft(uuid4())
+            result = get_live_draft(uuid4(), uuid4())
 
         assert result is draft
         mock_session.delete.assert_not_called()
@@ -600,10 +597,10 @@ class TestGetLiveDraft:
         draft = MagicMock()
         draft.updated_datetime = None
         draft.created_datetime = datetime.now(UTC) - timedelta(hours=1)
-        mock_session, mock_ctx = self._mock_ctx(draft)
+        _, mock_ctx = self._mock_ctx(draft)
 
         with patch("transcribe_api.domain.interface_dictation.Session", return_value=mock_ctx):
-            result = get_live_draft(uuid4())
+            result = get_live_draft(uuid4(), uuid4())
 
         assert result is draft
 
@@ -616,7 +613,7 @@ class TestGetLiveDraft:
         mock_session, mock_ctx = self._mock_ctx(draft)
 
         with patch("transcribe_api.domain.interface_dictation.Session", return_value=mock_ctx):
-            result = get_live_draft(uuid4())
+            result = get_live_draft(uuid4(), uuid4())
 
         assert result is None
         mock_session.delete.assert_called_once_with(draft)
@@ -635,7 +632,7 @@ class TestDeleteLiveDraft:
         mock_ctx.__exit__ = MagicMock(return_value=False)
 
         with patch("transcribe_api.domain.interface_dictation.Session", return_value=mock_ctx):
-            delete_live_draft(uuid4())
+            delete_live_draft(uuid4(), uuid4())
 
         mock_session.delete.assert_called_once_with(draft)
         mock_session.commit.assert_called_once()
@@ -650,7 +647,7 @@ class TestDeleteLiveDraft:
         mock_ctx.__exit__ = MagicMock(return_value=False)
 
         with patch("transcribe_api.domain.interface_dictation.Session", return_value=mock_ctx):
-            delete_live_draft(uuid4())
+            delete_live_draft(uuid4(), uuid4())
 
         mock_session.delete.assert_not_called()
         mock_session.commit.assert_not_called()
@@ -666,7 +663,8 @@ class TestUpsertLiveDraft:
         mock_ctx.__exit__ = MagicMock(return_value=False)
 
         with patch("transcribe_api.domain.interface_dictation.Session", return_value=mock_ctx):
-            upsert_live_draft(uuid4(), {"background": [], "evidence": [], "facts": []}, {})
+            upsert_live_draft(uuid4(), uuid4(), {"background": [], "evidence": [], "facts": []}, {})
 
-        mock_session.execute.assert_called_once()
+        # A draft from before jurisdictions is removed, then this one upserted (DIAAT-322).
+        assert mock_session.execute.call_count == 2
         mock_session.commit.assert_called_once()

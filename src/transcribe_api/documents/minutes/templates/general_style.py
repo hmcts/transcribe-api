@@ -4,13 +4,13 @@ from zoneinfo import ZoneInfo
 from langfuse.decorators import langfuse_context, observe
 from uwotm8 import convert_american_to_british_spelling
 
-from transcribe_api.domain.models_dictation import DialogueEntry, TemplateName
 from transcribe_api.documents.llm.llm_client import (
     LLMModel,
     langfuse_client,
     llm_completion,
 )
 from transcribe_api.documents.minutes.templates.utils import format_transcript_string_for_prompt
+from transcribe_api.domain.models_dictation import DialogueEntry, TemplateName
 from transcribe_api.runtime.markdown import markdown_to_html
 
 

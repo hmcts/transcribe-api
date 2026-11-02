@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import and_, case, func, or_
 from sqlalchemy import update as sa_update
 from sqlmodel import Session, col, select
 
-from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.domain.models_recording import (
     BatchJobStatus,
     Caller,
@@ -17,6 +17,10 @@ from transcribe_api.domain.models_recording import (
     JobStatus,
     SpeechBatchJob,
 )
+from transcribe_api.runtime.settings_recording import get_settings
+
+if TYPE_CHECKING:
+    from transcribe_api.domain.provenance_recording import TranscriptProvenance
 
 _POLL_BATCH_SIZE = 10
 
@@ -39,13 +43,15 @@ def list_jobs_paginated(
     status: JobStatus | None = None,
     limit: int = 20,
     offset: int = 0,
+    *,
+    jurisdiction_id: UUID,
 ) -> tuple[list[SpeechBatchJob], int]:
-    """List jobs with optional user_id filter.
+    """List jobs in one jurisdiction (DIAAT-334), with an optional user_id filter.
 
     Pass user_id=None to return all jobs regardless of owner (admin use).
     Pass a specific user_id to return only that user's jobs.
     """
-    conditions = []
+    conditions = [SpeechBatchJob.jurisdiction_id == jurisdiction_id]
     if user_id is not None:
         conditions.append(SpeechBatchJob.user_id == user_id)
     if status is not None:
@@ -129,9 +135,15 @@ def save_job_results(
     transcription_duration_seconds: float | None = None,
     model_identifier: str | None = None,
     model_display_name: str | None = None,
+    provenance: TranscriptProvenance | None = None,
 ) -> None:
+    """Save the transcript and, in the same transaction, its provenance (DIAAT-286).
+
+    The provenance's generated_at is the time the results are saved.
+    """
     job = session.get(SpeechBatchJob, job_id)
     if job:
+        now = datetime.now(UTC)
         job.dialogue_entries = [e.model_dump() if hasattr(e, "model_dump") else e for e in entries]
         job.batch_job_status = batch_status
         job.status = (
@@ -140,7 +152,11 @@ def save_job_results(
         job.transcription_duration_seconds = transcription_duration_seconds
         job.model_identifier = model_identifier
         job.model_display_name = model_display_name
-        job.updated_datetime = datetime.now(UTC)
+        if provenance is not None:
+            job.provenance = provenance.model_copy(update={"generated_at": now}).model_dump(
+                mode="json"
+            )
+        job.updated_datetime = now
         session.add(job)
         session.commit()
 

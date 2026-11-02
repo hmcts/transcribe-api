@@ -7,17 +7,17 @@ manually seeding a database with synthetic data, which bypassed this code
 path).
 """
 
-from transcribe_api.stt.speakers_recording import (
-    add_speaker_labels,
-    group_dialogue_entries_by_speaker,
-    normalize_speaker_labels,
-    process_speakers,
-)
 from transcribe_api.domain.models_recording import (
     DialogueEntry,
     NBestCandidate,
     PhraseAlternatives,
     WordInfo,
+)
+from transcribe_api.stt.speakers_recording import (
+    add_speaker_labels,
+    group_dialogue_entries_by_speaker,
+    normalize_speaker_labels,
+    process_speakers,
 )
 
 

@@ -2,7 +2,7 @@
 
 import asyncio
 import sys
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, Generator, Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -73,7 +73,7 @@ def pytest_addoption(parser):
 
 
 @pytest.fixture(scope="session")
-def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
+def event_loop() -> Generator[asyncio.AbstractEventLoop]:
     """Create an instance of the default event loop for the test session."""
     loop = asyncio.get_event_loop_policy().new_event_loop()
     yield loop
@@ -181,7 +181,7 @@ def sample_meeting_data() -> dict[str, Any]:
 
 
 @pytest_asyncio.fixture
-async def test_client() -> AsyncGenerator[AsyncClient, None]:
+async def test_client() -> AsyncGenerator[AsyncClient]:
     """Create test client for API testing."""
     # Import here to avoid circular imports
     from main import app
@@ -222,12 +222,52 @@ def setup_test_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "LANGFUSE_PUBLIC_KEY": "pk-lf-test-public-key-123456",
         "LANGFUSE_SECRET_KEY": "sk-lf-test-secret-key-123456",
         "LANGFUSE_HOST": "https://langfuse-ai.justice.gov.uk",
-        "SENTRY_DSN": "",  # Disable Sentry in tests
         "JWT_SECRET_KEY": "test-jwt-secret",
     }
 
     for key, value in test_env_vars.items():
         monkeypatch.setenv(key, value)
+
+
+class AuditLogStore:
+    """The audit rows written during one test (an in-memory database)."""
+
+    def __init__(self, engine) -> None:
+        self.engine = engine
+
+    def rows(self) -> list:
+        from sqlmodel import Session, select
+
+        from transcribe_api.domain.models_dictation import AuditLog
+
+        with Session(self.engine) as session:
+            return list(session.exec(select(AuditLog).order_by(AuditLog.timestamp)).all())
+
+
+@pytest.fixture(autouse=True)
+def audit_log(monkeypatch: pytest.MonkeyPatch, setup_test_environment) -> Iterator[AuditLogStore]:
+    """DIAAT-286: audit rows go to an in-memory database per test, never a real one.
+
+    ``audit_log.rows()`` lists them. Patching ``get_engine`` on the module itself
+    makes it fail like a real outage (tests of the fail-open behaviour).
+    """
+    from sqlalchemy.dialects.postgresql import JSONB
+    from sqlalchemy.ext.compiler import compiles
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import create_engine
+
+    import transcribe_api.domain.audit
+    from transcribe_api.domain.models_dictation import AuditLog
+
+    @compiles(JSONB, "sqlite")
+    def _jsonb_as_json(element, compiler, **kw):
+        return "JSON"
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    AuditLog.__table__.create(engine)
+    monkeypatch.setattr(transcribe_api.domain.audit, "get_engine", lambda: engine)
+    yield AuditLogStore(engine)
+    engine.dispose()  # one in-memory database per test: close it
 
 
 # Pytest configuration

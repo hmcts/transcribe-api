@@ -33,6 +33,8 @@ from sqlalchemy.exc import (
     TimeoutError as PoolTimeoutError,
 )
 
+from transcribe_api.domain.models_recording import BatchJobStatus, DialogueEntry
+from transcribe_api.runtime.telemetry import JOURNEY_JOB, configure_telemetry
 from transcribe_api.stt import job_telemetry
 from transcribe_api.stt.batch_client import BatchResultError
 from transcribe_api.stt.job_telemetry import (
@@ -44,8 +46,6 @@ from transcribe_api.stt.job_telemetry import (
 )
 from transcribe_api.stt.polling_service import BatchPollingService, _PendingJob
 from transcribe_api.stt.speakers_recording import process_speakers
-from transcribe_api.domain.models_recording import BatchJobStatus, DialogueEntry
-from transcribe_api.runtime.telemetry import JOURNEY_JOB, configure_telemetry
 
 SPEECH_JOB_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 SPEECH_URL = f"https://uksouth.api.cognitive.microsoft.com/speechtotext/v3.2/transcriptions/{SPEECH_JOB_ID}"
@@ -368,16 +368,16 @@ def test_post_speech_failures_are_the_applications(code):
 async def test_model_name_resolution_is_not_post_processing(tel):
     # An Azure Speech call (DIAAT-282 measures it), outside our post-processing stage.
     job = _pending()
-    with patch(f"{BASE}.process_speakers", side_effect=process_speakers):
-        with (
-            patch(f"{BASE}.get_batch_job_status", new=AsyncMock(return_value=_ok())),
-            patch(f"{BASE}.get_batch_results", new=AsyncMock(return_value=list(ENTRIES))),
-            patch(
-                f"{BASE}._resolve_model_display_name",
-                new=AsyncMock(side_effect=RuntimeError("x")),
-            ),
-        ):
-            await _service()._process_job(job)
+    with (
+        patch(f"{BASE}.process_speakers", side_effect=process_speakers),
+        patch(f"{BASE}.get_batch_job_status", new=AsyncMock(return_value=_ok())),
+        patch(f"{BASE}.get_batch_results", new=AsyncMock(return_value=list(ENTRIES))),
+        patch(
+            f"{BASE}._resolve_model_display_name",
+            new=AsyncMock(side_effect=RuntimeError("x")),
+        ),
+    ):
+        await _service()._process_job(job)
     assert tel.events("transcript_postprocessing.completed")
     assert not tel.events("transcript_postprocessing.failed")
     assert not tel.events("transcript_persistence.started")

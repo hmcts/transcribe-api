@@ -19,11 +19,6 @@ from hmcts_otel import conventions as c
 from sqlalchemy import inspect as sa_inspect
 from sqlmodel import Session
 
-from transcribe_api.stt import job_telemetry
-from transcribe_api.stt.batch_client import BatchSubmissionError, submit_batch_job
-from transcribe_api.stt.speech_auth import SpeechAuthError
-from transcribe_api.stt.job_telemetry import record_job_finished, seconds_between
-from transcribe_api.stt.speech_telemetry import speech_config_attributes
 from transcribe_api.domain.interface_recording import save_job
 from transcribe_api.domain.models_recording import BatchJobStatus, JobStatus, SpeechBatchJob
 from transcribe_api.runtime.telemetry import (
@@ -33,6 +28,11 @@ from transcribe_api.runtime.telemetry import (
     batch_job_id_from_url,
     upload_id_from_blob,
 )
+from transcribe_api.stt import job_telemetry
+from transcribe_api.stt.batch_client import BatchSubmissionError, submit_batch_job
+from transcribe_api.stt.job_telemetry import record_job_finished, seconds_between
+from transcribe_api.stt.speech_auth import SpeechAuthError
+from transcribe_api.stt.speech_telemetry import speech_config_attributes
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,7 @@ async def submit_and_queue_batch_job(
     audio_duration_seconds: float | None = None,
     audio_blob_path: str | None = None,
     user_id: UUID | None = None,
+    jurisdiction_id: UUID | None = None,
 ) -> SpeechBatchJob:
     """Submit audio to Azure Batch Transcription and persist the initial job record.
 
@@ -64,6 +65,7 @@ async def submit_and_queue_batch_job(
     job = SpeechBatchJob(
         caller_id=caller_id,
         user_id=user_id,
+        jurisdiction_id=jurisdiction_id,
         audio_url=audio_url,
         locale=locale,
         enable_diarization=enable_diarization,
@@ -217,22 +219,16 @@ async def _submit_to_speech(
     except BatchSubmissionError as exc:
         # Type and stack only: the Azure error text can echo request content (DIAAT-274 P7).
         logger.error("Batch submission failed for job %s (%s)", job.id, type(exc).__name__, exc_info=exc)
-        import sentry_sdk
-
-        sentry_sdk.capture_exception(exc)
         job.status = JobStatus.FAILED
         # Store only the high-level message — full Azure error detail (which
-        # may contain endpoint URLs or subscription IDs) goes to Sentry only.
+        # may contain endpoint URLs or subscription IDs) is never stored or logged.
         job.error_message = "Azure batch transcription submission failed"
         job.idempotency_key = None
         raise
     except SpeechAuthError as exc:
         # The pod's workload identity could not get a token (federation or
-        # role assignment missing); the detail is in the log and Sentry.
+        # role assignment missing); the type and redacted stack are in the log.
         logger.error("Batch submission failed for job %s (%s)", job.id, type(exc).__name__, exc_info=exc)
-        import sentry_sdk
-
-        sentry_sdk.capture_exception(exc)
         job.status = JobStatus.FAILED
         job.error_message = "Could not authenticate to Azure Speech"
         job.idempotency_key = None
@@ -242,9 +238,6 @@ async def _submit_to_speech(
         # the job, Speech may be transcribing, and a same-key retry must not
         # start a second transcription.
         logger.error("Unexpected error submitting job %s (%s)", job.id, type(exc).__name__, exc_info=exc)
-        import sentry_sdk
-
-        sentry_sdk.capture_exception(exc)
         job.status = JobStatus.FAILED
         job.error_message = "Job submission failed due to an internal error"
         raise

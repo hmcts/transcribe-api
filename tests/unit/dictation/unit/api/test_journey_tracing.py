@@ -8,12 +8,12 @@ from hmcts_otel import conventions as c
 from hmcts_otel import current_journey
 from hmcts_otel.testing import capture_telemetry
 
-from transcribe_api.runtime.telemetry import JOURNEY_SUBMISSION, JOURNEY_TRANSCRIPTION, transcription_id_from_key
 from tests.unit.dictation.unit.api.test_live_transcription_submission_logging import (  # DIAAT-298 helpers
     _MINIMAL_BODY,
     _make_user,
     _patch_submission_deps,
 )
+from transcribe_api.runtime.telemetry import JOURNEY_SUBMISSION, JOURNEY_TRANSCRIPTION, transcription_id_from_key
 
 
 def test_transcription_id_from_key_is_canonical():
@@ -37,6 +37,7 @@ def test_live_submission_journey_relates_the_transcription(client, as_user, mock
             "submission.started",
             "document_generation.started",
             "document_generation.completed",
+            "document.available",
             "transcript.available",
             "submission.completed",
         ]
@@ -45,10 +46,34 @@ def test_live_submission_journey_relates_the_transcription(client, as_user, mock
         assert available["dictation.transcription_id"] == str(saved.id)
 
 
+def test_submission_records_the_browser_dictation_session(client, as_user, mocker):
+    """OBS-4: the browser session is the submission journey's parent (from a header),
+    not a client-claimed transcription ID; a malformed value is ignored."""
+    as_user(_make_user(roles=["Judge"]))
+    _patch_submission_deps(mocker)
+    session_id = "3f2b8c1a-9d4e-4f6a-8b7c-1d2e3f4a5b6c"
+    with capture_telemetry() as telemetry:
+        ok = client.post(
+            "/api/live-transcription/submission",
+            json=_MINIMAL_BODY,
+            headers={"X-Dictation-Session-Id": session_id},
+        )
+        assert ok.status_code == 200, ok.text
+        assert telemetry.events("submission.completed")[0][c.JOURNEY_PARENT_ID] == session_id
+    with capture_telemetry() as telemetry:
+        client.post(
+            "/api/live-transcription/submission",
+            json=_MINIMAL_BODY,
+            headers={"X-Dictation-Session-Id": "PA/50123/2024"},
+        )
+        assert c.JOURNEY_PARENT_ID not in telemetry.events("submission.completed")[0]
+
+
 def test_upload_url_starts_the_transcription_journey(client, as_user, mocker):
     as_user(_make_user(roles=["Judge"]))
     settings = mocker.MagicMock(DIRECT_SDK_ACCESS=False, APP_URL="http://localhost:8000")
     mocker.patch("transcribe_api.api.routes_dictation.get_settings", return_value=settings)
+    mocker.patch("transcribe_api.api.routes_dictation.record_upload_jurisdiction")  # DIAAT-322
     with capture_telemetry() as telemetry:
         response = client.post("/api/get-upload-url", json={"file_extension": "mp4"})
         assert response.status_code == 200, response.text

@@ -11,7 +11,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from transcribe_api.domain.models_dictation import User
+from transcribe_api.domain.models_dictation import Transcription, User
 
 
 def _make_user(roles: list[str] | None = None, completed_onboarding: bool = False) -> User:
@@ -73,12 +73,13 @@ def test_health_returns_app_version_from_env(monkeypatch, client):
     import transcribe_api.api.routes_dictation
     import transcribe_api.runtime.version
 
-    monkeypatch.setenv("APP_VERSION", "1.2.3-abc1234")
-    importlib.reload(transcribe_api.runtime.version)
-    importlib.reload(transcribe_api.api.routes_dictation)
     try:
-        assert client.get("/api/health").json() == {"status": "ok", "version": "1.2.3-abc1234"}
-        assert client.get("/api/healthcheck").json() == {"status": "ok", "version": "1.2.3-abc1234"}
+        with monkeypatch.context() as env:
+            env.setenv("APP_VERSION", "1.2.3-abc1234")
+            importlib.reload(transcribe_api.runtime.version)
+            importlib.reload(transcribe_api.api.routes_dictation)
+            assert client.get("/api/health").json() == {"status": "ok", "version": "1.2.3-abc1234"}
+            assert client.get("/api/healthcheck").json() == {"status": "ok", "version": "1.2.3-abc1234"}
     finally:
         importlib.reload(transcribe_api.runtime.version)
         importlib.reload(transcribe_api.api.routes_dictation)
@@ -314,8 +315,7 @@ def test_upload_audio_rejects_key_with_mismatched_oid(client, as_user):
 # Audit log events — ST-J3
 # ---------------------------------------------------------------------------
 
-def _make_transcription(user_id=None) -> "Transcription":
-    from transcribe_api.domain.models_dictation import Transcription
+def _make_transcription(user_id=None) -> Transcription:
     t = Transcription(id=uuid.uuid4(), user_id=user_id or uuid.uuid4(), title="Test Hearing")
     t.__dict__.setdefault("transcription_jobs", [])
     t.__dict__.setdefault("minute_versions", [])
@@ -323,7 +323,12 @@ def _make_transcription(user_id=None) -> "Transcription":
     return t
 
 
-def test_transcript_viewed_logs_audit_event(client, as_user, mocker):
+# DIAAT-286: viewed and deleted are audit records in the database (audit_log), which
+# replaced the TRANSCRIPT_VIEWED / TRANSCRIPT_DELETED log lines. Detailed tests:
+# tests/unit/api/test_audit_events.py.
+
+
+def test_transcript_viewed_writes_an_audit_record(client, as_user, mocker, audit_log):
     user = _make_user(roles=["Judge"])
     as_user(user)
     transcription_id = uuid.uuid4()
@@ -331,46 +336,30 @@ def test_transcript_viewed_logs_audit_event(client, as_user, mocker):
     mock_logger = mocker.patch("transcribe_api.api.routes_dictation.logger")
     response = client.get(f"/api/transcriptions/{transcription_id}")
     assert response.status_code == 200
-    log_messages = [call[0][0] for call in mock_logger.info.call_args_list]
-    assert any("TRANSCRIPT_VIEWED" in msg for msg in log_messages)
+    (row,) = audit_log.rows()
+    assert (row.event_type, row.outcome, row.user_id, row.object_id) == (
+        "transcript.view",
+        "success",
+        str(user.id),
+        str(transcription_id),
+    )
+    assert not any("transcript.view" in c[0][0] for c in mock_logger.info.call_args_list)
 
 
-def test_transcript_viewed_log_contains_transcription_id_and_user(client, as_user, mocker):
-    user = _make_user(roles=["Judge"])
-    as_user(user)
-    transcription_id = uuid.uuid4()
-    mocker.patch("transcribe_api.api.routes_dictation.get_transcription_by_id", return_value=_make_transcription(user.id))
-    mock_logger = mocker.patch("transcribe_api.api.routes_dictation.logger")
-    client.get(f"/api/transcriptions/{transcription_id}")
-    viewed_call = next(c for c in mock_logger.info.call_args_list if "TRANSCRIPT_VIEWED" in c[0][0])
-    args = viewed_call[0]
-    assert str(transcription_id) in str(args[1])
-    assert str(user.id) in str(args[2])
-
-
-def test_transcript_deleted_logs_audit_event(client, as_user, mocker):
+def test_transcript_deleted_writes_an_audit_record(client, as_user, mocker, audit_log):
     user = _make_user(roles=["Judge"])
     as_user(user)
     transcription_id = uuid.uuid4()
     mocker.patch("transcribe_api.api.routes_dictation.delete_transcription_by_id")
-    mock_logger = mocker.patch("transcribe_api.api.routes_dictation.logger")
     response = client.delete(f"/api/transcriptions/{transcription_id}")
     assert response.status_code == 204
-    log_messages = [call[0][0] for call in mock_logger.info.call_args_list]
-    assert any("TRANSCRIPT_DELETED" in msg for msg in log_messages)
-
-
-def test_transcript_deleted_log_contains_transcription_id_and_user(client, as_user, mocker):
-    user = _make_user(roles=["Judge"])
-    as_user(user)
-    transcription_id = uuid.uuid4()
-    mocker.patch("transcribe_api.api.routes_dictation.delete_transcription_by_id")
-    mock_logger = mocker.patch("transcribe_api.api.routes_dictation.logger")
-    client.delete(f"/api/transcriptions/{transcription_id}")
-    deleted_call = next(c for c in mock_logger.info.call_args_list if "TRANSCRIPT_DELETED" in c[0][0])
-    args = deleted_call[0]
-    assert str(transcription_id) in str(args[1])
-    assert str(user.id) in str(args[2])
+    (row,) = audit_log.rows()
+    assert (row.event_type, row.outcome, row.user_id, row.object_id) == (
+        "transcript.delete",
+        "success",
+        str(user.id),
+        str(transcription_id),
+    )
 
 
 def test_transcript_job_submitted_logs_audit_event(client, as_user, mocker):
@@ -432,6 +421,7 @@ def test_generate_upload_url_uses_configured_ttl(client, as_user, mocker):
     settings = _mock_settings(mocker, upload_ttl=120)
     mocker.patch("transcribe_api.api.routes_dictation.get_settings", return_value=settings)
     mock_gen = mocker.patch("transcribe_api.api.routes_dictation.generate_blob_upload_url", new=AsyncMock(return_value="https://upload"))
+    mocker.patch("transcribe_api.api.routes_dictation.record_upload_jurisdiction")  # DIAAT-322
     client.post("/api/get-upload-url", json={"file_extension": "wav"})
     _, kwargs = mock_gen.call_args
     assert kwargs["expiry_hours"] == pytest.approx(120 / 60)

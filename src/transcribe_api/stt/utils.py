@@ -9,18 +9,18 @@ import ffmpeg
 import httpx
 from azure.storage.blob import BlobSasPermissions, generate_blob_sas
 
-from transcribe_api.runtime.blob_dictation import _redact_blob_path
 from transcribe_api.domain.models_dictation import DialogueEntry
-from transcribe_api.runtime.logger import logger
-from transcribe_api.runtime.telemetry import transcription_id_from_key
+from transcribe_api.runtime.blob_dictation import _redact_blob_path
 from transcribe_api.runtime.log_sanitization import sanitize_for_log
+from transcribe_api.runtime.logger import logger
 from transcribe_api.runtime.settings_dictation import get_settings
+from transcribe_api.runtime.telemetry import transcription_id_from_key
 
 
 def is_rate_limit_error(exception):
     """Check if the exception is due to rate limiting (HTTP 429)"""
     return (
-        isinstance(exception, httpx.HTTPStatusError) and exception.response.status_code == 429  # noqa: PLR2004
+        isinstance(exception, httpx.HTTPStatusError) and exception.response.status_code == 429
     )
 
 
@@ -199,7 +199,7 @@ async def generate_blob_download_url(
         await credential.close()
 
 
-def convert_to_mp3(  # noqa: C901, PLR0912
+def convert_to_mp3(
     input_file_path: Path, output_file=None, bitrate="192k", vbr=None
 ) -> Path:
     """
@@ -241,7 +241,7 @@ def convert_to_mp3(  # noqa: C901, PLR0912
         raise ValueError(msg)
 
     # Validate VBR quality
-    if vbr is not None and not (0 <= vbr <= 9):  # noqa: PLR2004
+    if vbr is not None and not (0 <= vbr <= 9):
         msg = f"Invalid VBR quality: {vbr}. Must be between 0 and 9."
         # logger.error(msg)
         raise ValueError(msg)
@@ -334,8 +334,8 @@ def get_audio_duration(file_path: Path) -> float:
     """
     try:
         logger.info("Getting audio duration using ffprobe")
-        result = subprocess.run(  # noqa: S603
-            [  # noqa: S607
+        result = subprocess.run(
+            [
                 "ffprobe",
                 "-v",
                 "error",
@@ -353,13 +353,13 @@ def get_audio_duration(file_path: Path) -> float:
         if result.returncode != 0:
             logger.error(f"ffprobe command failed with return code {result.returncode}")
             logger.error(f"ffprobe stderr: {result.stderr}")
-            raise ValueError(  # noqa: TRY003
-                "Failed to get duration using ffprobe"  # noqa: EM101
+            raise ValueError(
+                "Failed to get duration using ffprobe"
             )
 
         duration = float(result.stdout)
         logger.info(f"Successfully got duration using ffprobe: {duration} seconds")
-        return duration  # noqa: TRY300
+        return duration
 
     except Exception as e:
         logger.error(f"Failed to get audio duration: {e!s}", exc_info=True)

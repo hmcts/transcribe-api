@@ -1,0 +1,68 @@
+---
+config:
+  layout: elk
+---
+flowchart TB
+  dev(["Developer opens a PR<br/>(Conventional Commit title with Jira key)"])
+
+  subgraph gh["GitHub checks on the PR"]
+    direction LR
+    ruff["GitHub Actions: Ruff lint<br/>(transcribe-api, required on master)"]
+    copilot["Copilot review"]
+  end
+
+  subgraph prjob["Jenkins CNP pipeline on build.hmcts.net: PR build"]
+    direction TB
+    build["Checkout, Build<br/>(uv sync, or yarn install + lint)"]
+    par["Static checks / Container build, in parallel:<br/>unit tests + Sonar scan, security checks (uv or yarn audit),<br/>tech stack check, Docker image build in ACR hmctsprod"]
+    prtag["Promote Docker Image: tag pr-N-sha-time"]
+    tfplan["Terraform plan for AAT and prod<br/>(only when infrastructure/ changed)"]
+    prdeploy["AKS deploy - preview, then smoke and functional tests"]
+    build --> par --> prtag --> tfplan --> prdeploy
+  end
+
+  review(["Review, checks green, merge.<br/>develop: merge or squash. master: squash only"])
+
+  subgraph mjob["Jenkins CNP pipeline: master build"]
+    direction TB
+    mbuild["Same build, tests, scans and image build"]
+    tfaat["Terraform apply: AAT"]
+    staging["AKS deploy - AAT staging release,<br/>smoke and functional tests"]
+    chart["Publish Helm chart to hmcts-charts"]
+    tfprod["Terraform apply: prod<br/>(repo listed in cnp-jenkins-config environment approvals)"]
+    prodtag["Prod build promotion: tag prod-sha-time"]
+    sync["Sync branches with master:<br/>force-push demo, ithc, perftest"]
+    mbuild --> tfaat --> staging --> chart --> tfprod --> prodtag --> sync
+  end
+
+  subgraph flux["Flux in cnp-flux-config"]
+    direction TB
+    scan["ImageRepository scans hmctsprod"]
+    policy["ImagePolicy picks the newest tag:<br/>prod-* for AAT and prod,<br/>pr-45-* and pr-25-* for demo"]
+    commit["Image automation commits the new tag<br/>to cnp-flux-config master"]
+    helm["HelmRelease upgrade on both clusters<br/>(chart from hmcts-charts)"]
+    scan --> policy --> commit --> helm
+  end
+
+  demoTf["demo branch build: Terraform apply for demo only"]
+  envs(["Running in AAT, prod (from master)<br/>or demo (from develop)"])
+
+  dev --> gh
+  dev --> prjob
+  gh --> review
+  prjob --> review
+  review -->|"into develop: draft PR #45/#25 rebuilds"| prjob
+  review -->|"into master"| mjob
+  prtag -.->|"pr-N image"| scan
+  prodtag -.->|"prod image"| scan
+  sync -.-> demoTf
+  helm --> envs
+
+  classDef gh fill:#eef2f7,stroke:#5b6b80,color:#172b4d
+  classDef jen fill:#e3fcef,stroke:#006644,color:#172b4d
+  classDef fx fill:#eae6ff,stroke:#403294,color:#172b4d
+  classDef person fill:#fff7d6,stroke:#b65c02,color:#172b4d
+  class ruff,copilot gh
+  class build,par,prtag,tfplan,prdeploy,mbuild,tfaat,staging,chart,tfprod,prodtag,sync,demoTf jen
+  class scan,policy,commit,helm fx
+  class dev,review,envs person

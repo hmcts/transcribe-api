@@ -6,6 +6,9 @@ from uuid import UUID
 from fastapi import Depends, Header, HTTPException
 from sqlmodel import Session
 
+from transcribe_api.domain.interface_recording import get_all_active_callers, get_caller_by_lookup_hash
+from transcribe_api.domain.models_recording import Caller
+from transcribe_api.runtime.db_recording import get_session
 from transcribe_api.runtime.security import (
     compute_key_lookup_hash,
     encrypt_webhook_secret,
@@ -13,9 +16,6 @@ from transcribe_api.runtime.security import (
     verify_api_key,
 )
 from transcribe_api.runtime.settings_recording import get_settings
-from transcribe_api.runtime.db_recording import get_session
-from transcribe_api.domain.interface_recording import get_all_active_callers, get_caller_by_lookup_hash
-from transcribe_api.domain.models_recording import Caller
 
 
 def _local_dev_caller() -> Caller:
