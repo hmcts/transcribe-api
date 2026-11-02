@@ -18,8 +18,6 @@ from hmcts_otel import capture_trace_context, get_tracer
 from hmcts_otel import conventions as c
 from hmcts_otel.testing import TelemetryCapture, capture_telemetry
 
-from transcribe_api.stt.batch_client import BatchSubmissionError
-from transcribe_api.stt.polling_service import BatchPollingService, _PendingJob
 from transcribe_api.domain.models_recording import BatchJobStatus, SpeechBatchJob
 from transcribe_api.runtime.telemetry import (
     JOURNEY_UPLOAD,
@@ -27,6 +25,8 @@ from transcribe_api.runtime.telemetry import (
     configure_telemetry,
     upload_id_from_blob,
 )
+from transcribe_api.stt.batch_client import BatchSubmissionError
+from transcribe_api.stt.polling_service import BatchPollingService, _PendingJob
 
 SPEECH_JOB_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 SPEECH_URL = f"https://uksouth.api.cognitive.microsoft.com/speechtotext/v3.2/transcriptions/{SPEECH_JOB_ID}"
@@ -59,8 +59,8 @@ def test_helpers():
 
 def _client_with_user(mocker):
     from transcribe_api.api.app import create_app
-    from transcribe_api.domain.models_recording import User
     from transcribe_api.domain.auth.dependencies_recording import get_current_user
+    from transcribe_api.domain.models_recording import User
 
     manager = mocker.AsyncMock()
     manager.create_blob_from_file = mocker.AsyncMock(return_value=True)
@@ -120,7 +120,7 @@ def _submit(mocker, *, error: Exception | None = None):
 
 
 async def test_submission_stores_trace_context_and_relates_the_speech_job(tel, mocker):
-    submission, saved = _submit(mocker)
+    submission, _ = _submit(mocker)
     with get_tracer().start_as_current_span("POST /api/v1/jobs") as request_span:
         job = await submission.submit_and_queue_batch_job(
             session=MagicMock(), audio_url="https://x/y.wav", audio_blob_path=BLOB

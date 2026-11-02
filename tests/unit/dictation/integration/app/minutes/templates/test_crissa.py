@@ -1,11 +1,10 @@
-# ruff: noqa: T201
 
 import asyncio
 
 import pytest
 
-from transcribe_api.domain.models_dictation import DialogueEntry
 from transcribe_api.documents.minutes.templates.crissa import generate_full_crissa
+from transcribe_api.domain.models_dictation import DialogueEntry
 
 
 @pytest.mark.integration

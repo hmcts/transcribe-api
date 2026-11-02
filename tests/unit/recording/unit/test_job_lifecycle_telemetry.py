@@ -27,6 +27,9 @@ from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
+from transcribe_api.domain.interface_recording import count_job_states, update_job_batch_status
+from transcribe_api.domain.models_recording import BatchJobStatus, JobStatus, SpeechBatchJob
+from transcribe_api.runtime.telemetry import JOURNEY_JOB, configure_telemetry
 from transcribe_api.stt import job_telemetry
 from transcribe_api.stt.job_telemetry import (
     METRIC_JOB_DURATION,
@@ -40,9 +43,6 @@ from transcribe_api.stt.job_telemetry import (
     JobStateGauges,
 )
 from transcribe_api.stt.polling_service import BatchPollingService, _PendingJob
-from transcribe_api.domain.interface_recording import count_job_states, update_job_batch_status
-from transcribe_api.domain.models_recording import BatchJobStatus, JobStatus, SpeechBatchJob
-from transcribe_api.runtime.telemetry import JOURNEY_JOB, configure_telemetry
 
 SPEECH_JOB_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 SPEECH_URL = f"https://uksouth.api.cognitive.microsoft.com/speechtotext/v3.2/transcriptions/{SPEECH_JOB_ID}"

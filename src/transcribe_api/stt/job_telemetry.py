@@ -32,20 +32,24 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
-from hmcts_otel import StageHandle, get_meter, journey, record_event
+from hmcts_otel import SpeechMode, StageHandle, get_meter, journey, record_event
 from hmcts_otel import conventions as c
+from hmcts_otel import record_speech_usage as _record_speech_usage
 from opentelemetry.metrics import CallbackOptions, Meter, Observation
 from sqlalchemy import exc as sa_exc
 from sqlmodel import Session
 
-from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.domain.interface_recording import (
     JobStateCounts,
     claim_stuck_jobs,
     count_job_states,
 )
 from transcribe_api.domain.models_recording import JobStatus
+from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.runtime.telemetry import (
+    AI_FEATURE_BATCH_TRANSCRIPTION,
+    ATTR_AUDIO_DURATION_S,
+    ATTR_AUDIO_DURATION_SOURCE,
     ATTR_FAILURE_SOURCE,
     ATTR_HTTP_STATUS,
     ATTR_JOB_STATE,
@@ -79,8 +83,20 @@ METRIC_JOBS_RUNNING = "transcription.jobs.running"
 METRIC_QUEUE_DEPTH = "transcription.jobs.queue_depth"
 METRIC_OLDEST_WAITING_AGE = "transcription.jobs.oldest_waiting_age"
 METRIC_JOBS_STUCK = "transcription.jobs.stuck"
+# DIAAT-277: seconds since the polling loop last completed a poll (its heartbeat).
+METRIC_POLLER_LAST_SUCCESS_AGE = "transcription.poller.last_success_age"
 # DIAAT-282: running jobs / SPEECH_CONCURRENT_JOBS_LIMIT, only when the limit is set.
 METRIC_SPEECH_UTILISATION = "transcription.speech.concurrency.utilisation"
+
+# OBS-5: jobs whose Speech usage was recorded, by speech.audio_duration_source (azure,
+# estimate, or none when nothing was recorded).
+METRIC_SPEECH_USAGE_JOBS = "transcription.speech.usage.jobs"
+DURATION_SOURCE_AZURE = "azure"
+DURATION_SOURCE_ESTIMATE = "estimate"
+DURATION_SOURCE_NONE = "none"
+# The submitted estimate is the caller's: one beyond a day is not a recording's length,
+# and recording it would skew the usage share Speech cost is allocated by.
+MAX_ESTIMATED_AUDIO_SECONDS = 24 * 60 * 60
 
 # Values of the "phase" attribute on transcription.job.duration.
 PHASE_QUEUE_WAIT = "queue_wait"
@@ -112,7 +128,7 @@ def azure_last_action(status_data: Mapping[str, Any]) -> datetime | None:
     if not isinstance(value, str):
         return None
     try:
-        return _utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
+        return _utc(datetime.fromisoformat(value))
     except ValueError:
         return None
 
@@ -235,6 +251,55 @@ def record_job_finished(
         )
     except Exception as error:
         logger.warning("Could not count finished job (%s)", type(error).__name__)
+
+
+# AI usage (OBS-5) -----------------------------------------------------------------------
+
+
+def _seconds(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    seconds = float(value)
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
+
+
+def billed_audio_seconds(azure_seconds: object, estimated_seconds: object) -> tuple[float | None, str]:
+    """The audio seconds to record as a job's Speech usage, and where they came from.
+
+    Azure's own duration (from its results file, what it bills on) when it is known,
+    else the duration given when the job was submitted (an estimate), else nothing.
+    """
+    seconds = _seconds(azure_seconds)
+    if seconds is not None:
+        return seconds, DURATION_SOURCE_AZURE
+    seconds = _seconds(estimated_seconds)
+    if seconds is not None and seconds <= MAX_ESTIMATED_AUDIO_SECONDS:
+        return seconds, DURATION_SOURCE_ESTIMATE
+    return None, DURATION_SOURCE_NONE
+
+
+def record_speech_usage(seconds: float | None, source: str) -> dict[str, object]:
+    """Record a succeeded job's Azure Speech usage, once (OBS-5). Never raises.
+
+    hmcts.speech.audio.duration (mode batch, feature batch_transcription, outcome
+    success) when the seconds are known, and the job on transcription.speech.usage.jobs
+    by source either way. Returns the attributes for job.finished: the seconds and
+    their source, or nothing when no usage was recorded.
+    """
+    if seconds is not None:
+        _record_speech_usage(seconds=seconds, mode=SpeechMode.BATCH, feature=AI_FEATURE_BATCH_TRANSCRIPTION)
+    try:
+        _instrument(
+            "counter",
+            METRIC_SPEECH_USAGE_JOBS,
+            unit="{job}",
+            description="Jobs whose Azure Speech usage was recorded, by duration source",
+        ).add(1, {ATTR_AUDIO_DURATION_SOURCE: source})
+    except Exception as exc:  # telemetry must never break the job
+        logger.warning("Could not count speech usage (%s)", type(exc).__name__)
+    if seconds is None:
+        return {}
+    return {ATTR_AUDIO_DURATION_S: seconds, ATTR_AUDIO_DURATION_SOURCE: source}
 
 
 # Retries --------------------------------------------------------------------------------
@@ -797,6 +862,49 @@ class JobStateGauges:
         return [Observation(age or 0.0)]
 
 
+class PollerHeartbeat:
+    """DIAAT-277: is the polling loop (the job "queue"'s worker) alive?
+
+    ``transcription.poller.last_success_age``: seconds since the loop last completed a
+    poll without an unexpected error, or since it started if it has not yet. Growing
+    beyond a few poll intervals means the loop is stuck or failing on every poll.
+    Nothing is observed until the loop has started (e.g. in tests). Per replica: each
+    runs its own loop, so aggregate with max (any replica stalled) or min (all).
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._since: float | None = None
+
+    def started(self) -> None:
+        with self._lock:
+            if self._since is None:
+                self._since = self._clock()
+
+    def succeeded(self) -> None:
+        with self._lock:
+            self._since = self._clock()
+
+    def age(self) -> float | None:
+        with self._lock:
+            return None if self._since is None else max(0.0, self._clock() - self._since)
+
+    def _observe(self, _options: CallbackOptions) -> list[Observation]:
+        age = self.age()
+        return [] if age is None else [Observation(age)]
+
+    def register(self, meter: Meter) -> None:
+        meter.create_observable_gauge(
+            METRIC_POLLER_LAST_SUCCESS_AGE,
+            callbacks=[self._observe],
+            unit="s",
+            description="Seconds since the job polling loop last completed a poll",
+        )
+
+
+poller_heartbeat = PollerHeartbeat()
+
 _registered: list[Meter] = []
 
 
@@ -812,5 +920,6 @@ def register_job_gauges(session_factory: Callable[[], Session] | None = None) ->
             return Session(get_engine())
 
     JobStateGauges(session_factory).register(meter)
+    poller_heartbeat.register(meter)
     _registered.append(meter)
     return True

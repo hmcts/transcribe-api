@@ -11,17 +11,17 @@ from __future__ import annotations
 import logging
 import re
 
-from sqlmodel import Session, select
-
-from transcribe_api.runtime.db_connection import get_engine
-from transcribe_api.domain.models_dictation import User
 from hmcts_azure_auth import get_allowlisted_user as _lib_get_allowlisted_user
 from hmcts_azure_auth.audit import AuditWriter
 from hmcts_azure_auth.roles import get_valid_roles
+from sqlmodel import Session, select
 
-from transcribe_api.domain.auth.token_auth import build_token_user_dep
 from transcribe_api.domain.auth.auth_models_dictation import AuthenticatedUser
+from transcribe_api.domain.auth.token_auth import build_token_user_dep
 from transcribe_api.domain.auth.user_creation import insert_user_or_load_existing
+from transcribe_api.domain.jurisdictions import jurisdiction_dependency
+from transcribe_api.domain.models_dictation import User
+from transcribe_api.runtime.db_connection import get_engine
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +125,9 @@ def _resolve_user(azure_user_id: str, email: str, roles: list[str]) -> Authentic
 # verified bearer token only — see domain/auth/token_auth.py for why this is not
 # the library's Easy Auth based dependency.
 get_current_user = build_token_user_dep(_resolve_user)
+
+# The request's jurisdiction (DIAAT-322): domain/jurisdictions.py.
+get_active_jurisdiction = jurisdiction_dependency(get_current_user)
 
 
 def get_allowlisted_user(

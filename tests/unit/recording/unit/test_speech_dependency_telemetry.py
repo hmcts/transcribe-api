@@ -25,6 +25,10 @@ from hmcts_otel.testing import TelemetryCapture, capture_telemetry
 from sqlalchemy.exc import IntegrityError, OperationalError
 from tenacity import Future, RetryError
 
+from transcribe_api.domain.interface_recording import JobStateCounts
+from transcribe_api.domain.models_recording import BatchJobStatus, JobStatus
+from transcribe_api.runtime.settings_recording import get_settings
+from transcribe_api.runtime.telemetry import JOURNEY_JOB, configure_telemetry
 from transcribe_api.stt import job_telemetry, speech_telemetry, submission
 from transcribe_api.stt.batch_client import (
     BatchResultError,
@@ -46,10 +50,6 @@ from transcribe_api.stt.speech_telemetry import (
     METRIC_SPEECH_CALL_FAILURES,
     METRIC_SPEECH_THROTTLED,
 )
-from transcribe_api.runtime.settings_recording import get_settings
-from transcribe_api.domain.interface_recording import JobStateCounts
-from transcribe_api.domain.models_recording import BatchJobStatus, JobStatus
-from transcribe_api.runtime.telemetry import JOURNEY_JOB, configure_telemetry
 
 SPEECH_JOB_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 MODEL_ID = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d"
@@ -140,6 +140,9 @@ async def _poll(service, job, status_data, results=None) -> None:
         patch(f"{BASE}.process_speakers", side_effect=lambda entries: entries),
         patch(f"{BASE}._resolve_model_display_name", new=AsyncMock(return_value=None)),
         patch(f"{BASE}.delete_batch_job", new=AsyncMock()),
+        # A failed job marks its blob: never a real blob manager (its credential would
+        # try the Azure CLI, which the socket guard does not stop).
+        patch(f"{BASE}.AsyncAzureBlobManager"),
     ):
         await service._process_job(job)
 
@@ -836,15 +839,20 @@ async def test_rejected_submission_never_carries_azures_response_text(tel, mocke
     async def post(self, url, **_kwargs):
         return _response(400, "POST", url, **rejection)
 
-    sentry = mocker.patch("sentry_sdk.capture_exception")
     with caplog.at_level("DEBUG"), pytest.raises(BatchSubmissionError) as raised:
         await _submit(mocker, post)
 
     message = str(raised.value)
     expected = "InvalidPayload" if "json" in rejection else None
     assert message == "Batch job submission failed: HTTP 400" + (f" ({expected})" if expected else "")
-    (sent,) = sentry.call_args.args
-    for seen in (message, caplog.text, str(sent), repr(sent.args)):
+    # What App Insights receives for each logged exception: its type and stack, as
+    # hmcts-otel exports them (the message redacted).
+    exported = [
+        str(record.__dict__.get(key, ""))
+        for record in caplog.records
+        for key in ("exception.stacktrace", "exception.message")
+    ]
+    for seen in (message, caplog.text, repr(raised.value.args), *exported):
         for prohibited in (SAS_SIGNATURE, FILE_STEM, "Cannot access", "Bad request"):
             assert prohibited not in seen
 

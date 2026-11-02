@@ -61,8 +61,8 @@ class TestSubmitBatchJob:
         # versioned route below is the one that actually exists.
         import os
 
-        from transcribe_api.stt.batch_client import submit_batch_job
         from transcribe_api.runtime.settings_recording import get_settings
+        from transcribe_api.stt.batch_client import submit_batch_job
 
         os.environ["AZURE_SPEECH_ENDPOINT"] = "https://my-resource.cognitiveservices.azure.com"
         get_settings.cache_clear()
@@ -540,8 +540,8 @@ class TestGetModelDetails:
     async def test_returns_parsed_json_with_auth_header(self):
         import os
 
-        from transcribe_api.stt.batch_client import get_model_details
         from transcribe_api.runtime.settings_recording import get_settings
+        from transcribe_api.stt.batch_client import get_model_details
 
         os.environ["AZURE_SPEECH_KEY"] = "super-secret-key"
         get_settings.cache_clear()

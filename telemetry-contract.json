@@ -38,6 +38,9 @@
         "audio.export",
         "job.delete",
         "job.submit",
+        "jurisdiction.edit",
+        "membership.add",
+        "membership.remove",
         "transcript.delete",
         "transcript.edit",
         "transcript.export",
@@ -204,6 +207,13 @@
       "description": "Product feature an AI call served, e.g. summarise. Defaults to the current stage.",
       "max_length": 128,
       "pattern": "[a-z][a-z0-9_.]{0,63}",
+      "type": "str"
+    },
+    "hmcts.area": {
+      "allowed_values": null,
+      "description": "Product area the signal belongs to, e.g. dictation or recording (set with area()).",
+      "max_length": 128,
+      "pattern": "[a-z][a-z0-9_]{0,31}",
       "type": "str"
     },
     "hmcts.dependency.ref": {
@@ -441,6 +451,13 @@
       "description": "Minutes template.",
       "max_length": 128,
       "pattern": null,
+      "type": "str"
+    },
+    "next.error.digest": {
+      "allowed_values": null,
+      "description": "Next.js error digest: links a client-side error page to the server error that caused it.",
+      "max_length": 128,
+      "pattern": "[A-Za-z0-9]{1,32}",
       "type": "str"
     },
     "onboarding.step": {
@@ -681,6 +698,24 @@
       "pattern": null,
       "type": "str"
     },
+    "ui.error_source": {
+      "allowed_values": [
+        "render",
+        "unhandled_rejection",
+        "window_error"
+      ],
+      "description": "Where a client-side error was caught: the error page (render), window.onerror, or an unhandled promise rejection.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "str"
+    },
+    "ui.error_type": {
+      "allowed_values": null,
+      "description": "Class name of a client-side error (e.g. TypeError, ChunkLoadError). Never the message.",
+      "max_length": 128,
+      "pattern": "[A-Za-z][A-Za-z0-9_.]{0,63}",
+      "type": "str"
+    },
     "upload.file_count": {
       "allowed_values": null,
       "description": "Number of files uploaded for the hearing (X-Hearing-File-Count).",
@@ -736,12 +771,6 @@
       "browser": false,
       "class": "operational",
       "description": "An audit record could not be written to the database; the request carried on (fail-open). hmcts.error.code: audit.write_failed. Correlate on hmcts.request.id. Never carries the actor, the job or any content."
-    },
-    "auth.token_refresh_failed": {
-      "attributes": [],
-      "browser": true,
-      "class": "operational",
-      "description": "The browser could not obtain a fresh sign-in token."
     },
     "dependency.health_changed": {
       "attributes": [
@@ -1118,6 +1147,15 @@
       "class": "operational",
       "description": "Downloading the transcript from Azure Speech started."
     },
+    "security.jurisdiction_blocked": {
+      "attributes": [
+        "security.resource_type",
+        "security.action"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "DIAAT-334: a caller tried to reach material of a jurisdiction they are not working in (another of theirs, or one they do not belong to) and was refused with the same 404 as an unknown record. No jurisdiction, record or case content: correlate on hmcts.request.id with the audit record, which names the actor and the record."
+    },
     "security.ownership_violation": {
       "attributes": [
         "security.resource_type",
@@ -1340,6 +1378,17 @@
       "class": "operational",
       "description": "Speaker processing started."
     },
+    "ui.error": {
+      "attributes": [
+        "ui.error_type",
+        "ui.error_source",
+        "page.route",
+        "next.error.digest"
+      ],
+      "browser": true,
+      "class": "operational",
+      "description": "A client-side error reached the error page or the window's handlers (transcribe-web). Type only, never the message."
+    },
     "upload.file_rejected": {
       "attributes": [
         "hmcts.error.code",
@@ -1374,6 +1423,19 @@
       "browser": true,
       "class": "analytics",
       "description": "An upload was sent for transcription."
+    },
+    "upload.transfer_failed": {
+      "attributes": [
+        "hmcts.error.code",
+        "http.response.status_code",
+        "file.type",
+        "file.size_bytes",
+        "upload.retry_attempt",
+        "upload.source"
+      ],
+      "browser": true,
+      "class": "operational",
+      "description": "The browser could not send an audio file to storage after its retries (dictation uploads). hmcts.error.code: upload.network, upload.timeout, upload.url_unavailable or http.<status>. Not upload.failed (recording's server-side upload stage)."
     },
     "upload.url_issued": {
       "attributes": [

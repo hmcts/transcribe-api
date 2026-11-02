@@ -26,6 +26,14 @@ class UserHasTranscriptionsError(Exception):
         )
 
 
+class JurisdictionConflictError(Exception):
+    """DIAAT-334: a save names the caller's record of another jurisdiction."""
+
+    def __init__(self, record_type: str) -> None:
+        super().__init__(f"{record_type} belongs to another jurisdiction")
+        self.record_type = record_type
+
+
 class OwnershipConflictError(Exception):
     """A save would move an existing record to a different owner (SEC-1).
 

@@ -38,7 +38,7 @@ class TestLangfuseConnectionIntegration:
                 f"Please verify your credentials are correct."
             )
 
-            print(f"✅ Successfully authenticated with {settings.LANGFUSE_HOST}")  # noqa: T201
+            print(f"✅ Successfully authenticated with {settings.LANGFUSE_HOST}")
 
         except Exception as e:
             # Only fail if this is clearly a configuration issue, not auth failure

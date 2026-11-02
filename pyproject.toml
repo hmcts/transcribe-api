@@ -37,7 +37,7 @@ dependencies = [
     "opentelemetry-instrumentation-fastapi>=0.61b0",
 
     # --- telemetry (DIAAT-205) ---
-    "hmcts-otel[fastapi] @ git+https://github.com/hmcts/hmcts-otel@v0.2.3",
+    "hmcts-otel[fastapi] @ git+https://github.com/hmcts/hmcts-otel@v0.3.0",
 
     # --- auth ---
     # Resolved from git rather than vendored as a committed wheel, and at v0.3.0
@@ -76,7 +76,6 @@ dependencies = [
 
     # --- misc ---
     "notifications-python-client>=10.0.1",
-    "sentry-sdk[fastapi]>=2.59.0",
     "uwotm8>=0.1.6",
     "pyprojroot>=0.3.0",
     "pandas>=3.0.2",
@@ -125,7 +124,19 @@ pythonpath = ["src", "."]
 # data alongside the pipeline's flag (it still warns that `app` was never
 # imported; that warning is harmless).
 addopts = "--cov=transcribe_api"
+markers = [
+    "real_jurisdictions: use the real jurisdiction lookup, not every user an IAC judge (tests/unit/conftest.py)",
+]
 
 [tool.ruff]
 line-length = 120
 target-version = "py313"
+
+[tool.ruff.lint]
+# Ruff 0.17 dropped these from its defaults; keep enforcing what 0.15 enforced.
+extend-select = ["E4", "E7", "E9", "F"]
+# The broad excepts are deliberate fail-soft paths (audit, telemetry, pollers, health checks).
+ignore = ["BLE001"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.File", "fastapi.Form", "fastapi.Query", "fastapi.Header", "fastapi.Security"]

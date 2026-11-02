@@ -11,9 +11,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from alembic import command
 from alembic.config import Config
 from sqlalchemy import MetaData, text
+
+from alembic import command
 
 # Arbitrary, fixed key for pg_advisory_lock; only this code uses it.
 MIGRATION_LOCK_KEY = 7243184601
@@ -39,7 +40,7 @@ def target_metadata() -> MetaData:
     """The merged models' metadata, with every table registered."""
     from sqlmodel import SQLModel
 
-    import transcribe_api.domain.models_dictation  # noqa: F401
+    import transcribe_api.domain.models_dictation
     import transcribe_api.domain.models_recording  # noqa: F401
 
     return SQLModel.metadata

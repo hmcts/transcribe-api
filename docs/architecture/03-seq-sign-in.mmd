@@ -1,0 +1,41 @@
+sequenceDiagram
+  autonumber
+  actor U as User's browser
+  participant W as transcribe-web<br/>(Caddy + Next.js)
+  participant R as Redis
+  participant E as Entra ID
+  participant A as transcribe-api
+  participant D as Postgres
+
+  U->>W: Open any page
+  W-->>U: No session cookie, redirect to /auth/login
+  U->>W: GET /auth/login
+  W->>R: Save pending login (state, PKCE verifier), 10 minutes
+  W-->>U: Redirect to Entra sign-in
+  U->>E: Sign in with HMCTS account
+  E-->>U: Redirect to /auth/callback with a code
+  U->>W: GET /auth/callback
+  W->>R: Take the pending login (single use)
+  W->>E: Exchange code for tokens
+  E-->>W: ID token with app roles, refresh token
+  alt user holds none of the access roles
+    W-->>U: 403 "You do not have access to BenchNotes"
+  else user holds a role
+    W->>R: Store session (tokens, roles)
+    W-->>U: Set httpOnly session cookie, redirect to the page
+  end
+
+  Note over U,A: Every later API call
+  U->>W: /api/... with session cookie
+  W->>W: Caddy drops any Authorization header,<br/>asks Next.js for the session's token<br/>(refreshed with Entra when needed)
+  W->>A: Request with Authorization: Bearer ID token
+  A->>E: Fetch signing keys (cached)
+  A->>A: Verify signature, audience, issuer, expiry.<br/>Check the user holds an access role
+  A->>D: Find or create the user, sync role from token
+  A->>A: Check the route's required role
+  alt role allowed
+    A-->>W: 200 with data
+  else not allowed
+    A-->>W: 401 or 403
+  end
+  W-->>U: Response

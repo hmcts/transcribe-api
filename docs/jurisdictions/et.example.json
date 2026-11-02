@@ -1,0 +1,21 @@
+{
+  "wording": {
+    "home.intro": "Supporting Employment Tribunal judges with live dictation, so you can focus on the hearing.",
+    "help.subtitle": "Getting started with Bench Notes for the Employment Tribunal",
+    "records.column_title": "Claim",
+    "records.column_type": "Type",
+    "records.search_placeholder": "Search claims or dates",
+    "records.search_hint": "Search your recent dictations by claim title or date.",
+    "records.filter_label": "Filter your recent dictations by type",
+    "records.filter_placeholder": "Filter by type",
+    "records.filter_all": "All types",
+    "records.no_match": "No claims matched your current search or filters.",
+    "records.open": "Open claim",
+    "records.rename_hint": "Update the title shown in the claims list.",
+    "records.no_transcript": "No saved transcript was found for this claim.",
+    "autosave.record_name": "dictation record",
+    "alerts.speech_lost_guidance": "Pause then restart recording to restart dictation. If this warning comes back, record your judgment in another way and raise with your Support team for investigation."
+  },
+  "template": null,
+  "features": {"hearing_recordings": false}
+}

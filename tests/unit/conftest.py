@@ -57,7 +57,6 @@ TEST_ENV: dict[str, str] = {
     "LANGFUSE_PUBLIC_KEY": "pk-lf-test-public-key-123456",
     "LANGFUSE_SECRET_KEY": "sk-lf-test-secret-key-123456",
     "LANGFUSE_HOST": "https://langfuse-ai.justice.gov.uk",
-    "SENTRY_DSN": "",
     "JWT_SECRET_KEY": "test-jwt-secret",
     "DISABLE_FASTAPI_INSTRUMENTATION": "true",
     "RUN_WORKERS": "false",
@@ -113,6 +112,86 @@ def isolate_test_environment(monkeypatch: pytest.MonkeyPatch):
     _clear_settings_caches()
 
 
+@pytest.fixture(autouse=True)
+def every_user_is_an_iac_judge(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """DIAAT-322: every user belongs to the IAC alone, without a database: the
+    jurisdiction lookup is replaced. Tests of jurisdictions themselves mark themselves
+    ``real_jurisdictions`` and keep the real one."""
+    if request.node.get_closest_marker("real_jurisdictions"):
+        return
+    from tests.unit.jurisdiction_fixtures import iac_membership
+    from transcribe_api.domain import jurisdictions
+
+    monkeypatch.setattr(jurisdictions, "_load_memberships", lambda user_id: [iac_membership()])
+    monkeypatch.setattr(jurisdictions, "_remembered_jurisdiction_id", lambda user_id: None)
+    # Every record is in the IAC too (DIAAT-334): left to the ownership checks.
+    monkeypatch.setattr(jurisdictions, "_owned_transcription_jurisdiction", lambda transcription_id, user_id: (False, None))
+    monkeypatch.setattr(jurisdictions, "_job_owner_and_jurisdiction", lambda job_id: (False, None, None))
+    # And every upload was made in the IAC.
+    monkeypatch.setattr(jurisdictions, "_record_upload_jurisdiction", lambda upload_id, jurisdiction_id: None)
+    monkeypatch.setattr(jurisdictions, "_recorded_upload_jurisdiction", lambda upload_id: iac_membership().jurisdiction_id)
+
+
+@pytest.fixture
+def jurisdiction_db(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """DIAAT-322: an in-memory SQLite database with the jurisdiction tables, used by the
+    jurisdiction lookups, the dictation interface, the auth resolver (first sign-in)
+    and the document content loader. For tests marked ``real_jurisdictions``."""
+    assert request.node.get_closest_marker("real_jurisdictions"), (
+        "mark the test real_jurisdictions: without it every user is an IAC judge, whatever is in this database"
+    )
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, create_engine
+
+    from tests.unit.jurisdiction_fixtures import JURISDICTION_TABLES
+    from transcribe_api.documents import content_loader
+    from transcribe_api.domain import audit, interface_dictation, jurisdictions
+    from transcribe_api.domain.auth import dependencies_dictation
+    from transcribe_api.runtime import db_connection
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(engine, tables=JURISDICTION_TABLES)
+    monkeypatch.setattr(jurisdictions, "get_engine", lambda: engine)
+    monkeypatch.setattr(db_connection, "get_engine", lambda: engine)
+    monkeypatch.setattr(interface_dictation, "engine", engine)
+    monkeypatch.setattr(dependencies_dictation, "get_engine", lambda: engine)
+    monkeypatch.setattr(audit, "get_engine", lambda: engine)  # audit rows land here too
+    content_loader.clear_cache()
+    yield engine
+    content_loader.clear_cache()
+    engine.dispose()
+
+
+@pytest.fixture
+def fresh_postgres():
+    """A throwaway Postgres (TEST_POSTGRES_URL), emptied and migrated to head; the test
+    is skipped without one. Never point TEST_POSTGRES_URL at a database you need."""
+    url = os.getenv("TEST_POSTGRES_URL")
+    if not url:
+        pytest.skip("needs TEST_POSTGRES_URL (a throwaway Postgres)")
+    from sqlalchemy import create_engine, text
+
+    from transcribe_api.runtime import migrations
+
+    engine = create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public"))
+        migrations.run_migrations(engine)
+        yield engine
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture
+def jurisdiction_app():
+    """DIAAT-322: the dictation and jurisdiction routes; sign in with
+    jurisdiction_fixtures.client_as (one user per app)."""
+    from tests.unit.jurisdiction_fixtures import jurisdiction_route_app
+
+    return jurisdiction_route_app()
+
+
 class FakeSpeechCredential:
     """Stands in for DefaultAzureCredential in stt/speech_auth.py."""
 
@@ -148,3 +227,47 @@ def speech_workload_identity(monkeypatch: pytest.MonkeyPatch):
     credential = speech_auth._credential()
     yield credential
     speech_auth._credential.cache_clear()
+
+
+def pytest_sessionstart(session):
+    """DIAAT-287: no evidence from an earlier run is ever archived as this run's."""
+    from tests.unit import telemetry_scan
+
+    telemetry_scan.evidence_path(session.config.rootpath).unlink(missing_ok=True)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """DIAAT-287: write the session's prohibited-content scan evidence (both areas), if
+    any validation scenario ran, under the repository root (TELEMETRY_PII_SCAN_REPORT
+    overrides the path). Its result also fails if the test session failed."""
+    import os
+    import platform
+    import subprocess
+    from datetime import UTC, datetime
+    from importlib.metadata import version
+
+    from tests.unit import telemetry_scan
+
+    if not telemetry_scan.SCENARIOS:
+        return
+    try:
+        commit = (
+            os.environ.get("GIT_COMMIT")
+            or subprocess.run(  # noqa: S603 - fixed arguments
+                ["git", "rev-parse", "HEAD"],  # noqa: S607
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5,
+            ).stdout.strip()
+        )
+    except Exception:  # noqa: BLE001 - evidence metadata is best effort
+        commit = None
+    telemetry_scan.write_evidence(
+        telemetry_scan.evidence_path(session.config.rootpath),
+        exit_status=int(exitstatus),
+        generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        commit=commit,
+        python=platform.python_version(),
+        hmcts_otel=version("hmcts-otel"),
+    )

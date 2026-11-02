@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import re
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -9,16 +11,16 @@ import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 from uwotm8 import convert_american_to_british_spelling
 
-from transcribe_api.stt.job_telemetry import record_speech_retry, response_error_code
-from transcribe_api.stt.speech_telemetry import SPEECH_API_VERSION, speech_call
-from transcribe_api.runtime.settings_recording import get_settings
-from transcribe_api.stt.speech_auth import speech_auth_headers
 from transcribe_api.domain.models_recording import (
     DialogueEntry,
     NBestCandidate,
     PhraseAlternatives,
     WordInfo,
 )
+from transcribe_api.runtime.settings_recording import get_settings
+from transcribe_api.stt.job_telemetry import record_speech_retry, response_error_code
+from transcribe_api.stt.speech_auth import speech_auth_headers
+from transcribe_api.stt.speech_telemetry import SPEECH_API_VERSION, speech_call
 
 # A fixed transcript for SPEECH_BACKEND=mock (see settings_recording.py). Two
 # speakers, word-level timing and a low-confidence word so the review UI's
@@ -108,6 +110,12 @@ _TICKS_PER_SECOND: int = 10_000_000
 # respondent, interpreter, witnesses, clerk).
 _MAX_DIARIZATION_SPEAKERS: int = 35
 _HTTP_TIMEOUT: float = 30.0
+# What every job is submitted with, besides locale and diarization. DIAAT-286: also
+# recorded in the job's provenance, as configuration that shapes the transcript.
+PROFANITY_FILTER_MODE = "None"
+PUNCTUATION_MODE = "DictatedAndAutomatic"
+WORD_LEVEL_TIMESTAMPS = True
+MAX_DIARIZATION_SPEAKERS = _MAX_DIARIZATION_SPEAKERS
 _HTTP_SERVER_ERROR_MIN: int = 500
 
 _RETRY_POLICY = retry(
@@ -188,9 +196,9 @@ async def submit_batch_job(
         "locale": locale,
         "displayName": display_name,
         "properties": {
-            "wordLevelTimestampsEnabled": True,
-            "profanityFilterMode": "None",
-            "punctuationMode": "DictatedAndAutomatic",
+            "wordLevelTimestampsEnabled": WORD_LEVEL_TIMESTAMPS,
+            "profanityFilterMode": PROFANITY_FILTER_MODE,
+            "punctuationMode": PUNCTUATION_MODE,
         },
     }
 
@@ -232,6 +240,31 @@ async def submit_batch_job(
     return job_url
 
 
+class SpeechNotConfiguredError(Exception):
+    """AZURE_SPEECH_ENDPOINT is not set."""
+
+
+async def check_speech_available(timeout_s: float) -> None:
+    """Health check (DIAAT-277): list at most one base model; raises on failure.
+
+    ``GET .../speechtotext/<version>/models/base?top=1`` with the same endpoint and
+    credential (the workload identity) as submissions: a read of the service catalogue,
+    no audio and nothing billed. A failed token is a SpeechAuthError. The response body
+    is never read. Not retried and not counted in the Speech call metrics, which
+    describe job traffic.
+    """
+    settings = get_settings()
+    if not settings.AZURE_SPEECH_ENDPOINT:
+        raise SpeechNotConfiguredError
+    headers = await _auth_headers()
+    endpoint = settings.AZURE_SPEECH_ENDPOINT.rstrip("/")
+    async with httpx.AsyncClient(timeout=timeout_s) as client:
+        response = await client.get(
+            f"{endpoint}/speechtotext/{SPEECH_API_VERSION}/models/base", headers=headers, params={"top": 1}
+        )
+    response.raise_for_status()
+
+
 @_RETRY_POLICY
 async def get_batch_job_status(job_url: str) -> dict:
     """Return the full Azure batch job status JSON."""
@@ -270,14 +303,85 @@ async def get_model_details(model_url: str) -> dict:
     return response.json()
 
 
+class BatchResults(list[DialogueEntry]):
+    """The dialogue entries of a batch job, and the audio duration Azure reported.
+
+    A list, so every caller that only wants the entries is unchanged. OBS-5:
+    ``audio_duration_seconds`` is the length of the audio Azure Speech transcribed,
+    from its own results file (see ``audio_duration_seconds``), or None when the
+    results do not say.
+    """
+
+    def __init__(
+        self, entries: list[DialogueEntry] = (), audio_duration_seconds: float | None = None
+    ) -> None:
+        super().__init__(entries)
+        self.audio_duration_seconds = audio_duration_seconds
+
+
+# ISO 8601 durations as Azure writes them in results files, e.g. "PT1H2M3.5S".
+_ISO_DURATION = re.compile(
+    r"P(?:(?P<days>\d+(?:\.\d+)?)D)?"
+    r"(?:T(?:(?P<hours>\d+(?:\.\d+)?)H)?(?:(?P<minutes>\d+(?:\.\d+)?)M)?"
+    r"(?:(?P<seconds>\d+(?:\.\d+)?)S)?)?"
+)
+
+
+def _non_negative(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def _iso_duration_seconds(value: object) -> float | None:
+    match = _ISO_DURATION.fullmatch(value) if isinstance(value, str) else None
+    if match is None or value.endswith("T"):
+        return None
+    parts = {k: float(v) for k, v in match.groupdict().items() if v is not None}
+    if not parts:  # "P"
+        return None
+    seconds = (
+        parts.get("days", 0.0) * 86_400
+        + parts.get("hours", 0.0) * 3_600
+        + parts.get("minutes", 0.0) * 60
+        + parts.get("seconds", 0.0)
+    )
+    return seconds if math.isfinite(seconds) else None
+
+
+def audio_duration_seconds(result_data: object) -> float | None:
+    """The audio duration Azure reports at the top level of a results file, in seconds.
+
+    OBS-5: the duration Azure Speech bills batch transcription on. A results file is
+    per audio file (this service submits one per job), and its top level carries
+    the file's length: ``durationMilliseconds`` (newer API versions), else
+    ``durationInTicks`` (100 ns), else ``duration`` (ISO 8601, e.g. ``PT1M2.5S``).
+    None when none is present and valid (not a non-negative number). Never raises.
+    """
+    if not isinstance(result_data, dict):
+        return None
+    milliseconds = _non_negative(result_data.get("durationMilliseconds"))
+    if milliseconds is not None:
+        return milliseconds / 1000.0
+    ticks = _non_negative(result_data.get("durationInTicks"))
+    if ticks is not None:
+        return ticks / _TICKS_PER_SECOND
+    return _iso_duration_seconds(result_data.get("duration"))
+
+
 @_RETRY_POLICY
 async def get_batch_results(
     job_url: str,
     transcription_job_id: UUID | None = None,
-) -> list[DialogueEntry]:
-    """Download and parse batch transcription results."""
+) -> BatchResults:
+    """Download and parse batch transcription results.
+
+    OBS-5: the result also carries the audio duration Azure reported (a list, so
+    callers that only read the entries are unchanged).
+    """
     if get_settings().SPEECH_BACKEND == "mock" and job_url.startswith(_MOCK_JOB_URL_PREFIX):
-        return list(_MOCK_DIALOGUE_ENTRIES)
+        return BatchResults(list(_MOCK_DIALOGUE_ENTRIES), None)  # no Azure duration to report
 
     headers = await _auth_headers()
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
@@ -316,9 +420,10 @@ async def get_batch_results(
             raise _invalid_results(job_url, exc) from None
 
     try:
-        return _parse_results(result_data)
+        entries = _parse_results(result_data)
     except _MALFORMED_RESULTS as exc:
         raise _invalid_results(job_url, exc) from None
+    return BatchResults(entries, audio_duration_seconds(result_data))
 
 
 def _parse_results(result_data: dict) -> list[DialogueEntry]:

@@ -26,11 +26,6 @@ from urllib.parse import urlparse
 import httpx
 from hmcts_otel import conventions as c
 
-from transcribe_api.stt.job_telemetry import (
-    HTTP_TOO_MANY_REQUESTS,
-    _instrument,
-    failure_code,
-)
 from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.runtime.telemetry import (
     ATTR_HTTP_STATUS,
@@ -39,6 +34,11 @@ from transcribe_api.runtime.telemetry import (
     ATTR_SPEECH_LOCALE,
     ATTR_SPEECH_MODEL_REF,
     ATTR_SPEECH_REGION,
+)
+from transcribe_api.stt.job_telemetry import (
+    HTTP_TOO_MANY_REQUESTS,
+    _instrument,
+    failure_code,
 )
 
 logger = logging.getLogger(__name__)

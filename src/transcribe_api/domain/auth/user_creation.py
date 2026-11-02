@@ -7,13 +7,15 @@ import logging
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
+from transcribe_api.domain.jurisdictions import enrol_new_user
 from transcribe_api.domain.models_dictation import User
 
 logger = logging.getLogger(__name__)
 
 
 def insert_user_or_load_existing(session: Session, user: User) -> User:
-    """Insert a new User, or return the row a concurrent request inserted first.
+    """Insert a new User with their jurisdictions, or return the row a concurrent
+    request inserted first.
 
     Two first-login requests for the same user can both miss the lookup and both
     insert; ix_user_azure_user_id rejects the second. The session must be the
@@ -21,6 +23,10 @@ def insert_user_or_load_existing(session: Session, user: User) -> User:
     """
     session.add(user)
     try:
+        # DIAAT-322: the new user's jurisdictions go in the same transaction, so a
+        # failure cannot leave them signed up with none.
+        session.flush()
+        enrol_new_user(session, user)
         session.commit()
     except IntegrityError:
         session.rollback()

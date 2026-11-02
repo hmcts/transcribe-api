@@ -21,6 +21,12 @@ Quick Start:
 """
 
 from transcribe_api.documents.hearing_document_router import build_hearing_document_from_document_data
+from transcribe_api.documents.lib.models import (
+    Heading,
+    HearingDocument,
+    PageBreak,
+    Paragraph,
+)
 from transcribe_api.documents.models import (
     ContentControl,
     ContentControlType,
@@ -37,12 +43,6 @@ from transcribe_api.documents.template_renderer import (
     render_structured_document,
 )
 from transcribe_api.documents.word_document import WordDocument
-from transcribe_api.documents.lib.models import (
-    Heading,
-    HearingDocument,
-    PageBreak,
-    Paragraph,
-)
 
 __all__ = [
     "ContentControl",

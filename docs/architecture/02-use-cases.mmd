@@ -1,0 +1,58 @@
+---
+config:
+  layout: elk
+---
+flowchart LR
+  judge["Actor<br/>Any signed-in user<br/>Judge, Normal or an admin role"]
+  ltm["Actor<br/>LegalTextManager"]
+  sysadmin["Actor<br/>SystemAdministrator"]
+
+  subgraph bn["BenchNotes"]
+    direction TB
+    signin(["Sign in with HMCTS account"])
+    subgraph dict["Dictation area"]
+      direction TB
+      live(["Dictate with live transcription"])
+      submit(["Submit hearing notes, get a Word decision document"])
+      upload(["Upload an audio file for transcription and minutes"])
+      minutes(["Review and edit AI-generated minutes"])
+      mine(["View, tag, download and delete own transcriptions"])
+    end
+    subgraph rec["Hearing recordings area"]
+      direction TB
+      recup(["Upload a hearing recording"])
+      review(["Review transcript, play audio, correct and accept segments"])
+      wer(["Upload a reference transcript to measure accuracy"])
+      recdel(["Delete a recording and its transcript"])
+    end
+    subgraph adm["Admin area"]
+      direction TB
+      content(["Edit document content: hearing types, legal frameworks, anonymity statuses"])
+      viewcontent(["View document content"])
+      users(["Manage users and roles"])
+      alltx(["View all users' transcriptions and recordings"])
+    end
+  end
+
+  judge --- signin
+  judge --- live
+  judge --- submit
+  judge --- upload
+  judge --- minutes
+  judge --- mine
+  judge --- recup
+  judge --- review
+  judge --- wer
+  judge --- recdel
+  ltm --- signin
+  ltm --- content
+  ltm --- viewcontent
+  sysadmin --- signin
+  sysadmin --- viewcontent
+  sysadmin --- users
+  sysadmin --- alltx
+
+  classDef actor fill:#eae6ff,stroke:#403294,color:#172b4d
+  classDef uc fill:#ffffff,stroke:#5b6b80,color:#172b4d
+  class judge,ltm,sysadmin actor
+  class signin,live,submit,upload,minutes,mine,recup,review,wer,recdel,content,viewcontent,users,alltx uc

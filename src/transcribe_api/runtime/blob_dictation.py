@@ -9,8 +9,8 @@ from azure.identity.aio import DefaultAzureCredential
 from azure.storage.blob import ContentSettings
 from azure.storage.blob.aio import BlobServiceClient as AsyncBlobServiceClient
 
-from transcribe_api.runtime.logger import logger
 from transcribe_api.runtime.log_sanitization import sanitize_for_log
+from transcribe_api.runtime.logger import logger
 from transcribe_api.runtime.settings_dictation import get_settings
 
 
@@ -29,7 +29,7 @@ def _redact_blob_path(blob_path: str) -> str:
     Safe to call on any blob path — non-matching paths are returned unchanged.
     """
     parts = blob_path.split("/")
-    if len(parts) >= 3 and parts[0] == "user-uploads":  # noqa: PLR2004
+    if len(parts) >= 3 and parts[0] == "user-uploads":
         return _sanitize_for_log(f"user-uploads/[redacted]/{parts[-1]}")
     return _sanitize_for_log(blob_path)
 

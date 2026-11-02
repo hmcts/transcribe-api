@@ -170,13 +170,14 @@ class TestTranscribeAudioWithAzure:
         audio_tuple = posted_files[0]["audio"]
         assert audio_tuple[0] == audio_file.name  # not hardcoded "audio.webm"
 
-    async def test_nested_error_response_raises_422(self, mock_settings, audio_file, mock_http_response):
-        """Azure nested error shape {'error': {'code': '401', 'message': '...'}} surfaces correctly."""
+    async def test_nested_auth_error_is_a_service_failure(self, mock_settings, audio_file, mock_http_response):
+        """An invalid key (401) is the service's failure, not the audio's: 502, so the
+        user is told to retry rather than to check their file."""
         with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_client.post = AsyncMock(return_value=mock_http_response({
                 "error": {"code": "401", "message": "Access denied due to invalid subscription key"}
-            }))
+            }, status_code=401))
             mock_client_class.return_value.__aenter__.return_value = mock_client
 
             from transcribe_api.stt.fast_client import transcribe_audio_with_azure
@@ -184,8 +185,8 @@ class TestTranscribeAudioWithAzure:
             with pytest.raises(HTTPException) as exc:
                 await transcribe_audio_with_azure(audio_file)
 
-        assert exc.value.status_code == 422
-        assert "Access denied due to invalid subscription key" in exc.value.detail
+        assert exc.value.status_code == 502
+        assert "Access denied due to invalid subscription key" not in exc.value.detail  # never Azure\'s text: it travels with the exception
 
     async def test_top_level_error_response_raises_422(self, mock_settings, audio_file, mock_http_response):
         """Azure top-level error shape {'code': '...', 'message': '...'} also surfaces correctly."""
@@ -193,7 +194,7 @@ class TestTranscribeAudioWithAzure:
             mock_client = AsyncMock()
             mock_client.post = AsyncMock(return_value=mock_http_response({
                 "code": "InvalidRequest", "message": "Bad audio format"
-            }))
+            }, status_code=400))
             mock_client_class.return_value.__aenter__.return_value = mock_client
 
             from transcribe_api.stt.fast_client import transcribe_audio_with_azure
@@ -202,9 +203,29 @@ class TestTranscribeAudioWithAzure:
                 await transcribe_audio_with_azure(audio_file)
 
         assert exc.value.status_code == 422
-        assert "Bad audio format" in exc.value.detail
+        assert "Bad audio format" not in exc.value.detail  # never Azure\'s text: it travels with the exception
 
-    async def test_empty_phrases_raises_500(self, mock_settings, audio_file, mock_http_response):
+    @pytest.mark.parametrize(("status", "expected"), [(403, 502), (429, 502), (503, 502), (200, 502), (415, 422)])
+    async def test_only_azure_client_rejections_are_422(
+        self, mock_settings, audio_file, mock_http_response, status, expected
+    ):
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(
+                return_value=mock_http_response({"error": {"code": "X", "message": "m"}}, status_code=status)
+            )
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            from transcribe_api.stt.fast_client import transcribe_audio_with_azure
+
+            with pytest.raises(HTTPException) as exc:
+                await transcribe_audio_with_azure(audio_file)
+
+        assert exc.value.status_code == expected
+
+    async def test_no_speech_detected_raises_422(self, mock_settings, audio_file, mock_http_response):
+        """Silent or speech-free audio: Azure transcribed it but found no phrases. The
+        user's recording, not a service error (a 422 with its own code)."""
         with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_client.post = AsyncMock(return_value=mock_http_response({"phrases": []}))
@@ -215,8 +236,12 @@ class TestTranscribeAudioWithAzure:
             with pytest.raises(HTTPException) as exc:
                 await transcribe_audio_with_azure(audio_file)
 
-        assert exc.value.status_code == 500
-        assert "No transcription phrases found" in exc.value.detail
+        from transcribe_api.stt.fast_client import NO_SPEECH_DETECTED, NoSpeechDetectedError
+
+        assert isinstance(exc.value, NoSpeechDetectedError)
+        assert exc.value.status_code == 422
+        assert exc.value.error_code == NO_SPEECH_DETECTED == "speech.no_speech_detected"
+        assert exc.value.detail == "No speech was detected in the recording"
 
     async def test_missing_phrases_key_raises_500(self, mock_settings, audio_file, mock_http_response):
         with patch("httpx.AsyncClient") as mock_client_class:
@@ -242,8 +267,8 @@ class TestConvertToDialogueEntries:
         assert convert_to_dialogue_entries([]) == []
 
     def test_single_entry_creates_dialogue_entry(self):
-        from transcribe_api.stt.fast_client import convert_to_dialogue_entries
         from transcribe_api.domain.models_dictation import DialogueEntry
+        from transcribe_api.stt.fast_client import convert_to_dialogue_entries
         data = [{"speaker_label": "Speaker 0", "transcript": "Hello", "start_time": "0.0", "end_time": "1.5"}]
         result = convert_to_dialogue_entries(data)
         assert len(result) == 1
@@ -303,15 +328,15 @@ class TestDownloadAudioBlobWithRetry:
         self.mock_blob_manager.download_blob_to_file.return_value = False
         monkeypatch.setattr("transcribe_api.stt.fast_client.cleanup_files", AsyncMock())
         fast_fn = download_audio_blob_with_retry.retry_with(stop=stop_after_attempt(1), wait=wait_none())
-        with pytest.raises(Exception):  # noqa: B017, PT011  # tenacity wraps RuntimeError in RetryError
+        with pytest.raises(Exception):  # noqa: B017  # tenacity wraps RuntimeError in RetryError
             await fast_fn("user-uploads/user/file.mp3")
 
 
 @pytest.mark.asyncio
 class TestTranscribeAudio:
     async def test_converts_american_to_british_english(self, monkeypatch):
-        from transcribe_api.stt.fast_client import transcribe_audio
         from transcribe_api.domain.models_dictation import DialogueEntry
+        from transcribe_api.stt.fast_client import transcribe_audio
         entries = [DialogueEntry(speaker="S", text="color", start_time=0.0, end_time=1.0)]
         monkeypatch.setattr(
             "transcribe_api.stt.fast_client.perform_transcription_steps_with_azure_and_aws",
@@ -321,8 +346,8 @@ class TestTranscribeAudio:
         assert result[0].text == "colour"
 
     async def test_returns_all_entries(self, monkeypatch):
-        from transcribe_api.stt.fast_client import transcribe_audio
         from transcribe_api.domain.models_dictation import DialogueEntry
+        from transcribe_api.stt.fast_client import transcribe_audio
         entries = [
             DialogueEntry(speaker="S0", text="Hello", start_time=0.0, end_time=1.0),
             DialogueEntry(speaker="S1", text="Hi", start_time=1.0, end_time=2.0),
@@ -343,7 +368,7 @@ class TestPerformTranscriptionStepsWithAzureAndAws:
         self._entries = [DialogueEntry(speaker="S", text="Hi", start_time=0.0, end_time=1.0)]
         monkeypatch.setattr(
             "transcribe_api.stt.fast_client.download_audio_blob_with_retry",
-            AsyncMock(return_value=Path("/tmp/test.mp3")),  # noqa: S108
+            AsyncMock(return_value=Path("/tmp/test.mp3")),
         )
         monkeypatch.setattr(
             "transcribe_api.stt.fast_client.transcribe_audio_with_azure",
@@ -417,7 +442,167 @@ class TestTranscribeAudioWith429Response:
                 fast_fn = transcribe_audio_with_azure.retry_with(
                     stop=stop_after_attempt(1), wait=wait_none()
                 )
-                with pytest.raises(Exception):  # noqa: B017, PT011
+                with pytest.raises(Exception):  # noqa: B017
                     await fast_fn(audio_file)
 
         mock_response.raise_for_status.assert_called_once()
+
+
+SENTINEL = "SENTINEL-azure-says-the-judge-said-this"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"error": {"code": "InvalidRequest", "message": SENTINEL}},
+        {"code": "InvalidRequest", "message": SENTINEL},
+    ],
+)
+async def test_azure_error_message_is_never_logged(mock_settings, audio_file, mock_http_response, caplog, body):
+    """Azure's error message can echo request content: only the status and code are logged."""
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_http_response(body, status_code=400))
+        mock_client_class.return_value.__aenter__.return_value = mock_client
+
+        from transcribe_api.stt.fast_client import transcribe_audio_with_azure
+
+        with caplog.at_level("DEBUG"), pytest.raises(HTTPException):
+            await transcribe_audio_with_azure(audio_file)
+
+    assert SENTINEL not in caplog.text
+    assert "status=400 code=InvalidRequest" in caplog.text
+
+
+def test_an_unrecognised_azure_code_is_not_logged_verbatim():
+    from transcribe_api.stt.fast_client import _loggable_azure_code
+
+    assert _loggable_azure_code("InvalidRequest") == "InvalidRequest"
+    assert _loggable_azure_code(f"bad code {SENTINEL}") == "unrecognised"
+    assert _loggable_azure_code(None) == "unrecognised"
+
+
+# --- OBS-5: audio seconds Azure transcribed (hmcts.speech.audio.duration) ------------
+
+
+async def _transcribe_with(audio_file, body, status_code=200):
+    from transcribe_api.stt.fast_client import transcribe_audio_with_azure
+
+    response = MagicMock(status_code=status_code)
+    response.json.return_value = body
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=response)
+        mock_client_class.return_value.__aenter__.return_value = mock_client
+        return await transcribe_audio_with_azure(audio_file)
+
+
+def _audio_points(telemetry):
+    from hmcts_otel import conventions as c
+
+    return [(p["attributes"], p["value"]) for p in telemetry.metric_points(c.METRIC_SPEECH_AUDIO_DURATION)]
+
+
+@pytest.fixture
+def telemetry():
+    from hmcts_otel.testing import capture_telemetry
+
+    with capture_telemetry() as capture:
+        yield capture
+
+
+@pytest.mark.asyncio
+async def test_transcribed_audio_seconds_are_the_duration_azure_reports(mock_settings, audio_file, telemetry):
+    with patch("transcribe_api.stt.fast_client.get_audio_duration") as measure:
+        await _transcribe_with(audio_file, {"durationMilliseconds": 182439, "phrases": [VALID_PHRASE]})
+
+    measure.assert_not_called()  # Azure's figure is what it bills
+    ((attributes, seconds),) = _audio_points(telemetry)
+    assert seconds == pytest.approx(182.439)
+    assert attributes == {
+        "hmcts.speech.mode": "fast",
+        "hmcts.ai.feature": "upload_transcription",
+        "hmcts.outcome": "success",
+    }
+
+
+@pytest.mark.asyncio
+async def test_without_a_reported_duration_the_file_is_measured(mock_settings, audio_file, telemetry):
+    with patch("transcribe_api.stt.fast_client.get_audio_duration", return_value=12.5) as measure:
+        await _transcribe_with(audio_file, {"phrases": [VALID_PHRASE]})
+
+    measure.assert_called_once_with(audio_file)
+    ((_, seconds),) = _audio_points(telemetry)
+    assert seconds == 12.5
+
+
+@pytest.mark.asyncio
+async def test_no_usage_is_recorded_when_the_duration_is_unknown(mock_settings, audio_file, telemetry):
+    with patch("transcribe_api.stt.fast_client.get_audio_duration", side_effect=ValueError("ffprobe failed")):
+        entries = await _transcribe_with(audio_file, {"durationMilliseconds": "x", "phrases": [VALID_PHRASE]})
+
+    assert entries  # the transcription itself is unaffected
+    assert _audio_points(telemetry) == []
+
+
+@pytest.mark.asyncio
+async def test_transcribed_audio_without_speech_is_billed_usage_with_a_failure_outcome(
+    mock_settings, audio_file, telemetry
+):
+    with pytest.raises(HTTPException) as exc:
+        await _transcribe_with(audio_file, {"durationMilliseconds": 30000, "phrases": []})
+
+    assert exc.value.status_code == 422
+    ((attributes, seconds),) = _audio_points(telemetry)
+    assert seconds == 30.0
+    assert attributes["hmcts.outcome"] == "failure"  # the user's recording, not an error
+
+
+@pytest.mark.asyncio
+async def test_a_transcribed_response_without_phrases_is_billed_usage_with_an_error_outcome(
+    mock_settings, audio_file, telemetry
+):
+    with pytest.raises(HTTPException) as exc:
+        await _transcribe_with(audio_file, {"durationMilliseconds": 30000})
+
+    assert exc.value.status_code == 500
+    ((attributes, _),) = _audio_points(telemetry)
+    assert attributes["hmcts.outcome"] == "error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "body"),
+    [
+        (400, {"code": "InvalidRequest", "message": "bad audio"}),
+        (401, {"error": {"code": "401", "message": "invalid key"}}),
+        (500, {"durationMilliseconds": 30000}),  # not transcribed, whatever the body says
+    ],
+)
+async def test_requests_azure_did_not_transcribe_record_no_usage(
+    mock_settings, audio_file, telemetry, status_code, body
+):
+    with patch("transcribe_api.stt.fast_client.get_audio_duration", return_value=12.5), pytest.raises(HTTPException):
+        await _transcribe_with(audio_file, body, status_code=status_code)
+
+    assert _audio_points(telemetry) == []
+
+
+@pytest.mark.asyncio
+async def test_phrases_that_cannot_be_converted_are_billed_usage_with_an_error_outcome(
+    mock_settings, audio_file, telemetry
+):
+    """Usage is recorded after the conversion: a response that then fails is an error."""
+    with (
+        patch(
+            "transcribe_api.stt.fast_client.convert_input_dialogue_entries_to_dialogue_entries",
+            side_effect=KeyError("text"),
+        ),
+        pytest.raises(KeyError),
+    ):
+        await _transcribe_with(audio_file, {"durationMilliseconds": 30000, "phrases": [VALID_PHRASE]})
+
+    ((attributes, seconds),) = _audio_points(telemetry)
+    assert seconds == 30.0
+    assert attributes["hmcts.outcome"] == "error"

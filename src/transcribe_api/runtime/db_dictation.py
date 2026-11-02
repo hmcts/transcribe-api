@@ -37,7 +37,7 @@ engine = create_engine(
 )
 
 
-def get_session() -> Generator[Session, None, None]:
+def get_session() -> Generator[Session]:
     """Database session dependency"""
     with Session(engine) as session:
         yield session

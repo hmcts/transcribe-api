@@ -8,13 +8,14 @@ import re
 import socket
 import tempfile
 import wave
+from collections import Counter
 from collections.abc import AsyncGenerator
 from contextlib import aclosing
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Annotated
 from urllib.parse import urlparse
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 import aiofiles
 from fastapi import (
@@ -29,25 +30,26 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from fastapi.responses import StreamingResponse
-from hmcts_otel import StageHandle, journey, record_event, stage
+from hmcts_otel import Journey, StageHandle, journey, record_event, stage
 from hmcts_otel import conventions as c
 from pydantic import BaseModel, Field, field_validator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
-from starlette.background import BackgroundTask
 
-from transcribe_api.stt import local_storage
-from transcribe_api.stt.accuracy import DEFAULT_CONFIDENCE_THRESHOLD, compute_accuracy
-from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
-from transcribe_api.stt.batch_client import BatchSubmissionError, delete_batch_job
-from transcribe_api.stt.preprocessing import AudioDecodeError, normalize_to_wav
-from transcribe_api.stt.speech_auth import SpeechAuthError
-from transcribe_api.stt.submission import submit_and_queue_batch_job
-from transcribe_api.runtime.settings_recording import get_settings
-from transcribe_api.runtime.db_recording import get_session
+from transcribe_api.domain.audit_recording import (
+    AuditRecord,
+    AuditScope,
+    DenialReason,
+    action_for_violation,
+    audited,
+    denied,
+    write_audit,
+)
+from transcribe_api.domain.auth.approles_recording import get_valid_roles
+from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
+from transcribe_api.domain.auth.dependencies_recording import get_active_jurisdiction, get_current_user
 from transcribe_api.domain.interface_recording import (
     get_job_by_id,
     get_job_by_idempotency_key_for_user,
@@ -60,11 +62,40 @@ from transcribe_api.domain.models_recording import (
     JobStatus,
     SpeechBatchJob,
     WordCorrection,
+    merge_dialogue_entries,
 )
-from transcribe_api.runtime.telemetry import EVENT_UPLOAD_VALIDATION_FAILED, JOURNEY_UPLOAD
-from transcribe_api.domain.auth.approles_recording import get_valid_roles
-from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
-from transcribe_api.domain.auth.dependencies_recording import get_current_user
+from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
+from transcribe_api.runtime.db_recording import get_session
+from transcribe_api.domain.jurisdictions import (
+    ActiveJurisdiction,
+    job_owner_and_jurisdiction,
+    record_upload_jurisdiction,
+    recorded_upload_jurisdiction,
+)
+from transcribe_api.runtime.security_events import (
+    AUDIO,
+    JOB,
+    SUBMIT,
+    TRANSCRIPT,
+    UPLOAD,
+    action_for_method,
+    record_jurisdiction_blocked,
+    record_ownership_violation,
+)
+from transcribe_api.runtime.settings_recording import get_settings
+from transcribe_api.runtime.telemetry import (
+    EVENT_UPLOAD_VALIDATION_FAILED,
+    JOURNEY_JOB,
+    JOURNEY_UPLOAD,
+    upload_id_from_blob,
+)
+from transcribe_api.runtime.version import APP_VERSION
+from transcribe_api.stt import local_storage
+from transcribe_api.stt.accuracy import DEFAULT_CONFIDENCE_THRESHOLD, compute_accuracy
+from transcribe_api.stt.batch_client import BatchSubmissionError, delete_batch_job
+from transcribe_api.stt.preprocessing import AudioDecodeError, normalize_to_wav
+from transcribe_api.stt.speech_auth import SpeechAuthError
+from transcribe_api.stt.submission import submit_and_queue_batch_job
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1")
@@ -287,6 +318,7 @@ class CorrectionEntryResponse(BaseModel):
 
 
 class DialogueEntryResponse(BaseModel):
+    id: str
     speaker: str
     text: str
     start_time: float
@@ -379,6 +411,21 @@ class CorrectWordRangeRequest(BaseModel):
         return _validate_not_blank(v)
 
 
+class RenameSpeakerRequest(BaseModel):
+    speaker: str = Field(min_length=1, max_length=200)
+    apply_to_all: bool = False
+
+    @field_validator("speaker", mode="before")
+    @classmethod
+    def strip_speaker(cls, v: object) -> object:
+        return v.strip() if isinstance(v, str) else v
+
+
+class MergeNextRequest(BaseModel):
+    # The segment the caller expects to follow; another must not be combined in its place.
+    next_segment_id: str | None = None
+
+
 class RollbackHistoryRequest(BaseModel):
     history_index: int = Field(ge=0)
 
@@ -387,25 +434,55 @@ def _entry_field(entry, field: str, default=None):
     return entry.get(field, default) if isinstance(entry, dict) else getattr(entry, field, default)
 
 
+def _to_dialogue_entry(raw) -> DialogueEntry:
+    return DialogueEntry(
+        id=_entry_field(raw, "id"),
+        speaker=_entry_field(raw, "speaker", ""),
+        text=_entry_field(raw, "text", ""),
+        start_time=_entry_field(raw, "start_time", 0.0),
+        end_time=_entry_field(raw, "end_time", 0.0),
+        confidence=_entry_field(raw, "confidence"),
+        corrected_text=_entry_field(raw, "corrected_text"),
+        word_corrections=_entry_field(raw, "word_corrections"),
+        correction_history=_entry_field(raw, "correction_history"),
+        words=_entry_field(raw, "words"),
+        alternatives=_entry_field(raw, "alternatives"),
+        accepted=_entry_field(raw, "accepted", False),
+        merged=_entry_field(raw, "merged", False),
+        unreviewed_confidence=_entry_field(raw, "unreviewed_confidence"),
+        parts=_entry_field(raw, "parts"),
+    )
+
+
+def _content_key(raw) -> tuple:
+    # What never changes for a segment (a merge makes a new one), so a segment rewritten
+    # without its id, e.g. by an older pod mid-deploy, can't take another's.
+    return tuple(_entry_field(raw, f, "") for f in ("start_time", "end_time", "text"))
+
+
+def _entries_with_ids(job: SpeechBatchJob) -> list:
+    """job.dialogue_entries, giving any entry saved without an id one derived from its content.
+
+    The derived id stays the same on every read until the next write saves it with
+    the entry, so jobs from before segment ids need no migration.
+    """
+    entries = []
+    seen: Counter[tuple] = Counter()
+    for raw in job.dialogue_entries:
+        key = _content_key(raw)
+        repeat = seen[key]
+        seen[key] += 1
+        if not _entry_field(raw, "id"):
+            derived = uuid5(job.id, json.dumps([*key, repeat]))
+            raw = {**(raw if isinstance(raw, dict) else raw.model_dump()), "id": f"seg_{derived.hex}"}
+        entries.append(raw)
+    return entries
+
+
 def _to_dialogue_entries(job: SpeechBatchJob) -> list[DialogueEntry] | None:
     if job.status != JobStatus.SUCCEEDED or not job.dialogue_entries:
         return None
-    return [
-        DialogueEntry(
-            speaker=_entry_field(e, "speaker", ""),
-            text=_entry_field(e, "text", ""),
-            start_time=_entry_field(e, "start_time", 0.0),
-            end_time=_entry_field(e, "end_time", 0.0),
-            confidence=_entry_field(e, "confidence"),
-            corrected_text=_entry_field(e, "corrected_text"),
-            word_corrections=_entry_field(e, "word_corrections"),
-            correction_history=_entry_field(e, "correction_history"),
-            words=_entry_field(e, "words"),
-            alternatives=_entry_field(e, "alternatives"),
-            accepted=_entry_field(e, "accepted", False),
-        )
-        for e in job.dialogue_entries
-    ]
+    return [_to_dialogue_entry(e) for e in _entries_with_ids(job)]
 
 
 def _to_response(job: SpeechBatchJob) -> JobResponse:
@@ -450,6 +527,7 @@ def _to_response(job: SpeechBatchJob) -> JobResponse:
         updated_at=job.updated_datetime.isoformat() if job.updated_datetime else None,
         dialogue_entries=[
             DialogueEntryResponse(
+                id=e.id,
                 speaker=e.speaker,
                 text=e.text,
                 start_time=e.start_time,
@@ -529,6 +607,41 @@ def _to_response(job: SpeechBatchJob) -> JobResponse:
 # ---------------------------------------------------------------------------
 
 
+def _recording_jurisdiction(
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
+) -> ActiveJurisdiction:
+    """The request's jurisdiction, which must use hearing recordings (DIAAT-334): the
+    area answers 404 to any other, as if it were not there."""
+    if not jurisdiction.settings.features.hearing_recordings:
+        raise HTTPException(status_code=404, detail="Not available in this jurisdiction")
+    return jurisdiction
+
+
+def _job_in_jurisdiction(resource_type: str):
+    """A route dependency for a route naming a job: a job the caller may reach (theirs,
+    or any, for an administrator) but of another jurisdiction is refused with the 404
+    of an unknown job, and recorded (DIAAT-334); others are left to _check_job_access.
+    ``resource_type`` is the route's, as it passes to _check_job_access. A plain def:
+    the lookup is synchronous, so FastAPI runs it in the threadpool."""
+
+    def check(
+        request: Request,
+        job_id: UUID,
+        current_user: AuthenticatedUser = Depends(get_current_user),  # noqa: B008
+        jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),  # noqa: B008
+    ) -> None:
+        exists, owner_id, job_jurisdiction = job_owner_and_jurisdiction(job_id)
+        if not exists or not (_is_admin(current_user) or owner_id == current_user.id):
+            return
+        if job_jurisdiction != jurisdiction.id:
+            record_jurisdiction_blocked(
+                resource_type, action_for_method(request.method), actor_id=current_user.id, object_id=job_id
+            )
+            raise HTTPException(status_code=404, detail="Job not found")
+
+    return Depends(check)
+
+
 @router.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
@@ -536,13 +649,8 @@ async def health() -> dict:
 
 @router.get("/version")
 async def version() -> dict:
-    """Return the git commit SHA baked into the image at build time.
-
-    Used by the post-deploy version-gated check (DIAAT-241) to confirm the
-    newly built container is live before running e2e tests. Returns "unknown"
-    when GIT_SHA was not passed as a build arg (e.g. local development).
-    """
-    return {"version": get_settings().GIT_SHA}
+    """Return the build version (see runtime/version.py), as /api/health does."""
+    return {"version": APP_VERSION}
 
 
 async def _read_upload_capped(
@@ -646,6 +754,7 @@ async def upload_audio(
     request: Request,
     file: UploadFile = File(...),
     current_user: AuthenticatedUser = Depends(get_current_user),
+    jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),  # noqa: B008
     x_hearing_id: Annotated[str | None, Header()] = None,
     x_hearing_file_count: Annotated[str | None, Header()] = None,
 ) -> UploadResponse:
@@ -654,6 +763,8 @@ async def upload_audio(
     # DIAAT-280: the hearing (X-Hearing-Id) is the upload's parent, relating the files
     # of a multi-file hearing.
     upload_id = uuid4()
+    # DIAAT-334: its job is accepted only in the jurisdiction it was uploaded in.
+    await asyncio.to_thread(record_upload_jurisdiction, upload_id, jurisdiction.id)
     extension = PurePosixPath(file.filename or "").suffix.lower()
     metadata = _upload_metadata(file, extension, _hearing_file_count(x_hearing_file_count))
     with (
@@ -770,6 +881,10 @@ async def get_local_audio(blob_name: str) -> Response:
     return Response(content=content, media_type=media_type)
 
 
+# DIAAT-285: the controlled security alert test is POST /api/security/alert-test
+# (routes_dictation.py), one endpoint for both areas.
+
+
 @router.post("/jobs", status_code=201, response_model=JobResponse)
 @limiter.limit("100/hour")
 async def submit_job(
@@ -777,20 +892,72 @@ async def submit_job(
     body: Annotated[SubmitJobRequest, Body()],
     session: Session = Depends(get_session),
     current_user: AuthenticatedUser = Depends(get_current_user),
+    jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),  # noqa: B008
 ) -> JobResponse:
+    # DIAAT-286: "did X submit Y". An idempotent replay is recorded too (detail.replayed).
+    with audited("job.submit", current_user.id) as audit:
+        job = await _submit_job(body, session, current_user, jurisdiction, audit)
+        audit.object_id = job.id
+    return _to_response(job)
+
+
+def _replay(
+    existing: SpeechBatchJob, current_user: AuthenticatedUser, jurisdiction: ActiveJurisdiction, audit: AuditScope
+) -> SpeechBatchJob:
+    """The job an idempotent resubmission already made, if it is in this request's
+    jurisdiction (DIAAT-334): a key reused from another jurisdiction is refused, and
+    recorded, rather than handing back that jurisdiction's job."""
+    if existing.jurisdiction_id != jurisdiction.id:
+        record_jurisdiction_blocked(JOB, SUBMIT, actor_id=current_user.id, object_id=existing.id)
+        audit.skip()
+        raise HTTPException(status_code=409, detail="This idempotency key has already been used")
+    audit.detail["replayed"] = True
+    return existing
+
+
+async def _submit_job(
+    body: SubmitJobRequest,
+    session: Session,
+    current_user: AuthenticatedUser,
+    jurisdiction: ActiveJurisdiction,
+    audit: AuditScope,
+) -> SpeechBatchJob:
     if body.idempotency_key:
         existing = get_job_by_idempotency_key_for_user(
             session, body.idempotency_key, current_user.id
         )
         if existing:
-            return _to_response(existing)
+            return _replay(existing, current_user, jurisdiction, audit)
 
     # blob_name is later trusted by GET /jobs/{id}/audio to read straight from
     # storage — without this check a caller could point it at another user's
     # blob (upload_audio issues names under uploads/{current_user.id}/...) and
     # read their audio back through this job.
     if body.blob_name is not None and not body.blob_name.startswith(f"uploads/{current_user.id}/"):
+        # DIAAT-285: a security event (types only; never the blob name), same 422.
+        record_ownership_violation(
+            "upload", "submit", "blocked", journey=_upload_journey(body.blob_name)
+        )
+        # DIAAT-286: the refusal is the audit record (naming the targeted upload by its
+        # ID, never the blob name), in place of a "failed" submission.
+        upload_id = _upload_uuid(body.blob_name)
+        write_audit(denied("job.submit", current_user.id, upload_id, "not_owner", "upload"))
+        audit.skip()
         raise HTTPException(status_code=422, detail="blob_name does not belong to this user")
+
+    # DIAAT-334: the user's own upload, but it must be from this jurisdiction. The
+    # job takes the request's jurisdiction, and its audio is checked against the user
+    # alone, so another jurisdiction's recording would be played here. An upload with
+    # no record (made before this release) is refused too: upload it again.
+    if body.blob_name is not None:
+        upload_id = _upload_uuid(body.blob_name)
+        started_in = await asyncio.to_thread(recorded_upload_jurisdiction, upload_id) if upload_id else None
+        if started_in != jurisdiction.id:
+            record_jurisdiction_blocked(UPLOAD, SUBMIT, actor_id=current_user.id, object_id=upload_id)
+            audit.skip()
+            raise HTTPException(
+                status_code=422, detail="This recording was not uploaded in this jurisdiction. Upload it again here."
+            )
 
     try:
         job = await submit_and_queue_batch_job(
@@ -803,6 +970,7 @@ async def submit_job(
             audio_duration_seconds=body.audio_duration_seconds,
             audio_blob_path=body.blob_name,
             user_id=current_user.id,
+            jurisdiction_id=jurisdiction.id,  # DIAAT-334
         )
     except IntegrityError:
         # Two concurrent requests with the same idempotency_key both passed the
@@ -814,26 +982,27 @@ async def submit_job(
                 session, body.idempotency_key, current_user.id
             )
             if existing:
-                return _to_response(existing)
+                return _replay(existing, current_user, jurisdiction, audit)
         raise HTTPException(
             status_code=409, detail="Concurrent submission conflict; retry"
         ) from None
     except (BatchSubmissionError, SpeechAuthError):
         # Speech rejected the job or could not be authenticated to. The job is
         # already FAILED with its idempotency key released, and the cause is
-        # logged and sent to Sentry (stt/submission.py), so no traceback here.
+        # logged with its stack (stt/submission.py), so no traceback here.
         raise HTTPException(
             status_code=503,
             detail="The transcription service is unavailable. Please try again later.",
         ) from None
 
-    return _to_response(job)
+    return job
 
 
 @router.get("/jobs", response_model=ListJobsResponse)
 async def list_jobs(
     session: Session = Depends(get_session),
     current_user: AuthenticatedUser = Depends(get_current_user),
+    jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),  # noqa: B008
     status: str | None = Query(default=None, description="Filter by job status"),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
@@ -853,16 +1022,36 @@ async def list_jobs(
     # pre-migration jobs are restricted to SystemAdministrator everywhere.
     is_admin = get_valid_roles()["SystemAdministrator"] in current_user.app_roles
     filter_user_id = None if is_admin else current_user.id
-    jobs, total = list_jobs_paginated(session, filter_user_id, parsed_status, limit, offset)
-    return ListJobsResponse(
+    # DIAAT-334: administrators too see only the jurisdiction they are working in.
+    jobs, total = list_jobs_paginated(
+        session, filter_user_id, parsed_status, limit, offset, jurisdiction_id=jurisdiction.id
+    )
+    audit_records: list[AuditRecord] = []
+    if not is_admin:
+        # DIAAT-285: defence in depth. The query is already filtered by user, so a
+        # foreign row here is a defect: drop it rather than return its transcript.
+        owned = []
+        for job in jobs:
+            refusal = _ownership_refusal(job, current_user, "transcript", "read")
+            if refusal is None:
+                owned.append(job)
+            else:
+                audit_records.append(refusal)
+        jobs = owned
+    response = ListJobsResponse(
         jobs=[_to_response(j) for j in jobs],
         total=total,
         limit=limit,
         offset=offset,
     )
+    # DIAAT-286: only the refusals above are audited here (rare, and important). A list
+    # is not recorded as a view of each transcript: the dashboard polls it every 5 s
+    # while a job is in flight, which would bury the real events (see audit.py).
+    write_audit(*audit_records)
+    return response
 
 
-@router.get("/jobs/{job_id}", response_model=JobResponse)
+@router.get("/jobs/{job_id}", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
 async def get_job(
     job_id: UUID,
     session: Session = Depends(get_session),
@@ -871,11 +1060,17 @@ async def get_job(
     job = get_job_by_id(session, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    _check_job_access(job, current_user)
-    return _to_response(job)
+    _check_job_access(job, current_user, "transcript", "read")
+    _assert_job_owner(job, current_user, "transcript", "read")
+    # DIAAT-286: a view only when the transcript is returned (not while processing).
+    with audited("transcript.view", current_user.id, job.id) as audit:
+        response = _to_response(job)
+        if response.dialogue_entries is None:
+            audit.skip()
+    return response
 
 
-@router.post("/jobs/{job_id}/baseline", response_model=JobResponse)
+@router.post("/jobs/{job_id}/baseline", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
 async def upload_baseline_transcript(
     job_id: UUID,
     file: UploadFile = File(...),
@@ -895,7 +1090,7 @@ async def upload_baseline_transcript(
     job = get_job_by_id(session, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    _check_job_access(job, current_user)
+    _check_job_access(job, current_user, "transcript", "write")
     if job.status != JobStatus.SUCCEEDED or not job.dialogue_entries:
         raise HTTPException(
             status_code=422, detail="Job has no transcript to compare a baseline against"
@@ -938,9 +1133,40 @@ async def upload_baseline_transcript(
     return _to_response(job)
 
 
+def _is_admin(current_user: AuthenticatedUser) -> bool:
+    return get_valid_roles()["SystemAdministrator"] in current_user.app_roles
+
+
+def _job_journey(job: SpeechBatchJob) -> Journey | None:
+    try:
+        return Journey(JOURNEY_JOB, str(job.id))
+    except ValueError:  # not a valid identifier: record the event without it
+        return None
+
+
+def _upload_uuid(blob_name: str) -> UUID | None:
+    """The upload ID in a blob name, if it has one (DIAAT-286 audit; never the name)."""
+    upload_id = upload_id_from_blob(blob_name)
+    try:
+        return UUID(upload_id) if upload_id else None
+    except ValueError:
+        return None
+
+
+def _upload_journey(blob_name: str) -> Journey | None:
+    """The upload a rejected blob_name points at, if it has an upload ID (never the name)."""
+    upload_id = upload_id_from_blob(blob_name)
+    try:
+        return Journey(JOURNEY_UPLOAD, upload_id) if upload_id else None
+    except ValueError:
+        return None
+
+
 def _check_job_access(
     job: SpeechBatchJob,
     current_user: AuthenticatedUser,
+    resource_type: str,
+    action: str,
 ) -> None:
     """Raise 404 if current_user neither owns the job nor is a SystemAdministrator.
 
@@ -953,43 +1179,92 @@ def _check_job_access(
     SystemAdministrator — legacy jobs may contain sensitive hearing content, and
     any authenticated user who can obtain or guess a UUID should not be able to
     access that content.
+
+    DIAAT-285: a refusal of an existing job is a security event
+    (security.ownership_violation, outcome "blocked"). The job was already loaded
+    by ID, so telling "not yours" from "not found" costs no extra query, and the
+    response (404 "Job not found") is unchanged.
     """
-    is_admin = get_valid_roles()["SystemAdministrator"] in current_user.app_roles
-    if job.user_id is None:
-        if not is_admin:
-            raise HTTPException(status_code=404, detail="Job not found")
+    if _is_admin(current_user):
         return
-    if job.user_id != current_user.id and not is_admin:
+    if job.user_id is None or job.user_id != current_user.id:
+        reason: DenialReason = "legacy_job" if job.user_id is None else "not_owner"
+        write_audit(_violation(job, current_user, resource_type, action, "blocked", reason))
+        raise HTTPException(status_code=404, detail="Job not found")
+
+
+def _violation(
+    job: SpeechBatchJob,
+    current_user: AuthenticatedUser,
+    resource_type: str,
+    action: str,
+    outcome: str,
+    reason: DenialReason,
+) -> AuditRecord:
+    """DIAAT-285's security event, and the DIAAT-286 audit record for the caller to write.
+
+    The event carries no identifiers; the audit record (in the database) names the
+    caller and the job, and shares the event's hmcts.request.id.
+    """
+    record_ownership_violation(resource_type, action, outcome, journey=_job_journey(job))
+    return denied(action_for_violation(resource_type, action), current_user.id, job.id, reason)
+
+
+def _ownership_refusal(
+    job: SpeechBatchJob,
+    current_user: AuthenticatedUser,
+    resource_type: str,
+    action: str,
+) -> AuditRecord | None:
+    """DIAAT-285: post-authorisation ownership assertion. None if the caller may have it.
+
+    Independent of _check_job_access on purpose: it runs after authorisation has
+    already passed, so it should never fail. If it does, an authorisation check
+    is broken: record outcome "detected" (logged at ERROR) and return the audit
+    record of the refusal (DIAAT-286) for the caller to write.
+    """
+    if _is_admin(current_user) or (job.user_id is not None and job.user_id == current_user.id):
+        return None
+    return _violation(
+        job, current_user, resource_type, action, "detected", "ownership_assertion_failed"
+    )
+
+
+def _assert_job_owner(
+    job: SpeechBatchJob,
+    current_user: AuthenticatedUser,
+    resource_type: str,
+    action: str,
+) -> None:
+    """Block with the usual 404 if the post-authorisation ownership assertion fails."""
+    refusal = _ownership_refusal(job, current_user, resource_type, action)
+    if refusal is not None:
+        write_audit(refusal)
         raise HTTPException(status_code=404, detail="Job not found")
 
 
 def _load_entry_for_correction(
-    session: Session, job_id: UUID, index: int, current_user: AuthenticatedUser
-) -> tuple[SpeechBatchJob, DialogueEntry]:
+    session: Session, job_id: UUID, segment: str, current_user: AuthenticatedUser
+) -> tuple[SpeechBatchJob, int, DialogueEntry]:
+    """Load the job and the segment whose id is `segment`."""
     job = get_job_by_id(session, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    _check_job_access(job, current_user)
+    _check_job_access(job, current_user, "transcript", "write")
     if job.status != JobStatus.SUCCEEDED or not job.dialogue_entries:
         raise HTTPException(status_code=422, detail="Job has no transcript to correct")
-    if index < 0 or index >= len(job.dialogue_entries):
-        raise HTTPException(status_code=404, detail="Segment not found")
 
-    raw = job.dialogue_entries[index]
-    entry = DialogueEntry(
-        speaker=_entry_field(raw, "speaker", ""),
-        text=_entry_field(raw, "text", ""),
-        start_time=_entry_field(raw, "start_time", 0.0),
-        end_time=_entry_field(raw, "end_time", 0.0),
-        confidence=_entry_field(raw, "confidence"),
-        corrected_text=_entry_field(raw, "corrected_text"),
-        word_corrections=_entry_field(raw, "word_corrections"),
-        correction_history=_entry_field(raw, "correction_history"),
-        words=_entry_field(raw, "words"),
-        alternatives=_entry_field(raw, "alternatives"),
-        accepted=_entry_field(raw, "accepted", False),
-    )
-    return job, entry
+    job.dialogue_entries = _entries_with_ids(job)
+    index = next((i for i, raw in enumerate(job.dialogue_entries) if _entry_field(raw, "id") == segment), -1)
+    if index < 0:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This segment no longer exists: it may have been combined with another. "
+                "Reload the transcript and try again."
+            ),
+        )
+    return job, index, _to_dialogue_entry(job.dialogue_entries[index])
 
 
 def _save_corrected_entry(
@@ -1000,6 +1275,10 @@ def _save_corrected_entry(
     # in-place changes wouldn't be detected as dirty by the ORM.
     entries = list(job.dialogue_entries)
     entries[index] = entry.model_dump()
+    _save_entries(session, job, entries)
+
+
+def _save_entries(session: Session, job: SpeechBatchJob, entries: list) -> None:
     job.dialogue_entries = entries
     job.updated_datetime = datetime.now(UTC)
     session.add(job)
@@ -1007,10 +1286,10 @@ def _save_corrected_entry(
     session.refresh(job)
 
 
-@router.patch("/jobs/{job_id}/segments/{index}", response_model=JobResponse)
+@router.patch("/jobs/{job_id}/segments/{segment}", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
 async def correct_segment(
     job_id: UUID,
-    index: int,
+    segment: str,
     body: CorrectSegmentRequest,
     session: Session = Depends(get_session),
     current_user: AuthenticatedUser = Depends(get_current_user),
@@ -1023,11 +1302,12 @@ async def correct_segment(
     whole-segment override takes full precedence over any prior word-range
     corrections, so those are cleared.
     """
-    job, entry = _load_entry_for_correction(session, job_id, index, current_user)
+    job, index, entry = _load_entry_for_correction(session, job_id, segment, current_user)
 
     previous_text = entry.effective_text()
     entry.corrected_text = body.corrected_text
     entry.word_corrections = None
+    entry.unreviewed_confidence = None
     entry.correction_history = [
         *(entry.correction_history or []),
         CorrectionEntry(
@@ -1058,10 +1338,10 @@ async def correct_segment(
     return _to_response(job)
 
 
-@router.patch("/jobs/{job_id}/segments/{index}/words", response_model=JobResponse)
+@router.patch("/jobs/{job_id}/segments/{segment}/words", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
 async def correct_word_range(
     job_id: UUID,
-    index: int,
+    segment: str,
     body: CorrectWordRangeRequest,
     session: Session = Depends(get_session),
     current_user: AuthenticatedUser = Depends(get_current_user),
@@ -1071,7 +1351,7 @@ async def correct_word_range(
     Unlike a whole-segment correction, this keeps confidence highlighting
     and playback-sync intact for every word outside the corrected range.
     """
-    job, entry = _load_entry_for_correction(session, job_id, index, current_user)
+    job, index, entry = _load_entry_for_correction(session, job_id, segment, current_user)
 
     if not entry.words:
         raise HTTPException(status_code=422, detail="Segment has no word-level data to correct")
@@ -1122,6 +1402,7 @@ async def correct_word_range(
         )
     )
     entry.word_corrections = non_overlapping
+    entry.unreviewed_confidence = None
 
     entry.correction_history = [
         *(entry.correction_history or []),
@@ -1171,10 +1452,46 @@ async def correct_word_range(
     return _to_response(job)
 
 
-@router.post("/jobs/{job_id}/segments/{index}/rollback", response_model=JobResponse)
+@router.post(
+    "/jobs/{job_id}/segments/{segment}/merge-next", dependencies=[_job_in_jurisdiction(TRANSCRIPT)],
+    response_model=JobResponse,
+)
+async def merge_segment_with_next(
+    job_id: UUID,
+    segment: str,
+    body: MergeNextRequest | None = None,
+    session: Session = Depends(get_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> JobResponse:
+    """Combine a segment with the one after it, e.g. to rejoin a sentence split across two.
+
+    Segments after the pair move up one index. See merge_dialogue_entries for how
+    corrections, history and per-word data are carried over.
+    """
+    job, index, entry = _load_entry_for_correction(session, job_id, segment, current_user)
+    if index + 1 >= len(job.dialogue_entries):
+        raise HTTPException(status_code=422, detail="Segment has no next segment to combine with")
+    next_raw = job.dialogue_entries[index + 1]
+    if body and body.next_segment_id and _entry_field(next_raw, "id") != body.next_segment_id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The segment after this one has changed: it may have been combined with another. "
+                "Reload the transcript and try again."
+            ),
+        )
+
+    merged = merge_dialogue_entries(entry, _to_dialogue_entry(next_raw))
+    entries = list(job.dialogue_entries)
+    entries[index : index + 2] = [merged.model_dump()]
+    _save_entries(session, job, entries)
+    return _to_response(job)
+
+
+@router.post("/jobs/{job_id}/segments/{segment}/rollback", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
 async def rollback_segment(
     job_id: UUID,
-    index: int,
+    segment: str,
     session: Session = Depends(get_session),
     current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> JobResponse:
@@ -1186,7 +1503,7 @@ async def rollback_segment(
     Batch produced it. It's a deliberate "start over" action, not one more
     logged change.
     """
-    job, entry = _load_entry_for_correction(session, job_id, index, current_user)
+    job, index, entry = _load_entry_for_correction(session, job_id, segment, current_user)
 
     previous_text = entry.effective_text()
     if previous_text == entry.text and not entry.accepted:
@@ -1196,15 +1513,19 @@ async def rollback_segment(
     entry.word_corrections = None
     entry.correction_history = None
     entry.accepted = False
+    if entry.parts:
+        entry.parts = [p.model_copy(update={"current_text": p.text}) for p in entry.parts]
+    if entry.merged:
+        entry.unreviewed_confidence = entry.confidence
 
     _save_corrected_entry(session, job, index, entry)
     return _to_response(job)
 
 
-@router.post("/jobs/{job_id}/segments/{index}/accept", response_model=JobResponse)
+@router.post("/jobs/{job_id}/segments/{segment}/accept", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
 async def accept_segment(
     job_id: UUID,
-    index: int,
+    segment: str,
     session: Session = Depends(get_session),
     current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> JobResponse:
@@ -1224,7 +1545,7 @@ async def accept_segment(
     compare against — no correction was made). needs_review filtering
     additionally excludes entries with accepted=True (see compute_accuracy).
     """
-    job, entry = _load_entry_for_correction(session, job_id, index, current_user)
+    job, index, entry = _load_entry_for_correction(session, job_id, segment, current_user)
 
     if entry.accepted:
         raise HTTPException(status_code=422, detail="Segment has already been accepted")
@@ -1245,13 +1566,53 @@ async def accept_segment(
     return _to_response(job)
 
 
+@router.patch(
+    "/jobs/{job_id}/segments/{segment}/speaker",
+    dependencies=[_job_in_jurisdiction(TRANSCRIPT)],
+    response_model=JobResponse,
+)
+async def rename_speaker(
+    job_id: UUID,
+    segment: str,
+    body: RenameSpeakerRequest,
+    session: Session = Depends(get_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> JobResponse:
+    """Rename the speaker of one segment, or of every segment that shares its speaker.
+
+    With apply_to_all, segments are matched on the exact current speaker
+    label: the label is the only participant identity a transcript holds.
+    A speaker name is not a text correction, so it is not recorded in
+    correction_history and a segment rollback leaves it alone.
+    """
+    job, index, entry = _load_entry_for_correction(session, job_id, segment, current_user)
+
+    if body.speaker == entry.speaker:
+        return _to_response(job)
+
+    entries = list(job.dialogue_entries)
+    targets = (
+        [i for i, raw in enumerate(entries) if _entry_field(raw, "speaker", "") == entry.speaker]
+        if body.apply_to_all
+        else [index]
+    )
+    for i in targets:
+        raw = entries[i]
+        updated = dict(raw) if isinstance(raw, dict) else raw.model_dump()
+        updated["speaker"] = body.speaker
+        entries[i] = updated
+
+    _save_entries(session, job, entries)
+    return _to_response(job)
+
+
 @router.post(
-    "/jobs/{job_id}/segments/{index}/history/{history_index}/rollback",
+    "/jobs/{job_id}/segments/{segment}/history/{history_index}/rollback", dependencies=[_job_in_jurisdiction(TRANSCRIPT)],
     response_model=JobResponse,
 )
 async def rollback_to_history_entry(
     job_id: UUID,
-    index: int,
+    segment: str,
     history_index: int,
     session: Session = Depends(get_session),
     current_user: AuthenticatedUser = Depends(get_current_user),
@@ -1269,7 +1630,7 @@ async def rollback_to_history_entry(
     since reverting to an arbitrary point in time no longer has a clean
     correspondence to the original word positions in that case.
     """
-    job, entry = _load_entry_for_correction(session, job_id, index, current_user)
+    job, index, entry = _load_entry_for_correction(session, job_id, segment, current_user)
 
     history = entry.correction_history or []
     if history_index < 0 or history_index >= len(history):
@@ -1277,6 +1638,9 @@ async def rollback_to_history_entry(
 
     target = history[history_index]
     previous_text = entry.effective_text()
+    if entry.merged:
+        entry.accepted = False
+        entry.unreviewed_confidence = entry.confidence
 
     # Anything currently overlapping the targeted range at all — not just an
     # exact match. An empty overlap means the range is presently untouched
@@ -1362,7 +1726,7 @@ async def rollback_to_history_entry(
     return _to_response(job)
 
 
-@router.get("/jobs/{job_id}/audio")
+@router.get("/jobs/{job_id}/audio", dependencies=[_job_in_jurisdiction(AUDIO)])
 async def get_job_audio(
     job_id: UUID,
     request: Request,
@@ -1381,7 +1745,16 @@ async def get_job_audio(
     job = get_job_by_id(session, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    _check_job_access(job, current_user)
+    _check_job_access(job, current_user, "audio", "read")
+    _assert_job_owner(job, current_user, "audio", "read")
+    # DIAAT-286: one record per request (a seek is its own Range request: partial).
+    # A streamed (Azure) response is recorded when its body ends: success once sent,
+    # failed on a storage error or a client disconnect.
+    with audited("audio.export", current_user.id, job.id) as audit:
+        return await _job_audio_response(job, request, audit)
+
+
+async def _job_audio_response(job: SpeechBatchJob, request: Request, audit: AuditScope) -> Response:
     if not job.audio_blob_path:
         raise HTTPException(status_code=404, detail="Audio not available for this job")
 
@@ -1399,6 +1772,7 @@ async def get_job_audio(
             raise HTTPException(status_code=404, detail="Audio file not found")
 
     start, end, is_partial = _parse_range(request.headers.get("range"), total_size)
+    audit.detail["partial"] = is_partial
     length = end - start + 1
     status_code = 206 if is_partial else 200
 
@@ -1426,17 +1800,15 @@ async def get_job_audio(
     # can no longer be turned into a clean 404 (headers are already sent),
     # same limitation any streaming file server has.
     #
-    # The background task closes the stream if a client disconnect left it
-    # suspended mid-body (Starlette stops iterating but never closes it),
-    # rather than leaving its blob client and credential to the garbage
-    # collector. Closing a stream that already finished is a no-op.
-    chunk_iter = _stream_blob_range(job.audio_blob_path, start, length)
-    return StreamingResponse(
-        chunk_iter,
+    # The audited response closes the stream when the body ends, including after a
+    # client disconnect left it suspended mid-body (Starlette stops iterating but
+    # never closes it), rather than leaving its blob client and credential to the
+    # garbage collector.
+    return audit.streaming_response(
+        _stream_blob_range(job.audio_blob_path, start, length),
         media_type=media_type,
         status_code=status_code,
         headers=headers,
-        background=BackgroundTask(_close_stream, chunk_iter),
     )
 
 
@@ -1453,14 +1825,7 @@ async def _stream_blob_range(blob_name: str, start: int, length: int) -> AsyncGe
             yield chunk
 
 
-async def _close_stream(stream: AsyncGenerator[bytes]) -> None:
-    # A plain coroutine function, not stream.aclose itself: BackgroundTask
-    # doesn't recognise that builtin method as async, so would call it in a
-    # worker thread and never await the result.
-    await stream.aclose()
-
-
-@router.delete("/jobs/{job_id}", status_code=204)
+@router.delete("/jobs/{job_id}", dependencies=[_job_in_jurisdiction(JOB)], status_code=204)
 async def delete_job(
     job_id: UUID,
     session: Session = Depends(get_session),
@@ -1479,8 +1844,15 @@ async def delete_job(
     job = get_job_by_id(session, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    _check_job_access(job, current_user)
+    _check_job_access(job, current_user, "job", "delete")
+    # DIAAT-286: success once the row is deleted; failed (http_502) if the audio could
+    # not be deleted and the job was kept.
+    with audited("job.delete", current_user.id, job.id):
+        await _delete_job(session, job)
+    return Response(status_code=204)
 
+
+async def _delete_job(session: Session, job: SpeechBatchJob) -> None:
     if job.audio_blob_path:
         try:
             if get_settings().AUDIO_STORAGE_BACKEND == "local":
@@ -1488,7 +1860,7 @@ async def delete_job(
             else:
                 async with AsyncAzureBlobManager() as blob_manager:
                     await blob_manager.delete_blob(job.audio_blob_path)
-        except Exception as exc:  # noqa: BLE001 — surfaced to the caller as a 502
+        except Exception as exc:
             logger.error("Failed to delete audio blob %s: %s", job.audio_blob_path, exc)
             raise HTTPException(
                 status_code=502, detail="Failed to delete the audio file; job not deleted"
@@ -1499,9 +1871,8 @@ async def delete_job(
     if job.batch_job_url:
         try:
             await delete_batch_job(job.batch_job_url)
-        except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+        except Exception as exc:
             logger.warning("Could not delete batch job %s: %s", job.batch_job_url, exc)
 
     session.delete(job)
     session.commit()
-    return Response(status_code=204)

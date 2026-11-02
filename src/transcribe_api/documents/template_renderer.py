@@ -33,6 +33,15 @@ from transcribe_api.documents.hearing_document_router import (
     RESPONDENT_RULE_28_TEXT,
     build_hearing_document_from_document_data,
 )
+from transcribe_api.documents.lib.markdown_to_blocks import markdown_to_plain_text
+from transcribe_api.documents.lib.models import (
+    Heading,
+    HearingDocument,
+    PageBreak,
+    Paragraph,
+    TemplateBody,
+)
+from transcribe_api.documents.lib.procedural_frontmatter_docx import render_frontmatter
 from transcribe_api.documents.models import DocumentData, HearingFormData, TranscriptMessage
 from transcribe_api.documents.styles import (
     INDENT_INCREMENT_CM,
@@ -50,15 +59,6 @@ from transcribe_api.documents.styles import (
 )
 from transcribe_api.documents.word_document import WordDocument
 from transcribe_api.runtime.logger import logger
-from transcribe_api.documents.lib.markdown_to_blocks import markdown_to_plain_text
-from transcribe_api.documents.lib.models import (
-    Heading,
-    HearingDocument,
-    PageBreak,
-    Paragraph,
-    TemplateBody,
-)
-from transcribe_api.documents.lib.procedural_frontmatter_docx import render_frontmatter
 
 if TYPE_CHECKING:
     from transcribe_api.api.routes_dictation import LiveTranscriptionSubmissionRequest
@@ -159,7 +159,7 @@ def _derive_indent_level(block: Paragraph) -> int:
 
 def _set_paragraph_list_level(paragraph, ilvl: int, num_id: int = 1) -> None:
     """Override the numbering level on a single paragraph via ``w:numPr``."""
-    ppr = paragraph._element.get_or_add_pPr()  # noqa: SLF001
+    ppr = paragraph._element.get_or_add_pPr()
     existing = ppr.find(qn("w:numPr"))
     if existing is not None:
         ppr.remove(existing)
@@ -202,7 +202,7 @@ def _append_fee_award_dropdown(paragraph) -> None:
     sdt_content.append(run)
     sdt.append(sdt_content)
 
-    paragraph._element.append(sdt)  # noqa: SLF001
+    paragraph._element.append(sdt)
 
 
 def _apply_paragraph_indentation(
@@ -305,18 +305,18 @@ def _add_page_number(paragraph) -> None:
     begin_run = paragraph.add_run()
     fld_char_begin = OxmlElement("w:fldChar")
     fld_char_begin.set(qn("w:fldCharType"), "begin")
-    begin_run._r.append(fld_char_begin)  # noqa: SLF001
+    begin_run._r.append(fld_char_begin)
 
     instr_run = paragraph.add_run()
     instr_text = OxmlElement("w:instrText")
     instr_text.set(qn("xml:space"), "preserve")
     instr_text.text = " PAGE "
-    instr_run._r.append(instr_text)  # noqa: SLF001
+    instr_run._r.append(instr_text)
 
     end_run = paragraph.add_run()
     fld_char_end = OxmlElement("w:fldChar")
     fld_char_end.set(qn("w:fldCharType"), "end")
-    end_run._r.append(fld_char_end)  # noqa: SLF001
+    end_run._r.append(fld_char_end)
 
 
 def _configure_after_first_page_header(root, appeal_number: str) -> None:
@@ -421,7 +421,7 @@ def render_structured_document(hearing_document: HearingDocument, output_path: P
     return output_path
 
 
-def render_document(  # noqa: C901, PLR0912, PLR0915
+def render_document(
     document_data: DocumentData | HearingDocument,
     output_path: Path,
     template_path: Path | None = None,

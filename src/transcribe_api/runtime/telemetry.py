@@ -6,16 +6,23 @@ or the pollers start.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
-
-import contextlib
 from contextlib import AbstractContextManager
 from pathlib import PurePosixPath
 from uuid import UUID
 
-from hmcts_otel import Journey, TelemetrySettings, current_journey, default_redactor, journey, setup_telemetry
+from hmcts_otel import (
+    Journey,
+    TelemetrySettings,
+    current_journey,
+    default_redactor,
+    instrument_litellm,
+    journey,
+    setup_telemetry,
+)
 
 from transcribe_api.runtime.settings_dictation import get_settings
 from transcribe_api.runtime.telemetry_schema import register_schema
@@ -41,11 +48,34 @@ JOURNEY_UPLOAD = "recording.upload"
 # Recording batch jobs: id is SpeechBatchJob.id; parent is the upload's id.
 JOURNEY_JOB = "recording.job"
 
+# hmcts.area (decision 1): set on each area's routers and pollers (api/app.py), so
+# every signal tells the two areas apart. Unset means shared code (the top-level
+# /health, the browser relay, the background dependency checker). Queries fall back
+# to the journey type's prefix.
+AREA_DICTATION = "dictation"
+AREA_RECORDING = "recording"
+
 _UPLOAD_ID = re.compile(r"^uploads/[^/]+/([0-9a-fA-F-]{36})-")
 # DIAAT-280: a recording upload's file check failed; emitted before the stage's
 # upload.failed, with the same error code.
 EVENT_UPLOAD_VALIDATION_FAILED = "upload.validation_failed"
 
+
+# OBS-5: AI usage metering. Azure Speech bills batch transcription on the duration of
+# the audio: hmcts-otel's hmcts.speech.audio.duration counter (mode batch, feature
+# below) records it once per job whose transcript was saved. Usage only, never cost.
+AI_FEATURE_BATCH_TRANSCRIPTION = "batch_transcription"
+# On job.finished (success): the seconds recorded, and where they came from: azure (the
+# duration in Azure's results file) or estimate (audio_duration_seconds given when the
+# job was submitted).
+ATTR_AUDIO_DURATION_S = "speech.audio_duration_s"
+ATTR_AUDIO_DURATION_SOURCE = "speech.audio_duration_source"
+
+# DIAAT-277: service health (runtime/dependency_health.py), with the
+# service.dependency.up gauge and service.dependency.check.duration histogram.
+EVENT_DEPENDENCY_HEALTH_CHANGED = "dependency.health_changed"
+ATTR_DEPENDENCY_NAME = "dependency.name"
+ATTR_DEPENDENCY_STATE = "dependency.state"
 
 # Recording job lifecycle, Azure Speech and post-processing (DIAAT-281/282/283): the
 # names the code emits. They are registered, with their descriptions, in the merged
@@ -250,4 +280,9 @@ def configure_telemetry(service_name: str = SERVICE_NAME_API) -> TelemetrySettin
     }
     if not any(os.environ.get(name) for name in ("OTEL_SERVICE_NAME", "HMCTS_OTEL_SERVICE_NAME")):
         overrides["service_name"] = service_name
-    return setup_telemetry(TelemetrySettings(**overrides))
+    configured = setup_telemetry(TelemetrySettings(**overrides))
+    # OBS-5: token usage of every litellm call, as metrics (gen_ai.client.token.usage,
+    # hmcts.ai.requests). Usage only: no prices, no prompt or response content. After
+    # setup; idempotent; existing litellm callbacks are kept.
+    instrument_litellm()
+    return configured
