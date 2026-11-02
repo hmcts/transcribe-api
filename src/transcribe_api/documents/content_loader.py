@@ -36,6 +36,23 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 CONTENT_FILE = BASE_DIR / "data" / "document_content.json"
 
 
+# The IAC wording is always the row with this id (the id it had before jurisdictions), so
+# the previous version of the API, which reads only this id, still finds it after a downgrade.
+IAC_CONTENT_ID = 1
+
+
+def _new_content_row(jurisdiction_id: str, content: dict[str, Any], updated_at: Any):
+    """A document_content row to insert: id 1 for IAC, the next sequence value for the others."""
+    from transcribe_api.domain.models_dictation import DocumentContent
+
+    return DocumentContent(
+        id=IAC_CONTENT_ID if jurisdiction_id == DEFAULT_JURISDICTION_ID else None,
+        jurisdiction_id=jurisdiction_id,
+        content=content,
+        updated_at=updated_at,
+    )
+
+
 class ContentLoadError(Exception):
     """Raised when content cannot be loaded."""
 
@@ -66,11 +83,7 @@ def _load_content_file() -> dict[str, Any]:
             content = _load_from_file()
             try:
                 from datetime import UTC, datetime
-                session.add(
-                    DocumentContent(
-                        jurisdiction_id=DEFAULT_JURISDICTION_ID, content=content, updated_at=datetime.now(UTC)
-                    )
-                )
+                session.add(_new_content_row(DEFAULT_JURISDICTION_ID, content, datetime.now(UTC)))
                 session.commit()
             except Exception as seed_exc:
                 session.rollback()
@@ -150,7 +163,7 @@ def get_document_content(jurisdiction_id: str = DEFAULT_JURISDICTION_ID) -> dict
                 from datetime import UTC
                 from datetime import datetime as dt
                 now = dt.now(UTC)
-                session.add(DocumentContent(jurisdiction_id=jurisdiction_id, content=content, updated_at=now))
+                session.add(_new_content_row(jurisdiction_id, content, now))
                 session.commit()
                 _cache[jurisdiction_id] = (now, content)
             except Exception as seed_exc:
@@ -193,7 +206,7 @@ def save_document_content(jurisdiction_id: str, data: dict[str, Any]) -> None:
             row.updated_at = datetime.now(UTC)
             session.add(row)
         else:
-            session.add(DocumentContent(jurisdiction_id=jurisdiction_id, content=data, updated_at=datetime.now(UTC)))
+            session.add(_new_content_row(jurisdiction_id, data, datetime.now(UTC)))
         session.commit()
     clear_cache(jurisdiction_id)
 

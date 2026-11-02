@@ -100,9 +100,9 @@ All SystemAdministrator only.
 
 | Action | Route | Notes |
 | --- | --- | --- |
-| Create | `POST /admin/jurisdictions` body `{ "id": "tax", "name": "Tax Tribunal" }` | 201 `{id,name,has_legal_wording:false}`; `id` is `^[a-z0-9][a-z0-9_-]*$`, up to 64 chars; 409 if the id or name is taken (case-insensitive), 422 if malformed. Starts with the shipped hearing types and anonymity wording and no legal frameworks. |
+| Create | `POST /admin/jurisdictions` body `{ "id": "tax", "name": "Tax Tribunal" }` | 201 `{id,name,has_legal_wording:false}`; `id` is `^[a-z0-9][a-z0-9_-]*$`, up to 64 chars; 409 if the id or name collides with any existing id or name, ignoring case (id against name too; checked atomically, so concurrent creates cannot both succeed), 422 if malformed. Starts with the shipped hearing types and anonymity wording and no legal frameworks. |
 | List a jurisdiction's admins | `GET /admin/jurisdictions/{jid}/admins` | `[{ "user_id", "email", "role" }]` |
-| Assign | `PUT /admin/jurisdictions/{jid}/admins/{user_id}` | 200 with the item; idempotent. Pick the user with the existing `GET /admin/users?search_email=`. The user also needs the `LegalTextManager` role in Entra to reach the editor at all. |
+| Assign | `PUT /admin/jurisdictions/{jid}/admins/{user_id}` | 200 with the item; idempotent, also under concurrent identical requests (only the request that actually adds the mapping is audited). Pick the user with the existing `GET /admin/users?search_email=`. The user also needs the `LegalTextManager` role in Entra to reach the editor at all. |
 | Unassign | `DELETE /admin/jurisdictions/{jid}/admins/{user_id}` | 204; 404 if they were not an admin of it |
 
 A user appears in `/admin/users` only after they have signed in once, so a new admin signs in first, then

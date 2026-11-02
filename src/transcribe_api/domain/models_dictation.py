@@ -3,7 +3,7 @@ from enum import StrEnum
 from typing import Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import CheckConstraint, Column, DateTime, select
+from sqlalchemy import CheckConstraint, Column, DateTime, Index, column, func, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import Field, Relationship, SQLModel
@@ -120,6 +120,11 @@ class Jurisdiction(SQLModel, table=True):
     """
 
     __tablename__ = "jurisdiction"
+    # A form names a jurisdiction by id or name ignoring case (migration 0004).
+    __table_args__ = (
+        Index("uq_jurisdiction_id_lower", func.lower(column("id")), unique=True),
+        Index("uq_jurisdiction_name_lower", func.lower(column("name")), unique=True),
+    )
 
     id: str = Field(primary_key=True, max_length=64)
     name: str = Field(unique=True)
@@ -150,6 +155,7 @@ class DocumentContent(SQLModel, table=True):
 
     __tablename__ = "document_content"
 
+    # 1 is the IAC row (explicit id); other jurisdictions take the next sequence value, from 2.
     id: int | None = Field(default=None, primary_key=True)
     jurisdiction_id: str = Field(foreign_key="jurisdiction.id", unique=True)
     content: dict = Field(sa_column=Column(JSONB, nullable=False))

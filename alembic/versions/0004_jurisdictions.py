@@ -11,8 +11,11 @@ wording per jurisdiction and ties admins to jurisdictions:
   updated_at included, and becomes "iac"'s. Nothing is reseeded. On a database
   that has no row yet (a fresh one) there is still none; the API seeds it from the
   bundled JSON on first read as before. its id sequence is moved on so rows for
-  further jurisdictions get ids; the IAC row stays id 1 (also on a fresh database), so code
-  and tools that read id=1 still find the IAC wording.
+  further jurisdictions get ids from 2; id 1 is reserved for IAC (also on a fresh database,
+  where the API inserts it as id 1), so code and tools that read id=1 still find the IAC
+  wording, a downgrade included.
+- jurisdiction: unique indexes on lower(id) and lower(name), because a form names a
+  jurisdiction ignoring case. The API also serialises creates and checks id against name.
 - jurisdiction_admin: the user-to-jurisdiction mapping, managed by a
   SystemAdministrator through the API. Every user whose role is LegalTextManager
   when this runs is mapped to "iac", so the IAC admins keep the access they have.
@@ -50,6 +53,9 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("name"),
     )
+    # A form names a jurisdiction by id or name ignoring case, so two must never differ only in case.
+    op.create_index("uq_jurisdiction_id_lower", "jurisdiction", [sa.text("lower(id)")], unique=True)
+    op.create_index("uq_jurisdiction_name_lower", "jurisdiction", [sa.text("lower(name)")], unique=True)
     op.execute(
         sa.text("INSERT INTO jurisdiction (id, name, created_datetime) VALUES (:id, :name, now())").bindparams(
             id=IAC_ID, name=IAC_NAME
@@ -64,10 +70,12 @@ def upgrade() -> None:
         "fk_document_content_jurisdiction_id", "document_content", "jurisdiction", ["jurisdiction_id"], ["id"]
     )
     # id already has a serial default (0001), unused while the one row was inserted as id=1.
-    # Continue after the existing row, or start at 1 on a fresh database.
+    # id 1 is reserved for IAC (the API inserts it explicitly), on a fresh database too, so
+    # the sequence gives other jurisdictions ids from 2 up. A downgrade then leaves the IAC
+    # wording where the previous version reads it.
     op.execute(
         "SELECT setval(pg_get_serial_sequence('document_content', 'id'), "
-        "(SELECT COALESCE(MAX(id), 0) + 1 FROM document_content), false)"
+        "GREATEST((SELECT COALESCE(MAX(id), 1) FROM document_content), 1) + 1, false)"
     )
 
     op.create_table(

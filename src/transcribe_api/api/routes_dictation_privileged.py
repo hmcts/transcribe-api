@@ -265,9 +265,7 @@ async def create_jurisdiction_route(
     It starts with the shipped hearing types and anonymity wording and no legal
     frameworks. Map admins to it with PUT /admin/jurisdictions/{id}/admins/{user_id}.
     """
-    taken = {j.id.lower() for j in list_jurisdictions()} | {j.name.lower() for j in list_jurisdictions()}
-    if payload.id in taken or payload.name.lower() in taken:
-        raise HTTPException(status_code=409, detail="A jurisdiction with this id or name already exists")
+    # The case-insensitive collision check is made atomically with the insert, in create_jurisdiction.
     try:
         jurisdiction = create_jurisdiction(payload.id, payload.name)
     except JurisdictionExistsError:

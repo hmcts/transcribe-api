@@ -82,7 +82,9 @@ class World:
         return bool(self.wording[jurisdiction_id].get("legal_frameworks"))
 
     def create(self, jurisdiction_id, name):
-        if jurisdiction_id in self.jurisdictions:
+        # The real create_jurisdiction makes this check atomically (tests/unit/test_jurisdiction_wording_postgres.py).
+        wanted = {jurisdiction_id.lower(), name.lower()}
+        if any(wanted & {j.id.lower(), j.name.lower()} for j in self.jurisdictions.values()):
             raise JurisdictionExistsError(jurisdiction_id)
         self.jurisdictions[jurisdiction_id] = Jurisdiction(id=jurisdiction_id, name=name)
         self.wording[jurisdiction_id] = _wording("NEW", frameworks=False)

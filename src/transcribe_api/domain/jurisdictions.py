@@ -14,11 +14,13 @@ import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
+from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
 from transcribe_api.documents.models import DEFAULT_JURISDICTION, DEFAULT_JURISDICTION_ID
-from transcribe_api.domain.models_dictation import DocumentContent, Jurisdiction, JurisdictionAdmin, User
+from transcribe_api.domain.models_dictation import Jurisdiction, JurisdictionAdmin, User
 from transcribe_api.runtime.db_connection import get_engine
 
 logger = logging.getLogger(__name__)
@@ -94,20 +96,38 @@ def get_admin_jurisdiction_ids(user_id: UUID) -> set[str]:
         return set(rows.all())
 
 
+# Serialises jurisdiction creation (a transaction-scoped Postgres advisory lock key).
+_CREATE_LOCK_KEY = 342_000_001
+
+
 def create_jurisdiction(jurisdiction_id: str, name: str) -> Jurisdiction:
-    """Create a jurisdiction and its starting wording together."""
+    """Create a jurisdiction and its starting wording together.
+
+    A form names a jurisdiction by id or name ignoring case, so no id or name may equal
+    another's id or name once case is ignored (id against id, name against name, and id
+    against name). Creates are serialised and the check is made in the same transaction
+    as the insert, so two concurrent creates cannot both pass; the unique indexes on
+    lower(id) and lower(name) (migration 0004) back it up. Raises JurisdictionExistsError.
+    """
+    from transcribe_api.documents.content_loader import _new_content_row
+
     wording = starting_wording()
-    jurisdiction = Jurisdiction(id=jurisdiction_id, name=name)
+    wanted = {jurisdiction_id.lower(), name.lower()}
     with Session(get_engine()) as session:
         try:
+            session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _CREATE_LOCK_KEY})
+            for existing in session.exec(select(Jurisdiction)).all():
+                if wanted & {existing.id.lower(), existing.name.lower()}:
+                    raise JurisdictionExistsError(jurisdiction_id)
+            jurisdiction = Jurisdiction(id=jurisdiction_id, name=name)
             session.add(jurisdiction)
             session.flush()  # the wording's foreign key needs the jurisdiction to exist first
-            session.add(
-                DocumentContent(jurisdiction_id=jurisdiction_id, content=wording, updated_at=datetime.now(UTC)),
-            )
+            session.add(_new_content_row(jurisdiction_id, wording, datetime.now(UTC)))
             session.commit()
-        except IntegrityError as exc:
+        except (IntegrityError, JurisdictionExistsError) as exc:
             session.rollback()
+            if isinstance(exc, JurisdictionExistsError):
+                raise
             raise JurisdictionExistsError(jurisdiction_id) from exc
         session.refresh(jurisdiction)
         return jurisdiction
@@ -125,13 +145,16 @@ def list_jurisdiction_admins(jurisdiction_id: str) -> list[User]:
 
 
 def add_jurisdiction_admin(jurisdiction_id: str, user_id: UUID) -> bool:
-    """Map a user to a jurisdiction. False if they already were."""
+    """Map a user to a jurisdiction. False if they already were, including a concurrent request that got there first."""
+    statement = (
+        insert(JurisdictionAdmin)
+        .values(user_id=user_id, jurisdiction_id=jurisdiction_id, created_datetime=datetime.now(UTC))
+        .on_conflict_do_nothing(index_elements=["user_id", "jurisdiction_id"])
+    )
     with Session(get_engine()) as session:
-        if session.get(JurisdictionAdmin, (user_id, jurisdiction_id)) is not None:
-            return False
-        session.add(JurisdictionAdmin(user_id=user_id, jurisdiction_id=jurisdiction_id))
+        result = session.execute(statement)
         session.commit()
-        return True
+        return result.rowcount == 1
 
 
 def remove_jurisdiction_admin(jurisdiction_id: str, user_id: UUID) -> bool:

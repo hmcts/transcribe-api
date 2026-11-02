@@ -518,9 +518,7 @@ def test_0004_preserves_the_existing_iac_content_and_maps_the_existing_admins():
         ).all()
         jurisdictions = connection.execute(text("SELECT id, name FROM jurisdiction")).all()
         mapped = connection.execute(
-            text(
-                'SELECT u.role, a.jurisdiction_id FROM jurisdiction_admin a JOIN "user" u ON u.id = a.user_id'
-            )
+            text('SELECT u.role, a.jurisdiction_id FROM jurisdiction_admin a JOIN "user" u ON u.id = a.user_id')
         ).all()
     # Same row, same content text, same updated_at (the cache key); only the new column is filled in.
     assert [tuple(r)[:3] for r in after] == [tuple(r) for r in before]
@@ -553,7 +551,8 @@ def test_0004_preserves_the_existing_iac_content_and_maps_the_existing_admins():
 
 
 @pytest.mark.skipif(not os.getenv("TEST_POSTGRES_URL"), reason="needs TEST_POSTGRES_URL (a throwaway Postgres)")
-def test_0004_on_a_fresh_database_leaves_the_iac_row_to_be_seeded_as_id_1():
+def test_0004_on_a_fresh_database_reserves_id_1_for_iac():
+    """No row yet: the sequence still starts at 2, so another jurisdiction cannot take IAC's id."""
     from alembic import command
     from sqlalchemy import text
 
@@ -561,11 +560,35 @@ def test_0004_on_a_fresh_database_leaves_the_iac_row_to_be_seeded_as_id_1():
     _migrator(engine)(command.upgrade, "head")
     with engine.begin() as connection:
         assert connection.execute(text("SELECT count(*) FROM document_content")).scalar_one() == 0
-        seeded = connection.execute(
+        connection.execute(text("INSERT INTO jurisdiction (id, name, created_datetime) VALUES ('x', 'X', now())"))
+        other = connection.execute(
             text(
                 "INSERT INTO document_content (jurisdiction_id, content, updated_at)"
-                " VALUES ('iac', '{}', now()) RETURNING id"
+                " VALUES ('x', '{}', now()) RETURNING id"
             )
         ).scalar_one()
-    assert seeded == 1
+        iac = connection.execute(
+            text(
+                "INSERT INTO document_content (id, jurisdiction_id, content, updated_at)"
+                " VALUES (1, 'iac', '{}', now()) RETURNING id"
+            )
+        ).scalar_one()
+    assert (other, iac) == (2, 1)
+    engine.dispose()
+
+
+@pytest.mark.skipif(not os.getenv("TEST_POSTGRES_URL"), reason="needs TEST_POSTGRES_URL (a throwaway Postgres)")
+def test_0004_rejects_jurisdictions_that_differ_only_in_case():
+    from alembic import command
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    engine = _fresh_engine()
+    _migrator(engine)(command.upgrade, "head")
+    insert = text("INSERT INTO jurisdiction (id, name, created_datetime) VALUES (:id, :name, now())")
+    with engine.begin() as connection:
+        connection.execute(insert, {"id": "tax", "name": "Tax Tribunal"})
+    for values in ({"id": "tax2", "name": "TAX TRIBUNAL"}, {"id": "TAX", "name": "Another"}):
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            connection.execute(insert, values)
     engine.dispose()

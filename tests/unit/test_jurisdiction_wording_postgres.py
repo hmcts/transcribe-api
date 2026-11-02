@@ -299,3 +299,135 @@ def test_deleting_a_user_removes_their_mapping_and_a_jurisdiction_needs_unique_n
         create_jurisdiction("tax", "Another name")
     with pytest.raises(JurisdictionExistsError):
         create_jurisdiction("tax2", TAX_NAME)
+
+
+def _content_ids(engine) -> dict[str, int]:
+    with engine.connect() as connection:
+        return {j: i for j, i in connection.execute(text("SELECT jurisdiction_id, id FROM document_content")).all()}
+
+
+def test_iac_keeps_id_1_when_another_jurisdictions_wording_is_created_first(database):
+    """On a fresh database id 1 is reserved for IAC, so a downgrade leaves its wording where the old API reads it."""
+    from transcribe_api.documents import content_loader
+    from transcribe_api.domain.jurisdictions import create_jurisdiction
+
+    assert _content_ids(database) == {}
+    create_jurisdiction("tax", TAX_NAME)  # first row ever: must not take id 1
+    assert _content_ids(database) == {"tax": 2}
+
+    iac = content_loader.get_document_content("iac")  # seeded on first read
+
+    assert _content_ids(database) == {"tax": 2, "iac": 1}
+    assert iac["legal_frameworks"]
+
+
+def test_a_first_save_of_iac_wording_also_uses_id_1(database):
+    from transcribe_api.documents import content_loader
+    from transcribe_api.domain.jurisdictions import create_jurisdiction
+
+    create_jurisdiction("tax", TAX_NAME)
+    content_loader.save_document_content("iac", {"hearing_types": [], "legal_frameworks": [], "anonymity": {}})
+
+    assert _content_ids(database) == {"tax": 2, "iac": 1}
+
+
+def _concurrently(calls):
+    """Run the calls at the same moment on separate threads; return each result or exception."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    barrier = threading.Barrier(len(calls), timeout=10)
+
+    def run(call):
+        barrier.wait()
+        try:
+            return call()
+        except Exception as exc:  # noqa: BLE001
+            return exc
+
+    with ThreadPoolExecutor(max_workers=len(calls)) as pool:
+        return list(pool.map(run, calls))
+
+
+@pytest.mark.parametrize("rounds", range(5))
+def test_concurrent_creates_differing_only_in_case_cannot_both_succeed(database, rounds):
+    from transcribe_api.domain.jurisdictions import JurisdictionExistsError, create_jurisdiction, list_jurisdictions
+
+    results = _concurrently(
+        [
+            lambda: create_jurisdiction("tax-a", "Tax Tribunal"),
+            lambda: create_jurisdiction("tax-b", "TAX TRIBUNAL"),
+        ]
+    )
+
+    assert sum(isinstance(r, JurisdictionExistsError) for r in results) == 1
+    assert sum(not isinstance(r, Exception) for r in results) == 1
+    assert sorted(j.id for j in list_jurisdictions()) == sorted(
+        ["iac", next(r.id for r in results if not isinstance(r, Exception))]
+    )
+
+
+@pytest.mark.parametrize(
+    ("jurisdiction_id", "name"),
+    [
+        ("tax", "Other"),  # id against id
+        ("TAX", "Other"),  # id against id, case
+        ("other", "tax tribunal"),  # name against name, case
+        ("tax tribunal", "Other"),  # id against name
+        ("other", "TAX"),  # name against id
+        ("other", "iac"),  # name against IAC's id
+    ],
+)
+def test_a_create_colliding_with_an_id_or_name_ignoring_case_is_refused(database, jurisdiction_id, name):
+    from transcribe_api.domain.jurisdictions import JurisdictionExistsError, create_jurisdiction, list_jurisdictions
+
+    create_jurisdiction("tax", "Tax Tribunal")
+
+    with pytest.raises(JurisdictionExistsError):
+        create_jurisdiction(jurisdiction_id, name)
+    assert sorted(j.id for j in list_jurisdictions()) == ["iac", "tax"]
+    assert len(_content_ids(database)) == 1  # no wording row for the refused one
+
+
+def test_a_create_that_loses_a_case_race_is_a_409_not_a_500(api, database):
+    client, as_user = api
+    as_user(_make_user(database, ["SystemAdministrator"]))
+
+    first = client.post("/api/admin/jurisdictions", json={"id": "tax-a", "name": "Tax Tribunal"})
+    second = client.post("/api/admin/jurisdictions", json={"id": "tax-b", "name": "TAX TRIBUNAL"})
+
+    assert (first.status_code, second.status_code) == (201, 409)
+
+
+def test_concurrent_assignments_of_the_same_admin_are_idempotent_and_only_one_inserts(database):
+    from transcribe_api.domain.jurisdictions import (
+        add_jurisdiction_admin,
+        create_jurisdiction,
+        list_jurisdiction_admins,
+    )
+
+    create_jurisdiction("tax", TAX_NAME)
+    for _ in range(5):
+        user = _make_user(database, ["LegalTextManager"])
+        results = _concurrently([lambda: add_jurisdiction_admin("tax", user.id) for _ in range(8)])
+
+        assert not any(isinstance(r, Exception) for r in results), results
+        assert sorted(results) == [False] * 7 + [True]
+    assert len(list_jurisdiction_admins("tax")) == 5
+
+
+def test_assigning_an_admin_twice_audits_it_once(api, database):
+    client, as_user = api
+    sysadmin = _make_user(database, ["SystemAdministrator"])
+    candidate = _make_user(database, ["LegalTextManager"])
+    as_user(sysadmin)
+    assert client.post("/api/admin/jurisdictions", json={"id": "tax", "name": TAX_NAME}).status_code == 201
+
+    responses = [client.put(f"/api/admin/jurisdictions/tax/admins/{candidate.id}") for _ in range(2)]
+
+    assert [r.status_code for r in responses] == [200, 200]
+    with database.connect() as connection:
+        added = connection.execute(
+            text("SELECT count(*) FROM audit_log WHERE event_type = 'JURISDICTION_ADMIN_ADDED'")
+        ).scalar_one()
+    assert added == 1
