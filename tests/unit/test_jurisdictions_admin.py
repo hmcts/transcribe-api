@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 from uuid import uuid4
@@ -16,6 +17,17 @@ from transcribe_api.domain.models_dictation import Jurisdiction, JurisdictionMem
 pytestmark = pytest.mark.real_jurisdictions
 
 ET_EXAMPLE = Path(__file__).resolve().parents[2] / "docs" / "jurisdictions" / "et.example.json"
+
+
+@pytest.fixture
+def put(monkeypatch):
+    """Run ``put`` from the command line with the ET example settings on standard input."""
+
+    def run(session, *args: str) -> str:
+        monkeypatch.setattr("sys.stdin", io.StringIO(ET_EXAMPLE.read_text()))
+        return admin.run(["put", *args], session)
+
+    return run
 
 
 @pytest.fixture
@@ -46,8 +58,8 @@ def test_the_et_example_settings_are_valid():
     assert settings.features.hearing_recordings is False
 
 
-def test_put_creates_then_updates_a_jurisdiction(session):
-    assert admin.run(["put", "et", "--name", "Employment Tribunal", "--settings", str(ET_EXAMPLE)], session) == (
+def test_put_creates_then_updates_a_jurisdiction(session, put):
+    assert put(session, "et", "--name", "Employment Tribunal") == (
         "Created ET"
     )
     assert admin.put_jurisdiction(session, "ET", "Employment Tribunals", {}, auto_enrol=True) == "Updated ET"
@@ -62,19 +74,30 @@ def test_put_creates_then_updates_a_jurisdiction(session):
     )
 
 
-def test_put_keeps_the_flags_it_is_not_given(session):
+
+def test_put_opens_no_file_named_on_its_command_line(session, tmp_path):
+    """The settings come only from standard input (Sonar pythonsecurity:S8707): a path
+    on the command line is refused, not read."""
+    named = tmp_path / "et.json"
+    named.write_text(ET_EXAMPLE.read_text())
+
+    with pytest.raises(SystemExit):
+        admin.run(["put", "ET", "--name", "Employment Tribunal", "--settings", str(named)], session)
+    assert session.exec(select(Jurisdiction)).all() == []
+
+def test_put_keeps_the_flags_it_is_not_given(session, put):
     """Updating the IAC's wording must not turn its auto-enrol off (new users would
     then get no jurisdiction), nor re-enable a disabled jurisdiction."""
     admin.put_jurisdiction(session, "IAC", "Immigration and Asylum Chamber", {}, auto_enrol=True)
     admin.put_jurisdiction(session, "OLD", "Retired", {}, enabled=False)
 
-    admin.run(["put", "IAC", "--name", "Immigration and Asylum Chamber", "--settings", str(ET_EXAMPLE)], session)
-    admin.run(["put", "OLD", "--name", "Retired", "--settings", str(ET_EXAMPLE)], session)
+    put(session, "IAC", "--name", "Immigration and Asylum Chamber")
+    put(session, "OLD", "--name", "Retired")
 
     flags = {r.code: (r.auto_enrol, r.enabled) for r in session.exec(select(Jurisdiction)).all()}
     assert flags == {"IAC": (True, True), "OLD": (False, False)}
-    admin.run(["put", "IAC", "--name", "IAC", "--settings", str(ET_EXAMPLE), "--no-auto-enrol"], session)
-    admin.run(["put", "OLD", "--name", "Retired", "--settings", str(ET_EXAMPLE), "--enabled"], session)
+    put(session, "IAC", "--name", "IAC", "--no-auto-enrol")
+    put(session, "OLD", "--name", "Retired", "--enabled")
     flags = {r.code: (r.auto_enrol, r.enabled) for r in session.exec(select(Jurisdiction)).all()}
     assert flags == {"IAC": (False, True), "OLD": (False, True)}
 

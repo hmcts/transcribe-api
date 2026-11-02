@@ -30,7 +30,7 @@ role cannot sign in, whatever their memberships.
 The same operations run from a command line, for local development:
 
 ```sh
-python -m transcribe_api.jurisdictions_admin put ET --name "Employment Tribunal" --settings - < et.json
+python -m transcribe_api.jurisdictions_admin put ET --name "Employment Tribunal" < et.json
 python -m transcribe_api.jurisdictions_admin add-member ET first.last@ejudiciary.net --role judge
 python -m transcribe_api.jurisdictions_admin list
 ```

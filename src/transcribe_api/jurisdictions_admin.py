@@ -5,15 +5,15 @@ routes_dictation_privileged.py), with the functions here. Locally, or where a po
 can be reached, the same from the command line:
 
     python -m transcribe_api.jurisdictions_admin list
-    python -m transcribe_api.jurisdictions_admin put ET --name "Employment Tribunal" --settings et.json
+    python -m transcribe_api.jurisdictions_admin put ET --name "Employment Tribunal" < et.json
     python -m transcribe_api.jurisdictions_admin add-member ET judge@ejudiciary.net --role judge
     python -m transcribe_api.jurisdictions_admin remove-member ET judge@ejudiciary.net
 
 ``put`` creates or updates a jurisdiction; its settings (wording, template, features:
 domain/jurisdictions.JurisdictionSettings) are validated first. ``add-member`` adds a
 user who has signed in, or, for someone who has not, a pending membership they claim
-on first sign-in (so an ET test judge is never put in the IAC). Settings can be read
-from standard input with ``--settings -``.
+on first sign-in (so an ET test judge is never put in the IAC). ``put`` reads the
+settings from standard input only: the tool opens no file named on its command line.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ import argparse
 import json
 import sys
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import NamedTuple
 
 from sqlalchemy import func
@@ -313,10 +312,9 @@ def list_jurisdictions(session: Session) -> str:
     return "\n".join(lines) or "No jurisdictions"
 
 
-def _read_settings(path: str) -> dict:
-    text = sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8")
+def _read_settings() -> dict:
     try:
-        return json.loads(text)
+        return json.loads(sys.stdin.read())
     except json.JSONDecodeError as exc:
         msg = f"The settings are not JSON: {exc}"
         raise AdminError(msg) from None
@@ -326,10 +324,9 @@ def run(argv: list[str], session: Session) -> str:
     parser = argparse.ArgumentParser(prog="python -m transcribe_api.jurisdictions_admin", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("list")
-    put = commands.add_parser("put", help="create or update a jurisdiction")
+    put = commands.add_parser("put", help="create or update a jurisdiction; its settings (JSON) on standard input")
     put.add_argument("code")
     put.add_argument("--name", required=True)
-    put.add_argument("--settings", required=True, help="a JSON file, or - for standard input")
     put.add_argument(
         "--auto-enrol",
         action=argparse.BooleanOptionalAction,
@@ -353,7 +350,7 @@ def run(argv: list[str], session: Session) -> str:
             session,
             args.code,
             args.name,
-            _read_settings(args.settings),
+            _read_settings(),
             auto_enrol=args.auto_enrol,
             enabled=args.enabled,
         )

@@ -65,7 +65,7 @@ def iac(jurisdiction_db) -> Jurisdiction:
 
 def _add_the_et(engine) -> None:
     with Session(engine) as session:
-        admin.run(["put", "ET", "--name", "Employment Tribunal", "--settings", str(ET_EXAMPLE)], session)
+        admin.put_jurisdiction(session, "ET", "Employment Tribunal", json.loads(ET_EXAMPLE.read_text()))
         admin.add_member(session, "ET", "et.judge@example.test")
 
 
