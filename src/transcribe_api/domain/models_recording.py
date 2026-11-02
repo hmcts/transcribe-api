@@ -219,12 +219,14 @@ class DialogueEntry(SQLModel):
                     corrected=self.has_corrections(),
                 )
             ]
+        by_text = _shared_out(self.parts, current)
         if not self.has_corrections():
-            return [_with_corrected(p, False) for p in _shared_out(self.parts, current)]
-        legacy_only = all(p.corrected is None for p in self.parts)
-        if self.corrected_text is None and self.word_corrections and self.words and not legacy_only:
-            return _shared_out_by_word(self.parts, self.words, self.word_corrections)
-        return _shared_out(self.parts, current)
+            return [_with_corrected(p, False) for p in by_text]
+        if self.corrected_text is None and self.word_corrections and self.words:
+            by_word = _shared_out_by_word(self.parts, self.words, self.word_corrections)
+            # Parts stored without a correction state keep the share they have always been scored on.
+            return [t if t.corrected is None else w for t, w in zip(by_text, by_word, strict=True)]
+        return by_text
 
     def effective_text(self) -> str:
         """Current text after any corrections — what a clerk would read today."""
@@ -261,7 +263,6 @@ def _shared_out_by_word(
     by the words rather than the text matters: the rebuilt text takes its casing from
     `words`, which can differ from a part's display text, a correction can leave the text
     as it was, and a part emptied by one edit still owns its words when it is edited again.
-    Parts stored without a correction state keep none, and are judged by their wording.
     """
     owners = _word_owners(parts, words)
     shares: list[list[str]] = [[] for _ in parts]
@@ -281,7 +282,7 @@ def _shared_out_by_word(
     for i in range(cursor, len(words)):
         shares[owners[i]].append(words[i].text)
     return [
-        p.model_copy(update={"current_text": _join(*share), "corrected": None if p.corrected is None else t})
+        p.model_copy(update={"current_text": _join(*share), "corrected": t})
         for p, share, t in zip(parts, shares, touched, strict=True)
     ]
 
