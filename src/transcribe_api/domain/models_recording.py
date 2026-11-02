@@ -200,14 +200,17 @@ class DialogueEntry(SQLModel):
         """The original segments this entry is made of, each with its share of the current text.
 
         Once the text has been edited since the merge, each part's share is found by
-        aligning the current text against the parts' ASR text.
+        aligning the current text against the parts' text when merged, so that the
+        merge boundaries stay put. A full rollback to the ASR text gives each part its own.
         """
         current = self.effective_text()
         if not self.parts:
             return [EntryPart(text=self.text, current_text=current, confidence=self.confidence)]
         if current == _join(*(p.current_text for p in self.parts)):
             return self.parts
-        shares = split_by_alignment([p.text for p in self.parts], current)
+        if current == _join(*(p.text for p in self.parts)):
+            return [p.model_copy(update={"current_text": p.text}) for p in self.parts]
+        shares = split_by_alignment([p.current_text for p in self.parts], current)
         return [p.model_copy(update={"current_text": share}) for p, share in zip(self.parts, shares, strict=True)]
 
     def effective_text(self) -> str:

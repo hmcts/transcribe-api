@@ -433,3 +433,15 @@ class TestSegmentIdsAndParts:
         merged = merge_dialogue_entries(self._entry("one two", 0.9), self._entry("three four", 0.5, 1))
         merged.corrected_text = "one two three for"
         assert [p.current_text for p in merged.current_parts()] == ["one two", "three for"]
+
+    def test_a_later_edit_keeps_an_earlier_correction_in_its_own_part(self):
+        sit = self._entry("please sit", 0.9, corrected_text="please sit down")
+        merged = merge_dialogue_entries(sit, self._entry("thank you", 0.8, 1))
+        merged.corrected_text = "please sit down thank you all"
+        assert [p.current_text for p in merged.current_parts()] == ["please sit down", "thank you all"]
+
+    def test_rolling_back_to_the_asr_text_gives_each_part_its_own(self):
+        sit = self._entry("please sit", 0.9, corrected_text="please sit down")
+        merged = merge_dialogue_entries(sit, self._entry("thank you", 0.8, 1))
+        merged.corrected_text = None
+        assert [p.current_text for p in merged.current_parts()] == ["please sit", "thank you"]

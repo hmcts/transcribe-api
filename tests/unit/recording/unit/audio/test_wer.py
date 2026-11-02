@@ -141,3 +141,9 @@ class TestSplitByAlignment:
 
     def test_deleted_reference_gets_an_empty_share(self):
         assert split_by_alignment(["a b", "c d"], "a b") == ["a b", ""]
+
+    def test_all_empty_references_with_words_left_is_total_error(self):
+        from transcribe_api.stt.wer import aggregate_word_error_rate
+
+        assert aggregate_word_error_rate([("", "three four")]) == 1.0
+        assert aggregate_word_error_rate([("", "")]) == 0.0

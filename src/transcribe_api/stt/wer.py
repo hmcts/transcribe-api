@@ -85,7 +85,7 @@ def aggregate_word_error_rate(pairs: list[tuple[str, str]]) -> float:
         total_errors += _edit_distance(ref_words, hyp_words)
 
     if total_ref_words == 0:
-        return 0.0
+        return 0.0 if total_errors == 0 else 1.0
     return total_errors / total_ref_words
 
 

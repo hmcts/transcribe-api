@@ -218,3 +218,16 @@ class TestAccuracyAcrossMerges:
         summary = self._summary([merged])
         assert summary.word_error_rate is None
         assert summary.has_corrections is False
+
+    def test_a_later_edit_does_not_move_an_earlier_correction_between_parts(self):
+        sit = _entry(text="please sit", start=0, end=1, confidence=0.9, corrected="please sit down")
+        merged = merge_dialogue_entries(sit, _entry(text="thank you", start=1, end=2, confidence=0.9))
+        merged.corrected_text = "please sit down thank you all"
+        separate = [sit, _entry(text="thank you", start=1, end=2, confidence=0.9, corrected="thank you all")]
+        assert self._summary([merged]).word_error_rate == self._summary(separate).word_error_rate
+        assert self._summary([merged]).corrected_percent == 100.0
+
+    def test_deleting_a_whole_part_counts_as_errors(self):
+        merged = merge_dialogue_entries(*[_entry(text=t, start=i, end=i + 1, confidence=0.9) for i, t in enumerate(["one two", "three four"])])
+        merged.corrected_text = "one two"
+        assert self._summary([merged]).word_error_rate == 100.0
