@@ -89,6 +89,27 @@ def aggregate_word_error_rate(pairs: list[tuple[str, str]]) -> float:
     return total_errors / total_ref_words
 
 
+def split_by_alignment(references: list[str], hypothesis: str) -> list[str]:
+    """Split hypothesis into one piece per reference, following its word alignment against them.
+
+    The references are aligned as one run of words. Words inserted before a reference
+    word go with that word's reference, and words after the last go with the last.
+    """
+    ref_words: list[str] = []
+    owners: list[int] = []
+    for i, reference in enumerate(references):
+        words = _tokenize(reference)
+        ref_words += words
+        owners += [i] * len(words)
+    hyp_raw = _WORD_RE.findall(hypothesis)
+    pieces: list[list[str]] = [[] for _ in references]
+    for _tag, i1, i2, j1, j2 in Levenshtein.opcodes(ref_words, [w.lower() for w in hyp_raw]):
+        for k, j in enumerate(range(j1, j2)):
+            i = min(i1 + k, i2 - 1) if i2 > i1 else i1
+            pieces[owners[i] if i < len(owners) else len(references) - 1].append(hyp_raw[j])
+    return [" ".join(piece) for piece in pieces]
+
+
 def baseline_word_error_rate(reference: str, hypothesis: str) -> float:
     """WER of hypothesis against a clerk-supplied baseline reference transcript.
 

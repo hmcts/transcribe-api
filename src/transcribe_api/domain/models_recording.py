@@ -8,6 +8,8 @@ from sqlalchemy import Column, DateTime, Index, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
+from transcribe_api.stt.wer import split_by_alignment
+
 
 class JobStatus(StrEnum):
     PENDING = "pending"
@@ -114,7 +116,26 @@ class CorrectionEntry(SQLModel):
     new_phrase: str | None = None
 
 
+def new_segment_id() -> str:
+    return f"seg_{uuid4().hex}"
+
+
+class EntryPart(SQLModel):
+    """One of the original segments a merged entry was combined from.
+
+    `text` is its ASR text, `current_text` its text when it was merged, and
+    `confidence` its own confidence. The job's confidence score and WER are computed
+    per part, so combining segments doesn't change them.
+    """
+
+    text: str
+    current_text: str
+    confidence: float | None = None
+
+
 class DialogueEntry(SQLModel):
+    # Stable across edits, rollbacks and renames; a merge gives the result a new one.
+    id: str | None = None
     speaker: str
     text: str
     start_time: float
@@ -161,6 +182,8 @@ class DialogueEntry(SQLModel):
     # whole entry's confidence by a rollback, which can restore unreviewed text.
     merged: bool = False
     unreviewed_confidence: float | None = None
+    # Set by merge_dialogue_entries; None for an entry that is one original segment.
+    parts: list[EntryPart] | None = None
 
     def has_corrections(self) -> bool:
         return self.corrected_text is not None or bool(self.word_corrections)
@@ -172,6 +195,20 @@ class DialogueEntry(SQLModel):
         if self.merged:
             return self.unreviewed_confidence
         return None if self.has_corrections() else self.confidence
+
+    def current_parts(self) -> list[EntryPart]:
+        """The original segments this entry is made of, each with its share of the current text.
+
+        Once the text has been edited since the merge, each part's share is found by
+        aligning the current text against the parts' ASR text.
+        """
+        current = self.effective_text()
+        if not self.parts:
+            return [EntryPart(text=self.text, current_text=current, confidence=self.confidence)]
+        if current == _join(*(p.current_text for p in self.parts)):
+            return self.parts
+        shares = split_by_alignment([p.text for p in self.parts], current)
+        return [p.model_copy(update={"current_text": share}) for p, share in zip(self.parts, shares, strict=True)]
 
     def effective_text(self) -> str:
         """Current text after any corrections — what a clerk would read today."""
@@ -275,6 +312,7 @@ def merge_dialogue_entries(first: DialogueEntry, second: DialogueEntry) -> Dialo
     unreviewed = [c for c in (first.review_confidence(), second.review_confidence()) if c is not None]
 
     merged = DialogueEntry(
+        id=new_segment_id(),
         speaker=first.speaker,
         text=_join(first.text, second.text),
         start_time=first.start_time,
@@ -288,6 +326,7 @@ def merge_dialogue_entries(first: DialogueEntry, second: DialogueEntry) -> Dialo
         accepted=first.accepted and second.accepted,
         merged=True,
         unreviewed_confidence=min(unreviewed) if unreviewed else None,
+        parts=[*first.current_parts(), *second.current_parts()],
     )
     current_text = _join(first_text, second_text)
     if merged.word_corrections and merged.effective_text() != current_text:

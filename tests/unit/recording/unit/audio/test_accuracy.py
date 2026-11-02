@@ -1,6 +1,6 @@
 """Unit tests for accuracy/needs-review computation."""
 
-from transcribe_api.domain.models_recording import DialogueEntry
+from transcribe_api.domain.models_recording import DialogueEntry, merge_dialogue_entries
 from transcribe_api.stt.accuracy import DEFAULT_CONFIDENCE_THRESHOLD, compute_accuracy
 
 
@@ -176,3 +176,45 @@ class TestComputeAccuracy:
         assert summary.word_error_rate == 0.0
         # Baseline WER: original text compared against an unrelated reference.
         assert summary.baseline_word_error_rate == 100.0
+
+
+class TestAccuracyAcrossMerges:
+    def _entries(self):
+        return [
+            _entry(text="the hering will reconvene", start=0, end=1, confidence=0.7, corrected="the hearing will reconvene"),
+            _entry(text="at two o'clock today please", start=1, end=2, confidence=0.95),
+            _entry(text="all rise", start=2, end=3, confidence=0.5),
+        ]
+
+    def _summary(self, entries):
+        return compute_accuracy(entries, confidence_threshold=0.85)
+
+    def test_combining_leaves_score_wer_and_corrected_share_unchanged(self):
+        entries = self._entries()
+        before = self._summary(entries)
+        for i in (0, 1):
+            merged = [merge_dialogue_entries(entries[i], entries[i + 1]), *entries[:i], *entries[i + 2 :]]
+            after = self._summary(merged)
+            assert after.confidence_score == before.confidence_score
+            assert after.word_error_rate == before.word_error_rate
+            assert after.corrected_percent == before.corrected_percent
+            assert after.words_transcribed == before.words_transcribed
+
+    def test_pure_combine_of_uncorrected_segments_has_no_wer(self):
+        entries = self._entries()[1:]
+        assert self._summary([merge_dialogue_entries(*entries)]).word_error_rate is None
+
+    def test_editing_the_untouched_part_after_a_merge_scores_like_editing_it_separately(self):
+        a, b, c = self._entries()
+        separate = [a, b.model_copy(update={"corrected_text": "at two o'clock today"}), c]
+        merged = merge_dialogue_entries(a, b)
+        merged.corrected_text = "the hearing will reconvene at two o'clock today"
+        assert self._summary([merged, c]).word_error_rate == self._summary(separate).word_error_rate
+        assert self._summary([merged, c]).corrected_percent == self._summary(separate).corrected_percent
+
+    def test_rolling_back_a_merged_segment_clears_its_wer(self):
+        merged = merge_dialogue_entries(*self._entries()[:2])
+        merged.corrected_text = None
+        summary = self._summary([merged])
+        assert summary.word_error_rate is None
+        assert summary.has_corrections is False
