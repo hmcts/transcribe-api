@@ -136,8 +136,8 @@ class TestSplitByAlignment:
     def test_substitution_stays_with_its_reference(self):
         assert split_by_alignment(["The quick", "brown fox."], "The quick brown dog.") == ["The quick", "brown dog."]
 
-    def test_insertion_goes_with_the_following_reference_and_trailing_words_with_the_last(self):
-        assert split_by_alignment(["a b", "c d"], "a b x c d y") == ["a b", "x c d y"]
+    def test_inserted_words_go_with_the_word_before_them(self):
+        assert split_by_alignment(["a b", "c d"], "x a b y c d z") == ["x a b y", "c d z"]
 
     def test_deleted_reference_gets_an_empty_share(self):
         assert split_by_alignment(["a b", "c d"], "a b") == ["a b", ""]

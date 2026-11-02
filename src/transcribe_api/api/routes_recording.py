@@ -453,8 +453,15 @@ def _to_dialogue_entry(raw) -> DialogueEntry:
     )
 
 
+def _derived_segment_id(job_id: UUID, raw) -> str:
+    # From what never changes for a segment (a merge makes a new one), so a segment
+    # rewritten without its id, e.g. by an older pod mid-deploy, can't take another's.
+    key = "|".join(str(_entry_field(raw, f, "")) for f in ("start_time", "end_time", "text"))
+    return f"seg_{uuid5(job_id, key).hex}"
+
+
 def _entries_with_ids(job: SpeechBatchJob) -> list:
-    """job.dialogue_entries, giving any entry saved without an id one derived from its position.
+    """job.dialogue_entries, giving any entry saved without an id one derived from its content.
 
     The derived id stays the same on every read until the next write saves it with
     the entry, so jobs from before segment ids need no migration.
@@ -462,8 +469,8 @@ def _entries_with_ids(job: SpeechBatchJob) -> list:
     return [
         raw
         if _entry_field(raw, "id")
-        else {**(raw if isinstance(raw, dict) else raw.model_dump()), "id": f"seg_{uuid5(job.id, str(i)).hex}"}
-        for i, raw in enumerate(job.dialogue_entries)
+        else {**(raw if isinstance(raw, dict) else raw.model_dump()), "id": _derived_segment_id(job.id, raw)}
+        for raw in job.dialogue_entries
     ]
 
 
@@ -1506,6 +1513,8 @@ async def rollback_segment(
     entry.word_corrections = None
     entry.correction_history = None
     entry.accepted = False
+    if entry.parts:
+        entry.parts = [p.model_copy(update={"current_text": p.text}) for p in entry.parts]
     if entry.merged:
         entry.unreviewed_confidence = entry.confidence
 

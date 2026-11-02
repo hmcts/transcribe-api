@@ -3286,3 +3286,19 @@ class TestSegmentIds:
         assert "after this one has changed" in wrong.json()["detail"]
         assert right.status_code == 200
         assert len(right.json()["dialogue_entries"]) == 2
+
+    def test_derived_ids_follow_the_segment_not_its_position(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        ids = self._ids(client, job)
+        job.dialogue_entries = [job.dialogue_entries[0], job.dialogue_entries[2]]
+        assert self._ids(client, job) == [ids[0], ids[2]]
+
+    def test_a_full_rollback_of_a_merged_segment_resets_its_parts(self, client, as_current_user, mocker):
+        job = self._job()
+        job.dialogue_entries[0]["corrected_text"] = "Good day"
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        with self._session(client):
+            merged_id = client.post(f"/api/v1/jobs/{job.id}/segments/0/merge-next").json()["dialogue_entries"][0]["id"]
+            client.post(f"/api/v1/jobs/{job.id}/segments/{merged_id}/rollback")
+        assert [p["current_text"] for p in job.dialogue_entries[0]["parts"]] == ["Good", "morning."]

@@ -231,3 +231,11 @@ class TestAccuracyAcrossMerges:
         merged = merge_dialogue_entries(*[_entry(text=t, start=i, end=i + 1, confidence=0.9) for i, t in enumerate(["one two", "three four"])])
         merged.corrected_text = "one two"
         assert self._summary([merged]).word_error_rate == 100.0
+
+    def test_a_word_inserted_after_a_part_stays_with_that_part(self):
+        sit = _entry(text="please sit", start=0, end=1, confidence=0.9)
+        thanks = _entry(text="thank you very much", start=1, end=2, confidence=0.9)
+        merged = merge_dialogue_entries(sit, thanks)
+        merged.corrected_text = "please sit down thank you very much"
+        separate = [sit.model_copy(update={"corrected_text": "please sit down"}), thanks]
+        assert self._summary([merged]).word_error_rate == self._summary(separate).word_error_rate

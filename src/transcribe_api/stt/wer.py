@@ -92,8 +92,9 @@ def aggregate_word_error_rate(pairs: list[tuple[str, str]]) -> float:
 def split_by_alignment(references: list[str], hypothesis: str) -> list[str]:
     """Split hypothesis into one piece per reference, following its word alignment against them.
 
-    The references are aligned as one run of words. Words inserted before a reference
-    word go with that word's reference, and words after the last go with the last.
+    The references are aligned as one run of words. Inserted words go with the
+    reference of the word before them (the first reference, at the very start), as a
+    correction usually extends the phrase it replaces.
     """
     ref_words: list[str] = []
     owners: list[int] = []
@@ -105,8 +106,8 @@ def split_by_alignment(references: list[str], hypothesis: str) -> list[str]:
     pieces: list[list[str]] = [[] for _ in references]
     for _tag, i1, i2, j1, j2 in Levenshtein.opcodes(ref_words, [w.lower() for w in hyp_raw]):
         for k, j in enumerate(range(j1, j2)):
-            i = min(i1 + k, i2 - 1) if i2 > i1 else i1
-            pieces[owners[i] if i < len(owners) else len(references) - 1].append(hyp_raw[j])
+            i = min(i1 + k, i2 - 1) if i2 > i1 else i1 - 1
+            pieces[owners[i] if 0 <= i < len(owners) else (0 if i < 0 else len(references) - 1)].append(hyp_raw[j])
     return [" ".join(piece) for piece in pieces]
 
 
