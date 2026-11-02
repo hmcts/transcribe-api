@@ -2,7 +2,13 @@
 
 import pytest
 
-from transcribe_api.domain.models_recording import DialogueEntry, EntryPart, merge_dialogue_entries
+from transcribe_api.domain.models_recording import (
+    DialogueEntry,
+    EntryPart,
+    WordCorrection,
+    WordInfo,
+    merge_dialogue_entries,
+)
 from transcribe_api.stt.accuracy import DEFAULT_CONFIDENCE_THRESHOLD, compute_accuracy
 
 
@@ -342,3 +348,30 @@ class TestAccuracyAcrossMerges:
         merged = DialogueEntry(speaker="0", text="a b c", start_time=0, end_time=1, merged=True, parts=[part, EntryPart(text="c", current_text="c")])
         merged.corrected_text = "a b c"
         assert [p.corrected for p in merged.current_parts()] == [None, None]
+
+    def test_a_word_range_edit_after_a_merge_leaves_an_untouched_part_out_of_the_score(self):
+        def with_words(text, words, start):
+            entry = _entry(text=text, start=start, end=start + 1, confidence=0.9)
+            entry.words = [
+                WordInfo(text=w, start_time=start, end_time=start + 1, confidence=0.9) for w in words.split()
+            ]
+            return entry
+
+        hello = with_words("Hello world", "hello world", 0)
+        iz = with_words("this iz", "this iz", 1)
+        merged = merge_dialogue_entries(hello, iz)
+        merged.word_corrections = [WordCorrection(start_word_index=3, end_word_index=3, text="is")]
+        separate = [hello, iz.model_copy(update={"corrected_text": "this is"})]
+        assert [p.corrected for p in merged.current_parts()] == [False, True]
+        assert self._summary([merged]).corrected_percent == self._summary(separate).corrected_percent == 50.0
+        assert self._summary([merged]).word_error_rate == self._summary(separate).word_error_rate
+
+    def test_editing_one_part_keeps_another_parts_correction_that_matches_its_asr_text(self):
+        same = _entry(text="hello world", start=0, end=1, confidence=0.9, corrected="hello world")
+        iz = _entry(text="this iz", start=1, end=2, confidence=0.9, corrected="this is")
+        merged = merge_dialogue_entries(same, iz)
+        merged.corrected_text = "hello world this was"
+        separate = [same, iz.model_copy(update={"corrected_text": "this was"})]
+        assert [p.corrected for p in merged.current_parts()] == [True, True]
+        assert self._summary([merged]).corrected_percent == self._summary(separate).corrected_percent == 100.0
+        assert self._summary([merged]).word_error_rate == self._summary(separate).word_error_rate
