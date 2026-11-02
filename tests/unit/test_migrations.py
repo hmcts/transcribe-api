@@ -298,7 +298,9 @@ def test_0004_downgrade_reverses_it(monkeypatch):
 
 LIVE_EDITED_TABLES = ("jurisdiction", "document_content")
 _LIVE_WRITE = re.compile(
-    rf'^\s*(?:INSERT\s+INTO|UPDATE(?:\s+ONLY)?|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?)\s+"?({"|".join(LIVE_EDITED_TABLES)})"?(?![\w.])',
+    r"^\s*(?:INSERT\s+INTO|UPDATE(?:\s+ONLY)?|DELETE\s+FROM(?:\s+ONLY)?|TRUNCATE(?:\s+TABLE)?(?:\s+ONLY)?)\s+"
+    r'(?:"?\w+"?\s*\.\s*)?'
+    rf'"?({"|".join(LIVE_EDITED_TABLES)})"?(?![\w.])',
     re.IGNORECASE,
 )
 
@@ -355,6 +357,13 @@ def test_the_live_write_guard_sees_what_0004_does(monkeypatch):
         "UPDATE document_content SET jurisdiction_id = 'a', content = '{}'",
         "DELETE FROM document_content",
         "TRUNCATE document_content",
+        "UPDATE public.document_content SET content = '{}'",
+        'UPDATE "public"."jurisdiction" SET settings = \'{}\'',
+        "UPDATE ONLY public.jurisdiction SET name = 'x'",
+        "DELETE FROM ONLY document_content",
+        'DELETE FROM ONLY "public".jurisdiction',
+        "INSERT INTO public.jurisdiction (id) VALUES (1)",
+        "TRUNCATE TABLE ONLY public.document_content",
     ],
 )
 def test_the_live_write_guard_catches_every_kind_of_write(statement):
@@ -374,6 +383,8 @@ def test_the_live_write_guard_sees_a_first_statement_under_the_revision_comment(
         "ALTER TABLE document_content ADD COLUMN jurisdiction_id UUID",
         "CREATE INDEX ix_document_content_jurisdiction_id ON document_content (jurisdiction_id)",
         "SELECT * FROM jurisdiction",
+        "UPDATE public.jurisdiction_membership SET role = 'x'",
+        'DELETE FROM "public"."transcription"',
     ],
 )
 def test_the_live_write_guard_ignores_other_tables_and_schema_changes(statement):
