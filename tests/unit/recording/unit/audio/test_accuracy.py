@@ -402,3 +402,18 @@ class TestAccuracyAcrossMerges:
         assert [p.corrected for p in again.parts] == [False, False, True]
         assert self._summary([again]).corrected_percent == self._summary(never_corrected).corrected_percent
         assert self._summary([again]).word_error_rate == self._summary(never_corrected).word_error_rate
+
+    def test_a_part_emptied_by_a_word_range_edit_stays_corrected_after_another_merge(self):
+        one, two, three = (self._with_words(t, t, i) for i, t in enumerate(["one", "two", "three"]))
+        merged = merge_dialogue_entries(one, two)
+        merged.word_corrections = [WordCorrection(start_word_index=0, end_word_index=1, text="one")]
+        again = merge_dialogue_entries(merged, three)
+        separate = [
+            one.model_copy(update={"corrected_text": "one"}),
+            two.model_copy(update={"corrected_text": ""}),
+            three,
+        ]
+        assert [p.corrected for p in again.current_parts()] == [True, True, False]
+        assert self._summary([again]).corrected_percent == pytest.approx(200 / 3)
+        assert self._summary([again]).corrected_percent == self._summary(separate).corrected_percent
+        assert self._summary([again]).word_error_rate == self._summary(separate).word_error_rate

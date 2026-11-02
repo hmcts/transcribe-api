@@ -268,7 +268,9 @@ def _touched_by_word_corrections(
     for wc in word_corrections:
         span = marked[wc.start_word_index : wc.end_word_index + 1]
         marked[wc.start_word_index : wc.end_word_index + 1] = [_EDIT_MARK] * len(span)
-    shares = split_by_alignment([p.current_text for p in parts], " ".join(marked))
+    # Against each part's ASR text, as `words` are: a part emptied by an earlier edit
+    # still owns its words.
+    shares = split_by_alignment([p.text for p in parts], " ".join(marked))
     return [_EDIT_MARK in share.split() for share in shares]
 
 
