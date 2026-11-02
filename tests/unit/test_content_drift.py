@@ -30,6 +30,7 @@ class _FakeSession:
     def __init__(self, content, writes: list[str]):
         self.content = content
         self.writes = writes
+        self.executed: list[str] = []
 
     def __enter__(self):
         return self
@@ -39,6 +40,9 @@ class _FakeSession:
 
     def exec(self, statement):
         return _Result(None if self.content is None else DocumentContent(id=1, content=self.content))
+
+    def execute(self, statement):
+        self.executed.append(str(statement))
 
     def add(self, *args):
         self.writes.append("add")
@@ -64,9 +68,11 @@ def events(monkeypatch) -> list[tuple]:
     return recorded
 
 
-def _live(monkeypatch, writes, content) -> None:
-    monkeypatch.setattr("sqlmodel.Session", lambda engine: _FakeSession(content, writes))
+def _live(monkeypatch, writes, content) -> _FakeSession:
+    session = _FakeSession(content, writes)
+    monkeypatch.setattr("sqlmodel.Session", lambda engine: session)
     monkeypatch.setattr("transcribe_api.runtime.db_connection.get_engine", lambda: object())
+    return session
 
 
 def test_identical_content_has_no_drift():
@@ -185,3 +191,12 @@ def test_startup_runs_the_check_after_the_migrations(monkeypatch):
         pass
 
     assert calls == ["migrate", "drift"]
+
+
+def test_the_read_is_bounded_by_database_side_timeouts(monkeypatch, writes, events):
+    session = _live(monkeypatch, writes, _load_from_file())
+
+    content_drift.check_content_drift()
+
+    assert session.executed == ["SET LOCAL lock_timeout = '5s'", "SET LOCAL statement_timeout = '5s'"]
+    assert writes == []

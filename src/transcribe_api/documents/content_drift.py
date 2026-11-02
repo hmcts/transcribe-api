@@ -20,6 +20,9 @@ from transcribe_api.documents.content_loader import _load_from_file
 
 logger = logging.getLogger(__name__)
 
+# Startup waits on this check, so a lock or a slow query must not hold up readiness.
+_DB_TIMEOUT = "5s"
+
 # Collection name -> path to its list of items in the content payload.
 COLLECTIONS: dict[str, tuple[str, ...]] = {
     "hearing_types": ("hearing_types",),
@@ -68,12 +71,16 @@ def check_content_drift() -> ContentDrift | None:
     drift, or None when there is none or the check could not run.
     """
     try:
+        from sqlalchemy import text
         from sqlmodel import Session, select
 
         from transcribe_api.domain.models_dictation import DocumentContent
         from transcribe_api.runtime.db_connection import get_engine
 
         with Session(get_engine()) as session:
+            # Bound the read on the database side: a thread blocked on an exclusive lock cannot be cancelled.
+            session.execute(text(f"SET LOCAL lock_timeout = '{_DB_TIMEOUT}'"))
+            session.execute(text(f"SET LOCAL statement_timeout = '{_DB_TIMEOUT}'"))
             row = session.exec(select(DocumentContent).where(DocumentContent.id == 1)).first()
             live = row.content if row is not None else None
         if live is None:
