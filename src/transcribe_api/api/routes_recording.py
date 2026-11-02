@@ -454,10 +454,10 @@ def _to_dialogue_entry(raw) -> DialogueEntry:
     )
 
 
-def _content_key(raw) -> str:
+def _content_key(raw) -> tuple:
     # What never changes for a segment (a merge makes a new one), so a segment rewritten
     # without its id, e.g. by an older pod mid-deploy, can't take another's.
-    return "|".join(str(_entry_field(raw, f, "")) for f in ("start_time", "end_time", "text"))
+    return tuple(_entry_field(raw, f, "") for f in ("start_time", "end_time", "text"))
 
 
 def _entries_with_ids(job: SpeechBatchJob) -> list:
@@ -467,13 +467,13 @@ def _entries_with_ids(job: SpeechBatchJob) -> list:
     the entry, so jobs from before segment ids need no migration.
     """
     entries = []
-    seen: Counter[str] = Counter()
+    seen: Counter[tuple] = Counter()
     for raw in job.dialogue_entries:
         key = _content_key(raw)
         repeat = seen[key]
         seen[key] += 1
         if not _entry_field(raw, "id"):
-            derived = uuid5(job.id, f"{key}|{repeat}" if repeat else key)
+            derived = uuid5(job.id, json.dumps([*key, repeat]))
             raw = {**(raw if isinstance(raw, dict) else raw.model_dump()), "id": f"seg_{derived.hex}"}
         entries.append(raw)
     return entries

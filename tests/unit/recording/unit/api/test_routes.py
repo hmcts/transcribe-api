@@ -3313,3 +3313,10 @@ class TestSegmentIds:
         with self._session(client):
             response = client.post(f"/api/v1/jobs/{job.id}/segments/{ids[1]}/accept")
         assert [e["accepted"] for e in response.json()["dialogue_entries"]] == [False, True]
+
+    def test_text_that_looks_like_an_occurrence_count_does_not_collide(self, client, as_current_user, mocker):
+        job = self._job()
+        base = job.dialogue_entries[1]
+        job.dialogue_entries = [base, dict(base), {**base, "text": f"{base['text']}|1"}]
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        assert len(set(self._ids(client, job))) == 3
