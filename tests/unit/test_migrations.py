@@ -24,6 +24,8 @@ EXPECTED_TABLES = {
     "caller",
     "correction_dataset_entry",
     "document_content",
+    "jurisdiction",
+    "jurisdiction_admin",
     "live_transcript_draft",
     "minuteversion",
     "tag",
@@ -50,6 +52,8 @@ AWARE_TIMESTAMP_COLUMNS = {
 # Timestamp columns added after 0002, created timestamptz from the start.
 ADDED_AWARE_TIMESTAMP_COLUMNS = {
     "transcription_job": ["processing_started_datetime", "stuck_reported_at"],  # 0003
+    "jurisdiction": ["created_datetime"],  # 0004
+    "jurisdiction_admin": ["created_datetime"],  # 0004
 }
 
 # Dictation migration a8f2c9d5e1b3 (fix for 15-20s p95 latency); 0001 lost them.
@@ -84,7 +88,7 @@ def _alter_type_sql(table: str, column: str, type_sql: str) -> re.Pattern[str]:
 def test_there_is_one_history_with_one_head():
     script = ScriptDirectory.from_config(migrations.alembic_config())
     assert script.get_bases() == ["0001"]
-    assert script.get_heads() == ["0003"]
+    assert script.get_heads() == ["0004"]
 
 
 def test_baseline_creates_every_table(monkeypatch):
@@ -407,3 +411,161 @@ def test_0003_keeps_existing_rows_and_allows_app_rows_without_an_email():
     with engine.connect() as connection:
         emails = sorted(connection.execute(text("SELECT email FROM audit_log")).scalars().all())
     assert emails == ["", "judge@example.test"]
+
+
+# 0004: DIAAT-342 jurisdictions --------------------------------------------------------
+
+
+def test_0004_adds_jurisdictions_without_touching_existing_rows(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0003:0004")
+    assert "CREATE TABLE jurisdiction " in sql
+    assert "CREATE TABLE jurisdiction_admin " in sql
+    assert "ALTER TABLE document_content ADD COLUMN jurisdiction_id VARCHAR;" in sql
+    # The existing row becomes IAC's by an UPDATE of the new column only: content and updated_at are not written.
+    assert "UPDATE document_content SET jurisdiction_id = 'iac' WHERE id = 1" in sql
+    assert "SET content" not in sql
+    assert "updated_at" not in sql
+    assert "DELETE FROM" not in sql
+    # Existing IAC admins keep access.
+    assert "role = 'LegalTextManager'" in sql
+
+
+def test_0004_downgrade_leaves_the_iac_row_alone(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0004:0003", downgrade=True)
+    assert "DROP TABLE jurisdiction_admin" in sql
+    assert "DROP COLUMN jurisdiction_id" in sql
+    assert "DROP TABLE jurisdiction;" in sql
+    assert "DELETE FROM document_content WHERE jurisdiction_id <> 'iac'" in sql
+    assert "SET content" not in sql
+
+
+def test_the_models_declare_the_jurisdiction_tables():
+    tables = migrations.target_metadata().tables
+    assert {c.name for c in tables["jurisdiction"].columns} == {"id", "name", "created_datetime"}
+    assert {c.name for c in tables["jurisdiction_admin"].columns} == {"user_id", "jurisdiction_id", "created_datetime"}
+    content = tables["document_content"].columns["jurisdiction_id"]
+    assert not content.nullable
+    assert content.unique
+
+
+# A shape and text no shipped default has, so a reseed could not pass for a preserved row.
+EDITED_IAC_WORDING = {
+    "hearing_types": [
+        {"id": "face_to_face", "title": "Face to face", "hearing_title": "Edited", "hearing_description": "Edited."}
+    ],
+    "legal_frameworks": [
+        {"id": "edited_framework", "title": "Edited", "rank": 7, "content": "Edited **wording**.", "issues": ["Q?"]}
+    ],
+    "anonymity": {"statuses": []},
+    "extra_key_kept": {"nested": [1, 2, {"three": None}]},
+}
+
+
+def _fresh_engine():
+    from sqlalchemy import create_engine, text
+
+    engine = create_engine(os.environ["TEST_POSTGRES_URL"])
+    with engine.begin() as connection:
+        connection.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public"))
+    return engine
+
+
+def _migrator(engine):
+    def migrate(step, revision):
+        with engine.begin() as connection:
+            config = migrations.alembic_config()
+            config.attributes["connection"] = connection
+            step(config, revision)
+
+    return migrate
+
+
+@pytest.mark.skipif(not os.getenv("TEST_POSTGRES_URL"), reason="needs TEST_POSTGRES_URL (a throwaway Postgres)")
+def test_0004_preserves_the_existing_iac_content_and_maps_the_existing_admins():
+    """The IAC row survives byte for byte, is not reseeded, and IAC admins stay admins."""
+    import json
+    from datetime import UTC, datetime
+
+    from alembic import command
+    from sqlalchemy import text
+
+    engine = _fresh_engine()
+    migrate = _migrator(engine)
+    migrate(command.upgrade, "0003")
+
+    edited_at = datetime(2026, 3, 4, 5, 6, 7, 123456, tzinfo=UTC)
+    with engine.begin() as connection:
+        connection.execute(
+            text("INSERT INTO document_content (id, content, updated_at) VALUES (1, CAST(:c AS jsonb), :t)"),
+            {"c": json.dumps(EDITED_IAC_WORDING), "t": edited_at},
+        )
+        for role in ("LegalTextManager", "LegalTextManager", "Judge", "Normal", "SystemAdministrator"):
+            connection.execute(
+                text(
+                    'INSERT INTO "user" (id, created_datetime, email, azure_user_id, has_completed_onboarding, role)'
+                    " VALUES (gen_random_uuid(), now(), :email, :oid, false, :role)"
+                ),
+                {"email": f"{role}-{id(role)}-{os.urandom(2).hex()}@x.test", "oid": os.urandom(8).hex(), "role": role},
+            )
+    with engine.connect() as connection:
+        before = connection.execute(text("SELECT id, content::text, updated_at FROM document_content")).all()
+
+    migrate(command.upgrade, "head")
+
+    with engine.connect() as connection:
+        after = connection.execute(
+            text("SELECT id, content::text, updated_at, jurisdiction_id FROM document_content")
+        ).all()
+        jurisdictions = connection.execute(text("SELECT id, name FROM jurisdiction")).all()
+        mapped = connection.execute(
+            text(
+                'SELECT u.role, a.jurisdiction_id FROM jurisdiction_admin a JOIN "user" u ON u.id = a.user_id'
+            )
+        ).all()
+    # Same row, same content text, same updated_at (the cache key); only the new column is filled in.
+    assert [tuple(r)[:3] for r in after] == [tuple(r) for r in before]
+    assert after[0][3] == "iac"
+    assert json.loads(after[0][1]) == EDITED_IAC_WORDING
+    assert [tuple(j) for j in jurisdictions] == [("iac", "First-tier Tribunal Immigration and Asylum Chamber")]
+    assert [tuple(m) for m in mapped] == [("LegalTextManager", "iac")] * 2
+
+    # A second jurisdiction's wording gets its own row, id after the IAC row's.
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO jurisdiction (id, name, created_datetime) VALUES ('x', 'X', now())"))
+        new_id = connection.execute(
+            text(
+                "INSERT INTO document_content (jurisdiction_id, content, updated_at)"
+                " VALUES ('x', '{}', now()) RETURNING id"
+            )
+        ).scalar_one()
+    assert new_id == 2
+
+    # Downgrade drops the other jurisdiction's wording and leaves the IAC row as it was.
+    migrate(command.downgrade, "0003")
+    with engine.connect() as connection:
+        restored = connection.execute(text("SELECT id, content::text, updated_at FROM document_content")).all()
+        tables = connection.execute(
+            text("SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'jurisdiction%'")
+        ).all()
+    assert [tuple(r) for r in restored] == [tuple(r) for r in before]
+    assert tables == []
+    engine.dispose()
+
+
+@pytest.mark.skipif(not os.getenv("TEST_POSTGRES_URL"), reason="needs TEST_POSTGRES_URL (a throwaway Postgres)")
+def test_0004_on_a_fresh_database_leaves_the_iac_row_to_be_seeded_as_id_1():
+    from alembic import command
+    from sqlalchemy import text
+
+    engine = _fresh_engine()
+    _migrator(engine)(command.upgrade, "head")
+    with engine.begin() as connection:
+        assert connection.execute(text("SELECT count(*) FROM document_content")).scalar_one() == 0
+        seeded = connection.execute(
+            text(
+                "INSERT INTO document_content (jurisdiction_id, content, updated_at)"
+                " VALUES ('iac', '{}', now()) RETURNING id"
+            )
+        ).scalar_one()
+    assert seeded == 1
+    engine.dispose()

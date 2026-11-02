@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
-from transcribe_api.domain.models_dictation import Transcription, TranscriptionJob, User
+from transcribe_api.domain.models_dictation import Jurisdiction, Transcription, TranscriptionJob, User
 
 
 def _make_user(roles: list[str] | None = None, email: str = "admin@justice.gov.uk") -> User:
@@ -110,6 +110,15 @@ def mock_content(mocker):
     data = copy.deepcopy(SAMPLE_CONTENT)
     mocker.patch("transcribe_api.api.routes_dictation_privileged._read_content", return_value=data)
     mocker.patch("transcribe_api.api.routes_dictation_privileged._write_content")
+    # DIAAT-342: the unscoped routes are the IAC jurisdiction's, and a LegalTextManager
+    # needs to be mapped to it (migration 0004 maps the existing ones).
+    mocker.patch(
+        "transcribe_api.api.routes_dictation_privileged.get_jurisdiction",
+        return_value=Jurisdiction(id="iac", name="First-tier Tribunal Immigration and Asylum Chamber"),
+    )
+    mocker.patch(
+        "transcribe_api.api.routes_dictation_privileged.get_admin_jurisdiction_ids", return_value={"iac"}
+    )
     return data
 
 

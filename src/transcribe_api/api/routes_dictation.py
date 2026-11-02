@@ -10,13 +10,13 @@ from uuid import UUID
 
 import httpx
 import pytz
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from hmcts_otel import StageHandle, background_span, journey, record_event, stage
 from hmcts_otel import conventions as c
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.responses import JSONResponse, StreamingResponse
 
-from transcribe_api.api.document_content_models import DocumentContentResponse
+from transcribe_api.api.document_content_models import DocumentContentResponse, JurisdictionRef, JurisdictionSummary
 from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager, _redact_blob_path, _sanitize_for_log
 from transcribe_api.stt.utils import (
     generate_blob_download_url,
@@ -50,6 +50,7 @@ from transcribe_api.domain.interface_dictation import (
     update_user,
     upsert_live_draft,
 )
+from transcribe_api.domain.jurisdictions import list_jurisdictions, resolve_jurisdiction
 from transcribe_api.domain.models_dictation import (
     DialogueEntry,
     MinuteVersion,
@@ -58,7 +59,7 @@ from transcribe_api.domain.models_dictation import (
     TranscriptionJob,
     User,
 )
-from transcribe_api.documents.content_loader import get_document_content
+from transcribe_api.documents.content_loader import get_document_content, has_legal_wording
 from transcribe_api.documents.models import DEFAULT_JURISDICTION
 from transcribe_api.documents.template_renderer import render_hearing_document
 from transcribe_api.documents.llm.llm_client import (
@@ -137,15 +138,39 @@ async def health_check_legacy():
     return JSONResponse(status_code=200, content={"status": "ok", "version": APP_VERSION})
 
 
+@router.get("/jurisdictions", response_model=list[JurisdictionSummary])
+async def list_jurisdictions_route(
+    response: Response,
+    current_user: User = Depends(get_allowlisted_user()),  # noqa: B008, ARG001
+) -> list[JurisdictionSummary]:
+    """Return the jurisdictions a judge's form can name, and whether each has legal wording."""
+    response.headers["Cache-Control"] = "no-store"
+    return [
+        JurisdictionSummary(id=j.id, name=j.name, has_legal_wording=has_legal_wording(j.id))
+        for j in list_jurisdictions()
+    ]
+
+
 @router.get("/document-content", response_model=DocumentContentResponse)
 async def get_document_content_route(
     response: Response,
+    jurisdiction: str = Query(default=DEFAULT_JURISDICTION, max_length=200),
     current_user: User = Depends(get_allowlisted_user()),  # noqa: B008, ARG001
 ) -> DocumentContentResponse:
-    """Return editable document content for allowlisted recorder users."""
+    """Return editable document content for allowlisted recorder users.
+
+    jurisdiction is the id or display name the form submits (default: the IAC
+    jurisdiction, so existing clients are unchanged). A jurisdiction with no legal
+    wording returns no legal frameworks and has_legal_wording=false.
+    """
     response.headers["Cache-Control"] = "no-store"
-    data = get_document_content()
+    resolved = resolve_jurisdiction(jurisdiction)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="Jurisdiction not found")
+    data = get_document_content(resolved.id)
     return DocumentContentResponse(
+        jurisdiction=JurisdictionRef(id=resolved.id, name=resolved.name),
+        has_legal_wording=bool(data.get("legal_frameworks")),
         hearing_types=data.get("hearing_types", []),
         legal_frameworks=data.get("legal_frameworks", []),
         anonymity=data.get("anonymity", {}),
@@ -1123,6 +1148,10 @@ async def save_live_transcription_submission(
     current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")])),  # noqa: B008
 ) -> LiveTranscriptionSubmissionResponse:
     """Persist live transcription form and transcript data as JSON in the audio uploads bucket."""
+    # Refuse a jurisdiction we hold no wording for before storing or rendering anything:
+    # another jurisdiction's wording must never fill its place.
+    if resolve_jurisdiction(request.form_data.jurisdiction) is None:
+        raise HTTPException(status_code=422, detail="Unknown jurisdiction")
     # DIAAT-276: the submission is a journey; the transcription it creates is related
     # on the transcript.available event.
     submission_id = uuid.uuid4()

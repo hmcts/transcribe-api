@@ -112,17 +112,46 @@ class Transcription(BaseTable, table=True):
     )
 
 
-class DocumentContent(SQLModel, table=True):
-    """Singleton row storing the full document_content JSON.
+class Jurisdiction(SQLModel, table=True):
+    """A jurisdiction whose document wording is edited independently (DIAAT-342).
 
-    Always id=1. All instances read and write the same row via the
-    shared PostgreSQL database, replacing the previous per-container
-    JSON file approach.
+    id is a short slug used in URLs. name is the display name the judge's form
+    submits as its ``jurisdiction`` value. Migration 0004 creates "iac".
+    """
+
+    __tablename__ = "jurisdiction"
+
+    id: str = Field(primary_key=True, max_length=64)
+    name: str = Field(unique=True)
+    created_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
+
+
+class JurisdictionAdmin(SQLModel, table=True):
+    """Ties a user to a jurisdiction whose wording they may administer.
+
+    Managed by a SystemAdministrator. Rows go when either side is deleted.
+    """
+
+    __tablename__ = "jurisdiction_admin"
+
+    user_id: UUID = Field(foreign_key="user.id", primary_key=True, ondelete="CASCADE")
+    jurisdiction_id: str = Field(foreign_key="jurisdiction.id", primary_key=True, ondelete="CASCADE")
+    created_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
+
+
+class DocumentContent(SQLModel, table=True):
+    """One row per jurisdiction storing its full document_content JSON.
+
+    Before DIAAT-342 this was a singleton (id=1); that row is now the "iac"
+    jurisdiction's. All instances read and write the same rows via the shared
+    PostgreSQL database, replacing the previous per-container JSON file approach.
+    updated_at is the cache key, per jurisdiction.
     """
 
     __tablename__ = "document_content"
 
-    id: int = Field(default=1, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
+    jurisdiction_id: str = Field(foreign_key="jurisdiction.id", unique=True)
     content: dict = Field(sa_column=Column(JSONB, nullable=False))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
 

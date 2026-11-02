@@ -27,13 +27,19 @@ from transcribe_api.documents.content_loader import (
     get_hearing_title,
     get_legal_framework_content,
     get_legal_issues_display,
+    has_legal_wording,
 )
 from transcribe_api.documents.hearing_document_router import (
     APPELLANT_RULE_28_TEXT,
     RESPONDENT_RULE_28_TEXT,
     build_hearing_document_from_document_data,
 )
-from transcribe_api.documents.models import DocumentData, HearingFormData, TranscriptMessage
+from transcribe_api.documents.models import (
+    DEFAULT_JURISDICTION_ID,
+    DocumentData,
+    HearingFormData,
+    TranscriptMessage,
+)
 from transcribe_api.documents.styles import (
     INDENT_INCREMENT_CM,
     QUOTATION_BASE_INDENT_CM,
@@ -429,6 +435,7 @@ def render_document(  # noqa: C901, PLR0912, PLR0915
     default_for_missing: str | None = "N/A",
     style_missing_as_placeholder: bool = False,
     delete_if_empty: set[str] | None = None,
+    jurisdiction_id: str = DEFAULT_JURISDICTION_ID,
 ) -> Path:
     """Render a document from DocumentData.
 
@@ -442,6 +449,8 @@ def render_document(  # noqa: C901, PLR0912, PLR0915
         default_for_missing: Value to use for controls without data (None to leave empty)
         style_missing_as_placeholder: If True, style missing values as bold red
         delete_if_empty: Controls to delete if no data (defaults to DELETE_IF_EMPTY_CONTROLS)
+        jurisdiction_id: Whose wording fills the document. Without legal wording the
+            Issues and Legal Framework controls are deleted.
 
     Returns:
         Path to the rendered document
@@ -469,7 +478,7 @@ def render_document(  # noqa: C901, PLR0912, PLR0915
 
         # Replace hearing type ID with actual description
         if form_data.hearing_type:
-            hearing_description = get_hearing_description(form_data.hearing_type)
+            hearing_description = get_hearing_description(form_data.hearing_type, jurisdiction_id)
 
             # Append Rule 28 text for appellant non-attendance
             if form_data.requires_appellant_rule_28_text():
@@ -482,12 +491,17 @@ def render_document(  # noqa: C901, PLR0912, PLR0915
                 logger.info("Added Rule 28 text for respondent non-representation")
 
             template_data["HearingDescription"] = markdown_to_plain_text(hearing_description)
-            template_data["HearingTitle"] = get_hearing_title(form_data.hearing_type)
+            template_data["HearingTitle"] = get_hearing_title(form_data.hearing_type, jurisdiction_id)
 
         # Replace legal issues IDs with display titles and content
-        if form_data.legal_issues:
-            template_data["Issues"] = get_legal_issues_display(form_data.legal_issues)
-            template_data["LegalFramework"] = get_legal_framework_content(form_data.legal_issues)
+        legal_wording = has_legal_wording(jurisdiction_id)
+        if not legal_wording:
+            # The jurisdiction has no legal wording: remove both controls.
+            template_data["Issues"] = DELETE_MARKER
+            template_data["LegalFramework"] = DELETE_MARKER
+        elif form_data.legal_issues:
+            template_data["Issues"] = get_legal_issues_display(form_data.legal_issues, jurisdiction_id)
+            template_data["LegalFramework"] = get_legal_framework_content(form_data.legal_issues, jurisdiction_id)
 
         # FeeAward - default placeholder (can be customized based on form data)
         if "FeeAward" not in template_data or not template_data.get("FeeAward"):
@@ -503,7 +517,7 @@ def render_document(  # noqa: C901, PLR0912, PLR0915
 
         # Process anonymity content based on the anonymity order status
         anonymity_status = parse_anonymity_status(form_data.anonymity_order)
-        anonymity_content = get_anonymity_content(anonymity_status)
+        anonymity_content = get_anonymity_content(anonymity_status, jurisdiction_id)
 
         # Merge anonymity data into template data
         template_data.update(anonymity_content.to_template_dict())
@@ -629,11 +643,23 @@ def render_hearing_document_structured(
 ) -> Path:
     """Render a hearing document through HearingDocument block routing."""
     document_data = _build_document_data_from_submission(request, user_email)
-    hearing_document = build_hearing_document_from_document_data(document_data)
+    hearing_document = build_hearing_document_from_document_data(
+        document_data, _resolve_jurisdiction_id(request.form_data.jurisdiction)
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / _generate_output_filename()
     return render_document(hearing_document, output_path)
+
+
+def _resolve_jurisdiction_id(jurisdiction: str | None) -> str:
+    """The id of the jurisdiction a form names; UnknownJurisdictionError if it names none."""
+    from transcribe_api.domain.jurisdictions import UnknownJurisdictionError, resolve_jurisdiction
+
+    resolved = resolve_jurisdiction(jurisdiction)
+    if resolved is None:
+        raise UnknownJurisdictionError(jurisdiction)
+    return resolved.id
 
 
 def _build_document_data_from_submission(

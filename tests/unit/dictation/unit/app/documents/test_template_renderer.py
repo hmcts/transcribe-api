@@ -125,7 +125,8 @@ class TestRenderDocument:
         with patch("transcribe_api.documents.template_renderer.get_hearing_description", return_value="Face to face hearing") as mock_desc:
             render_document(doc_data, output, template_path=fake_template)
 
-        mock_desc.assert_called_once_with("face_to_face")
+        # DIAAT-342: wording is read for a jurisdiction; the legacy path defaults to IAC.
+        mock_desc.assert_called_once_with("face_to_face", "iac")
 
     def test_appends_rule_28_for_appellant_non_attendance(self, mock_word_doc, fake_template, tmp_path):
         _, mock_doc = mock_word_doc

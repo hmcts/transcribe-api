@@ -13,6 +13,9 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 DEFAULT_JURISDICTION = "First-tier Tribunal Immigration and Asylum Chamber"
+# The id of the jurisdiction DEFAULT_JURISDICTION names (DIAAT-342). Document wording
+# is kept per jurisdiction id; the content that predates jurisdictions belongs to this one.
+DEFAULT_JURISDICTION_ID = "iac"
 
 
 def format_date_long(date_str: str) -> str:

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from transcribe_api.documents.content_loader import get_anonymity_status_by_id
+from transcribe_api.documents.models import DEFAULT_JURISDICTION_ID
 
 # Marker used in templates to indicate content should be deleted
 DELETE_MARKER = "[DELETE]"
@@ -83,7 +84,7 @@ class AnonymityContent:
         return delete_controls
 
 
-def _load_anonymity_content(status: AnonymityStatus) -> AnonymityContent:
+def _load_anonymity_content(status: AnonymityStatus, jurisdiction_id: str = DEFAULT_JURISDICTION_ID) -> AnonymityContent:
     """Load anonymity content from JSON configuration.
 
     Args:
@@ -95,7 +96,7 @@ def _load_anonymity_content(status: AnonymityStatus) -> AnonymityContent:
     Raises:
         ValueError: If the status is not found in the configuration.
     """
-    status_data = get_anonymity_status_by_id(status.value)
+    status_data = get_anonymity_status_by_id(status.value, jurisdiction_id)
     if status_data is None:
         msg = f"Anonymity status not found in configuration: {status.value}"
         raise ValueError(msg)
@@ -109,11 +110,12 @@ def _load_anonymity_content(status: AnonymityStatus) -> AnonymityContent:
     )
 
 
-def get_anonymity_content(status: AnonymityStatus) -> AnonymityContent:
+def get_anonymity_content(status: AnonymityStatus, jurisdiction_id: str = DEFAULT_JURISDICTION_ID) -> AnonymityContent:
     """Get the anonymity content for a given status.
 
     Args:
         status: The anonymity order status.
+        jurisdiction_id: Whose anonymity wording to use.
 
     Returns:
         AnonymityContent with all field values for the given status.
@@ -121,7 +123,7 @@ def get_anonymity_content(status: AnonymityStatus) -> AnonymityContent:
     Raises:
         ValueError: If status is not a valid AnonymityStatus.
     """
-    return _load_anonymity_content(status)
+    return _load_anonymity_content(status, jurisdiction_id)
 
 
 def clear_cache() -> None:

@@ -11,8 +11,9 @@ from transcribe_api.documents.content_loader import (
     get_hearing_title,
     get_legal_framework_content_blocks,
     get_legal_framework_issues,
+    has_legal_wording,
 )
-from transcribe_api.documents.models import DocumentData, format_date_long
+from transcribe_api.documents.models import DEFAULT_JURISDICTION_ID, DocumentData, format_date_long
 from transcribe_api.documents.notes_parser import parse_notes_html
 from transcribe_api.documents.lib.blocks import (
     enumerated_list_blocks,
@@ -61,10 +62,10 @@ def _as_content_blocks(paragraphs: list[Paragraph]) -> list[ContentBlock]:
     return [*paragraphs]
 
 
-def _build_hearing_description_blocks(document_data: DocumentData) -> list[ContentBlock]:
+def _build_hearing_description_blocks(document_data: DocumentData, jurisdiction_id: str) -> list[ContentBlock]:
     """Build the hearing description as parsed Markdown blocks."""
     form_data = document_data.form_data
-    hearing_md = get_hearing_description(form_data.hearing_type)
+    hearing_md = get_hearing_description(form_data.hearing_type, jurisdiction_id)
 
     if form_data.requires_appellant_rule_28_text():
         hearing_md += APPELLANT_RULE_28_TEXT
@@ -75,22 +76,22 @@ def _build_hearing_description_blocks(document_data: DocumentData) -> list[Conte
     return markdown_to_blocks(hearing_md)
 
 
-def _build_legal_framework_blocks(framework_ids_or_titles: list[str]) -> list[ContentBlock]:
+def _build_legal_framework_blocks(framework_ids_or_titles: list[str], jurisdiction_id: str) -> list[ContentBlock]:
     """Build structured blocks for the Legal Framework section from Markdown."""
-    blocks = get_legal_framework_content_blocks(framework_ids_or_titles)
+    blocks = get_legal_framework_content_blocks(framework_ids_or_titles, jurisdiction_id)
     if not blocks:
         return _as_content_blocks(paragraph_blocks("[No legal frameworks selected]", alignment="justify"))
     return blocks
 
 
-def _build_frontmatter_model(document_data: DocumentData) -> Frontmatter:
+def _build_frontmatter_model(document_data: DocumentData, jurisdiction_id: str) -> Frontmatter:
     form_data = document_data.form_data
     effective_location = (
         form_data.location_other if form_data.location == "Other" and form_data.location_other else form_data.location
     )
     hearing_date = format_date_long(form_data.hearing_date)
     anonymity_status = parse_anonymity_status(form_data.anonymity_order)
-    anonymity_content = get_anonymity_content(anonymity_status)
+    anonymity_content = get_anonymity_content(anonymity_status, jurisdiction_id)
     include_anonymity_label = anonymity_content.head != DELETE_MARKER
 
     return Frontmatter(
@@ -110,17 +111,25 @@ def _build_frontmatter_model(document_data: DocumentData) -> Frontmatter:
     )
 
 
-def build_hearing_document_from_document_data(document_data: DocumentData) -> HearingDocument:
-    """Convert template-oriented DocumentData into structured HearingDocument."""
+def build_hearing_document_from_document_data(
+    document_data: DocumentData,
+    jurisdiction_id: str = DEFAULT_JURISDICTION_ID,
+) -> HearingDocument:
+    """Convert template-oriented DocumentData into structured HearingDocument.
+
+    The wording comes from the given jurisdiction. If it has no legal wording the
+    document has no Issues or Legal Framework section, and whatever legal issues
+    the form carries are ignored.
+    """
     form_data = document_data.form_data
     section_transcripts = document_data.get_section_transcripts()
 
-    frontmatter = _build_frontmatter_model(document_data)
+    frontmatter = _build_frontmatter_model(document_data, jurisdiction_id)
     frontmatter.crest_path = str(
         SCOTTISH_CREST_PATH if frontmatter.hearing_location in SCOTTISH_LOCATIONS else ENGLISH_CREST_PATH
     )
     anonymity_status = parse_anonymity_status(form_data.anonymity_order)
-    anonymity_content = get_anonymity_content(anonymity_status)
+    anonymity_content = get_anonymity_content(anonymity_status, jurisdiction_id)
 
     header_blocks: list[Paragraph] = []
 
@@ -177,7 +186,12 @@ def build_hearing_document_from_document_data(document_data: DocumentData) -> He
     evidence_messages = [msg.text for msg in section_transcripts.evidence]
     facts_messages = [msg.text for msg in section_transcripts.facts]
 
-    legal_issues = get_legal_framework_issues(form_data.legal_issues) if form_data.legal_issues else []
+    legal_wording = has_legal_wording(jurisdiction_id)
+    legal_issues = (
+        get_legal_framework_issues(form_data.legal_issues, jurisdiction_id)
+        if legal_wording and form_data.legal_issues
+        else []
+    )
     decision_date_text = (
         format_date_long(form_data.appealable_decision_date) if form_data.appealable_decision_date else "<date>"
     )
@@ -205,19 +219,27 @@ def build_hearing_document_from_document_data(document_data: DocumentData) -> He
         ),
         background=section_heading_blocks("Background", level=1, bold=True)
         + _section_blocks("background", background_messages, "[No background content]"),
-        hearing=section_heading_blocks(get_hearing_title(form_data.hearing_type), level=1, bold=True)
-        + _build_hearing_description_blocks(document_data),
-        issues=section_heading_blocks("Issues", level=2, bold=True)
-        + paragraph_blocks(ISSUES_INTRO_TEXT, alignment="justify")
-        + (
-            enumerated_list_blocks(legal_issues, style="alphabet")
-            if legal_issues
-            else paragraph_blocks("[No legal issues selected]", alignment="justify")
+        hearing=section_heading_blocks(get_hearing_title(form_data.hearing_type, jurisdiction_id), level=1, bold=True)
+        + _build_hearing_description_blocks(document_data, jurisdiction_id),
+        issues=(
+            section_heading_blocks("Issues", level=2, bold=True)
+            + paragraph_blocks(ISSUES_INTRO_TEXT, alignment="justify")
+            + (
+                enumerated_list_blocks(legal_issues, style="alphabet")
+                if legal_issues
+                else paragraph_blocks("[No legal issues selected]", alignment="justify")
+            )
+            if legal_wording
+            else []
         ),
         evidence=section_heading_blocks("Evidence", level=2, bold=True)
         + _section_blocks("evidence", evidence_messages, "[No evidence content]"),
-        legal_framework=section_heading_blocks("Legal Framework", level=1, bold=True)
-        + _build_legal_framework_blocks(form_data.legal_issues or []),
+        legal_framework=(
+            section_heading_blocks("Legal Framework", level=1, bold=True)
+            + _build_legal_framework_blocks(form_data.legal_issues or [], jurisdiction_id)
+            if legal_wording
+            else []
+        ),
         facts=section_heading_blocks("Facts", level=1, bold=True)
         + _section_blocks("facts", facts_messages, "[No facts content]"),
         determination_of_issues=section_heading_blocks("Determination of the Issues", level=1, bold=True)
