@@ -298,7 +298,7 @@ def test_0004_downgrade_reverses_it(monkeypatch):
 
 LIVE_EDITED_TABLES = ("jurisdiction", "document_content")
 _LIVE_WRITE = re.compile(
-    r"^\s*(?:INSERT\s+INTO|UPDATE(?:\s+ONLY)?|DELETE\s+FROM(?:\s+ONLY)?|TRUNCATE(?:\s+TABLE)?(?:\s+ONLY)?)\s+"
+    r"(?:^|[\s(])(?:INSERT\s+INTO|UPDATE(?:\s+ONLY)?|DELETE\s+FROM(?:\s+ONLY)?|TRUNCATE(?:\s+TABLE)?(?:\s+ONLY)?)\s+"
     r'(?:"?\w+"?\s*\.\s*)?'
     rf'"?({"|".join(LIVE_EDITED_TABLES)})"?(?![\w.])',
     re.IGNORECASE,
@@ -320,7 +320,7 @@ def _forbidden_live_writes(revision: str, sql: str) -> list[str]:
     ones its revision is allowed (ALLOWED_LIVE_WRITES)."""
     uncommented = re.sub(r"^\s*--.*$", "", sql, flags=re.MULTILINE)  # "-- Running upgrade" heads the first statement
     statements = (statement.strip() for statement in re.split(r";\s*\n", uncommented))
-    writes = [statement for statement in statements if _LIVE_WRITE.match(statement)]
+    writes = [statement for statement in statements if _LIVE_WRITE.search(statement)]
     allowed = ALLOWED_LIVE_WRITES.get(revision)
     return [statement for statement in writes if not (allowed and allowed.match(statement))]
 
@@ -364,6 +364,9 @@ def test_the_live_write_guard_sees_what_0004_does(monkeypatch):
         'DELETE FROM ONLY "public".jurisdiction',
         "INSERT INTO public.jurisdiction (id) VALUES (1)",
         "TRUNCATE TABLE ONLY public.document_content",
+        "WITH x AS (UPDATE jurisdiction SET settings = '{}' RETURNING id) SELECT * FROM x",
+        "WITH x AS (SELECT 1) DELETE FROM document_content",
+        "WITH d AS (DELETE FROM document_content RETURNING id) INSERT INTO audit (id) SELECT id FROM d",
     ],
 )
 def test_the_live_write_guard_catches_every_kind_of_write(statement):
@@ -385,6 +388,9 @@ def test_the_live_write_guard_sees_a_first_statement_under_the_revision_comment(
         "SELECT * FROM jurisdiction",
         "UPDATE public.jurisdiction_membership SET role = 'x'",
         'DELETE FROM "public"."transcription"',
+        "UPDATE transcription SET name = (SELECT name FROM jurisdiction LIMIT 1)",
+        "DELETE FROM jurisdiction_membership WHERE jurisdiction_id IN (SELECT id FROM jurisdiction)",
+        "INSERT INTO jurisdiction_membership (jurisdiction_id) SELECT id FROM jurisdiction",
     ],
 )
 def test_the_live_write_guard_ignores_other_tables_and_schema_changes(statement):
