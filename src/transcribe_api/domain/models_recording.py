@@ -219,21 +219,13 @@ class DialogueEntry(SQLModel):
                     corrected=self.has_corrections(),
                 )
             ]
-        if current == _join(*(p.current_text for p in self.parts)):
-            return self.parts
-        if current == _join(*(p.text for p in self.parts)):
-            return [_with_share(p, p.text, p.current_text) for p in self.parts]
-        merged_texts = [p.current_text for p in self.parts]
-        shares = split_by_alignment(merged_texts, current)
-        # Text rebuilt from word-range edits takes its casing from `words`, which can differ
-        # from a part's display text, so a part is only edited if its share also differs
-        # from its share of the unedited words.
-        unedited = (
-            split_by_alignment(merged_texts, " ".join(w.text for w in self.words))
-            if self.corrected_text is None and self.words
-            else merged_texts
-        )
-        return [_with_share(p, share, base) for p, share, base in zip(self.parts, shares, unedited, strict=True)]
+        parts = _shared_out(self.parts, current)
+        if not self.has_corrections():
+            return [_with_corrected(p, False) for p in parts]
+        if self.corrected_text is None and self.word_corrections and self.words:
+            touched = _touched_by_word_corrections(self.parts, self.words, self.word_corrections)
+            return [_with_corrected(p, t) for p, t in zip(parts, touched, strict=True)]
+        return parts
 
     def effective_text(self) -> str:
         """Current text after any corrections — what a clerk would read today."""
@@ -251,21 +243,54 @@ class DialogueEntry(SQLModel):
         return self.text
 
 
-def _with_share(part: EntryPart, share: str, unedited: str) -> EntryPart:
+_EDIT_MARK = "\x00edited"
+
+
+def _shared_out(parts: list[EntryPart], current: str) -> list[EntryPart]:
+    if current == _join(*(p.current_text for p in parts)):
+        return parts
+    if current == _join(*(p.text for p in parts)):
+        return [_with_share(p, p.text) for p in parts]
+    shares = split_by_alignment([p.current_text for p in parts], current)
+    return [_with_share(p, share) for p, share in zip(parts, shares, strict=True)]
+
+
+def _touched_by_word_corrections(
+    parts: list[EntryPart], words: list[WordInfo], word_corrections: list[WordCorrection]
+) -> list[bool]:
+    """Whether each part holds an active word-range correction.
+
+    Found from the corrected word ranges rather than the text: a rebuilt text takes its
+    casing from `words`, which can differ from a part's display text, and a correction
+    can leave the text as it was.
+    """
+    marked = [w.text for w in words]
+    for wc in word_corrections:
+        span = marked[wc.start_word_index : wc.end_word_index + 1]
+        marked[wc.start_word_index : wc.end_word_index + 1] = [_EDIT_MARK] * len(span)
+    shares = split_by_alignment([p.current_text for p in parts], " ".join(marked))
+    return [_EDIT_MARK in share.split() for share in shares]
+
+
+def _with_share(part: EntryPart, share: str) -> EntryPart:
     """`part` with a new share of the current text.
 
-    A share back to the segment's own ASR wording (a rollback) marks it not corrected, so
-    a later merge doesn't count it; any other change marks it corrected. A share that
-    matches `unedited`, its share before any word-range edit, isn't a change.
+    Its correction state is kept while its share is unchanged. A changed share marks it
+    corrected, unless it is back to the segment's own ASR wording (a rollback), so a
+    later merge doesn't count it.
     """
     update: dict[str, object] = {"current_text": share}
     words = share.split()
     if part.corrected is not None and words != part.current_text.split():
-        if words == part.text.split():
-            update["corrected"] = False
-        elif words != unedited.split():
-            update["corrected"] = True
+        update["corrected"] = words != part.text.split()
     return part.model_copy(update=update)
+
+
+def _with_corrected(part: EntryPart, corrected: bool) -> EntryPart:
+    """`part` with its correction state set, unless it was stored without one."""
+    if part.corrected is None or part.corrected == corrected:
+        return part
+    return part.model_copy(update={"corrected": corrected})
 
 
 def _join(*parts: str) -> str:
