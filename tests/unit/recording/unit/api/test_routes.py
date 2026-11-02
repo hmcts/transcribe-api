@@ -3302,3 +3302,14 @@ class TestSegmentIds:
             merged_id = client.post(f"/api/v1/jobs/{job.id}/segments/0/merge-next").json()["dialogue_entries"][0]["id"]
             client.post(f"/api/v1/jobs/{job.id}/segments/{merged_id}/rollback")
         assert [p["current_text"] for p in job.dialogue_entries[0]["parts"]] == ["Good", "morning."]
+
+    def test_identical_legacy_entries_get_distinct_ids(self, client, as_current_user, mocker):
+        job = self._job()
+        twin = {**job.dialogue_entries[1], "speaker": "Speaker 3"}
+        job.dialogue_entries = [job.dialogue_entries[1], twin]
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        ids = self._ids(client, job)
+        assert len(set(ids)) == 2
+        with self._session(client):
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/{ids[1]}/accept")
+        assert [e["accepted"] for e in response.json()["dialogue_entries"]] == [False, True]

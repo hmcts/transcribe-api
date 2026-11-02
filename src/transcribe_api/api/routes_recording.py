@@ -8,6 +8,7 @@ import re
 import socket
 import tempfile
 import wave
+from collections import Counter
 from collections.abc import AsyncGenerator
 from contextlib import aclosing
 from datetime import UTC, datetime
@@ -453,11 +454,10 @@ def _to_dialogue_entry(raw) -> DialogueEntry:
     )
 
 
-def _derived_segment_id(job_id: UUID, raw) -> str:
-    # From what never changes for a segment (a merge makes a new one), so a segment
-    # rewritten without its id, e.g. by an older pod mid-deploy, can't take another's.
-    key = "|".join(str(_entry_field(raw, f, "")) for f in ("start_time", "end_time", "text"))
-    return f"seg_{uuid5(job_id, key).hex}"
+def _content_key(raw) -> str:
+    # What never changes for a segment (a merge makes a new one), so a segment rewritten
+    # without its id, e.g. by an older pod mid-deploy, can't take another's.
+    return "|".join(str(_entry_field(raw, f, "")) for f in ("start_time", "end_time", "text"))
 
 
 def _entries_with_ids(job: SpeechBatchJob) -> list:
@@ -466,12 +466,17 @@ def _entries_with_ids(job: SpeechBatchJob) -> list:
     The derived id stays the same on every read until the next write saves it with
     the entry, so jobs from before segment ids need no migration.
     """
-    return [
-        raw
-        if _entry_field(raw, "id")
-        else {**(raw if isinstance(raw, dict) else raw.model_dump()), "id": _derived_segment_id(job.id, raw)}
-        for raw in job.dialogue_entries
-    ]
+    entries = []
+    seen: Counter[str] = Counter()
+    for raw in job.dialogue_entries:
+        key = _content_key(raw)
+        repeat = seen[key]
+        seen[key] += 1
+        if not _entry_field(raw, "id"):
+            derived = uuid5(job.id, f"{key}|{repeat}" if repeat else key)
+            raw = {**(raw if isinstance(raw, dict) else raw.model_dump()), "id": f"seg_{derived.hex}"}
+        entries.append(raw)
+    return entries
 
 
 def _to_dialogue_entries(job: SpeechBatchJob) -> list[DialogueEntry] | None:
