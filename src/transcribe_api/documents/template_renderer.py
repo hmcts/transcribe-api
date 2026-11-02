@@ -427,6 +427,40 @@ def render_structured_document(hearing_document: HearingDocument, output_path: P
     return output_path
 
 
+LEGAL_SECTION_HEADINGS = ("Issues", "Legal Framework")
+
+
+def _paragraph_text(element) -> str:
+    return "".join(t.text or "" for t in element.iter(qn("w:t")))
+
+
+def _is_heading(element) -> bool:
+    style = element.find(f"{qn('w:pPr')}/{qn('w:pStyle')}") if element.tag == qn("w:p") else None
+    return style is not None and (style.get(qn("w:val")) or "").startswith("Heading")
+
+
+def _remove_legal_sections(document) -> list[str]:
+    """Remove the template's Issues and Legal Framework sections whole, for a jurisdiction with no legal wording.
+
+    A section runs from its heading up to the next heading, so its introduction, agreed-matters
+    paragraphs and content controls go with it, not only the controls. Returns the headings removed.
+    """
+    body = document.element.body
+    removed: list[str] = []
+    for heading in LEGAL_SECTION_HEADINGS:
+        children = list(body)
+        start = next(
+            (i for i, el in enumerate(children) if _is_heading(el) and _paragraph_text(el).strip() == heading), None
+        )
+        if start is None:
+            continue
+        end = next((i for i in range(start + 1, len(children)) if _is_heading(children[i])), len(children))
+        for element in children[start:end]:
+            body.remove(element)
+        removed.append(heading)
+    return removed
+
+
 def render_document(  # noqa: C901, PLR0912, PLR0915
     document_data: DocumentData | HearingDocument,
     output_path: Path,
@@ -496,7 +530,9 @@ def render_document(  # noqa: C901, PLR0912, PLR0915
         # Replace legal issues IDs with display titles and content
         legal_wording = has_legal_wording(jurisdiction_id)
         if not legal_wording:
-            # The jurisdiction has no legal wording: remove both controls.
+            # The jurisdiction has no legal wording: remove both sections (headings, introduction,
+            # controls) from the template, and the controls too should a template keep them elsewhere.
+            _remove_legal_sections(doc.document)
             template_data["Issues"] = DELETE_MARKER
             template_data["LegalFramework"] = DELETE_MARKER
         elif form_data.legal_issues:
