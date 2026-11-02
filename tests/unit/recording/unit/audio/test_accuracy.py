@@ -349,16 +349,15 @@ class TestAccuracyAcrossMerges:
         merged.corrected_text = "a b c"
         assert [p.corrected for p in merged.current_parts()] == [None, None]
 
-    def test_a_word_range_edit_after_a_merge_leaves_an_untouched_part_out_of_the_score(self):
-        def with_words(text, words, start):
-            entry = _entry(text=text, start=start, end=start + 1, confidence=0.9)
-            entry.words = [
-                WordInfo(text=w, start_time=start, end_time=start + 1, confidence=0.9) for w in words.split()
-            ]
-            return entry
+    @staticmethod
+    def _with_words(text, words, start):
+        entry = _entry(text=text, start=start, end=start + 1, confidence=0.9)
+        entry.words = [WordInfo(text=w, start_time=start, end_time=start + 1, confidence=0.9) for w in words.split()]
+        return entry
 
-        hello = with_words("Hello world", "hello world", 0)
-        iz = with_words("this iz", "this iz", 1)
+    def test_a_word_range_edit_after_a_merge_leaves_an_untouched_part_out_of_the_score(self):
+        hello = self._with_words("Hello world", "hello world", 0)
+        iz = self._with_words("this iz", "this iz", 1)
         merged = merge_dialogue_entries(hello, iz)
         merged.word_corrections = [WordCorrection(start_word_index=3, end_word_index=3, text="is")]
         separate = [hello, iz.model_copy(update={"corrected_text": "this is"})]
@@ -375,3 +374,31 @@ class TestAccuracyAcrossMerges:
         assert [p.corrected for p in merged.current_parts()] == [True, True]
         assert self._summary([merged]).corrected_percent == self._summary(separate).corrected_percent == 100.0
         assert self._summary([merged]).word_error_rate == self._summary(separate).word_error_rate
+
+    @pytest.mark.parametrize("replacement", ["Hello", "hello"])
+    def test_a_word_range_edit_that_keeps_the_text_counts_the_same_before_and_after_a_merge(self, replacement):
+        hello = self._with_words("Hello world", "hello world", 0)
+        iz = self._with_words("this iz", "this iz", 1)
+        edit = [WordCorrection(start_word_index=0, end_word_index=0, text=replacement)]
+        merged = merge_dialogue_entries(hello, iz)
+        merged.word_corrections = edit
+        separate = [hello.model_copy(update={"word_corrections": edit}), iz]
+        assert [p.corrected for p in merged.current_parts()] == [True, False]
+        assert self._summary([merged]).corrected_percent == self._summary(separate).corrected_percent == 50.0
+
+    def test_a_history_rollback_to_the_asr_text_clears_every_parts_correction_state(self):
+        same = _entry(text="hello world", start=0, end=1, confidence=0.9, corrected="hello world")
+        iz = _entry(text="this iz", start=1, end=2, confidence=0.9, corrected="this is")
+        rize = _entry(text="all rize", start=2, end=3, confidence=0.9, corrected="all rise")
+        merged = merge_dialogue_entries(same, iz)
+        merged.corrected_text = None
+        assert [p.corrected for p in merged.current_parts()] == [False, False]
+        again = merge_dialogue_entries(merged, rize)
+        never_corrected = [
+            same.model_copy(update={"corrected_text": None}),
+            iz.model_copy(update={"corrected_text": None}),
+            rize,
+        ]
+        assert [p.corrected for p in again.parts] == [False, False, True]
+        assert self._summary([again]).corrected_percent == self._summary(never_corrected).corrected_percent
+        assert self._summary([again]).word_error_rate == self._summary(never_corrected).word_error_rate
