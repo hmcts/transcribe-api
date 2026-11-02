@@ -222,9 +222,18 @@ class DialogueEntry(SQLModel):
         if current == _join(*(p.current_text for p in self.parts)):
             return self.parts
         if current == _join(*(p.text for p in self.parts)):
-            return [_with_share(p, p.text) for p in self.parts]
-        shares = split_by_alignment([p.current_text for p in self.parts], current)
-        return [_with_share(p, share) for p, share in zip(self.parts, shares, strict=True)]
+            return [_with_share(p, p.text, p.current_text) for p in self.parts]
+        merged_texts = [p.current_text for p in self.parts]
+        shares = split_by_alignment(merged_texts, current)
+        # Text rebuilt from word-range edits takes its casing from `words`, which can differ
+        # from a part's display text, so a part is only edited if its share also differs
+        # from its share of the unedited words.
+        unedited = (
+            split_by_alignment(merged_texts, " ".join(w.text for w in self.words))
+            if self.corrected_text is None and self.words
+            else merged_texts
+        )
+        return [_with_share(p, share, base) for p, share, base in zip(self.parts, shares, unedited, strict=True)]
 
     def effective_text(self) -> str:
         """Current text after any corrections — what a clerk would read today."""
@@ -242,16 +251,20 @@ class DialogueEntry(SQLModel):
         return self.text
 
 
-def _with_share(part: EntryPart, share: str) -> EntryPart:
+def _with_share(part: EntryPart, share: str, unedited: str) -> EntryPart:
     """`part` with a new share of the current text.
 
-    Marked corrected if the share changed since the merge, and not corrected if it is
-    back to the segment's own ASR wording (a rollback), so a later merge doesn't count it.
+    A share back to the segment's own ASR wording (a rollback) marks it not corrected, so
+    a later merge doesn't count it; any other change marks it corrected. A share that
+    matches `unedited`, its share before any word-range edit, isn't a change.
     """
     update: dict[str, object] = {"current_text": share}
-    if part.corrected is not None:
-        reverted = share.split() == part.text.split()
-        update["corrected"] = not reverted and (part.corrected or share.split() != part.current_text.split())
+    words = share.split()
+    if part.corrected is not None and words != part.current_text.split():
+        if words == part.text.split():
+            update["corrected"] = False
+        elif words != unedited.split():
+            update["corrected"] = True
     return part.model_copy(update=update)
 
 
