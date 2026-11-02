@@ -232,11 +232,14 @@ async def lifespan(app: FastAPI):
 
         await run_in_threadpool(migrations.run_migrations)
 
-        # DIAAT-343: a deployment never writes the live document content. Tell the
-        # product team where it differs from the new defaults. Never raises.
+        # DIAAT-343: a deployment never writes the live document content or the
+        # jurisdiction settings. Tell the product team where they differ from the
+        # shipped defaults. Neither check raises.
         from transcribe_api.documents.content_drift import check_content_drift
+        from transcribe_api.domain.jurisdiction_settings_drift import check_settings_drift
 
         await run_in_threadpool(check_content_drift)
+        await run_in_threadpool(check_settings_drift)
 
     tasks: list[asyncio.Task] = []
     if settings.ENVIRONMENT != "test":

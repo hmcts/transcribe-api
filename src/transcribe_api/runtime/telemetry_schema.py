@@ -232,6 +232,29 @@ def _dictation_attributes(schema: TelemetrySchema) -> None:
     schema.attribute("page.route", pattern="/[a-z0-9/_:.\\-]{0,100}", description="Page route, IDs replaced by :id.")
     schema.attribute("recording.duration_seconds", int, description="Recording length.")
     schema.attribute("recording.mode", allowed_values=("mic", "screen"), description="Recording kind.")
+    schema.attribute(
+        "settings.features_changed_count",
+        int,
+        description="Feature flags of the live IAC settings that differ from the shipped ones.",
+    )
+    schema.attribute(
+        "settings.template_changed", bool, description="Whether the live IAC template differs from the shipped one."
+    )
+    schema.attribute(
+        "settings.wording_default_only_count",
+        int,
+        description="Wording keys in the shipped IAC settings that are missing from the live ones.",
+    )
+    schema.attribute(
+        "settings.wording_edited_count",
+        int,
+        description="Wording keys whose live IAC text differs from the shipped text.",
+    )
+    schema.attribute(
+        "settings.wording_live_only_count",
+        int,
+        description="Wording keys in the live IAC settings that are not in the shipped ones.",
+    )
     schema.attribute("speakers.segment_seconds", float, description="Length of the speaker sample played.")
     schema.attribute(
         "speech.cancel_reason",
@@ -425,6 +448,17 @@ def _dictation_events(schema: TelemetrySchema) -> None:
         "document.available",
         attributes=("document.template", "document.template_version"),
         description="A generated document is ready to download; which template and version produced it.",
+    )
+    schema.event(
+        "settings.drift_detected",
+        attributes=(
+            "settings.wording_edited_count",
+            "settings.wording_live_only_count",
+            "settings.wording_default_only_count",
+            "settings.template_changed",
+            "settings.features_changed_count",
+        ),
+        description="At startup, the live IAC jurisdiction settings (wording, template, feature flags) differ from the ones it was created with. The live settings are kept; the key names are in the warning log. Counts only, never the wording.",
     )
     schema.event(
         "upload.rejected",

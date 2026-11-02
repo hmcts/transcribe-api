@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from transcribe_api.documents import content_drift
 from transcribe_api.documents.content_loader import _load_from_file
+from transcribe_api.domain import jurisdiction_settings_drift
 from transcribe_api.domain.models_dictation import DocumentContent
 
 WORDING = "Wording an admin typed, which must never reach a log or an event"
@@ -185,12 +186,13 @@ def test_startup_runs_the_check_after_the_migrations(monkeypatch):
     monkeypatch.setenv("RUN_MIGRATIONS", "true")
     monkeypatch.setattr("transcribe_api.runtime.migrations.run_migrations", lambda: calls.append("migrate"))
     monkeypatch.setattr(content_drift, "check_content_drift", lambda: calls.append("drift"))
+    monkeypatch.setattr(jurisdiction_settings_drift, "check_settings_drift", lambda: calls.append("settings"))
     from transcribe_api.api.app import create_app
 
     with TestClient(create_app()):
         pass
 
-    assert calls == ["migrate", "drift"]
+    assert calls == ["migrate", "drift", "settings"]
 
 
 def test_the_read_is_bounded_by_database_side_timeouts(monkeypatch, writes, events):

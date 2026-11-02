@@ -566,6 +566,41 @@
       "pattern": null,
       "type": "str"
     },
+    "settings.features_changed_count": {
+      "allowed_values": null,
+      "description": "Feature flags of the live IAC settings that differ from the shipped ones.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "settings.template_changed": {
+      "allowed_values": null,
+      "description": "Whether the live IAC template differs from the shipped one.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "bool"
+    },
+    "settings.wording_default_only_count": {
+      "allowed_values": null,
+      "description": "Wording keys in the shipped IAC settings that are missing from the live ones.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "settings.wording_edited_count": {
+      "allowed_values": null,
+      "description": "Wording keys whose live IAC text differs from the shipped text.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "settings.wording_live_only_count": {
+      "allowed_values": null,
+      "description": "Wording keys in the live IAC settings that are not in the shipped ones.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
     "speakers.segment_seconds": {
       "allowed_values": null,
       "description": "Length of the speaker sample played.",
@@ -1196,6 +1231,18 @@
       "browser": false,
       "class": "operational",
       "description": "A caller reached, or tried to reach, a resource they do not own. Correlate on hmcts.request.id; hmcts.journey.id is the target job or upload."
+    },
+    "settings.drift_detected": {
+      "attributes": [
+        "settings.wording_edited_count",
+        "settings.wording_live_only_count",
+        "settings.wording_default_only_count",
+        "settings.template_changed",
+        "settings.features_changed_count"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "At startup, the live IAC jurisdiction settings (wording, template, feature flags) differ from the ones it was created with. The live settings are kept; the key names are in the warning log. Counts only, never the wording."
     },
     "speakers.sample_played": {
       "attributes": [
