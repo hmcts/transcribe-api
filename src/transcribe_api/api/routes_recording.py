@@ -408,6 +408,18 @@ class CorrectWordRangeRequest(BaseModel):
         return _validate_not_blank(v)
 
 
+class RenameSpeakerRequest(BaseModel):
+    speaker: str = Field(min_length=1, max_length=200)
+    apply_to_all: bool = False
+
+    @field_validator("speaker")
+    @classmethod
+    def validate_speaker(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("speaker must not be blank")
+        return v.strip()
+
+
 class RollbackHistoryRequest(BaseModel):
     history_index: int = Field(ge=0)
 
@@ -1231,6 +1243,10 @@ def _save_corrected_entry(
     # in-place changes wouldn't be detected as dirty by the ORM.
     entries = list(job.dialogue_entries)
     entries[index] = entry.model_dump()
+    _save_entries(session, job, entries)
+
+
+def _save_entries(session: Session, job: SpeechBatchJob, entries: list) -> None:
     job.dialogue_entries = entries
     job.updated_datetime = datetime.now(UTC)
     session.add(job)
@@ -1473,6 +1489,46 @@ async def accept_segment(
     ]
 
     _save_corrected_entry(session, job, index, entry)
+    return _to_response(job)
+
+
+@router.patch(
+    "/jobs/{job_id}/segments/{index}/speaker",
+    dependencies=[_job_in_jurisdiction(TRANSCRIPT)],
+    response_model=JobResponse,
+)
+async def rename_speaker(
+    job_id: UUID,
+    index: int,
+    body: RenameSpeakerRequest,
+    session: Session = Depends(get_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> JobResponse:
+    """Rename the speaker of one segment, or of every segment that shares its speaker.
+
+    With apply_to_all, segments are matched on the exact current speaker
+    label: the label is the only participant identity a transcript holds.
+    A speaker name is not a text correction, so it is not recorded in
+    correction_history and a segment rollback leaves it alone.
+    """
+    job, entry = _load_entry_for_correction(session, job_id, index, current_user)
+
+    if body.speaker == entry.speaker:
+        return _to_response(job)
+
+    entries = list(job.dialogue_entries)
+    targets = (
+        [i for i, raw in enumerate(entries) if _entry_field(raw, "speaker", "") == entry.speaker]
+        if body.apply_to_all
+        else [index]
+    )
+    for i in targets:
+        raw = entries[i]
+        updated = dict(raw) if isinstance(raw, dict) else raw.model_dump()
+        updated["speaker"] = body.speaker
+        entries[i] = updated
+
+    _save_entries(session, job, entries)
     return _to_response(job)
 
 
