@@ -202,6 +202,9 @@ def _shift(start: int | None, end: int | None, offset: int | None) -> tuple[int 
 def merge_dialogue_entries(first: DialogueEntry, second: DialogueEntry) -> DialogueEntry:
     """Combine two adjacent entries into one, keeping `first`'s speaker and start and `second`'s end.
 
+    If the two overlap so that `first` ends later, that later end is kept, so the
+    result still covers both.
+
     Word indices are positions in the combined `words` list, so word-range corrections
     survive only when both entries have words and rebuilding from them reproduces both
     halves' current text (an untouched half otherwise switches from its display text to
@@ -275,7 +278,7 @@ def merge_dialogue_entries(first: DialogueEntry, second: DialogueEntry) -> Dialo
         speaker=first.speaker,
         text=_join(first.text, second.text),
         start_time=first.start_time,
-        end_time=second.end_time,
+        end_time=max(first.end_time, second.end_time),
         confidence=min(confidences) if confidences else None,
         corrected_text=corrected_text,
         word_corrections=word_corrections,

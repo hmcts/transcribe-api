@@ -203,6 +203,10 @@ class TestMergeDialogueEntries:
         assert merged.start_time == 1.0
         assert merged.end_time == 4.0
 
+    def test_keeps_the_later_end_when_the_first_overlaps_past_the_second(self):
+        first, second = self._pair(first={"end_time": 5.0})
+        assert merge_dialogue_entries(first, second).end_time == 5.0
+
     def test_joins_text_with_a_single_space(self):
         first, second = self._pair(first={"text": "The quick "}, second={"text": " brown fox."})
         assert merge_dialogue_entries(first, second).text == "The quick brown fox."
