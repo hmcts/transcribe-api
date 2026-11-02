@@ -1246,7 +1246,7 @@ def _assert_job_owner(
 def _load_entry_for_correction(
     session: Session, job_id: UUID, segment: str, current_user: AuthenticatedUser
 ) -> tuple[SpeechBatchJob, int, DialogueEntry]:
-    """Load the job and the segment named by `segment`: its id, or (until the web has moved to ids) its index."""
+    """Load the job and the segment whose id is `segment`."""
     job = get_job_by_id(session, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1255,20 +1255,15 @@ def _load_entry_for_correction(
         raise HTTPException(status_code=422, detail="Job has no transcript to correct")
 
     job.dialogue_entries = _entries_with_ids(job)
-    if segment.isdigit():
-        index = int(segment)
-        if index >= len(job.dialogue_entries):
-            raise HTTPException(status_code=404, detail="Segment not found")
-    else:
-        index = next((i for i, raw in enumerate(job.dialogue_entries) if _entry_field(raw, "id") == segment), -1)
-        if index < 0:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "This segment no longer exists: it may have been combined with another. "
-                    "Reload the transcript and try again."
-                ),
-            )
+    index = next((i for i, raw in enumerate(job.dialogue_entries) if _entry_field(raw, "id") == segment), -1)
+    if index < 0:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This segment no longer exists: it may have been combined with another. "
+                "Reload the transcript and try again."
+            ),
+        )
     return job, index, _to_dialogue_entry(job.dialogue_entries[index])
 
 
