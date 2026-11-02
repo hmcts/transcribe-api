@@ -66,6 +66,7 @@ None. Every write loads the job, changes the list in memory and commits the whol
 9. A section reset restores the speaker for single renames. A rename-all that covers the section survives the reset, because removing it from one section would half-undo it. The dependency refusal applies wherever a reset would otherwise break a later multi-section change.
 10. Anyone with write access to the transcription (the existing `_check_job_access` write check) can undo or reset anyone's change. There is no author-only rule. Whole-transcription reset requires an explicit confirmation step in the UI.
 11. Speaker corrections are training signal. Dataset rows store the original AI speaker label and the final speaker label, so a section whose only correction is a rename still produces a row. The new columns go in the migration-first PR.
+12. Section reset is allowed on legacy jobs. It restores the text and the changes recorded since this ships, and leaves speaker names from renames made before this ships as they are, telling the user so plainly.
 
 ### Our calls
 
@@ -74,14 +75,13 @@ None. Every write loads the job, changes the list in memory and commits the whol
 - Our call: every user sees the same history. Each entry records the user and the time, and the web's "Changed by" column shows the real user.
 - Our call: concurrency is an optimistic version check on the transcription. A stale edit or rollback gets a 409, and the UI asks the user to refresh.
 - Our call: a combine entry stores the full pre-merge state of both entries. A rename-all entry stores the affected segment ids and their previous labels.
-- Our call: on a legacy job, a section reset restores the AI text, undoes the changes recorded since this ships under the same rename-all rules as a new job, and says that it leaves labels from renames made before this ships as they are. Those renames left no record, so they cannot be detected or refused one by one. This needs the user's confirmation (see "Resets").
 - Our call: existing `correction_history` entries on legacy jobs are shown in history but cannot be undone one by one. They record only text snapshots, so undoing them would not be exact. A section reset still clears them, because the AI text (`text`) has never been changed.
 
 ## Goals
 
 - One ordered history per transcription that records all six modification types, with the user and the time of each.
 - Undo of the latest change, from the section view or the whole-transcription view, that restores the exact earlier state, including multi-section changes.
-- Section reset and whole-transcription reset as defined in decisions 5, 8 and 9 and our calls.
+- Section reset and whole-transcription reset as defined in decisions 5, 8, 9 and 12 and our calls.
 - Every reset or undo the system offers is exact. Anything that cannot be done exactly is hidden and refused, with the reason.
 - Training data, including speaker corrections, that equals the final transcript paired with the AI output at all times, while the flag is on.
 - No lost updates: a write based on a stale copy of the transcription fails visibly.
@@ -165,7 +165,7 @@ The reset is refused, by the same rule and with the same message as an individua
 On a legacy job (decision 8):
 
 - A section reset is refused if the section is a combine made before this ships. The section has `merged` set and no `combine` entry, and it cannot be split exactly.
-- Renames made before this ships left no record, so nothing can tell which labels they changed, and the API cannot refuse them one by one. A section reset on a legacy job does what it does on a new job for every change recorded since this ships. It restores the AI text, clears corrections and `accepted`, and removes single renames. It keeps any covering rename-all, with the same rebasing and refusal rules. It does not touch a label changed before this ships. The UI and the API message for a legacy job say plainly that the reset covers the text and the changes made since this ships, not speaker names changed before (our call). The alternative is to refuse section reset on every legacy job, which would also take away text resets that are exact. The user should confirm which they want.
+- Renames made before this ships left no record, so nothing can tell which labels they changed, and the API cannot refuse them one by one. A section reset on a legacy job does what it does on a new job for every change recorded since this ships. It restores the AI text, clears corrections and `accepted`, and removes single renames. It keeps any covering rename-all, with the same rebasing and refusal rules. It does not touch a label changed before this ships. The UI and the API message for a legacy job say plainly that the reset covers the text and the changes made since this ships, not speaker names changed before (decision 12).
 - Whole-transcription reset is refused.
 
 Whole-transcription reset on a new job replaces the dialogue entries with the stored original AI output. This splits every combined section, restores the original speaker labels and ids, and empties the log. The web asks the user to confirm before sending it (decision 10).
