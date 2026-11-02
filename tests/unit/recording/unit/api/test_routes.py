@@ -2091,6 +2091,105 @@ class TestAcceptSegment:
         assert response.json()["dialogue_entries"][0]["accepted"] is True
 
 
+class TestRenameSpeaker:
+    def _job(self):
+        job = _make_job(status=JobStatus.SUCCEEDED)
+        job.dialogue_entries = [
+            {"speaker": "Speaker 1", "text": "first", "start_time": 0.0, "end_time": 1.0},
+            {"speaker": "Speaker 2", "text": "second", "start_time": 1.0, "end_time": 2.0},
+            {
+                "speaker": "Speaker 1",
+                "text": "third",
+                "start_time": 2.0,
+                "end_time": 3.0,
+                "corrected_text": "third, corrected",
+            },
+        ]
+        return job
+
+    @contextmanager
+    def _session(self, client):
+        from transcribe_api.runtime.db_recording import get_session
+
+        mock_session = MagicMock()
+        client.app.dependency_overrides[get_session] = lambda: mock_session
+        try:
+            yield mock_session
+        finally:
+            client.app.dependency_overrides.pop(get_session, None)
+
+    def _rename(self, client, job, index, body):
+        return client.patch(f"/api/v1/jobs/{job.id}/segments/{index}/speaker", json=body)
+
+    def test_replace_one_renames_only_that_segment(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+
+        with self._session(client) as mock_session:
+            response = self._rename(client, job, 0, {"speaker": "Judge Smith"})
+
+        assert response.status_code == 200
+        speakers = [e["speaker"] for e in response.json()["dialogue_entries"]]
+        assert speakers == ["Judge Smith", "Speaker 2", "Speaker 1"]
+        mock_session.commit.assert_called_once()
+
+    def test_replace_all_renames_every_segment_with_that_speaker(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+
+        with self._session(client):
+            response = self._rename(client, job, 2, {"speaker": "  Judge Smith ", "apply_to_all": True})
+
+        assert response.status_code == 200
+        entries = response.json()["dialogue_entries"]
+        assert [e["speaker"] for e in entries] == ["Judge Smith", "Speaker 2", "Judge Smith"]
+        assert entries[2]["corrected_text"] == "third, corrected"
+        assert entries[2]["correction_history"] is None
+
+    def test_unchanged_name_is_not_saved(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+
+        with self._session(client) as mock_session:
+            response = self._rename(client, job, 1, {"speaker": "Speaker 2"})
+
+        assert response.status_code == 200
+        mock_session.commit.assert_not_called()
+
+    def test_length_limit_applies_to_trimmed_name(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+
+        with self._session(client):
+            response = self._rename(client, job, 0, {"speaker": f"  {'x' * 200}  "})
+
+        assert response.status_code == 200
+        assert response.json()["dialogue_entries"][0]["speaker"] == "x" * 200
+
+    @pytest.mark.parametrize("speaker", ["", "   ", "x" * 201, 7])
+    def test_rejects_invalid_name(self, client, as_current_user, mocker, speaker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+
+        response = self._rename(client, job, 0, {"speaker": speaker})
+        assert response.status_code == 422
+
+    def test_returns_404_for_other_users_job(self, client, as_current_user, mocker):
+        job = self._job()
+        job.user_id = uuid.uuid4()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+
+        response = self._rename(client, job, 0, {"speaker": "Judge Smith"})
+        assert response.status_code == 404
+
+    def test_returns_404_for_out_of_range_index(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+
+        response = self._rename(client, job, 9, {"speaker": "Judge Smith"})
+        assert response.status_code == 404
+
+
 class TestRollbackSegment:
     def _patch_session(self, client, mocker):
         from transcribe_api.runtime.db_recording import get_session
