@@ -61,6 +61,7 @@ from transcribe_api.domain.models_recording import (
     JobStatus,
     SpeechBatchJob,
     WordCorrection,
+    merge_dialogue_entries,
 )
 from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
 from transcribe_api.runtime.db_recording import get_session
@@ -426,25 +427,28 @@ def _entry_field(entry, field: str, default=None):
     return entry.get(field, default) if isinstance(entry, dict) else getattr(entry, field, default)
 
 
+def _to_dialogue_entry(raw) -> DialogueEntry:
+    return DialogueEntry(
+        speaker=_entry_field(raw, "speaker", ""),
+        text=_entry_field(raw, "text", ""),
+        start_time=_entry_field(raw, "start_time", 0.0),
+        end_time=_entry_field(raw, "end_time", 0.0),
+        confidence=_entry_field(raw, "confidence"),
+        corrected_text=_entry_field(raw, "corrected_text"),
+        word_corrections=_entry_field(raw, "word_corrections"),
+        correction_history=_entry_field(raw, "correction_history"),
+        words=_entry_field(raw, "words"),
+        alternatives=_entry_field(raw, "alternatives"),
+        accepted=_entry_field(raw, "accepted", False),
+        merged=_entry_field(raw, "merged", False),
+        unreviewed_confidence=_entry_field(raw, "unreviewed_confidence"),
+    )
+
+
 def _to_dialogue_entries(job: SpeechBatchJob) -> list[DialogueEntry] | None:
     if job.status != JobStatus.SUCCEEDED or not job.dialogue_entries:
         return None
-    return [
-        DialogueEntry(
-            speaker=_entry_field(e, "speaker", ""),
-            text=_entry_field(e, "text", ""),
-            start_time=_entry_field(e, "start_time", 0.0),
-            end_time=_entry_field(e, "end_time", 0.0),
-            confidence=_entry_field(e, "confidence"),
-            corrected_text=_entry_field(e, "corrected_text"),
-            word_corrections=_entry_field(e, "word_corrections"),
-            correction_history=_entry_field(e, "correction_history"),
-            words=_entry_field(e, "words"),
-            alternatives=_entry_field(e, "alternatives"),
-            accepted=_entry_field(e, "accepted", False),
-        )
-        for e in job.dialogue_entries
-    ]
+    return [_to_dialogue_entry(e) for e in job.dialogue_entries]
 
 
 def _to_response(job: SpeechBatchJob) -> JobResponse:
@@ -1216,21 +1220,7 @@ def _load_entry_for_correction(
     if index < 0 or index >= len(job.dialogue_entries):
         raise HTTPException(status_code=404, detail="Segment not found")
 
-    raw = job.dialogue_entries[index]
-    entry = DialogueEntry(
-        speaker=_entry_field(raw, "speaker", ""),
-        text=_entry_field(raw, "text", ""),
-        start_time=_entry_field(raw, "start_time", 0.0),
-        end_time=_entry_field(raw, "end_time", 0.0),
-        confidence=_entry_field(raw, "confidence"),
-        corrected_text=_entry_field(raw, "corrected_text"),
-        word_corrections=_entry_field(raw, "word_corrections"),
-        correction_history=_entry_field(raw, "correction_history"),
-        words=_entry_field(raw, "words"),
-        alternatives=_entry_field(raw, "alternatives"),
-        accepted=_entry_field(raw, "accepted", False),
-    )
-    return job, entry
+    return job, _to_dialogue_entry(job.dialogue_entries[index])
 
 
 def _save_corrected_entry(
@@ -1273,6 +1263,7 @@ async def correct_segment(
     previous_text = entry.effective_text()
     entry.corrected_text = body.corrected_text
     entry.word_corrections = None
+    entry.unreviewed_confidence = None
     entry.correction_history = [
         *(entry.correction_history or []),
         CorrectionEntry(
@@ -1367,6 +1358,7 @@ async def correct_word_range(
         )
     )
     entry.word_corrections = non_overlapping
+    entry.unreviewed_confidence = None
 
     entry.correction_history = [
         *(entry.correction_history or []),
@@ -1416,6 +1408,32 @@ async def correct_word_range(
     return _to_response(job)
 
 
+@router.post(
+    "/jobs/{job_id}/segments/{index}/merge-next", dependencies=[_job_in_jurisdiction(TRANSCRIPT)],
+    response_model=JobResponse,
+)
+async def merge_segment_with_next(
+    job_id: UUID,
+    index: int,
+    session: Session = Depends(get_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> JobResponse:
+    """Combine a segment with the one after it, e.g. to rejoin a sentence split across two.
+
+    Segments after the pair move up one index. See merge_dialogue_entries for how
+    corrections, history and per-word data are carried over.
+    """
+    job, entry = _load_entry_for_correction(session, job_id, index, current_user)
+    if index + 1 >= len(job.dialogue_entries):
+        raise HTTPException(status_code=422, detail="Segment has no next segment to combine with")
+
+    merged = merge_dialogue_entries(entry, _to_dialogue_entry(job.dialogue_entries[index + 1]))
+    entries = list(job.dialogue_entries)
+    entries[index : index + 2] = [merged.model_dump()]
+    _save_entries(session, job, entries)
+    return _to_response(job)
+
+
 @router.post("/jobs/{job_id}/segments/{index}/rollback", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
 async def rollback_segment(
     job_id: UUID,
@@ -1441,6 +1459,8 @@ async def rollback_segment(
     entry.word_corrections = None
     entry.correction_history = None
     entry.accepted = False
+    if entry.merged:
+        entry.unreviewed_confidence = entry.confidence
 
     _save_corrected_entry(session, job, index, entry)
     return _to_response(job)
@@ -1562,6 +1582,9 @@ async def rollback_to_history_entry(
 
     target = history[history_index]
     previous_text = entry.effective_text()
+    if entry.merged:
+        entry.accepted = False
+        entry.unreviewed_confidence = entry.confidence
 
     # Anything currently overlapping the targeted range at all — not just an
     # exact match. An empty overlap means the range is presently untouched

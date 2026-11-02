@@ -2190,6 +2190,177 @@ class TestRenameSpeaker:
         assert response.status_code == 404
 
 
+class TestMergeSegmentWithNext:
+    def _job(self):
+        job = _make_job(status=JobStatus.SUCCEEDED)
+        job.dialogue_entries = [
+            {"speaker": "Speaker 1", "text": "Good", "start_time": 0.0, "end_time": 1.0, "confidence": 0.9},
+            {"speaker": "Speaker 2", "text": "morning.", "start_time": 1.2, "end_time": 2.0, "confidence": 0.5},
+            {"speaker": "Speaker 1", "text": "Please sit.", "start_time": 3.0, "end_time": 4.0, "confidence": 0.95},
+        ]
+        return job
+
+    def _post(self, client, mocker, job, index):
+        from transcribe_api.runtime.db_recording import get_session
+
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        mock_session = MagicMock()
+        client.app.dependency_overrides[get_session] = lambda: mock_session
+        try:
+            return client.post(f"/api/v1/jobs/{job.id}/segments/{index}/merge-next"), mock_session
+        finally:
+            client.app.dependency_overrides.pop(get_session, None)
+
+    def test_returns_404_for_unknown_job(self, client, as_current_user, mocker):
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=None)
+        response = client.post(f"/api/v1/jobs/{uuid.uuid4()}/segments/0/merge-next")
+        assert response.status_code == 404
+
+    def test_returns_404_for_other_callers_job(self, client, as_current_user, mocker):
+        job = self._job()
+        job.user_id = uuid.uuid4()
+        response, _ = self._post(client, mocker, job, 0)
+        assert response.status_code == 404
+
+    def test_returns_422_when_job_not_succeeded(self, client, as_current_user, mocker):
+        job = self._job()
+        job.status = JobStatus.SUBMITTED
+        response, _ = self._post(client, mocker, job, 0)
+        assert response.status_code == 422
+
+    def test_returns_404_for_out_of_range_index(self, client, as_current_user, mocker):
+        response, _ = self._post(client, mocker, self._job(), 5)
+        assert response.status_code == 404
+
+    def test_returns_422_for_last_segment(self, client, as_current_user, mocker):
+        response, session = self._post(client, mocker, self._job(), 2)
+        assert response.status_code == 422
+        session.commit.assert_not_called()
+
+    def test_combines_segment_with_the_next_one(self, client, as_current_user, mocker):
+        response, session = self._post(client, mocker, self._job(), 0)
+
+        assert response.status_code == 200
+        entries = response.json()["dialogue_entries"]
+        assert len(entries) == 2
+        assert entries[0]["speaker"] == "Speaker 1"
+        assert entries[0]["text"] == "Good morning."
+        assert entries[0]["start_time"] == 0.0
+        assert entries[0]["end_time"] == 2.0
+        assert entries[0]["confidence"] == 0.5
+        assert entries[1]["text"] == "Please sit."
+        session.commit.assert_called_once()
+
+    def test_merged_low_confidence_segment_still_needs_review(self, client, as_current_user, mocker):
+        response, _ = self._post(client, mocker, self._job(), 0)
+        assert [item["start_time"] for item in response.json()["needs_review"]] == [0.0]
+
+    def test_unreviewed_half_stays_in_review_until_the_merged_segment_is_corrected(
+        self, client, as_current_user, mocker
+    ):
+        from transcribe_api.runtime.db_recording import get_session
+
+        job = self._job()
+        job.dialogue_entries[0]["confidence"] = 0.95
+        job.dialogue_entries[0]["corrected_text"] = "Good"
+        response, _ = self._post(client, mocker, job, 0)
+        assert response.json()["needs_review"] == [{"speaker": "Speaker 1", "start_time": 0.0, "confidence": 0.5}]
+
+        client.app.dependency_overrides[get_session] = lambda: MagicMock()
+        try:
+            response = client.patch(
+                f"/api/v1/jobs/{job.id}/segments/0", json={"corrected_text": "Good morning."}
+            )
+        finally:
+            client.app.dependency_overrides.pop(get_session, None)
+        assert response.status_code == 200
+        assert response.json()["needs_review"] == []
+
+    def _merged_with_corrected_halves(self, client, mocker):
+        job = self._job()
+        job.dialogue_entries[0]["corrected_text"] = "Good"
+        job.dialogue_entries[0]["correction_history"] = [
+            {"timestamp": "2026-01-01T09:00:00+00:00", "kind": "segment", "previous_text": "Gud", "new_text": "Good"}
+        ]
+        job.dialogue_entries[1]["corrected_text"] = "morning!"
+        response, _ = self._post(client, mocker, job, 0)
+        assert response.json()["needs_review"] == []
+        return job
+
+    def test_history_rollback_on_accepted_merged_segment_puts_it_back_in_review(
+        self, client, as_current_user, mocker
+    ):
+        from transcribe_api.runtime.db_recording import get_session
+
+        job = self._merged_with_corrected_halves(client, mocker)
+        job.dialogue_entries[0]["accepted"] = True
+        client.app.dependency_overrides[get_session] = lambda: MagicMock()
+        try:
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/0/history/0/rollback")
+        finally:
+            client.app.dependency_overrides.pop(get_session, None)
+        assert response.json()["dialogue_entries"][0]["accepted"] is False
+        assert response.json()["needs_review"] == [{"speaker": "Speaker 1", "start_time": 0.0, "confidence": 0.5}]
+
+    def test_history_rollback_on_merged_word_corrections_keeps_display_text(self, client, as_current_user, mocker):
+        from transcribe_api.runtime.db_recording import get_session
+
+        def words(*texts):
+            return [{"text": t, "start_time": 0.0, "end_time": 0.1, "confidence": 0.9} for t in texts]
+
+        def word_fix(index, old, new, text, fixed):
+            return {
+                "word_corrections": [{"start_word_index": index, "end_word_index": index, "text": new}],
+                "correction_history": [
+                    {
+                        "timestamp": "2026-01-01T09:00:00+00:00",
+                        "kind": "word_range",
+                        "previous_text": text,
+                        "new_text": fixed,
+                        "start_word_index": index,
+                        "end_word_index": index,
+                        "previous_phrase": old,
+                        "new_phrase": new,
+                    }
+                ],
+            }
+
+        job = self._job()
+        job.dialogue_entries = [
+            {
+                "speaker": "Speaker 1", "text": "My favourite colour.", "start_time": 0.0, "end_time": 1.0,
+                "words": words("my", "favorite", "color"),
+                **word_fix(2, "color", "hue", "My favourite colour.", "my favorite hue"),
+            },
+            {
+                "speaker": "Speaker 1", "text": "Is blue.", "start_time": 1.0, "end_time": 2.0,
+                "words": words("is", "blue"),
+                **word_fix(1, "blue", "green", "Is blue.", "is green"),
+            },
+        ]
+        self._post(client, mocker, job, 0)
+
+        client.app.dependency_overrides[get_session] = lambda: MagicMock()
+        try:
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/0/history/0/rollback")
+        finally:
+            client.app.dependency_overrides.pop(get_session, None)
+        assert response.json()["dialogue_entries"][0]["corrected_text"] == "My favourite colour. is green"
+
+    @pytest.mark.parametrize("path", ["rollback", "history/0/rollback"])
+    def test_rollback_on_merged_segment_puts_it_back_in_review(self, client, as_current_user, mocker, path):
+        from transcribe_api.runtime.db_recording import get_session
+
+        job = self._merged_with_corrected_halves(client, mocker)
+        client.app.dependency_overrides[get_session] = lambda: MagicMock()
+        try:
+            response = client.post(f"/api/v1/jobs/{job.id}/segments/0/{path}")
+        finally:
+            client.app.dependency_overrides.pop(get_session, None)
+        assert response.status_code == 200
+        assert response.json()["needs_review"] == [{"speaker": "Speaker 1", "start_time": 0.0, "confidence": 0.5}]
+
+
 class TestRollbackSegment:
     def _patch_session(self, client, mocker):
         from transcribe_api.runtime.db_recording import get_session

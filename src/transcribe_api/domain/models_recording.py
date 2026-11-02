@@ -154,9 +154,24 @@ class DialogueEntry(SQLModel):
     # audio/accuracy.py (nothing was actually corrected), but it must still
     # remove the segment from "needs review" (see compute_accuracy()).
     accepted: bool = False
+    # Set on an entry combined from others (merge_dialogue_entries). Its own confidence
+    # and corrections no longer say whether every part has been reviewed, so its review
+    # state is unreviewed_confidence instead: the lowest confidence of a part not yet
+    # corrected or accepted, None once all are. Cleared by a correction; reset to the
+    # whole entry's confidence by a rollback, which can restore unreviewed text.
+    merged: bool = False
+    unreviewed_confidence: float | None = None
 
     def has_corrections(self) -> bool:
         return self.corrected_text is not None or bool(self.word_corrections)
+
+    def review_confidence(self) -> float | None:
+        """The confidence that decides whether this entry still needs review; None once reviewed."""
+        if self.accepted:
+            return None
+        if self.merged:
+            return self.unreviewed_confidence
+        return None if self.has_corrections() else self.confidence
 
     def effective_text(self) -> str:
         """Current text after any corrections — what a clerk would read today."""
@@ -172,6 +187,113 @@ class DialogueEntry(SQLModel):
             parts.append(" ".join(w.text for w in self.words[cursor:]))
             return " ".join(p for p in parts if p)
         return self.text
+
+
+def _join(*parts: str) -> str:
+    return " ".join(p.strip() for p in parts if p.strip())
+
+
+def _shift(start: int | None, end: int | None, offset: int | None) -> tuple[int | None, int | None]:
+    if offset is None or start is None or end is None:
+        return None, None
+    return start + offset, end + offset
+
+
+def merge_dialogue_entries(first: DialogueEntry, second: DialogueEntry) -> DialogueEntry:
+    """Combine two adjacent entries into one, keeping `first`'s speaker and start and `second`'s end.
+
+    If the two overlap so that `first` ends later, that later end is kept, so the
+    result still covers both.
+
+    Word indices are positions in the combined `words` list, so word-range corrections
+    survive only when both entries have words and rebuilding from them reproduces both
+    halves' current text (an untouched half otherwise switches from its display text to
+    the raw words); failing that, corrections are flattened into corrected_text. Each
+    history snapshot gets the other entry's current text added and loses its word range,
+    so rolling back to it restores that whole snapshot: undoing one edit without dropping
+    the other half or rebuilding it from raw words. The lower confidence is kept,
+    unreviewed_confidence carries the review state of each half (see DialogueEntry.merged),
+    and the result is accepted only if both halves were.
+    """
+    words = [*first.words, *second.words] if first.words and second.words else None
+    offset = len(first.words) if words and first.words else None
+    first_text = first.effective_text()
+    second_text = second.effective_text()
+    has_word_corrections = bool(first.word_corrections or second.word_corrections)
+
+    corrected_text = None
+    word_corrections = None
+    if (
+        first.corrected_text is not None
+        or second.corrected_text is not None
+        or (has_word_corrections and offset is None)
+    ):
+        corrected_text = _join(first_text, second_text)
+    elif has_word_corrections:
+        word_corrections = [*(first.word_corrections or [])]
+        for wc in second.word_corrections or []:
+            start, end = _shift(wc.start_word_index, wc.end_word_index, offset)
+            word_corrections.append(WordCorrection(start_word_index=start, end_word_index=end, text=wc.text))
+
+    unlocated = {"start_word_index": None, "end_word_index": None}
+    history = [
+        h.model_copy(
+            update={
+                "previous_text": _join(h.previous_text, second_text),
+                "new_text": _join(h.new_text, second_text),
+                **unlocated,
+            }
+        )
+        for h in first.correction_history or []
+    ]
+    history += [
+        h.model_copy(
+            update={
+                "previous_text": _join(first_text, h.previous_text),
+                "new_text": _join(first_text, h.new_text),
+                **unlocated,
+            }
+        )
+        for h in second.correction_history or []
+    ]
+    history.sort(key=lambda h: h.timestamp)
+
+    alternatives = [
+        group.model_copy(
+            update={
+                "start_word_index": group.start_word_index if offset is not None else None,
+                "end_word_index": group.end_word_index if offset is not None else None,
+            }
+        )
+        for group in first.alternatives or []
+    ]
+    for group in second.alternatives or []:
+        start, end = _shift(group.start_word_index, group.end_word_index, offset)
+        alternatives.append(group.model_copy(update={"start_word_index": start, "end_word_index": end}))
+
+    confidences = [c for c in (first.confidence, second.confidence) if c is not None]
+    unreviewed = [c for c in (first.review_confidence(), second.review_confidence()) if c is not None]
+
+    merged = DialogueEntry(
+        speaker=first.speaker,
+        text=_join(first.text, second.text),
+        start_time=first.start_time,
+        end_time=max(first.end_time, second.end_time),
+        confidence=min(confidences) if confidences else None,
+        corrected_text=corrected_text,
+        word_corrections=word_corrections,
+        correction_history=history or None,
+        words=words,
+        alternatives=alternatives or None,
+        accepted=first.accepted and second.accepted,
+        merged=True,
+        unreviewed_confidence=min(unreviewed) if unreviewed else None,
+    )
+    current_text = _join(first_text, second_text)
+    if merged.word_corrections and merged.effective_text() != current_text:
+        merged.corrected_text = current_text
+        merged.word_corrections = None
+    return merged
 
 
 class CorrectionDatasetEntry(BaseTable, table=True):
