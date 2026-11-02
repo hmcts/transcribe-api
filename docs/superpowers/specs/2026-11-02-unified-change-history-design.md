@@ -74,7 +74,7 @@ None. Every write loads the job, changes the list in memory and commits the whol
 - Our call: every user sees the same history. Each entry records the user and the time, and the web's "Changed by" column shows the real user.
 - Our call: concurrency is an optimistic version check on the transcription. A stale edit or rollback gets a 409, and the UI asks the user to refresh.
 - Our call: a combine entry stores the full pre-merge state of both entries. A rename-all entry stores the affected segment ids and their previous labels.
-- Our call: on a legacy job, a section reset restores the AI text and the changes recorded since this ships, and says that it leaves labels from renames made before this ships as they are. Those renames left no record, so they cannot be detected or refused one by one. This needs the user's confirmation (see "Resets").
+- Our call: on a legacy job, a section reset restores the AI text, undoes the changes recorded since this ships under the same rename-all rules as a new job, and says that it leaves labels from renames made before this ships as they are. Those renames left no record, so they cannot be detected or refused one by one. This needs the user's confirmation (see "Resets").
 - Our call: existing `correction_history` entries on legacy jobs are shown in history but cannot be undone one by one. They record only text snapshots, so undoing them would not be exact. A section reset still clears them, because the AI text (`text`) has never been changed.
 
 ## Goals
@@ -158,12 +158,14 @@ A section reset (decisions 5 and 9) does the following:
 - It deletes the entries it undid from the log.
 - If the section was created by a combine, it splits the section back into the two original sections. Each keeps its pre-combine changes and their entries (our call).
 
-The reset is refused, by the same rule and with the same message as an individual undo, when an entry it would delete or undo has a later dependant in another section. Here is an example. Section A is renamed on its own, then a rename-all covers A and section B, and then B is edited. Resetting A would have to restore A's label from before its own rename, which sits under the rename-all. That would change what the rename-all undoes, so the reset is refused and the message names B. The builder may narrow the rule to the cases that really conflict, but must never let a reset partly undo a multi-section change.
+A reset never leaves a surviving entry with stale before-state. When it deletes a section's single renames and keeps a `rename_all` that covers the section, it rebases that rename-all's stored previous label for the section. The new previous label is the label the section would have with the deleted renames removed: the label set by the previous surviving rename-all for the section, or its AI label if there is none. The section keeps the label of its latest surviving rename-all, or gets its AI label back if none covers it. Here is an example. Section A is renamed from "Speaker 1" to "Judge" on its own, and then a rename-all changes A to "Chair". Resetting A deletes the single rename, keeps "Chair", and rebases the rename-all so that undoing it later restores "Speaker 1", not the deleted "Judge".
+
+The reset is refused, by the same rule and with the same message as an individual undo, when a surviving multi-section change would depend on something the reset removes and cannot be rebased. The main case is splitting a combined section that a later rename-all or combine touched: that change refers to the combined section's id, which the split removes. The builder may narrow the rule to the cases that really conflict, but must never let a reset partly undo a multi-section change or leave a surviving entry that undoes to a deleted state.
 
 On a legacy job (decision 8):
 
 - A section reset is refused if the section is a combine made before this ships. The section has `merged` set and no `combine` entry, and it cannot be split exactly.
-- Renames made before this ships left no record, so nothing can tell which labels they changed, and the API cannot refuse them one by one. A section reset on a legacy job restores the AI text and undoes every change recorded since this ships, including single renames. It does not touch a label changed before this ships. The UI and the API message for a legacy job say plainly that the reset covers the text and the changes made since this ships, not speaker names changed before (our call). The alternative is to refuse section reset on every legacy job, which would also take away text resets that are exact. The user should confirm which they want.
+- Renames made before this ships left no record, so nothing can tell which labels they changed, and the API cannot refuse them one by one. A section reset on a legacy job does what it does on a new job for every change recorded since this ships. It restores the AI text, clears corrections and `accepted`, and removes single renames. It keeps any covering rename-all, with the same rebasing and refusal rules. It does not touch a label changed before this ships. The UI and the API message for a legacy job say plainly that the reset covers the text and the changes made since this ships, not speaker names changed before (our call). The alternative is to refuse section reset on every legacy job, which would also take away text resets that are exact. The user should confirm which they want.
 - Whole-transcription reset is refused.
 
 Whole-transcription reset on a new job replaces the dialogue entries with the stored original AI output. This splits every combined section, restores the original speaker labels and ids, and empties the log. The web asks the user to confirm before sending it (decision 10).
@@ -178,7 +180,11 @@ Anyone who passes `_check_job_access(job, user, "transcript", "write")` and the 
 
 `transcription_job` gains a version number. Every read returns it. Every edit, rollback and reset sends the version it was based on. The write is a compare-and-set: either an `UPDATE ... WHERE id = :id AND version = :expected` that bumps the version, or the equivalent row lock and check. A mismatch returns 409 with a code distinct from the existing "section no longer exists" 409. The web shows "This transcript has changed since you loaded it. Refresh to see the latest version." and does not retry automatically (our call). Combine's `next_segment_id` check can stay as a more specific message.
 
-Rollout order matters. The API should first return the version and accept writes without one. Then the web should send it. Then the API should require it. Otherwise a web deploy that lags the API would fail every write.
+Rollout order matters, for the web and for old API pods.
+
+- Web: the API first returns the version and accepts writes without one. Then the web sends it. Then the API requires it. Otherwise a web deploy that lags the API would fail every write.
+- API: old pods rewrite the transcript without the version or the log. A new pod could then undo a logged change whose before-state predates an old pod's edit, and lose that edit without anyone seeing it. Two releases prevent this. The first release only makes every transcript write bump the version, and checks the version when one is sent. It does not change history. The second release adds the log and the new undo and reset operations. During its rollout, the only other writers are first-release pods, which bump the version.
+- Each log entry records the version before and after it. When an entry's "before" version is not the "after" version of the entry below it, a write happened that the log did not record. Undo stops at that gap: the entries below it become non-undoable, like legacy entries, and the API says why. A section reset or whole-transcription reset is still exact, because it works from the AI text or the stored original output rather than from those entries. An edit made by an old pod during the transition is therefore never discarded by an undo.
 
 ### Training dataset
 
@@ -189,8 +195,8 @@ The dataset must equal a function of the current transcript: for each changed se
 - A section has a row when its final text or its final speaker differs from the AI output. A section whose only change is a rename still has a row. An accept alone produces none.
 - A rename or rename-all updates the final speaker on the affected rows, or creates or deletes them.
 - On new jobs the original speaker comes from the stored original AI output. On legacy jobs it is unknown, because renames made before this ships overwrote it. The builder stores it as null there and does not guess it from the current label, so training can leave those rows out.
-- A combine replaces both original sections' rows with the combined section's row. Undoing the combine or resetting the section restores them. The combined section's `parts` give per-original-section pairs if the builder prefers to keep rows at the original sections' granularity.
-- Whether word-range corrections stay as separate rows or the row is always the whole section is left to the builder, as long as every row reflects the final state.
+- A combined section keeps the lineage of its sources. Each source's segment id, its original AI speaker label and its AI text come from the stored pre-merge states and the original AI output. `EntryPart` today has no source id or speaker, so it gains them for combines made after this ships. The dataset holds one row per source segment, or one structured row that lists every source with its own original speaker. Either way, each source's original speaker is paired with the combined section's final speaker. A section produces training data when any source's text or speaker differs from the AI output, for example when two speakers' sections are combined under the first speaker's label. Undoing the combine or resetting the section restores the sources' own rows. For combines made before this ships, the source ids and speakers are unknown and are stored as null.
+- Whether word-range corrections stay as separate rows or the row is always the whole section or source is left to the builder, as long as every row reflects the final state.
 - `record_correction_dataset_entry` keeps its `CORRECTIONS_DATASET_EXPORT_ENABLED` check, and the class keeps its compliance note. When the flag is off, nothing is written or deleted.
 
 The flag has been off everywhere, so the table should be empty. The builder should check this in each environment before changing its key. If it has rows, they can be rebuilt from the current transcripts.
@@ -217,7 +223,7 @@ The new operations are: undo the latest change for a section, undo the latest ch
 ## Constraints
 
 - Migrations go only through master (README "Branches and environments"). The schema changes land first as additive Alembic migrations in their own PR to master: the stored original AI output, the version column, the log storage, and the dataset's segment id and original and final speaker columns. Then master is merged into develop, and then the feature goes in. The next revision is `0006`. `tests/unit/test_migrations.py` covers migrations.
-- Old and new pods run side by side during a rollout. New code must read jobs whose history is still inline `correction_history`, and old pods' writes in that window must not corrupt the log. A job whose results an old pod saves during the rollout has no stored copy, so it is legacy.
+- Old and new pods run side by side during a rollout. New code must read jobs whose history is still inline `correction_history`, and old pods' writes in that window must not corrupt the log or be lost to an undo (see "Concurrency" for the two releases and the version gap rule). A job whose results an old pod saves during the rollout has no stored copy, so it is legacy.
 - Both repos have tests, and this work must extend them. transcribe-api uses pytest under `tests/unit/` (for example `recording/unit/api/test_routes.py`, `recording/unit/database/test_correction_dataset.py` and `recording/integration/test_dialogue_entries_persistence.py`). transcribe-web uses Vitest under `tests/recording/unit/` (the segment, speaker and merge-next route tests, `modification-history.test.ts` and `modification-history-table.test.tsx`) and Playwright under `tests/recording/e2e/` (`modification-history.spec.ts` and `speaker-rename.spec.ts`).
 - The web calls the API only through Next.js API routes, which must pass through the version, the reset flags and the new 409 code.
 
@@ -228,7 +234,9 @@ Tests should cover at least the following:
 - Undoing a rename-all restores every label.
 - Undoing a combine gives back both original sections exactly as they were, with their ids.
 - An undo or reset that would affect a dependent change is refused, and the message names the section.
-- A section reset restores single renames, keeps a covering rename-all, and splits a combined section.
+- A section reset restores single renames, keeps a covering rename-all and rebases its previous label, and splits a combined section.
+- An unrecorded write between two log entries stops undo at that point.
+- A combine of two sections with different speakers produces training rows that keep each source's original speaker.
 - Whole-transcription reset on a new job gives back the stored original AI output and an empty log. The web asks for confirmation first.
 - On a legacy job, whole-transcription reset and undoing or resetting a legacy combine are refused with the reason, and the web hides those controls.
 - Every dataset row matches the final transcript after any sequence of changes, undos and resets with the flag on, including rename-only sections. Nothing is written with the flag off.
@@ -241,4 +249,4 @@ Tests should cover at least the following:
 - Exact endpoint paths and request and response shapes.
 - UI layout details, including the wording of the confirmation and the refusal messages.
 - How the user is shown (email, name from the token, or a new column).
-- Whether dataset rows are per section, per original section or per word range, within the rules in "Training dataset".
+- Whether dataset rows are per section, per source segment, structured, or per word range, within the rules in "Training dataset".
