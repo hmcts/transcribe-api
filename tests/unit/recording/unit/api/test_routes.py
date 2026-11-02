@@ -3269,3 +3269,20 @@ class TestSegmentIds:
             after = client.post(f"/api/v1/jobs/{job.id}/segments/0/merge-next").json()["accuracy"]
         assert after["confidence_score"] == before["confidence_score"]
         assert after["words_transcribed"] == before["words_transcribed"]
+
+    def test_merge_checks_the_segment_the_caller_expects_next(self, client, as_current_user, mocker):
+        job = self._job()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+        ids = self._ids(client, job)
+        with self._session(client) as session:
+            wrong = client.post(
+                f"/api/v1/jobs/{job.id}/segments/{ids[0]}/merge-next", json={"next_segment_id": ids[2]}
+            )
+            session.commit.assert_not_called()
+            right = client.post(
+                f"/api/v1/jobs/{job.id}/segments/{ids[0]}/merge-next", json={"next_segment_id": ids[1]}
+            )
+        assert wrong.status_code == 409
+        assert "after this one has changed" in wrong.json()["detail"]
+        assert right.status_code == 200
+        assert len(right.json()["dialogue_entries"]) == 2

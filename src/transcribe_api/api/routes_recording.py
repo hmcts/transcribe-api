@@ -420,6 +420,11 @@ class RenameSpeakerRequest(BaseModel):
         return v.strip() if isinstance(v, str) else v
 
 
+class MergeNextRequest(BaseModel):
+    # The segment the caller expects to follow; another must not be combined in its place.
+    next_segment_id: str | None = None
+
+
 class RollbackHistoryRequest(BaseModel):
     history_index: int = Field(ge=0)
 
@@ -1447,6 +1452,7 @@ async def correct_word_range(
 async def merge_segment_with_next(
     job_id: UUID,
     segment: str,
+    body: MergeNextRequest | None = None,
     session: Session = Depends(get_session),
     current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> JobResponse:
@@ -1458,8 +1464,17 @@ async def merge_segment_with_next(
     job, index, entry = _load_entry_for_correction(session, job_id, segment, current_user)
     if index + 1 >= len(job.dialogue_entries):
         raise HTTPException(status_code=422, detail="Segment has no next segment to combine with")
+    next_raw = job.dialogue_entries[index + 1]
+    if body and body.next_segment_id and _entry_field(next_raw, "id") != body.next_segment_id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The segment after this one has changed: it may have been combined with another. "
+                "Reload the transcript and try again."
+            ),
+        )
 
-    merged = merge_dialogue_entries(entry, _to_dialogue_entry(job.dialogue_entries[index + 1]))
+    merged = merge_dialogue_entries(entry, _to_dialogue_entry(next_raw))
     entries = list(job.dialogue_entries)
     entries[index : index + 2] = [merged.model_dump()]
     _save_entries(session, job, entries)
