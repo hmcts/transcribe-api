@@ -2404,6 +2404,31 @@ class TestMergeSegmentWithNext:
         assert summary.corrected_percent == expected.corrected_percent
         assert summary.word_error_rate == expected.word_error_rate
 
+    def test_a_segment_edit_after_word_edits_leaves_an_untouched_part_uncorrected(
+        self, client, as_current_user, mocker
+    ):
+        from transcribe_api.domain.models_recording import DialogueEntry
+        from transcribe_api.runtime.db_recording import get_session
+
+        def words(*texts):
+            return [{"text": w, "start_time": 0.0, "end_time": 1.0, "confidence": 0.9} for w in texts]
+
+        job = self._job()
+        job.dialogue_entries[0].update(text="Hello world", words=words("hello", "world"))
+        job.dialogue_entries[1].update(text="this iz", words=words("this", "iz"))
+        response, _ = self._post(client, mocker, job, 0)
+        assert response.status_code == 200
+        client.app.dependency_overrides[get_session] = lambda: MagicMock()
+        try:
+            segment = f"/api/v1/jobs/{job.id}/segments/{_sid(job)}"
+            body = {"start_word_index": 3, "end_word_index": 3, "corrected_text": "is"}
+            assert client.patch(f"{segment}/words", json=body).status_code == 200
+            assert client.patch(segment, json={"corrected_text": "hello world this IS"}).status_code == 200
+        finally:
+            client.app.dependency_overrides.pop(get_session, None)
+        merged = DialogueEntry(**job.dialogue_entries[0])
+        assert [p.corrected for p in merged.current_parts()] == [False, True]
+
 
 class TestRollbackSegment:
     def _patch_session(self, client, mocker):

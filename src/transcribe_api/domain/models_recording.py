@@ -131,12 +131,17 @@ class EntryPart(SQLModel):
     merged, and updated if the merged text is edited later), so scoring doesn't have to
     infer it from the wording: a change of capitalisation alone is still a correction.
     None on parts stored before it existed, which are then judged by their wording.
+
+    `word_count` is how many of the merged entry's `words` are this segment's, so word-range
+    corrections can be placed in the right part. None if unknown, when the words are matched
+    to parts by aligning them with their text.
     """
 
     text: str
     current_text: str
     confidence: float | None = None
     corrected: bool | None = None
+    word_count: int | None = None
 
 
 class DialogueEntry(SQLModel):
@@ -217,14 +222,31 @@ class DialogueEntry(SQLModel):
                     current_text=current,
                     confidence=self.confidence,
                     corrected=self.has_corrections(),
+                    word_count=len(self.words) if self.words else None,
                 )
             ]
         if not self.has_corrections():
             return [_with_corrected(p, False) for p in _shared_out(self.parts, current)]
-        legacy_only = all(p.corrected is None for p in self.parts)
-        if self.corrected_text is None and self.word_corrections and self.words and not legacy_only:
+        if self._shares_follow_words() and self.words and self.word_corrections:
             return _shared_out_by_word(self.parts, self.words, self.word_corrections)
         return _shared_out(self.parts, current)
+
+    def _shares_follow_words(self) -> bool:
+        return (
+            bool(self.parts and self.words and self.word_corrections)
+            and self.corrected_text is None
+            and not all(p.corrected is None for p in self.parts or [])
+        )
+
+    def settle_parts(self) -> None:
+        """Store each part's current share and correction state.
+
+        Called before a change stops the text coming from word-range corrections: their
+        shares come from `words`, whose casing can differ from the parts' stored text, so
+        comparing the new text with that stored text would count unrelated casing changes.
+        """
+        if self._shares_follow_words():
+            self.parts = self.current_parts()
 
     def effective_text(self) -> str:
         """Current text after any corrections — what a clerk would read today."""
@@ -309,7 +331,14 @@ def _word_tokens(
 
 
 def _word_owners(parts: list[EntryPart], words: list[WordInfo]) -> list[int]:
-    """The index of the part each word belongs to, by aligning the words with the parts' ASR text."""
+    """The index of the part each word belongs to.
+
+    From the parts' word counts when all are known, otherwise by aligning the words with
+    the parts' ASR text.
+    """
+    counts = [p.word_count for p in parts]
+    if None not in counts and sum(c or 0 for c in counts) == len(words):
+        return [i for i, count in enumerate(counts) for _ in range(count or 0)]
     token_owners = _token_owners([p.text for p in parts], " ".join(w.text for w in words))
     owners: list[int] = []
     token = 0

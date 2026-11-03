@@ -1305,6 +1305,7 @@ async def correct_segment(
     job, index, entry = _load_entry_for_correction(session, job_id, segment, current_user)
 
     previous_text = entry.effective_text()
+    entry.settle_parts()
     entry.corrected_text = body.corrected_text
     entry.word_corrections = None
     entry.unreviewed_confidence = None
@@ -1714,6 +1715,7 @@ async def rollback_to_history_entry(
         ]
     else:
         restored_text = target.previous_text
+        entry.settle_parts()
         entry.corrected_text = None if restored_text == entry.text else restored_text
         entry.word_corrections = None
         entry.correction_history = [
