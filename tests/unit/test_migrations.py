@@ -355,6 +355,15 @@ ALLOWED_LIVE_WRITES = {
 }
 
 
+def _top_level(statement: str) -> str:
+    """The statement with string literals emptied and every parenthesised part collapsed
+    to (), so a pattern sees only its outermost clauses."""
+    flat = re.sub(r"'(?:[^']|'')*'", "''", statement)
+    while (collapsed := re.sub(r"\([^()]*\)", "()", flat)) != flat:
+        flat = collapsed
+    return flat
+
+
 def _forbidden_live_writes(revision: str, sql: str) -> list[str]:
     """The statements of one migration's SQL that write a live-edited table, less the
     ones its revision is allowed (ALLOWED_LIVE_WRITES)."""
@@ -369,7 +378,7 @@ def _forbidden_live_writes(revision: str, sql: str) -> list[str]:
         # The allowed shape's value or WHERE could hide a second write in a subquery.
         return bool(
             allowed
-            and allowed.match(statement)
+            and allowed.match(_top_level(statement))
             and len(_LIVE_WRITE.findall(statement)) == 1
             and not _truncates_a_live_table(statement)
         )
@@ -458,6 +467,8 @@ def test_only_the_revision_that_backfills_a_new_jurisdiction_column_may_write_do
     assert _forbidden_live_writes("0006", f"{backfill};\n") == []
     assert _forbidden_live_writes("0007", f"{backfill};\n") == [backfill]
     assert _forbidden_live_writes("0006", "UPDATE jurisdiction SET settings = '{}';\n") != []
+    subquery = "UPDATE document_content SET jurisdiction_id = (SELECT id FROM jurisdiction WHERE code = 'IAC')"
+    assert _forbidden_live_writes("0006", f"{subquery};\n") == []
 
 
 @pytest.mark.parametrize(
@@ -467,9 +478,11 @@ def test_only_the_revision_that_backfills_a_new_jurisdiction_column_may_write_do
         "(WITH u AS (UPDATE document_content SET content = '{}' RETURNING id) SELECT id FROM u)",
         "UPDATE document_content SET jurisdiction_id = "
         "(WITH d AS (DELETE FROM jurisdiction RETURNING id) SELECT id FROM d LIMIT 1)",
+        "UPDATE document_content SET jurisdiction_id = (SELECT id FROM jurisdiction WHERE code = 'IAC'), "
+        "content = '{}'",
     ],
 )
-def test_the_allowed_backfill_cannot_carry_a_second_live_write(statement):
+def test_the_allowed_backfill_cannot_carry_another_write(statement):
     assert _forbidden_live_writes("0006", f"{statement};\n") == [statement]
 
 
