@@ -1,6 +1,14 @@
 """Unit tests for accuracy/needs-review computation."""
 
-from transcribe_api.domain.models_recording import DialogueEntry, merge_dialogue_entries
+import pytest
+
+from transcribe_api.domain.models_recording import (
+    DialogueEntry,
+    EntryPart,
+    WordCorrection,
+    WordInfo,
+    merge_dialogue_entries,
+)
 from transcribe_api.stt.accuracy import DEFAULT_CONFIDENCE_THRESHOLD, compute_accuracy
 
 
@@ -239,3 +247,318 @@ class TestAccuracyAcrossMerges:
         merged.corrected_text = "please sit down thank you very much"
         separate = [sit.model_copy(update={"corrected_text": "please sit down"}), thanks]
         assert self._summary([merged]).word_error_rate == self._summary(separate).word_error_rate
+
+    def test_a_capitalisation_only_correction_scores_the_same_before_and_after_a_merge(self):
+        case = _entry(text="hello world", start=0, end=1, confidence=0.9, corrected="Hello world")
+        untouched = _entry(text="this is fine", start=1, end=2, confidence=0.9)
+        before = self._summary([case, untouched])
+        after = self._summary([merge_dialogue_entries(case, untouched)])
+        assert before.corrected_percent == 50.0
+        assert after.corrected_percent == before.corrected_percent
+        assert after.word_error_rate == before.word_error_rate
+
+    def test_merging_two_corrections_one_of_them_capitalisation_only_keeps_both_scored(self):
+        first = _entry(text="hello world", start=0, end=1, confidence=0.9, corrected="Hello world")
+        second = _entry(text="this iz", start=1, end=2, confidence=0.9, corrected="this is")
+        before = self._summary([first, second])
+        after = self._summary([merge_dialogue_entries(first, second)])
+        assert before.word_error_rate == 25.0
+        assert before.corrected_percent == 100.0
+        assert after.word_error_rate == 25.0
+        assert after.corrected_percent == 100.0
+
+    def test_untouched_parts_stay_out_of_the_score_after_a_merge(self):
+        entries = [
+            _entry(text="hello world", start=0, end=1, confidence=0.9, corrected="Hello world"),
+            _entry(text="this iz", start=1, end=2, confidence=0.9),
+            _entry(text="all rise", start=2, end=3, confidence=0.9),
+        ]
+        merged = merge_dialogue_entries(merge_dialogue_entries(entries[0], entries[1]), entries[2])
+        assert [p.corrected for p in merged.parts] == [True, False, False]
+        assert self._summary([merged]).corrected_percent == self._summary(entries).corrected_percent
+        assert self._summary([merged]).corrected_percent == pytest.approx(100 / 3)
+
+    def test_a_capitalisation_only_edit_after_a_merge_counts_for_that_part(self):
+        a = _entry(text="hello world", start=0, end=1, confidence=0.9)
+        b = _entry(text="this is fine", start=1, end=2, confidence=0.9)
+        merged = merge_dialogue_entries(a, b)
+        merged.corrected_text = "Hello world this is fine"
+        separate = [a.model_copy(update={"corrected_text": "Hello world"}), b]
+        assert self._summary([merged]).corrected_percent == self._summary(separate).corrected_percent == 50.0
+        assert self._summary([merged]).word_error_rate == self._summary(separate).word_error_rate
+
+    def test_the_correction_state_survives_a_second_merge(self):
+        a = _entry(text="hello world", start=0, end=1, confidence=0.9, corrected="Hello world")
+        b = _entry(text="this is fine", start=1, end=2, confidence=0.9)
+        c = _entry(text="all rise", start=2, end=3, confidence=0.9)
+        merged = merge_dialogue_entries(merge_dialogue_entries(a, b), c)
+        assert self._summary([merged]).corrected_percent == self._summary([a, b, c]).corrected_percent
+
+    def test_parts_stored_without_a_correction_state_are_judged_by_their_wording_as_before(self):
+        legacy = DialogueEntry(
+            speaker="0",
+            text="hello world this iz",
+            start_time=0,
+            end_time=2,
+            confidence=0.9,
+            corrected_text="Hello world this is",
+            merged=True,
+            parts=[
+                EntryPart(text="hello world", current_text="Hello world", confidence=0.9),
+                EntryPart(text="this iz", current_text="this is", confidence=0.9),
+            ],
+        )
+        assert all(p.corrected is None for p in legacy.parts)
+        summary = self._summary([legacy])
+        # Only the part whose words changed is scored, exactly as before the state existed.
+        assert summary.corrected_percent == 50.0
+        assert summary.word_error_rate == 50.0
+
+    def test_legacy_parts_round_trip_without_gaining_a_correction_state(self):
+        part = EntryPart.model_validate({"text": "a b", "current_text": "a b", "confidence": 0.5})
+        assert part.corrected is None
+
+    def _rolled_back_then_merged(self, *, hard):
+        a = _entry(text="hello world", start=0, end=1, confidence=0.9, corrected="Hello world")
+        b = _entry(text="this is fine", start=1, end=2, confidence=0.9)
+        c = _entry(text="all rize", start=2, end=3, confidence=0.9, corrected="all rise")
+        merged = merge_dialogue_entries(a, b)
+        merged.corrected_text = None
+        if hard:  # what rollback_segment does
+            merged.parts = [p.model_copy(update={"current_text": p.text, "corrected": False}) for p in merged.parts]
+        never_corrected = [a.model_copy(update={"corrected_text": None}), b, c]
+        return merge_dialogue_entries(merged, c), never_corrected
+
+    @pytest.mark.parametrize("hard", [True, False])
+    def test_a_rolled_back_merged_part_is_not_counted_again_when_merged_with_a_corrected_segment(self, hard):
+        again, never_corrected = self._rolled_back_then_merged(hard=hard)
+        assert [p.corrected for p in again.parts] == [False, False, True]
+        assert self._summary([again]).word_error_rate == self._summary(never_corrected).word_error_rate
+        assert self._summary([again]).corrected_percent == self._summary(never_corrected).corrected_percent
+        assert self._summary([again]).corrected_percent == pytest.approx(100 / 3)
+
+    def test_editing_a_part_again_after_a_rollback_counts_it_again(self):
+        again, _ = self._rolled_back_then_merged(hard=True)
+        again.corrected_text = "Hello world this is fine all rise"
+        assert [p.corrected for p in again.current_parts()] == [True, False, True]
+        assert self._summary([again]).corrected_percent == pytest.approx(200 / 3)
+
+    def test_a_rollback_leaves_legacy_parts_without_a_correction_state(self):
+        part = EntryPart(text="a b", current_text="A b", confidence=0.5)
+        merged = DialogueEntry(speaker="0", text="a b c", start_time=0, end_time=1, merged=True, parts=[part, EntryPart(text="c", current_text="c")])
+        merged.corrected_text = "a b c"
+        assert [p.corrected for p in merged.current_parts()] == [None, None]
+
+    @staticmethod
+    def _with_words(text, words, start):
+        entry = _entry(text=text, start=start, end=start + 1, confidence=0.9)
+        entry.words = [WordInfo(text=w, start_time=start, end_time=start + 1, confidence=0.9) for w in words.split()]
+        return entry
+
+    def test_a_word_range_edit_after_a_merge_leaves_an_untouched_part_out_of_the_score(self):
+        hello = self._with_words("Hello world", "hello world", 0)
+        iz = self._with_words("this iz", "this iz", 1)
+        merged = merge_dialogue_entries(hello, iz)
+        merged.word_corrections = [WordCorrection(start_word_index=3, end_word_index=3, text="is")]
+        separate = [hello, iz.model_copy(update={"corrected_text": "this is"})]
+        assert [p.corrected for p in merged.current_parts()] == [False, True]
+        assert self._summary([merged]).corrected_percent == self._summary(separate).corrected_percent == 50.0
+        assert self._summary([merged]).word_error_rate == self._summary(separate).word_error_rate
+
+    def test_editing_one_part_keeps_another_parts_correction_that_matches_its_asr_text(self):
+        same = _entry(text="hello world", start=0, end=1, confidence=0.9, corrected="hello world")
+        iz = _entry(text="this iz", start=1, end=2, confidence=0.9, corrected="this is")
+        merged = merge_dialogue_entries(same, iz)
+        merged.corrected_text = "hello world this was"
+        separate = [same, iz.model_copy(update={"corrected_text": "this was"})]
+        assert [p.corrected for p in merged.current_parts()] == [True, True]
+        assert self._summary([merged]).corrected_percent == self._summary(separate).corrected_percent == 100.0
+        assert self._summary([merged]).word_error_rate == self._summary(separate).word_error_rate
+
+    @pytest.mark.parametrize("replacement", ["Hello", "hello"])
+    def test_a_word_range_edit_that_keeps_the_text_counts_the_same_before_and_after_a_merge(self, replacement):
+        hello = self._with_words("Hello world", "hello world", 0)
+        iz = self._with_words("this iz", "this iz", 1)
+        edit = [WordCorrection(start_word_index=0, end_word_index=0, text=replacement)]
+        merged = merge_dialogue_entries(hello, iz)
+        merged.word_corrections = edit
+        separate = [hello.model_copy(update={"word_corrections": edit}), iz]
+        assert [p.corrected for p in merged.current_parts()] == [True, False]
+        assert self._summary([merged]).corrected_percent == self._summary(separate).corrected_percent == 50.0
+
+    def test_a_history_rollback_to_the_asr_text_clears_every_parts_correction_state(self):
+        same = _entry(text="hello world", start=0, end=1, confidence=0.9, corrected="hello world")
+        iz = _entry(text="this iz", start=1, end=2, confidence=0.9, corrected="this is")
+        rize = _entry(text="all rize", start=2, end=3, confidence=0.9, corrected="all rise")
+        merged = merge_dialogue_entries(same, iz)
+        merged.corrected_text = None
+        assert [p.corrected for p in merged.current_parts()] == [False, False]
+        again = merge_dialogue_entries(merged, rize)
+        never_corrected = [
+            same.model_copy(update={"corrected_text": None}),
+            iz.model_copy(update={"corrected_text": None}),
+            rize,
+        ]
+        assert [p.corrected for p in again.parts] == [False, False, True]
+        assert self._summary([again]).corrected_percent == self._summary(never_corrected).corrected_percent
+        assert self._summary([again]).word_error_rate == self._summary(never_corrected).word_error_rate
+
+    def test_a_part_emptied_by_a_word_range_edit_stays_corrected_after_another_merge(self):
+        one, two, three = (self._with_words(t, t, i) for i, t in enumerate(["one", "two", "three"]))
+        merged = merge_dialogue_entries(one, two)
+        merged.word_corrections = [WordCorrection(start_word_index=0, end_word_index=1, text="one")]
+        again = merge_dialogue_entries(merged, three)
+        separate = [
+            one.model_copy(update={"corrected_text": "one"}),
+            two.model_copy(update={"corrected_text": ""}),
+            three,
+        ]
+        assert [p.corrected for p in again.current_parts()] == [True, True, False]
+        assert self._summary([again]).corrected_percent == pytest.approx(200 / 3)
+        assert self._summary([again]).corrected_percent == self._summary(separate).corrected_percent
+        assert self._summary([again]).word_error_rate == self._summary(separate).word_error_rate
+
+    def test_re_editing_a_part_emptied_by_a_word_range_edit_scores_it_as_its_own_text(self):
+        one, two, three = (self._with_words(t, t, i) for i, t in enumerate(["one", "two", "three"]))
+        merged = merge_dialogue_entries(one, two)
+        merged.word_corrections = [WordCorrection(start_word_index=0, end_word_index=1, text="one")]
+        again = merge_dialogue_entries(merged, three)
+        again.word_corrections = [WordCorrection(start_word_index=1, end_word_index=1, text="two new")]
+        separate = [one, two.model_copy(update={"corrected_text": "two new"}), three]
+        parts = again.current_parts()
+        assert [p.current_text for p in parts] == ["one", "two new", "three"]
+        assert [p.corrected for p in parts] == [False, True, False]
+        assert self._summary([again]).word_error_rate == self._summary(separate).word_error_rate == 50.0
+        assert self._summary([again]).corrected_percent == self._summary(separate).corrected_percent
+
+    @pytest.mark.parametrize(("replacement", "wer"), [("one two three four", 0.0), ("one two three for", 25.0)])
+    def test_a_word_range_edit_across_merged_parts_is_split_between_them(self, replacement, wer):
+        first = self._with_words("one two", "one two", 0)
+        second = self._with_words("three four", "three four", 1)
+        merged = merge_dialogue_entries(first, second)
+        merged.word_corrections = [WordCorrection(start_word_index=0, end_word_index=3, text=replacement)]
+        parts = merged.current_parts()
+        assert [p.current_text for p in parts] == ["one two", replacement.removeprefix("one two ")]
+        assert [p.corrected for p in parts] == [True, True]
+        assert self._summary([merged]).word_error_rate == wer
+
+    def test_a_word_range_edit_counts_for_a_new_part_merged_with_legacy_parts(self):
+        legacy = DialogueEntry(
+            speaker="0",
+            text="one two",
+            start_time=0,
+            end_time=2,
+            confidence=0.9,
+            words=[WordInfo(text=w, start_time=0, end_time=2, confidence=0.9) for w in ["one", "two"]],
+            merged=True,
+            parts=[
+                EntryPart(text="one", current_text="one", confidence=0.9),
+                EntryPart(text="two", current_text="two", confidence=0.9),
+            ],
+        )
+        merged = merge_dialogue_entries(legacy, self._with_words("Three", "three", 2))
+        merged.word_corrections = [WordCorrection(start_word_index=2, end_word_index=2, text="Three")]
+        assert [p.corrected for p in merged.current_parts()] == [None, None, True]
+        assert self._summary([merged]).corrected_percent == pytest.approx(100 / 3)
+
+    def test_merging_legacy_parts_with_a_new_segment_leaves_their_score_unchanged(self):
+        legacy = DialogueEntry(
+            speaker="0",
+            text="one two three",
+            start_time=0,
+            end_time=3,
+            confidence=0.9,
+            words=[WordInfo(text=w, start_time=0, end_time=3, confidence=0.9) for w in ["one", "two", "three"]],
+            word_corrections=[WordCorrection(start_word_index=1, end_word_index=1, text="two new")],
+            merged=True,
+            parts=[
+                EntryPart(text="one", current_text="one two new", confidence=0.9),
+                EntryPart(text="two", current_text="", confidence=0.9),
+                EntryPart(text="three", current_text="three", confidence=0.9),
+            ],
+        )
+        four = self._with_words("four", "four", 3)
+        merged = merge_dialogue_entries(legacy, four)
+        assert merged.word_corrections
+        assert self._summary([merged]).word_error_rate == self._summary([legacy, four]).word_error_rate
+        assert self._summary([merged]).corrected_percent == self._summary([legacy, four]).corrected_percent
+        merged.word_corrections = [WordCorrection(start_word_index=1, end_word_index=1, text="two")]
+        assert [p.current_text for p in merged.current_parts()] == ["one", "two", "three", "four"]
+        assert self._summary([merged]).corrected_percent == 0.0
+
+    def test_an_edit_next_to_legacy_parts_gives_each_word_to_one_part(self):
+        legacy = DialogueEntry(
+            speaker="0",
+            text="one two words",
+            start_time=0,
+            end_time=2,
+            confidence=0.9,
+            words=[WordInfo(text=w, start_time=0, end_time=2, confidence=0.9) for w in ["one", "two", "words"]],
+            merged=True,
+            parts=[
+                EntryPart(text="one", current_text="one", confidence=0.9),
+                EntryPart(text="two words", current_text="two words", confidence=0.9),
+            ],
+        )
+        merged = merge_dialogue_entries(legacy, self._with_words("three", "three", 2))
+        merged.word_corrections = [WordCorrection(start_word_index=3, end_word_index=3, text="new three")]
+        parts = merged.current_parts()
+        assert [p.current_text for p in parts] == ["one", "two words", "new three"]
+        assert [p.corrected for p in parts] == [None, None, True]
+        assert self._summary([merged]).corrected_percent == pytest.approx(100 / 3)
+        separate = [
+            _entry(text="one", start=0, end=1, confidence=0.9),
+            _entry(text="two words", start=1, end=2, confidence=0.9),
+            _entry(text="three", start=2, end=3, confidence=0.9, corrected="new three"),
+        ]
+        assert self._summary([merged]).word_error_rate == self._summary(separate).word_error_rate
+
+    def test_a_new_part_between_legacy_parts_keeps_the_text_in_order(self):
+        def legacy(first, second, start):
+            return DialogueEntry(
+                speaker="0",
+                text=f"{first} {second}",
+                start_time=start,
+                end_time=start + 1,
+                confidence=0.9,
+                words=[WordInfo(text=w, start_time=start, end_time=start + 1, confidence=0.9) for w in [first, second]],
+                merged=True,
+                parts=[
+                    EntryPart(text=first, current_text=first, confidence=0.9),
+                    EntryPart(text=second, current_text=second, confidence=0.9),
+                ],
+            )
+
+        merged = merge_dialogue_entries(
+            merge_dialogue_entries(legacy("a", "b", 0), self._with_words("c", "c", 1)), legacy("d", "g", 2)
+        )
+        merged.word_corrections = [
+            WordCorrection(start_word_index=1, end_word_index=1, text="b c d"),
+            WordCorrection(start_word_index=2, end_word_index=2, text="e"),
+            WordCorrection(start_word_index=3, end_word_index=3, text="f"),
+        ]
+        parts = merged.current_parts()
+        assert " ".join(p.current_text for p in parts) == merged.effective_text() == "a b c d e f g"
+        assert [p.current_text for p in parts] == ["a", "b c d", "e", "f", "g"]
+        assert [p.corrected for p in parts] == [None, None, True, None, None]
+
+    def test_words_stay_with_their_own_segment_when_its_text_splits_differently(self):
+        im = self._with_words("I'm", "i am", 0)
+        am = self._with_words("AM", "a m", 1)
+        im.word_corrections = [WordCorrection(start_word_index=0, end_word_index=0, text="i")]
+        am.word_corrections = [WordCorrection(start_word_index=0, end_word_index=0, text="a")]
+        merged = merge_dialogue_entries(im, am)
+        assert merged.word_corrections
+        assert [p.current_text for p in merged.current_parts()] == ["i am", "a m"]
+        assert self._summary([merged]).word_error_rate == self._summary([im, am]).word_error_rate
+
+    def test_switching_from_word_edits_to_a_segment_edit_leaves_untouched_parts_out(self):
+        hello = self._with_words("Hello world", "hello world", 0)
+        iz = self._with_words("this iz", "this iz", 1)
+        merged = merge_dialogue_entries(hello, iz)
+        merged.word_corrections = [WordCorrection(start_word_index=3, end_word_index=3, text="is")]
+        merged.settle_parts()
+        merged.corrected_text = "hello world this IS"
+        merged.word_corrections = None
+        assert [p.corrected for p in merged.current_parts()] == [False, True]
+        assert self._summary([merged]).corrected_percent == 50.0
