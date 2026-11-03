@@ -364,7 +364,17 @@ def _forbidden_live_writes(revision: str, sql: str) -> list[str]:
         statement for statement in statements if _LIVE_WRITE.search(statement) or _truncates_a_live_table(statement)
     ]
     allowed = ALLOWED_LIVE_WRITES.get(revision)
-    return [statement for statement in writes if not (allowed and allowed.match(statement))]
+
+    def is_allowed(statement: str) -> bool:
+        # The allowed shape's value or WHERE could hide a second write in a subquery.
+        return bool(
+            allowed
+            and allowed.match(statement)
+            and len(_LIVE_WRITE.findall(statement)) == 1
+            and not _truncates_a_live_table(statement)
+        )
+
+    return [statement for statement in writes if not is_allowed(statement)]
 
 
 def _revisions_after_0004() -> list[tuple[str, str]]:
@@ -448,6 +458,19 @@ def test_only_the_revision_that_backfills_a_new_jurisdiction_column_may_write_do
     assert _forbidden_live_writes("0006", f"{backfill};\n") == []
     assert _forbidden_live_writes("0007", f"{backfill};\n") == [backfill]
     assert _forbidden_live_writes("0006", "UPDATE jurisdiction SET settings = '{}';\n") != []
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE document_content SET jurisdiction_id = 'a' WHERE id IN "
+        "(WITH u AS (UPDATE document_content SET content = '{}' RETURNING id) SELECT id FROM u)",
+        "UPDATE document_content SET jurisdiction_id = "
+        "(WITH d AS (DELETE FROM jurisdiction RETURNING id) SELECT id FROM d LIMIT 1)",
+    ],
+)
+def test_the_allowed_backfill_cannot_carry_a_second_live_write(statement):
+    assert _forbidden_live_writes("0006", f"{statement};\n") == [statement]
 
 
 class _FakeConnection:
