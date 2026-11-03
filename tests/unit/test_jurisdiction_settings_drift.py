@@ -113,6 +113,16 @@ def test_compare_finds_every_kind_of_difference_by_key():
     assert drift.features_changed == ["added_flag", "hearing_recordings"]
 
 
+@pytest.mark.parametrize("value", [1, 0, "true", None])
+def test_a_flag_that_is_not_a_bool_is_a_change(value):
+    live = _shipped()
+    live["features"]["hearing_recordings"] = value
+
+    drift = drift_check.compare_settings(live, drift_check.SHIPPED_IAC_SETTINGS)
+
+    assert drift.features_changed == ["hearing_recordings"]
+
+
 def test_compare_tolerates_missing_or_malformed_settings():
     drift = drift_check.compare_settings(
         {"wording": ["not", "a", "dict"], "features": None}, drift_check.SHIPPED_IAC_SETTINGS

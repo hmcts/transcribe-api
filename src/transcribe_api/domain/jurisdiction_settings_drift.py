@@ -81,21 +81,27 @@ def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _differs(live: Any, shipped: Any) -> bool:
+    # 1 == True and 0 == False in Python, but the app only honours a real bool flag
+    # (jurisdictions.parse_settings), so a value of another type is a change.
+    return type(live) is not type(shipped) or live != shipped
+
+
 def compare_settings(live: dict[str, Any] | None, shipped: dict[str, Any]) -> SettingsDrift:
     live, shipped = _mapping(live), _mapping(shipped)
     live_wording, shipped_wording = _mapping(live.get("wording")), _mapping(shipped.get("wording"))
     live_features, shipped_features = _mapping(live.get("features")), _mapping(shipped.get("features"))
     return SettingsDrift(
         wording_edited=sorted(
-            k for k in live_wording.keys() & shipped_wording.keys() if live_wording[k] != shipped_wording[k]
+            k for k in live_wording.keys() & shipped_wording.keys() if _differs(live_wording[k], shipped_wording[k])
         ),
         wording_live_only=sorted(live_wording.keys() - shipped_wording.keys()),
         wording_default_only=sorted(shipped_wording.keys() - live_wording.keys()),
-        template_changed=live.get("template") != shipped.get("template"),
+        template_changed=_differs(live.get("template"), shipped.get("template")),
         features_changed=sorted(
             k
             for k in live_features.keys() | shipped_features.keys()
-            if k not in live_features or k not in shipped_features or live_features[k] != shipped_features[k]
+            if k not in live_features or k not in shipped_features or _differs(live_features[k], shipped_features[k])
         ),
     )
 
