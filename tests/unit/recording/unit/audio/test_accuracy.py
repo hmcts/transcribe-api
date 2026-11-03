@@ -482,6 +482,9 @@ class TestAccuracyAcrossMerges:
         assert merged.word_corrections
         assert self._summary([merged]).word_error_rate == self._summary([legacy, four]).word_error_rate
         assert self._summary([merged]).corrected_percent == self._summary([legacy, four]).corrected_percent
+        merged.word_corrections = [WordCorrection(start_word_index=1, end_word_index=1, text="two")]
+        assert [p.current_text for p in merged.current_parts()] == ["one", "two", "three", "four"]
+        assert self._summary([merged]).corrected_percent == 0.0
 
     def test_an_edit_next_to_legacy_parts_gives_each_word_to_one_part(self):
         legacy = DialogueEntry(
@@ -509,3 +512,32 @@ class TestAccuracyAcrossMerges:
             _entry(text="three", start=2, end=3, confidence=0.9, corrected="new three"),
         ]
         assert self._summary([merged]).word_error_rate == self._summary(separate).word_error_rate
+
+    def test_a_new_part_between_legacy_parts_keeps_the_text_in_order(self):
+        def legacy(first, second, start):
+            return DialogueEntry(
+                speaker="0",
+                text=f"{first} {second}",
+                start_time=start,
+                end_time=start + 1,
+                confidence=0.9,
+                words=[WordInfo(text=w, start_time=start, end_time=start + 1, confidence=0.9) for w in [first, second]],
+                merged=True,
+                parts=[
+                    EntryPart(text=first, current_text=first, confidence=0.9),
+                    EntryPart(text=second, current_text=second, confidence=0.9),
+                ],
+            )
+
+        merged = merge_dialogue_entries(
+            merge_dialogue_entries(legacy("a", "b", 0), self._with_words("c", "c", 1)), legacy("d", "g", 2)
+        )
+        merged.word_corrections = [
+            WordCorrection(start_word_index=1, end_word_index=1, text="b c d"),
+            WordCorrection(start_word_index=2, end_word_index=2, text="e"),
+            WordCorrection(start_word_index=3, end_word_index=3, text="f"),
+        ]
+        parts = merged.current_parts()
+        assert " ".join(p.current_text for p in parts) == merged.effective_text() == "a b c d e f g"
+        assert [p.current_text for p in parts] == ["a", "b c d", "e", "f", "g"]
+        assert [p.corrected for p in parts] == [None, None, True, None, None]
