@@ -1305,6 +1305,7 @@ async def correct_segment(
     job, index, entry = _load_entry_for_correction(session, job_id, segment, current_user)
 
     previous_text = entry.effective_text()
+    entry.settle_parts()
     entry.corrected_text = body.corrected_text
     entry.word_corrections = None
     entry.unreviewed_confidence = None
@@ -1514,7 +1515,11 @@ async def rollback_segment(
     entry.correction_history = None
     entry.accepted = False
     if entry.parts:
-        entry.parts = [p.model_copy(update={"current_text": p.text}) for p in entry.parts]
+        # A part with no recorded correction state (None) is left that way, as stored.
+        entry.parts = [
+            p.model_copy(update={"current_text": p.text, "corrected": None if p.corrected is None else False})
+            for p in entry.parts
+        ]
     if entry.merged:
         entry.unreviewed_confidence = entry.confidence
 
@@ -1710,6 +1715,7 @@ async def rollback_to_history_entry(
         ]
     else:
         restored_text = target.previous_text
+        entry.settle_parts()
         entry.corrected_text = None if restored_text == entry.text else restored_text
         entry.word_corrections = None
         entry.correction_history = [

@@ -90,7 +90,7 @@ def _alter_type_sql(table: str, column: str, type_sql: str) -> re.Pattern[str]:
 def test_there_is_one_history_with_one_head():
     script = ScriptDirectory.from_config(migrations.alembic_config())
     assert script.get_bases() == ["0001"]
-    assert script.get_heads() == ["0005"]
+    assert script.get_heads() == ["0006"]
 
 
 def test_baseline_creates_every_table(monkeypatch):
@@ -264,6 +264,29 @@ def test_0005_downgrade_keeps_one_draft_per_user(monkeypatch):
     assert sql.index(f"DELETE FROM live_transcript_draft WHERE jurisdiction_id <> '{IAC_ID}'") < sql.index(
         "ADD CONSTRAINT live_transcript_draft_user_id_key UNIQUE (user_id)"
     )
+
+
+def test_0006_gives_the_existing_legal_wording_to_the_iac_and_touches_nothing_else(monkeypatch):
+    """DIAAT-342. The one write to document_content is the plain backfill of the new
+    column (the live wording is the IAC's, and its content and updated_at are not touched)."""
+    sql = _offline_sql(monkeypatch, "0005:0006")
+    assert f"UPDATE document_content SET jurisdiction_id = '{IAC_ID}' WHERE id = 1" in sql
+    writes = re.findall(r"(?:INSERT INTO|UPDATE|DELETE FROM)\s+document_content\b[^;]*", sql, flags=re.IGNORECASE)
+    assert writes == [f"UPDATE document_content SET jurisdiction_id = '{IAC_ID}' WHERE id = 1"], writes
+    assert sql.index("UPDATE document_content") < sql.index(
+        "ALTER TABLE document_content ALTER COLUMN jurisdiction_id SET NOT NULL"
+    )
+    assert "ADD CONSTRAINT document_content_jurisdiction_id_key UNIQUE (jurisdiction_id)" in sql
+    assert "REFERENCES jurisdiction (id)" in sql
+    # Id 1 stays the IAC's.
+    assert "setval(seq, 1, true)" in sql
+    assert "CHECK (id <> 1 OR jurisdiction_id = " in sql
+
+
+def test_0006_downgrade_keeps_only_the_iacs_row(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0006:0005", downgrade=True)
+    assert f"DELETE FROM document_content WHERE jurisdiction_id <> '{IAC_ID}'" in sql
+    assert "DROP COLUMN jurisdiction_id" in sql
 
 
 def test_0004_iac_settings_are_valid_and_set_every_wording_key():
