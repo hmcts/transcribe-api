@@ -70,14 +70,23 @@ def _corrected_parts(entry: DialogueEntry) -> list[EntryPart]:
     """The original segments in an entry that have a clerk's text to measure against.
 
     Scored per original segment, so that merging a corrected segment with an
-    untouched one doesn't count the untouched words as corrected.
+    untouched one doesn't count the untouched words as corrected. Whether a
+    segment was corrected is its recorded state, so a correction that only
+    changes capitalisation counts as it does for a segment that was never merged.
     """
     if not entry.has_corrections():
         return []
     parts = entry.current_parts()
     if not entry.parts:
         return parts
-    return [p for p in parts if p.current_text.lower().split() != p.text.lower().split()]
+    return [p for p in parts if _is_corrected(p)]
+
+
+def _is_corrected(part: EntryPart) -> bool:
+    if part.corrected is not None:
+        return part.corrected
+    # Parts stored before `corrected` existed: judged by their wording, as they always were.
+    return part.current_text.lower().split() != part.text.lower().split()
 
 
 def compute_accuracy(
