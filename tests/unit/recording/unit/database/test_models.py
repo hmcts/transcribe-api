@@ -422,7 +422,7 @@ class TestSegmentIdsAndParts:
 
     def test_unmerged_entry_is_one_part(self):
         entry = self._entry("one two", 0.9, corrected_text="one too")
-        assert entry.current_parts() == [EntryPart(text="one two", current_text="one too", confidence=0.9)]
+        assert entry.current_parts() == [EntryPart(text="one two", current_text="one too", confidence=0.9, corrected=True)]
 
     def test_merge_keeps_each_original_segment_as_a_part_through_a_second_merge(self):
         a, b, c = self._entry("one two", 0.9), self._entry("three", 0.5, 1), self._entry("four", 0.7, 2)
