@@ -482,3 +482,30 @@ class TestAccuracyAcrossMerges:
         assert merged.word_corrections
         assert self._summary([merged]).word_error_rate == self._summary([legacy, four]).word_error_rate
         assert self._summary([merged]).corrected_percent == self._summary([legacy, four]).corrected_percent
+
+    def test_an_edit_next_to_legacy_parts_gives_each_word_to_one_part(self):
+        legacy = DialogueEntry(
+            speaker="0",
+            text="one two words",
+            start_time=0,
+            end_time=2,
+            confidence=0.9,
+            words=[WordInfo(text=w, start_time=0, end_time=2, confidence=0.9) for w in ["one", "two", "words"]],
+            merged=True,
+            parts=[
+                EntryPart(text="one", current_text="one", confidence=0.9),
+                EntryPart(text="two words", current_text="two words", confidence=0.9),
+            ],
+        )
+        merged = merge_dialogue_entries(legacy, self._with_words("three", "three", 2))
+        merged.word_corrections = [WordCorrection(start_word_index=3, end_word_index=3, text="new three")]
+        parts = merged.current_parts()
+        assert [p.current_text for p in parts] == ["one", "two words", "new three"]
+        assert [p.corrected for p in parts] == [None, None, True]
+        assert self._summary([merged]).corrected_percent == pytest.approx(100 / 3)
+        separate = [
+            _entry(text="one", start=0, end=1, confidence=0.9),
+            _entry(text="two words", start=1, end=2, confidence=0.9),
+            _entry(text="three", start=2, end=3, confidence=0.9, corrected="new three"),
+        ]
+        assert self._summary([merged]).word_error_rate == self._summary(separate).word_error_rate

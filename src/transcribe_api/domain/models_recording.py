@@ -219,14 +219,12 @@ class DialogueEntry(SQLModel):
                     corrected=self.has_corrections(),
                 )
             ]
-        by_text = _shared_out(self.parts, current)
         if not self.has_corrections():
-            return [_with_corrected(p, False) for p in by_text]
-        if self.corrected_text is None and self.word_corrections and self.words:
-            by_word = _shared_out_by_word(self.parts, self.words, self.word_corrections)
-            # Parts stored without a correction state keep the share they have always been scored on.
-            return [t if t.corrected is None else w for t, w in zip(by_text, by_word, strict=True)]
-        return by_text
+            return [_with_corrected(p, False) for p in _shared_out(self.parts, current)]
+        legacy_only = all(p.corrected is None for p in self.parts)
+        if self.corrected_text is None and self.word_corrections and self.words and not legacy_only:
+            return _shared_out_by_word(self.parts, self.words, self.word_corrections, current)
+        return _shared_out(self.parts, current)
 
     def effective_text(self) -> str:
         """Current text after any corrections — what a clerk would read today."""
@@ -254,7 +252,7 @@ def _shared_out(parts: list[EntryPart], current: str) -> list[EntryPart]:
 
 
 def _shared_out_by_word(
-    parts: list[EntryPart], words: list[WordInfo], word_corrections: list[WordCorrection]
+    parts: list[EntryPart], words: list[WordInfo], word_corrections: list[WordCorrection], current: str
 ) -> list[EntryPart]:
     """Each part's share of text rebuilt from word-range corrections, and whether one falls in it.
 
@@ -263,40 +261,64 @@ def _shared_out_by_word(
     by the words rather than the text matters: the rebuilt text takes its casing from
     `words`, which can differ from a part's display text, a correction can leave the text
     as it was, and a part emptied by one edit still owns its words when it is edited again.
+
+    Parts stored without a correction state keep no state, and keep the words an alignment
+    of `current` with the parts' text when merged gives them, as they were always scored,
+    unless a part with a state owns the word. Every word goes to exactly one part.
     """
-    owners = _word_owners(parts, words)
+    tokens, touched = _word_tokens(parts, words, word_corrections)
+    text_owners = _token_owners([p.current_text for p in parts], current)
     shares: list[list[str]] = [[] for _ in parts]
+    for (token, owner), text_owner in zip(tokens, text_owners, strict=True):
+        legacy = parts[owner].corrected is None and parts[text_owner].corrected is None
+        shares[text_owner if legacy else owner].append(token)
+    return [
+        p.model_copy(update={"current_text": " ".join(share), "corrected": None if p.corrected is None else t})
+        for p, share, t in zip(parts, shares, touched, strict=True)
+    ]
+
+
+def _word_tokens(
+    parts: list[EntryPart], words: list[WordInfo], word_corrections: list[WordCorrection]
+) -> tuple[list[tuple[str, int]], list[bool]]:
+    """The rebuilt text's tokens, each with the index of its part, and which parts a correction touches."""
+    owners = _word_owners(parts, words)
+    tokens: list[tuple[str, int]] = []
     touched = [False] * len(parts)
+
+    def keep(start: int, end: int) -> None:
+        tokens.extend((token, owners[i]) for i in range(start, end) for token in words[i].text.split())
+
     cursor = 0
     for wc in sorted(word_corrections, key=lambda w: w.start_word_index):
-        for i in range(cursor, min(wc.start_word_index, len(words))):
-            shares[owners[i]].append(words[i].text)
+        keep(cursor, min(wc.start_word_index, len(words)))
         replaced = range(wc.start_word_index, min(wc.end_word_index + 1, len(words)))
         covered = list(dict.fromkeys(owners[i] for i in replaced)) or [owners[-1]]
         replaced_words = [" ".join(words[i].text for i in replaced if owners[i] == o) for o in covered]
         pieces = split_by_alignment(replaced_words, wc.text) if len(covered) > 1 else [wc.text]
         for owner, piece in zip(covered, pieces, strict=True):
-            shares[owner].append(piece)
+            tokens.extend((token, owner) for token in piece.split())
             touched[owner] = True
         cursor = wc.end_word_index + 1
-    for i in range(cursor, len(words)):
-        shares[owners[i]].append(words[i].text)
-    return [
-        p.model_copy(update={"current_text": _join(*share), "corrected": t})
-        for p, share, t in zip(parts, shares, touched, strict=True)
-    ]
+    keep(cursor, len(words))
+    return tokens, touched
 
 
 def _word_owners(parts: list[EntryPart], words: list[WordInfo]) -> list[int]:
     """The index of the part each word belongs to, by aligning the words with the parts' ASR text."""
-    pieces = split_by_alignment([p.text for p in parts], " ".join(w.text for w in words))
-    token_owners = [i for i, piece in enumerate(pieces) for _ in piece.split()]
+    token_owners = _token_owners([p.text for p in parts], " ".join(w.text for w in words))
     owners: list[int] = []
     token = 0
     for w in words:
         owners.append(token_owners[min(token, len(token_owners) - 1)] if token_owners else 0)
         token += len(w.text.split())
     return owners
+
+
+def _token_owners(references: list[str], text: str) -> list[int]:
+    """The index of the reference each token of `text` aligns with."""
+    pieces = split_by_alignment(references, text)
+    return [i for i, piece in enumerate(pieces) for _ in piece.split()]
 
 
 def _with_share(part: EntryPart, share: str) -> EntryPart:
