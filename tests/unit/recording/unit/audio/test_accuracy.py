@@ -541,3 +541,24 @@ class TestAccuracyAcrossMerges:
         assert " ".join(p.current_text for p in parts) == merged.effective_text() == "a b c d e f g"
         assert [p.current_text for p in parts] == ["a", "b c d", "e", "f", "g"]
         assert [p.corrected for p in parts] == [None, None, True, None, None]
+
+    def test_words_stay_with_their_own_segment_when_its_text_splits_differently(self):
+        im = self._with_words("I'm", "i am", 0)
+        am = self._with_words("AM", "a m", 1)
+        im.word_corrections = [WordCorrection(start_word_index=0, end_word_index=0, text="i")]
+        am.word_corrections = [WordCorrection(start_word_index=0, end_word_index=0, text="a")]
+        merged = merge_dialogue_entries(im, am)
+        assert merged.word_corrections
+        assert [p.current_text for p in merged.current_parts()] == ["i am", "a m"]
+        assert self._summary([merged]).word_error_rate == self._summary([im, am]).word_error_rate
+
+    def test_switching_from_word_edits_to_a_segment_edit_leaves_untouched_parts_out(self):
+        hello = self._with_words("Hello world", "hello world", 0)
+        iz = self._with_words("this iz", "this iz", 1)
+        merged = merge_dialogue_entries(hello, iz)
+        merged.word_corrections = [WordCorrection(start_word_index=3, end_word_index=3, text="is")]
+        merged.settle_parts()
+        merged.corrected_text = "hello world this IS"
+        merged.word_corrections = None
+        assert [p.corrected for p in merged.current_parts()] == [False, True]
+        assert self._summary([merged]).corrected_percent == 50.0
