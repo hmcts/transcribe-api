@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -66,9 +67,16 @@ class _FakeSession:
             return _Result(self.row.updated_at)
         return _Result(self.row)
 
-    def add(self, row):
-        self.writes.append("add")
-        self.row = row
+    def get_bind(self):
+        return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+    def execute(self, statement):
+        # content_loader seeds with INSERT ... ON CONFLICT DO NOTHING.
+        from transcribe_api.domain.models_dictation import DocumentContent
+
+        self.writes.append("insert")
+        if self.row is None:
+            self.row = DocumentContent(**statement.compile().params)
 
     def commit(self):
         self.writes.append("commit")
@@ -79,9 +87,9 @@ class _FakeSession:
 
 @pytest.fixture(autouse=True)
 def _fresh_cache():
-    content_loader._cache.update(content=None, updated_at=None)
+    content_loader._cache.clear()
     yield
-    content_loader._cache.update(content=None, updated_at=None)
+    content_loader._cache.clear()
 
 
 def _table(monkeypatch, row, writes):
@@ -110,7 +118,7 @@ def test_the_bundled_defaults_seed_only_an_empty_table(monkeypatch):
     monkeypatch.setattr("transcribe_api.runtime.db_connection.get_engine", lambda: object())
 
     assert content_loader.get_document_content() == _load_from_file()
-    assert writes == ["add", "commit"]
+    assert writes == ["insert", "commit"]
     assert session.row.id == 1
 
 

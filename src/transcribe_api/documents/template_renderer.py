@@ -27,6 +27,7 @@ from transcribe_api.documents.content_loader import (
     get_hearing_title,
     get_legal_framework_content,
     get_legal_issues_display,
+    legal_wording_of,
 )
 from transcribe_api.documents.hearing_document_router import (
     APPELLANT_RULE_28_TEXT,
@@ -61,6 +62,8 @@ from transcribe_api.documents.word_document import WordDocument
 from transcribe_api.runtime.logger import logger
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from transcribe_api.api.routes_dictation import LiveTranscriptionSubmissionRequest
 
 # Current year for copyright notice
@@ -605,6 +608,7 @@ def render_hearing_document(
     request: LiveTranscriptionSubmissionRequest,
     output_dir: Path,
     user_email: str,
+    jurisdiction_id: UUID | None = None,
 ) -> Path:
     """Render a hearing document from an API submission request.
 
@@ -615,21 +619,26 @@ def render_hearing_document(
         request: The live transcription submission request
         output_dir: Directory for the rendered document
         user_email: Email of the submitting user
+        jurisdiction_id: The jurisdiction the document is made in: its legal wording is
+            used (DIAAT-342). None: the IAC's.
 
     Returns:
         Path to the rendered document
     """
-    return render_hearing_document_structured(request, output_dir, user_email)
+    return render_hearing_document_structured(request, output_dir, user_email, jurisdiction_id)
 
 
 def render_hearing_document_structured(
     request: LiveTranscriptionSubmissionRequest,
     output_dir: Path,
     user_email: str,
+    jurisdiction_id: UUID | None = None,
 ) -> Path:
-    """Render a hearing document through HearingDocument block routing."""
+    """Render a hearing document through HearingDocument block routing, with the legal
+    wording of ``jurisdiction_id`` (None: the IAC's)."""
     document_data = _build_document_data_from_submission(request, user_email)
-    hearing_document = build_hearing_document_from_document_data(document_data)
+    with legal_wording_of(jurisdiction_id):
+        hearing_document = build_hearing_document_from_document_data(document_data)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / _generate_output_filename()
