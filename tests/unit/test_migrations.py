@@ -326,6 +326,23 @@ _LIVE_WRITE = re.compile(
     rf'"?({"|".join(LIVE_EDITED_TABLES)})"?(?![\w.])',
     re.IGNORECASE,
 )
+# TRUNCATE takes a list of tables, any of which may be live: TRUNCATE [TABLE] [ONLY] name [*] [, ...] [options]
+_TRUNCATE_TARGETS = re.compile(
+    r"(?:^|[\s(])TRUNCATE(?:\s+TABLE)?\s+(.+?)(?:\s+(?:RESTART|CONTINUE|CASCADE|RESTRICT)\b.*)?$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _truncates_a_live_table(statement: str) -> bool:
+    match = _TRUNCATE_TARGETS.search(statement)
+    if not match:
+        return False
+    for target in match.group(1).split(","):
+        name = re.sub(r"^\s*ONLY\s+", "", target, flags=re.IGNORECASE).strip().rstrip("*").strip()
+        if name.split(".")[-1].strip().strip('"').lower() in LIVE_EDITED_TABLES:
+            return True
+    return False
+
 
 # Revisions allowed to write a live table, and the one statement shape each may use.
 # DIAAT-342 adds document_content.jurisdiction_id in 0006 and backfills that column
@@ -343,7 +360,9 @@ def _forbidden_live_writes(revision: str, sql: str) -> list[str]:
     ones its revision is allowed (ALLOWED_LIVE_WRITES)."""
     uncommented = re.sub(r"^\s*--.*$", "", sql, flags=re.MULTILINE)  # "-- Running upgrade" heads the first statement
     statements = (statement.strip() for statement in re.split(r";\s*\n", uncommented))
-    writes = [statement for statement in statements if _LIVE_WRITE.search(statement)]
+    writes = [
+        statement for statement in statements if _LIVE_WRITE.search(statement) or _truncates_a_live_table(statement)
+    ]
     allowed = ALLOWED_LIVE_WRITES.get(revision)
     return [statement for statement in writes if not (allowed and allowed.match(statement))]
 
@@ -387,6 +406,9 @@ def test_the_live_write_guard_sees_what_0004_does(monkeypatch):
         'DELETE FROM ONLY "public".jurisdiction',
         "INSERT INTO public.jurisdiction (id) VALUES (1)",
         "TRUNCATE TABLE ONLY public.document_content",
+        "TRUNCATE transcription, document_content",
+        "TRUNCATE TABLE jurisdiction_membership, jurisdiction CASCADE",
+        'TRUNCATE transcription, ONLY "public"."jurisdiction" * RESTART IDENTITY',
         "WITH x AS (UPDATE jurisdiction SET settings = '{}' RETURNING id) SELECT * FROM x",
         "WITH x AS (SELECT 1) DELETE FROM document_content",
         "WITH d AS (DELETE FROM document_content RETURNING id) INSERT INTO audit (id) SELECT id FROM d",
@@ -414,6 +436,7 @@ def test_the_live_write_guard_sees_a_first_statement_under_the_revision_comment(
         "UPDATE transcription SET name = (SELECT name FROM jurisdiction LIMIT 1)",
         "DELETE FROM jurisdiction_membership WHERE jurisdiction_id IN (SELECT id FROM jurisdiction)",
         "INSERT INTO jurisdiction_membership (jurisdiction_id) SELECT id FROM jurisdiction",
+        "TRUNCATE transcription, jurisdiction_membership CASCADE",
     ],
 )
 def test_the_live_write_guard_ignores_other_tables_and_schema_changes(statement):
