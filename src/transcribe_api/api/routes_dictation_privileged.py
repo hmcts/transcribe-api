@@ -5,29 +5,32 @@ All endpoints require authenticated users to pass JWT role checks.
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import hashlib
-
 import logging
 import urllib.parse
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from hmcts_azure_auth.audit import AuditEvent, AuditEventType
 from pydantic import BaseModel, StringConstraints
 from pydantic import Field as PydanticField
-from sqlmodel import Field, Session, select
+from sqlmodel import Field, Session
 
 from transcribe_api.api.document_content_models import (
+    AdminDocumentContentResponse,
     AnonymityStatusPayload,
-    DocumentContentResponse,
     HearingTypePayload,
+    JurisdictionRef,
     LegalFrameworkPayload,
 )
-from transcribe_api.documents.content_loader import clear_cache as clear_content_cache
 from transcribe_api.documents.content_loader import get_document_content as load_document_content
+from transcribe_api.documents.content_loader import has_legal_wording, save_document_content
 from transcribe_api.documents.minutes.types import AdminTranscriptionListResponse, AdminTranscriptionRecord
 from transcribe_api import jurisdictions_admin
 from transcribe_api.domain.audit import (
@@ -39,7 +42,11 @@ from transcribe_api.domain.audit import (
     write_audit_event,
 )
 from transcribe_api.domain.auth.approles_dictation import get_role, get_valid_roles
-from transcribe_api.domain.auth.dependencies_dictation import get_active_jurisdiction, get_allowlisted_user
+from transcribe_api.domain.auth.dependencies_dictation import (
+    get_active_jurisdiction,
+    get_allowlisted_user,
+    get_current_user,
+)
 from transcribe_api.domain.exceptions import UserHasTranscriptionsError, UserNotFoundError
 from transcribe_api.domain.interface_dictation import (
     admin_delete_user,
@@ -49,9 +56,15 @@ from transcribe_api.domain.interface_dictation import (
     get_user_by_id,
     update_user,
 )
-from transcribe_api.domain.jurisdictions import WORDING_KEYS, ActiveJurisdiction
+from transcribe_api.domain.jurisdictions import (
+    IAC_JURISDICTION_ID,
+    ROLE_ADMIN,
+    TEMPLATE_IAC_DECISION,
+    WORDING_KEYS,
+    ActiveJurisdiction,
+)
 from transcribe_api.runtime.security_events import DOCUMENT, READ, TRANSCRIPTION, record_jurisdiction_blocked
-from transcribe_api.domain.models_dictation import BaseTable, DocumentContent, Transcription
+from transcribe_api.domain.models_dictation import BaseTable, Transcription
 from transcribe_api.runtime.db_connection import get_engine
 from transcribe_api.runtime.log_sanitization import sanitize_for_log
 from transcribe_api.runtime.settings_dictation import get_settings
@@ -88,25 +101,17 @@ class AdminUserResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _read_content() -> dict[str, Any]:
+def _read_content(jurisdiction_id: UUID) -> dict[str, Any]:
+    """A copy of the jurisdiction's legal wording, for the route to change and write."""
     try:
-        return load_document_content()
+        return copy.deepcopy(load_document_content(jurisdiction_id))
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Unable to load document content") from exc
 
 
-def _write_content(data: dict[str, Any]) -> None:
+def _write_content(data: dict[str, Any], jurisdiction_id: UUID) -> None:
     try:
-        with Session(get_engine()) as session:
-            row = session.exec(select(DocumentContent).where(DocumentContent.id == 1)).first()
-            if row is not None:
-                row.content = data
-                row.updated_at = datetime.now(UTC)
-                session.add(row)
-            else:
-                session.add(DocumentContent(id=1, content=data, updated_at=datetime.now(UTC)))
-            session.commit()
-        clear_content_cache()
+        save_document_content(jurisdiction_id, data)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Unable to persist document content: {exc}") from exc
 
@@ -117,6 +122,19 @@ def _log_admin_content_change(*, admin_id: str, action: str, item_id: str) -> No
         sanitize_for_log(admin_id),
         action,
         sanitize_for_log(item_id),
+    )
+
+
+def _record_content_change(scope: LegalWordingScope, action: str, item_id: str) -> None:
+    """Log and audit a legal wording change: which jurisdiction, what kind of change and
+    which item, never the wording."""
+    _log_admin_content_change(admin_id=str(scope.user.id), action=action, item_id=item_id)
+    record_audit(
+        "jurisdiction.edit",
+        actor_id=scope.user.id,
+        outcome="success",
+        object_type="jurisdiction",
+        detail={"code": scope.jurisdiction.code, "fields": ["legal_wording"], "change": action, "item": item_id},
     )
 
 
@@ -170,20 +188,101 @@ async def get_admin_roles(
 
 
 # ---------------------------------------------------------------------------
+# Legal wording access (DIAAT-342)
+#
+# The routes below edit the legal wording (hearing types, legal frameworks, anonymity
+# text) of ONE jurisdiction: the one the request works in (X-Jurisdiction, as for every
+# route: a jurisdiction the user does not belong to is 403 jurisdiction_not_available).
+# Who may:
+#   - an admin member of that jurisdiction (any BenchNotes app role): read and write;
+#   - for the IAC only, as before jurisdictions: the global LegalTextManager role (read
+#     and write) and SystemAdministrator (read only).
+# A jurisdiction without the IAC decision template has no legal wording to edit (404, as
+# for its judges).
+# ---------------------------------------------------------------------------
+
+_LEGAL_WORDING_ADMIN_REQUIRED = "jurisdiction_admin_required"
+
+
+@dataclass(frozen=True)
+class LegalWordingScope:
+    """Who is editing which jurisdiction's legal wording."""
+
+    user: User
+    jurisdiction: ActiveJurisdiction
+
+
+def _may_edit_legal_wording(roles: list[str], jurisdiction: ActiveJurisdiction, *, write: bool) -> bool:
+    ltm, sysadmin = _require_role("LegalTextManager"), _require_role("SystemAdministrator")
+    has_app_role = any(r in roles for r in (_require_role("Normal"), _require_role("Judge"), ltm, sysadmin))
+    if jurisdiction.current.role == ROLE_ADMIN and has_app_role:
+        return True
+    if jurisdiction.id == IAC_JURISDICTION_ID:
+        return ltm in roles or (not write and sysadmin in roles)
+    return False
+
+
+def _legal_wording_access(*, write: bool):
+    async def check(
+        request: Request,
+        response: Response,
+        current_user: User = Depends(get_current_user),  # noqa: B008
+        jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
+    ) -> LegalWordingScope:
+        response.headers["Cache-Control"] = "no-store"
+        roles: list[str] = current_user.__dict__.get("app_roles", [])
+        if not _may_edit_legal_wording(roles, jurisdiction, write=write):
+            required = [f"admin of {jurisdiction.code}"]
+            if jurisdiction.id == IAC_JURISDICTION_ID:
+                required.append(_require_role("LegalTextManager"))
+            await asyncio.to_thread(
+                write_audit_event,
+                AuditEvent(
+                    event_type=AuditEventType.ACCESS_DENIED,
+                    user_id=sanitize_for_log(getattr(current_user, "azure_user_id", "unknown")),
+                    email=sanitize_for_log(getattr(current_user, "email", "unknown")),
+                    held_roles=[sanitize_for_log(r) for r in roles],
+                    required_roles=required,
+                    resource=sanitize_for_log(f"{request.method} {request.url.path}"),
+                    client_ip=request.client.host if request.client else None,
+                ),
+            )
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": _LEGAL_WORDING_ADMIN_REQUIRED,
+                    "message": f"Only an admin for {jurisdiction.code} can change its legal wording.",
+                },
+            )
+        if jurisdiction.settings.template != TEMPLATE_IAC_DECISION:
+            raise HTTPException(status_code=404, detail="Not available in this jurisdiction")
+        return LegalWordingScope(user=current_user, jurisdiction=jurisdiction)
+
+    return check
+
+
+_LEGAL_WORDING_READ = _legal_wording_access(write=False)
+_LEGAL_WORDING_WRITE = _legal_wording_access(write=True)
+
+
+# ---------------------------------------------------------------------------
 # Read all
 # ---------------------------------------------------------------------------
 
 
-@router.get("/document-content", response_model=DocumentContentResponse)
+@router.get("/document-content", response_model=AdminDocumentContentResponse)
 async def get_document_content(
-    admin_user: User = Depends(get_allowlisted_user(required_roles_any=[_require_role("LegalTextManager"), _require_role("SystemAdministrator")], audit_writer=write_audit_event)),  # noqa: B008
-) -> DocumentContentResponse:
-    """Return the full document_content.json payload."""
-    data = _read_content()
-    return DocumentContentResponse(
+    scope: LegalWordingScope = Depends(_LEGAL_WORDING_READ),  # noqa: B008
+) -> AdminDocumentContentResponse:
+    """Return the legal wording of the jurisdiction the admin is working in (and only
+    that one), with ``has_legal_wording`` and which jurisdiction it is."""
+    data = _read_content(scope.jurisdiction.id)
+    return AdminDocumentContentResponse(
         hearing_types=data.get("hearing_types", []),
         legal_frameworks=data.get("legal_frameworks", []),
         anonymity=data.get("anonymity", {}),
+        has_legal_wording=has_legal_wording(data),
+        jurisdiction=JurisdictionRef(code=scope.jurisdiction.code, name=scope.jurisdiction.current.name),
     )
 
 
@@ -196,20 +295,16 @@ async def get_document_content(
 async def update_hearing_type(
     item_id: str,
     payload: HearingTypePayload,
-    admin_user: User = Depends(get_allowlisted_user(required_roles_all=[_require_role("LegalTextManager")], audit_writer=write_audit_event)),  # noqa: B008
+    scope: LegalWordingScope = Depends(_LEGAL_WORDING_WRITE),  # noqa: B008
 ) -> dict[str, Any]:
     """Update an existing hearing type by ID."""
-    data = _read_content()
+    data = _read_content(scope.jurisdiction.id)
     items: list[dict] = data.get("hearing_types", [])
     for i, item in enumerate(items):
         if item.get("id") == item_id:
             items[i] = payload.model_dump()
-            _write_content(data)
-            _log_admin_content_change(
-                admin_id=str(admin_user.id),
-                action="updated hearing type",
-                item_id=item_id,
-            )
+            _write_content(data, scope.jurisdiction.id)
+            _record_content_change(scope, "updated hearing type", item_id)
             return items[i]
     raise HTTPException(status_code=404, detail=f"Hearing type '{item_id}' not found")
 
@@ -217,42 +312,34 @@ async def update_hearing_type(
 @router.post("/document-content/hearing-types", status_code=201)
 async def create_hearing_type(
     payload: HearingTypePayload,
-    admin_user: User = Depends(get_allowlisted_user(required_roles_all=[_require_role("LegalTextManager")], audit_writer=write_audit_event)),  # noqa: B008
+    scope: LegalWordingScope = Depends(_LEGAL_WORDING_WRITE),  # noqa: B008
 ) -> dict[str, Any]:
     """Create a new hearing type."""
-    data = _read_content()
-    items: list[dict] = data.get("hearing_types", [])
+    data = _read_content(scope.jurisdiction.id)
+    items: list[dict] = data.setdefault("hearing_types", [])
     if any(item.get("id") == payload.id for item in items):
         raise HTTPException(status_code=409, detail=f"Hearing type with id '{payload.id}' already exists")
     new_item = payload.model_dump()
     items.append(new_item)
-    _write_content(data)
-    _log_admin_content_change(
-        admin_id=str(admin_user.id),
-        action="created hearing type",
-        item_id=payload.id,
-    )
+    _write_content(data, scope.jurisdiction.id)
+    _record_content_change(scope, "created hearing type", payload.id)
     return new_item
 
 
 @router.delete("/document-content/hearing-types/{item_id}", status_code=204)
 async def delete_hearing_type(
     item_id: str,
-    admin_user: User = Depends(get_allowlisted_user(required_roles_all=[_require_role("LegalTextManager")], audit_writer=write_audit_event)),  # noqa: B008
+    scope: LegalWordingScope = Depends(_LEGAL_WORDING_WRITE),  # noqa: B008
 ) -> None:
     """Delete a hearing type by ID."""
-    data = _read_content()
+    data = _read_content(scope.jurisdiction.id)
     items: list[dict] = data.get("hearing_types", [])
     original_len = len(items)
     data["hearing_types"] = [item for item in items if item.get("id") != item_id]
     if len(data["hearing_types"]) == original_len:
         raise HTTPException(status_code=404, detail=f"Hearing type '{item_id}' not found")
-    _write_content(data)
-    _log_admin_content_change(
-        admin_id=str(admin_user.id),
-        action="deleted hearing type",
-        item_id=item_id,
-    )
+    _write_content(data, scope.jurisdiction.id)
+    _record_content_change(scope, "deleted hearing type", item_id)
 
 
 # ---------------------------------------------------------------------------
@@ -264,20 +351,16 @@ async def delete_hearing_type(
 async def update_legal_framework(
     item_id: str,
     payload: LegalFrameworkPayload,
-    admin_user: User = Depends(get_allowlisted_user(required_roles_all=[_require_role("LegalTextManager")], audit_writer=write_audit_event)),  # noqa: B008
+    scope: LegalWordingScope = Depends(_LEGAL_WORDING_WRITE),  # noqa: B008
 ) -> dict[str, Any]:
     """Update an existing legal framework by ID."""
-    data = _read_content()
+    data = _read_content(scope.jurisdiction.id)
     items: list[dict] = data.get("legal_frameworks", [])
     for i, item in enumerate(items):
         if item.get("id") == item_id:
             items[i] = payload.model_dump()
-            _write_content(data)
-            _log_admin_content_change(
-                admin_id=str(admin_user.id),
-                action="updated legal framework",
-                item_id=item_id,
-            )
+            _write_content(data, scope.jurisdiction.id)
+            _record_content_change(scope, "updated legal framework", item_id)
             return items[i]
     raise HTTPException(status_code=404, detail=f"Legal framework '{item_id}' not found")
 
@@ -285,44 +368,39 @@ async def update_legal_framework(
 @router.post("/document-content/legal-frameworks", status_code=201)
 async def create_legal_framework(
     payload: LegalFrameworkPayload,
-    admin_user: User = Depends(get_allowlisted_user(required_roles_all=[_require_role("LegalTextManager")], audit_writer=write_audit_event)),  # noqa: B008
+    scope: LegalWordingScope = Depends(_LEGAL_WORDING_WRITE),  # noqa: B008
 ) -> dict[str, Any]:
-    """Create a new legal framework."""
-    data = _read_content()
-    items: list[dict] = data.get("legal_frameworks", [])
+    """Create a new legal framework. A jurisdiction's first one turns its legal wording
+    on: its form gets the legal issues step and its documents the Issues and Legal
+    Framework sections."""
+    data = _read_content(scope.jurisdiction.id)
+    items: list[dict] = data.setdefault("legal_frameworks", [])
     if any(item.get("id") == payload.id for item in items):
         raise HTTPException(status_code=409, detail=f"Legal framework with id '{payload.id}' already exists")
     new_item = payload.model_dump()
     items.append(new_item)
     items.sort(key=lambda x: x.get("rank", 999))
     data["legal_frameworks"] = items
-    _write_content(data)
-    _log_admin_content_change(
-        admin_id=str(admin_user.id),
-        action="created legal framework",
-        item_id=payload.id,
-    )
+    _write_content(data, scope.jurisdiction.id)
+    _record_content_change(scope, "created legal framework", payload.id)
     return new_item
 
 
 @router.delete("/document-content/legal-frameworks/{item_id}", status_code=204)
 async def delete_legal_framework(
     item_id: str,
-    admin_user: User = Depends(get_allowlisted_user(required_roles_all=[_require_role("LegalTextManager")], audit_writer=write_audit_event)),  # noqa: B008
+    scope: LegalWordingScope = Depends(_LEGAL_WORDING_WRITE),  # noqa: B008
 ) -> None:
-    """Delete a legal framework by ID."""
-    data = _read_content()
+    """Delete a legal framework by ID. Deleting the last one turns the jurisdiction's
+    legal wording off."""
+    data = _read_content(scope.jurisdiction.id)
     items: list[dict] = data.get("legal_frameworks", [])
     original_len = len(items)
     data["legal_frameworks"] = [item for item in items if item.get("id") != item_id]
     if len(data["legal_frameworks"]) == original_len:
         raise HTTPException(status_code=404, detail=f"Legal framework '{item_id}' not found")
-    _write_content(data)
-    _log_admin_content_change(
-        admin_id=str(admin_user.id),
-        action="deleted legal framework",
-        item_id=item_id,
-    )
+    _write_content(data, scope.jurisdiction.id)
+    _record_content_change(scope, "deleted legal framework", item_id)
 
 
 # ---------------------------------------------------------------------------
@@ -334,21 +412,17 @@ async def delete_legal_framework(
 async def update_anonymity_status(
     item_id: str,
     payload: AnonymityStatusPayload,
-    admin_user: User = Depends(get_allowlisted_user(required_roles_all=[_require_role("LegalTextManager")], audit_writer=write_audit_event)),  # noqa: B008
+    scope: LegalWordingScope = Depends(_LEGAL_WORDING_WRITE),  # noqa: B008
 ) -> dict[str, Any]:
     """Update an existing anonymity status by ID."""
-    data = _read_content()
+    data = _read_content(scope.jurisdiction.id)
     statuses: list[dict] = data.get("anonymity", {}).get("statuses", [])
     for i, item in enumerate(statuses):
         if item.get("id") == item_id:
             statuses[i] = payload.model_dump()
             data["anonymity"]["statuses"] = statuses
-            _write_content(data)
-            _log_admin_content_change(
-                admin_id=str(admin_user.id),
-                action="updated anonymity status",
-                item_id=item_id,
-            )
+            _write_content(data, scope.jurisdiction.id)
+            _record_content_change(scope, "updated anonymity status", item_id)
             return statuses[i]
     raise HTTPException(status_code=404, detail=f"Anonymity status '{item_id}' not found")
 

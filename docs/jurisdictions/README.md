@@ -24,6 +24,11 @@ and nothing else, from the **Wording** link in the header (`/jurisdiction-wordin
 behind it `/api/jurisdictions/wording`). Being an admin in one jurisdiction gives
 nothing in another.
 
+A jurisdiction's **legal wording** (hearing types, legal frameworks, anonymity text: what
+its decision document is built from) is its own too, edited by its admins and, for the
+IAC, by the LegalTextManager role as before: see
+[`../jurisdiction-legal-wording.md`](../jurisdiction-legal-wording.md) (DIAAT-342).
+
 A membership does not replace the BenchNotes app role in Entra: someone with neither
 role cannot sign in, whatever their memberships.
 

@@ -16,6 +16,7 @@ from transcribe_api.documents.content_loader import (
     get_hearing_title,
     get_legal_framework_content_blocks,
     get_legal_framework_issues,
+    has_legal_wording,
 )
 from transcribe_api.documents.lib.blocks import (
     enumerated_list_blocks,
@@ -182,7 +183,14 @@ def build_hearing_document_from_document_data(document_data: DocumentData) -> He
     evidence_messages = [msg.text for msg in section_transcripts.evidence]
     facts_messages = [msg.text for msg in section_transcripts.facts]
 
-    legal_issues = get_legal_framework_issues(form_data.legal_issues) if form_data.legal_issues else []
+    # DIAAT-342: a jurisdiction without legal wording has no Issues or Legal Framework
+    # section at all, whatever legal issues the form still carries.
+    include_legal_sections = has_legal_wording()
+    legal_issues = (
+        get_legal_framework_issues(form_data.legal_issues)
+        if include_legal_sections and form_data.legal_issues
+        else []
+    )
     decision_date_text = (
         format_date_long(form_data.appealable_decision_date) if form_data.appealable_decision_date else "<date>"
     )
@@ -212,17 +220,25 @@ def build_hearing_document_from_document_data(document_data: DocumentData) -> He
         + _section_blocks("background", background_messages, "[No background content]"),
         hearing=section_heading_blocks(get_hearing_title(form_data.hearing_type), level=1, bold=True)
         + _build_hearing_description_blocks(document_data),
-        issues=section_heading_blocks("Issues", level=2, bold=True)
-        + paragraph_blocks(ISSUES_INTRO_TEXT, alignment="justify")
-        + (
-            enumerated_list_blocks(legal_issues, style="alphabet")
-            if legal_issues
-            else paragraph_blocks("[No legal issues selected]", alignment="justify")
+        issues=(
+            section_heading_blocks("Issues", level=2, bold=True)
+            + paragraph_blocks(ISSUES_INTRO_TEXT, alignment="justify")
+            + (
+                enumerated_list_blocks(legal_issues, style="alphabet")
+                if legal_issues
+                else paragraph_blocks("[No legal issues selected]", alignment="justify")
+            )
+            if include_legal_sections
+            else []
         ),
         evidence=section_heading_blocks("Evidence", level=2, bold=True)
         + _section_blocks("evidence", evidence_messages, "[No evidence content]"),
-        legal_framework=section_heading_blocks("Legal Framework", level=1, bold=True)
-        + _build_legal_framework_blocks(form_data.legal_issues or []),
+        legal_framework=(
+            section_heading_blocks("Legal Framework", level=1, bold=True)
+            + _build_legal_framework_blocks(form_data.legal_issues or [])
+            if include_legal_sections
+            else []
+        ),
         facts=section_heading_blocks("Facts", level=1, bold=True)
         + _section_blocks("facts", facts_messages, "[No facts content]"),
         determination_of_issues=section_heading_blocks("Determination of the Issues", level=1, bold=True)

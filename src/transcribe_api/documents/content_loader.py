@@ -1,8 +1,20 @@
 """Content loader for document generation.
 
-This module provides functions to load document content data from the
-JSON configuration file, including hearing types, legal frameworks,
-and anonymity content.
+This module provides functions to load document content data (hearing types, legal
+frameworks and anonymity content: a jurisdiction's "legal wording", DIAAT-342) from
+the database, with the bundled JSON as the IAC's fallback.
+
+Each jurisdiction has its own legal wording (``document_content.jurisdiction_id``).
+Every read is for one jurisdiction: the one named by the caller or, for the accessors
+the renderer uses (``get_hearing_description`` and the rest, which take no
+jurisdiction), the one ``legal_wording_of`` set for the render in progress. With
+neither it is the IAC's, which is what every caller was before jurisdictions.
+
+A jurisdiction other than the IAC has no row until its admin first saves: it then has
+the bundled hearing types and anonymity text (a document needs them) and no legal
+frameworks, so it has no legal wording (``has_legal_wording``). Only the IAC falls
+back to the bundled file when the database is unavailable; another jurisdiction is
+never served the IAC's wording.
 
 Content fields are stored as Markdown.  Helper functions expose both
 the raw Markdown strings (for APIs / editing) and parsed Word-document
@@ -16,10 +28,13 @@ import hashlib
 import json
 import logging
 from contextvars import ContextVar
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 from transcribe_api.documents.lib.markdown_to_blocks import markdown_to_blocks, markdown_to_plain_text
+from transcribe_api.domain.jurisdictions import IAC_JURISDICTION_ID
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +55,44 @@ class ContentLoadError(Exception):
     """Raised when content cannot be loaded."""
 
 
+# The IAC's row has always been id 1; other jurisdictions' ids are generated from 2
+# (migration 0006), so id 1 stays the IAC's.
+IAC_ROW_ID = 1
+
+
+def _insert_if_absent(session: Any, jurisdiction_id: UUID, content: dict[str, Any], updated_at: datetime) -> None:
+    """Insert a jurisdiction's row unless it has one: two instances doing this at once
+    (the first read of the IAC's wording after a deployment, or the first saves of a
+    new jurisdiction's) both succeed, and the second changes nothing. The IAC's row
+    always takes id 1; another jurisdiction's id is generated."""
+    from transcribe_api.domain.models_dictation import DocumentContent
+
+    dialect = session.get_bind().dialect.name
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert
+    elif dialect == "sqlite":  # the unit tests' database
+        from sqlalchemy.dialects.sqlite import insert
+    else:  # pragma: no cover - only PostgreSQL is deployed
+        msg = f"unsupported database: {dialect}"
+        raise RuntimeError(msg)
+    values: dict[str, Any] = {"jurisdiction_id": jurisdiction_id, "content": content, "updated_at": updated_at}
+    if jurisdiction_id == IAC_JURISDICTION_ID:
+        values["id"] = IAC_ROW_ID
+    session.execute(insert(DocumentContent.__table__).values(**values).on_conflict_do_nothing())
+
+
 def _load_content_file() -> dict[str, Any]:
-    """Load document content from the database.
+    """The IAC's legal wording from the database (the bundled file when the database
+    cannot be read), seeding its row from the file if it has none yet.
 
     Falls back to the bundled JSON file if the database row has not been
     seeded yet (e.g. during initial migration or local development before
     running migrations).
     """
+    return _read_or_seed_iac()
+
+
+def _read_or_seed_iac() -> dict[str, Any]:
     from sqlmodel import Session, select
 
     from transcribe_api.domain.models_dictation import DocumentContent
@@ -54,17 +100,18 @@ def _load_content_file() -> dict[str, Any]:
 
     try:
         with Session(get_engine()) as session:
-            row = session.exec(select(DocumentContent).where(DocumentContent.id == 1)).first()
+            row = session.exec(
+                select(DocumentContent).where(DocumentContent.jurisdiction_id == IAC_JURISDICTION_ID)
+            ).first()
             if row is not None:
                 return row.content
 
-            # No row yet — read the file on this instance and seed the DB.
+            # No row yet: read the file on this instance and seed the DB.
             # On existing deployments the file contains admin-modified content;
             # this ensures the first request after migration preserves it.
             content = _load_from_file()
             try:
-                from datetime import UTC, datetime
-                session.add(DocumentContent(id=1, content=content, updated_at=datetime.now(UTC)))
+                _insert_if_absent(session, IAC_JURISDICTION_ID, content, datetime.now(UTC))
                 session.commit()
             except Exception as seed_exc:
                 session.rollback()
@@ -91,7 +138,12 @@ def _load_from_file() -> dict[str, Any]:
         raise ContentLoadError(msg) from e
 
 
-_cache: dict[str, Any] = {"content": None, "updated_at": None}
+# Per jurisdiction: (the row's updated_at, its content).
+_cache: dict[UUID, tuple[datetime, dict[str, Any]]] = {}
+# What a jurisdiction without a row has (see _new_jurisdiction_default).
+_defaults: dict[str, Any] | None = None
+# The jurisdiction whose legal wording the accessors read (legal_wording_of).
+_wording_of: ContextVar[UUID | None] = ContextVar("legal_wording_jurisdiction", default=None)
 _last_used_digest: str | None = None
 # The content object last digested, with its digest: the cached copy is handed out on
 # every call, so it is hashed once per load, not on every cache hit.
@@ -145,11 +197,71 @@ def track_content_used() -> Iterator[set[str]]:
         _content_used.reset(token)
 
 
-def get_document_content() -> dict[str, Any]:
-    """Get the full editable document content payload.
+def current_jurisdiction_id() -> UUID:
+    """The jurisdiction whose legal wording the accessors read: the one set by
+    ``legal_wording_of`` for this render, else the IAC's."""
+    return _wording_of.get() or IAC_JURISDICTION_ID
+
+
+@contextlib.contextmanager
+def legal_wording_of(jurisdiction_id: UUID | None) -> Iterator[None]:
+    """Read the legal wording of ``jurisdiction_id`` (None: the IAC's) in the enclosed
+    block: for a render, whose accessors take no jurisdiction. Context-local, so
+    concurrent renders in other jurisdictions do not see it, and it follows the render
+    into ``asyncio.to_thread`` (which runs in a copy of the context)."""
+    token = _wording_of.set(jurisdiction_id)
+    try:
+        yield
+    finally:
+        _wording_of.reset(token)
+
+
+def _new_jurisdiction_default() -> dict[str, Any]:
+    """The wording of a jurisdiction that has not saved any: the bundled hearing types
+    and anonymity text, which a document needs, and no legal frameworks."""
+    global _defaults
+    if _defaults is None:
+        _defaults = {**_load_from_file(), "legal_frameworks": []}
+    return _defaults
+
+
+def has_legal_wording(content: dict[str, Any] | None = None) -> bool:
+    """Whether the jurisdiction (this render's, or the IAC's) has any legal framework.
+    Without one, its form has no legal issues step and its documents have no Issues or
+    Legal Framework sections."""
+    if content is None:
+        content = get_document_content()
+    return bool(content.get("legal_frameworks"))
+
+
+def save_document_content(jurisdiction_id: UUID, content: dict[str, Any]) -> None:
+    """Replace a jurisdiction's legal wording, creating its row on its first save
+    (race-safe: see _insert_if_absent). Raises on a database error."""
+    from sqlalchemy import update
+    from sqlmodel import Session
+
+    from transcribe_api.domain.models_dictation import DocumentContent
+    from transcribe_api.runtime.db_connection import get_engine
+
+    now = datetime.now(UTC)
+    with Session(get_engine()) as session:
+        _insert_if_absent(session, jurisdiction_id, content, now)
+        session.execute(
+            update(DocumentContent)
+            .where(DocumentContent.jurisdiction_id == jurisdiction_id)
+            .values(content=content, updated_at=now)
+        )
+        session.commit()
+    clear_cache(jurisdiction_id)
+
+
+def get_document_content(jurisdiction_id: UUID | None = None) -> dict[str, Any]:
+    """Get a jurisdiction's full editable document content payload.
+
+    ``jurisdiction_id``: whose (default: ``current_jurisdiction_id()``).
 
     Uses the database row's updated_at timestamp as a cache key. Every call
-    does a cheap SELECT updated_at (single PK lookup, no JSONB) and compares
+    does a cheap SELECT updated_at (single indexed lookup, no JSONB) and compares
     it to the cached value. If they match the in-process copy is returned
     immediately; if they differ the full row is fetched and the cache is
     refreshed. This means every instance sees an admin save on its very next
@@ -160,38 +272,55 @@ def get_document_content() -> dict[str, Any]:
     from transcribe_api.domain.models_dictation import DocumentContent
     from transcribe_api.runtime.db_connection import get_engine
 
+    jurisdiction_id = jurisdiction_id or current_jurisdiction_id()
+    is_iac = jurisdiction_id == IAC_JURISDICTION_ID
     try:
         with Session(get_engine()) as session:
             # Cheap check: fetch only the timestamp column
             ts_row = session.exec(
-                select(DocumentContent.updated_at).where(DocumentContent.id == 1)
+                select(DocumentContent.updated_at).where(DocumentContent.jurisdiction_id == jurisdiction_id)
             ).first()
+            cached = _cache.get(jurisdiction_id)
 
-            if ts_row is not None and ts_row == _cache["updated_at"] and _cache["content"] is not None:
-                return _used(_cache["content"])
+            if ts_row is not None and cached is not None and cached[0] == ts_row:
+                return _used(cached[1])
 
             # Timestamp changed or no cache — fetch full content
-            row = session.exec(select(DocumentContent).where(DocumentContent.id == 1)).first()
+            row = session.exec(
+                select(DocumentContent).where(DocumentContent.jurisdiction_id == jurisdiction_id)
+            ).first()
             if row is not None:
-                _cache["content"] = row.content
-                _cache["updated_at"] = row.updated_at
-                return _used(_cache["content"])
+                _cache[jurisdiction_id] = (row.updated_at, row.content)
+                return _used(row.content)
+
+            _cache.pop(jurisdiction_id, None)
+            if not is_iac:
+                return _used(_new_jurisdiction_default())
 
             # No DB row yet — seed from file and persist
             content = _load_from_file()
             try:
-                from datetime import UTC
-                from datetime import datetime as dt
-                now = dt.now(UTC)
-                session.add(DocumentContent(id=1, content=content, updated_at=now))
+                now = datetime.now(UTC)
+                _insert_if_absent(session, jurisdiction_id, content, now)
                 session.commit()
-                _cache["content"] = content
-                _cache["updated_at"] = now
             except Exception as seed_exc:
                 session.rollback()
                 logger.warning("Failed to seed document_content table: %s", seed_exc)
-            return _used(content)
-    except Exception:
+                return _used(content)
+            # Whoever's insert won (another instance's, if they raced), as stored.
+            row = session.exec(
+                select(DocumentContent).where(DocumentContent.jurisdiction_id == jurisdiction_id)
+            ).first()
+            if row is None:  # pragma: no cover - the row was just inserted
+                return _used(content)
+            _cache[jurisdiction_id] = (row.updated_at, row.content)
+            return _used(row.content)
+    except Exception as exc:
+        if not is_iac:
+            # Never another jurisdiction's wording, and never the IAC's file for it.
+            logger.exception("Database unavailable for document content of jurisdiction %s", jurisdiction_id)
+            msg = "Document content is unavailable"
+            raise ContentLoadError(msg) from exc
         logger.exception(
             "Database unavailable for document content — falling back to local file. "
             "Reads may be inconsistent across instances.",
@@ -323,10 +452,15 @@ def get_anonymity_status_by_id(status_id: str) -> dict[str, str] | None:
     return None
 
 
-def clear_cache() -> None:
-    """Reset the cached timestamp so the next read re-checks the database."""
-    _cache["content"] = None
-    _cache["updated_at"] = None
+def clear_cache(jurisdiction_id: UUID | None = None) -> None:
+    """Forget the cached content (one jurisdiction's, or all) so the next read
+    re-checks the database."""
+    global _defaults
+    if jurisdiction_id is None:
+        _cache.clear()
+        _defaults = None
+    else:
+        _cache.pop(jurisdiction_id, None)
 
 
 def get_hearing_description(hearing_type_id_or_title: str) -> str:
