@@ -223,7 +223,7 @@ class DialogueEntry(SQLModel):
             return [_with_corrected(p, False) for p in _shared_out(self.parts, current)]
         legacy_only = all(p.corrected is None for p in self.parts)
         if self.corrected_text is None and self.word_corrections and self.words and not legacy_only:
-            return _shared_out_by_word(self.parts, self.words, self.word_corrections, current)
+            return _shared_out_by_word(self.parts, self.words, self.word_corrections)
         return _shared_out(self.parts, current)
 
     def effective_text(self) -> str:
@@ -252,7 +252,7 @@ def _shared_out(parts: list[EntryPart], current: str) -> list[EntryPart]:
 
 
 def _shared_out_by_word(
-    parts: list[EntryPart], words: list[WordInfo], word_corrections: list[WordCorrection], current: str
+    parts: list[EntryPart], words: list[WordInfo], word_corrections: list[WordCorrection]
 ) -> list[EntryPart]:
     """Each part's share of text rebuilt from word-range corrections, and whether one falls in it.
 
@@ -262,20 +262,24 @@ def _shared_out_by_word(
     `words`, which can differ from a part's display text, a correction can leave the text
     as it was, and a part emptied by one edit still owns its words when it is edited again.
 
-    Parts stored without a correction state keep no state, and keep the words an alignment
-    of `current` with the parts' text when merged gives them, as they were always scored,
-    unless a part with a state owns the word. Every word goes to exactly one part.
+    Parts stored without a correction state keep none. Each run of them shares out the
+    text its words give it as it always has (`_shared_out`), so their scores don't change.
     """
     tokens, touched = _word_tokens(parts, words, word_corrections)
-    text_owners = _token_owners([p.current_text for p in parts], current)
-    shares: list[list[str]] = [[] for _ in parts]
-    for (token, owner), text_owner in zip(tokens, text_owners, strict=True):
-        legacy = parts[owner].corrected is None and parts[text_owner].corrected is None
-        shares[text_owner if legacy else owner].append(token)
-    return [
-        p.model_copy(update={"current_text": " ".join(share), "corrected": None if p.corrected is None else t})
-        for p, share, t in zip(parts, shares, touched, strict=True)
+    shared = [
+        p.model_copy(update={"current_text": " ".join(t for t, owner in tokens if owner == i), "corrected": hit})
+        for i, (p, hit) in enumerate(zip(parts, touched, strict=True))
     ]
+    start = 0
+    while start < len(parts):
+        end = start
+        while end < len(parts) and parts[end].corrected is None:
+            end += 1
+        if end > start:
+            run = _join(*(p.current_text for p in shared[start:end]))
+            shared[start:end] = _shared_out(parts[start:end], run)
+        start = end + 1
+    return shared
 
 
 def _word_tokens(
