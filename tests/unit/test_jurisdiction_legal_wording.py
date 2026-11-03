@@ -505,8 +505,8 @@ def test_concurrent_renders_in_two_jurisdictions_do_not_see_each_others_wording(
     """The jurisdiction is per render (a context), not per process."""
     client(world, world.et_admin).post("/api/admin/document-content/legal-frameworks", json=ET_FRAMEWORK, headers=ET)
     seed_iac(world)
-    seen: dict[str, bool] = {}
-    errors: list[BaseException] = []
+    seen: dict[str, list[bool]] = {"et": [], "iac": []}
+    errors: list[Exception] = []
     barrier = threading.Barrier(2)
 
     def render(name, jurisdiction_id, issue):
@@ -514,9 +514,8 @@ def test_concurrent_renders_in_two_jurisdictions_do_not_see_each_others_wording(
             barrier.wait()
             for _ in range(5):
                 text = " ".join(_all_text(_render(tmp_path, jurisdiction_id, [issue]))["raw"])
-                seen[name] = "ZEBRA-FRAMEWORK-TEXT" in text
-                assert ("ZEBRA-FRAMEWORK-TEXT" in text) == (name == "et")
-        except BaseException as exc:  # noqa: BLE001
+                seen[name].append("ZEBRA-FRAMEWORK-TEXT" in text)
+        except Exception as exc:  # noqa: BLE001
             errors.append(exc)
 
     threads = [
@@ -529,4 +528,4 @@ def test_concurrent_renders_in_two_jurisdictions_do_not_see_each_others_wording(
     for t in threads:
         t.join()
     assert not errors, errors
-    assert seen == {"et": True, "iac": False}
+    assert seen == {"et": [True] * 5, "iac": [False] * 5}
