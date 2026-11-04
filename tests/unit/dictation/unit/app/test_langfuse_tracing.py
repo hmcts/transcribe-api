@@ -23,7 +23,7 @@ def test_otel_trace_ids_are_kept() -> None:
     assert langfuse_trace_id(OTEL_TRACE_ID) == OTEL_TRACE_ID
 
 
-@pytest.mark.parametrize("trace_id", [None, "", LEGACY_TRACE_ID, OTEL_TRACE_ID.upper(), "trace-123"])
+@pytest.mark.parametrize("trace_id", [None, "", LEGACY_TRACE_ID, OTEL_TRACE_ID.upper(), "trace-123", "0" * 32])
 def test_legacy_or_invalid_trace_ids_are_dropped(trace_id: str | None) -> None:
     assert langfuse_trace_id(trace_id) is None
 

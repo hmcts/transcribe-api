@@ -69,8 +69,11 @@ def langfuse_trace_id(trace_id: str | None) -> str | None:
     """The trace id if Langfuse can attach to it, else None.
 
     Minutes made under the Langfuse v2 SDK hold UUID trace ids; v3 and later accept
-    only 32 lowercase hex characters and raise on anything else."""
-    return trace_id if trace_id and re.fullmatch(r"[0-9a-f]{32}", trace_id) else None
+    only 32 lowercase hex characters and raise on anything else. All zeros is
+    OpenTelemetry's invalid trace id, which starts a new trace instead."""
+    if trace_id and re.fullmatch(r"[0-9a-f]{32}", trace_id) and int(trace_id, 16):
+        return trace_id
+    return None
 
 
 class LangfuseAuthManager:
