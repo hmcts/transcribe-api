@@ -1,7 +1,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from langfuse.decorators import langfuse_context, observe
+from langfuse import observe, propagate_attributes
 from uwotm8 import convert_american_to_british_spelling
 
 from transcribe_api.documents.llm.llm_client import (
@@ -23,37 +23,28 @@ async def generate_general_style_summary(
     model_name: str = LLMModel.VERTEX_GEMINI_25_PRO,
     temperature: float = 0.1,
 ) -> str:
-    transcript_string = format_transcript_string_for_prompt(dialogue_entries, include_index=False)
-    prompt = langfuse_client.get_prompt(prompt_name, version=prompt_version, type="chat")
+    with propagate_attributes(user_id=user_id):
+        transcript_string = format_transcript_string_for_prompt(dialogue_entries, include_index=False)
+        prompt = langfuse_client.get_prompt(prompt_name, version=prompt_version, type="chat")
 
-    langfuse_context.update_current_observation(
-        prompt=prompt,
-        user_id=user_id,
-        input={"template": TemplateName.GENERAL, "dialogue_entries": transcript_string},
-    )
+        langfuse_client.update_current_generation(
+            prompt=prompt,
+            input={"template": TemplateName.GENERAL, "dialogue_entries": transcript_string},
+        )
 
-    compiled_chat_prompt = prompt.compile(
-        meeting_transcript=transcript_string,
-        date=datetime.now(tz=ZoneInfo("Europe/London")).strftime("%d %B %Y"),
-    )
+        compiled_chat_prompt = prompt.compile(
+            meeting_transcript=transcript_string,
+            date=datetime.now(tz=ZoneInfo("Europe/London")).strftime("%d %B %Y"),
+        )
 
-    completion = await llm_completion(
-        temperature=temperature,
-        messages=compiled_chat_prompt,
-        model=model_name,
-    )
-    output = completion.choices[0].message.content
+        completion = await llm_completion(
+            temperature=temperature,
+            messages=compiled_chat_prompt,
+            model=model_name,
+        )
+        output = completion.choices[0].message.content
 
-    converted_output = convert_american_to_british_spelling(output)
+        converted_output = convert_american_to_british_spelling(output)
 
-    langfuse_context.update_current_observation(
-        output=output,
-    )
-    langfuse_context.update_current_trace(
-        user_id=user_id,
-        input={"template": TemplateName.GENERAL, "dialogue_entries": transcript_string},
-        output=output,
-    )
-    html_content = markdown_to_html(converted_output)
-
-    return html_content
+        langfuse_client.update_current_generation(output=output)
+        return markdown_to_html(converted_output)

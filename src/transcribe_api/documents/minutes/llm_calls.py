@@ -3,12 +3,13 @@ from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 from hmcts_otel import ai_feature, stage
-from langfuse.decorators import langfuse_context, observe
+from langfuse import observe, propagate_attributes
 from uwotm8 import convert_american_to_british_spelling
 
 from transcribe_api.documents.llm.llm_client import (
     LLMModel,
     langfuse_client,
+    langfuse_trace_id,
     llm_completion,
     structured_output_llm_completion_builder_func,
 )
@@ -46,32 +47,26 @@ async def edit_minutes_with_ai(
     user_id: str,
     **kwargs,
 ) -> str:
-    current_markdown_minutes = html_to_markdown(current_minute_version.html_content)
-    langfuse_context.update_current_trace(
-        user_id=user_id,
-    )
-    prompt = langfuse_client.get_prompt("ai-edit-prompt", type="chat")
-    langfuse_context.update_current_observation(
-        prompt=prompt,
-    )
+    with propagate_attributes(user_id=user_id):
+        current_markdown_minutes = html_to_markdown(current_minute_version.html_content)
+        prompt = langfuse_client.get_prompt("ai-edit-prompt", type="chat")
+        langfuse_client.update_current_generation(prompt=prompt)
 
-    transcript_string = format_transcript_string_for_prompt(transcript, include_index=False)
-    compiled_chat_prompt = prompt.compile(
-        meeting_transcript=transcript_string,
-        meeting_summary=current_markdown_minutes,
-        user_instructions=edit_instructions,
-    )
-
-    with ai_feature("minutes_ai_edit"):  # OBS-5: token usage by feature
-        initial_completion = await llm_completion(
-            temperature=0.1,
-            messages=compiled_chat_prompt,
-            model=LLMModel.VERTEX_GEMINI_25_FLASH,
+        transcript_string = format_transcript_string_for_prompt(transcript, include_index=False)
+        compiled_chat_prompt = prompt.compile(
+            meeting_transcript=transcript_string,
+            meeting_summary=current_markdown_minutes,
+            user_instructions=edit_instructions,
         )
-    british_minutes = convert_american_to_british_spelling(initial_completion.choices[0].message.content)
-    html_minutes = markdown_to_html(british_minutes)
 
-    return html_minutes
+        with ai_feature("minutes_ai_edit"):  # OBS-5: token usage by feature
+            initial_completion = await llm_completion(
+                temperature=0.1,
+                messages=compiled_chat_prompt,
+                model=LLMModel.VERTEX_GEMINI_25_FLASH,
+            )
+        british_minutes = convert_american_to_british_spelling(initial_completion.choices[0].message.content)
+        return markdown_to_html(british_minutes)
 
 
 @observe(name="generate_meeting_title", as_type="generation")
@@ -79,23 +74,19 @@ async def generate_meeting_title(
     transcript: list[DialogueEntry],
     user_id: str,
 ) -> str:
-    langfuse_context.update_current_trace(
-        user_id=user_id,
-    )
-    prompt = langfuse_client.get_prompt("generate-meeting-title-prompt", type="chat")
-    langfuse_context.update_current_observation(
-        prompt=prompt,
-    )
-    transcript_string = format_transcript_string_for_prompt(transcript, include_index=False)
-    compiled_chat_prompt = prompt.compile(meeting_transcript=transcript_string)
+    with propagate_attributes(user_id=user_id):
+        prompt = langfuse_client.get_prompt("generate-meeting-title-prompt", type="chat")
+        langfuse_client.update_current_generation(prompt=prompt)
+        transcript_string = format_transcript_string_for_prompt(transcript, include_index=False)
+        compiled_chat_prompt = prompt.compile(meeting_transcript=transcript_string)
 
-    meeting_title_completion_func = structured_output_llm_completion_builder_func(MeetingTitleOutput)
-    with ai_feature("title_generation"):
-        completion = await meeting_title_completion_func(
-            messages=compiled_chat_prompt,
-            temperature=0.1,
-            model=LLMModel.VERTEX_GEMINI_25_FLASH,
-        )
+        meeting_title_completion_func = structured_output_llm_completion_builder_func(MeetingTitleOutput)
+        with ai_feature("title_generation"):
+            completion = await meeting_title_completion_func(
+                messages=compiled_chat_prompt,
+                temperature=0.1,
+                model=LLMModel.VERTEX_GEMINI_25_FLASH,
+            )
 
     if not completion or not completion.title:
         raise HTTPException(status_code=500, detail="No title generated")
@@ -105,24 +96,20 @@ async def generate_meeting_title(
 
 @observe(name="generate_speaker_predictions", as_type="generation")
 async def generate_speaker_predictions(dialogue_entries: list, user_id: str) -> dict:
-    langfuse_context.update_current_trace(
-        user_id=user_id,
-    )
-    prompt = langfuse_client.get_prompt("predict-speaker-names", type="chat")
-    langfuse_context.update_current_observation(
-        prompt=prompt,
-    )
-    # Prepare the conversation context
-    conversation_context = "\n".join([f"{entry.speaker}: {entry.text}" for entry in dialogue_entries])
+    with propagate_attributes(user_id=user_id):
+        prompt = langfuse_client.get_prompt("predict-speaker-names", type="chat")
+        langfuse_client.update_current_generation(prompt=prompt)
+        # Prepare the conversation context
+        conversation_context = "\n".join([f"{entry.speaker}: {entry.text}" for entry in dialogue_entries])
 
-    compiled_chat_prompt = prompt.compile(meeting_transcript=conversation_context)
-    speaker_prediction_completion_func = structured_output_llm_completion_builder_func(SpeakerPredictionOutput)
-    with ai_feature("speaker_naming"):
-        completion = await speaker_prediction_completion_func(
-            messages=compiled_chat_prompt,
-            temperature=0.1,
-            model=LLMModel.VERTEX_GEMINI_25_FLASH,
-        )
+        compiled_chat_prompt = prompt.compile(meeting_transcript=conversation_context)
+        speaker_prediction_completion_func = structured_output_llm_completion_builder_func(SpeakerPredictionOutput)
+        with ai_feature("speaker_naming"):
+            completion = await speaker_prediction_completion_func(
+                messages=compiled_chat_prompt,
+                temperature=0.1,
+                model=LLMModel.VERTEX_GEMINI_25_FLASH,
+            )
 
     predictions = completion
 
@@ -155,7 +142,7 @@ async def generate_llm_output_task(
             transcription_id=transcription_id,
             html_content="",
             template=template,
-            trace_id=langfuse_context.get_current_trace_id(),
+            trace_id=langfuse_client.get_current_trace_id(),
             is_generating=True,
         )
         save_minute_version(initial_minute_version, check_owner=False)
@@ -186,7 +173,7 @@ async def generate_llm_output_task(
                 transcription_id,
                 e,
                 template=template,
-                trace_id=langfuse_context.get_current_trace_id(),
+                trace_id=langfuse_client.get_current_trace_id(),
             )
             save_minute_version(error_minute_version, check_owner=False)
             raise
@@ -207,13 +194,16 @@ async def ai_edit_task(
             raise HTTPException(status_code=400, detail="No dialogue entries found")
 
         current_minutes = get_minute_version_by_id(current_minute_version_id, transcription_id)
+        # A legacy (UUID) or missing trace id gets a new trace, saved on the new version so
+        # that feedback on this edit reaches it.
+        trace_id = langfuse_trace_id(current_minutes.trace_id) or langfuse_client.create_trace_id()
 
         new_minute_version = MinuteVersion(
             id=new_minute_version_id,
             transcription_id=transcription_id,
             html_content="",
             template=current_minutes.template,
-            trace_id=current_minutes.trace_id,
+            trace_id=trace_id,
             is_generating=True,
         )
         save_minute_version(new_minute_version, check_owner=False)
@@ -223,7 +213,7 @@ async def ai_edit_task(
                 edit_instructions,
                 dialogue_entries,
                 user_id,
-                langfuse_parent_trace_id=current_minutes.trace_id,
+                langfuse_trace_id=trace_id,
             )
 
             new_minute_version.html_content = llm_output
@@ -326,7 +316,7 @@ Please generate a structured summary of this conversation."""
     else:
         summary = response.choices[0].message.content.strip()
 
-        langfuse_context.update_current_observation(
+        langfuse_client.update_current_generation(
             input={
                 "transcript_entries": transcript_entries,
                 "existing_summary": existing_summary,
