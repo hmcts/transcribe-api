@@ -1,4 +1,4 @@
-from langfuse.decorators import langfuse_context, observe
+from langfuse import observe
 from shared_utils.database.postgres_models import DialogueEntry
 from uwotm8 import convert_american_to_british_spelling
 
@@ -15,13 +15,9 @@ async def generate_short_n_sweet_summary(
     dialogue_entries: list[DialogueEntry],
     user_email: str,
 ) -> str:
-    langfuse_context.update_current_trace(
-        user_id=user_email,
-    )
     prompt = langfuse_client.get_prompt("short-n-sweet-template-prompt", type="chat")
-    langfuse_context.update_current_observation(
+    langfuse_client.update_current_generation(
         prompt=prompt,
-        user_id=user_email,
     )
 
     transcript_string = format_transcript_string_for_prompt(dialogue_entries, include_index=False)
@@ -37,10 +33,7 @@ async def generate_short_n_sweet_summary(
     converted_output = convert_american_to_british_spelling(markdown_output)
     html_output = markdown_to_html(converted_output)
 
-    langfuse_context.update_current_observation(
+    langfuse_client.update_current_generation(
         output=html_output,
-    )
-    langfuse_context.update_current_trace(
-        user_id=user_email,
     )
     return html_output

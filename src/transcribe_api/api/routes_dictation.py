@@ -25,6 +25,7 @@ from transcribe_api.documents.llm.langfuse_models import (
 )
 from transcribe_api.documents.llm.llm_client import (
     langfuse_client,
+    langfuse_trace_id,
 )
 from transcribe_api.documents.minutes.llm_calls import ai_edit_task, generate_llm_output_task, generate_realtime_summary
 from transcribe_api.documents.minutes.templates.templates_metadata import (
@@ -1726,14 +1727,15 @@ async def submit_langfuse_trace(
 ):
     """Submit a trace to Langfuse via backend proxy for security."""
     try:
-        # Submit general trace/event
-        langfuse_client.event(
-            trace_id=request.trace_id,
+        trace_id = langfuse_trace_id(request.trace_id)
+        # The user goes in the event's metadata: propagate_attributes would also set it
+        # on the current span, here the request span that App Insights exports.
+        langfuse_client.create_event(
+            trace_context={"trace_id": trace_id} if trace_id else None,
             name=request.name,
-            metadata=request.metadata or {},
+            metadata={**(request.metadata or {}), "user_id": str(current_user.id)},
             input=request.input_data,
             output=request.output_data,
-            user_id=str(current_user.id),
         )
 
         logger.info(
@@ -1759,12 +1761,11 @@ async def submit_langfuse_score(
     """Submit a score to Langfuse via backend proxy for security."""
     try:
         # Submit score using the backend Langfuse client
-        langfuse_client.score(
+        langfuse_client.create_score(
             trace_id=request.trace_id,
             name=request.name,
             value=request.value,
             comment=request.comment,
-            user_id=str(current_user.id),
         )
 
         logger.info(

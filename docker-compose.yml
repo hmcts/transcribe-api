@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     container_name: transcribe-postgres
     environment:
       POSTGRES_USER: transcribe
@@ -14,7 +14,9 @@ services:
       timeout: 3s
       retries: 20
     volumes:
-      - transcribe-pgdata:/var/lib/postgresql/data
+      # The 18 image keeps its data under a versioned directory below this mount and
+      # cannot read a 16 data directory, hence a new volume rather than transcribe-pgdata.
+      - transcribe-pgdata-18:/var/lib/postgresql
 
   # Azure Blob Storage emulator. The app talks to blob storage for audio upload
   # and staging; azurite lets that work without real Azure credentials.
@@ -28,5 +30,5 @@ services:
       - transcribe-azurite:/data
 
 volumes:
-  transcribe-pgdata:
+  transcribe-pgdata-18:
   transcribe-azurite:

@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from langfuse.decorators import langfuse_context, observe
+from langfuse import observe, propagate_attributes
 from pydantic import BaseModel
 from uwotm8 import convert_american_to_british_spelling
 
@@ -37,30 +37,24 @@ async def generate_crissa_section(
     prompt_version: int | None = None,
     temperature: float = 0.1,
 ) -> tuple[str, str]:
-    trace_id = langfuse_context.get_current_trace_id()
+    trace_id = langfuse_client.get_current_trace_id()
 
-    langfuse_context.update_current_trace(
-        user_id=user_id,
-    )
+    with propagate_attributes(user_id=user_id):
+        prompt = langfuse_client.get_prompt("crissa-prompt", version=prompt_version, type="chat")
+        langfuse_client.update_current_generation(prompt=prompt)
 
-    prompt = langfuse_client.get_prompt("crissa-prompt", version=prompt_version, type="chat")
-    langfuse_context.update_current_observation(
-        prompt=prompt,
-        user_id=user_id,
-    )
+        compiled_chat_prompt = prompt.compile(
+            meeting_transcript=transcript_string,
+            today_date_readable=today_date_readable,
+            crissa_draft_sections="\n\n".join(previous_outputs),
+            section=section,
+        )
 
-    compiled_chat_prompt = prompt.compile(
-        meeting_transcript=transcript_string,
-        today_date_readable=today_date_readable,
-        crissa_draft_sections="\n\n".join(previous_outputs),
-        section=section,
-    )
-
-    completion = await llm_completion(
-        temperature=temperature,
-        messages=compiled_chat_prompt,
-        model=model_name,
-    )
+        completion = await llm_completion(
+            temperature=temperature,
+            messages=compiled_chat_prompt,
+            model=model_name,
+        )
 
     markdown_output = completion.choices[0].message.content
 
@@ -104,13 +98,7 @@ async def generate_full_crissa(
     # Combine all sections
     combined_html = "\n\n".join(all_sections)
 
-    langfuse_context.update_current_observation(
-        user_id=user_id,
-        input={"template": TemplateName.CRISSA, "dialogue_entries": transcript_string},
-        output=html_to_markdown(combined_html),
-    )
-    langfuse_context.update_current_trace(
-        user_id=user_id,
+    langfuse_client.update_current_generation(
         input={"template": TemplateName.CRISSA, "dialogue_entries": transcript_string},
         output=html_to_markdown(combined_html),
     )

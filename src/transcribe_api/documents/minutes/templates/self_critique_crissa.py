@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from langfuse.decorators import langfuse_context, observe
+from langfuse import observe
 from pydantic import BaseModel
 from uwotm8 import convert_american_to_british_spelling
 
@@ -35,17 +35,11 @@ async def generate_full_crissa_one_shot(
     temperature: float = 0.1,
     today_date: str | None = None,
 ) -> str:
-    # trace_id = langfuse_context.get_current_trace_id()
-
-    langfuse_context.update_current_trace(
-        user_id=user_email,
-    )
 
     prompt = langfuse_client.get_prompt("crissa-one-shot", version=prompt_version, type="chat")
 
-    langfuse_context.update_current_observation(
+    langfuse_client.update_current_generation(
         prompt=prompt,
-        user_id=user_email,
     )
 
     # Use provided date or default to current date
@@ -65,13 +59,7 @@ async def generate_full_crissa_one_shot(
     markdown_output = completion.choices[0].message.content
     markdown_output = convert_american_to_british_spelling(markdown_output)
 
-    langfuse_context.update_current_observation(
-        user_id=user_email,
-        input={"template": TemplateName.CRISSA, "dialogue_entries": transcript_string},
-        output=html_to_markdown(markdown_output),
-    )
-    langfuse_context.update_current_trace(
-        user_id=user_email,
+    langfuse_client.update_current_generation(
         input={"template": TemplateName.CRISSA, "dialogue_entries": transcript_string},
         output=html_to_markdown(markdown_output),
     )
@@ -111,8 +99,6 @@ async def critique_crissa_report(
     Critique a CRISSA report and determine if refinements are needed.
     Returns a structured CrisssaCritique object.
     """
-
-    langfuse_context.update_current_trace(user_id=user_email)
 
     # Create the enhanced critique prompt that includes original instructions and examples
     critique_prompt = """You are an expert evaluator of UK probation case notes, specifically CRISSA reports, with deep knowledge of the CRISSA framework and years of experience in criminal justice case management.
@@ -258,8 +244,7 @@ Focus your critique on substantive issues that would impact the quality and usef
             summary=f"Unable to complete critique due to error: {e!s}, proceeding with original report",
         )
 
-    langfuse_context.update_current_observation(
-        user_id=user_email,
+    langfuse_client.update_current_generation(
         input={"transcript": transcript_string, "crissa_report": crissa_report},
         output=critique_result.model_dump(),
     )
@@ -280,8 +265,6 @@ async def refine_crissa_report(
     """
     Refine a CRISSA report based on critique feedback.
     """
-
-    langfuse_context.update_current_trace(user_id=user_email)
 
     today_date_readable = today_date or datetime.now(UTC).strftime("%d %B %Y")
 
@@ -347,8 +330,7 @@ Generate the full CRISSA report with only the specified refinements applied:"""
     refined_output = completion.choices[0].message.content
     refined_output = convert_american_to_british_spelling(refined_output)
 
-    langfuse_context.update_current_observation(
-        user_id=user_email,
+    langfuse_client.update_current_generation(
         input={
             "original_crissa": original_crissa,
             "critique": critique_feedback.model_dump(),
@@ -374,8 +356,6 @@ async def generate_full_crissa_one_shot_with_refinement(
     Generate a CRISSA report with critique and refinement process.
     Returns the final refined report as a string.
     """
-
-    langfuse_context.update_current_trace(user_id=user_email)
 
     # Step 1: Generate initial CRISSA report
     initial_report = await generate_full_crissa_one_shot(
@@ -414,25 +394,13 @@ async def generate_full_crissa_one_shot_with_refinement(
         refinement_iterations += 1
 
     # Update final trace
-    langfuse_context.update_current_observation(
-        user_id=user_email,
+    langfuse_client.update_current_generation(
         input={"template": TemplateName.CRISSA, "dialogue_entries": transcript_string},
         output=html_to_markdown(final_report),
         metadata={
             "initial_quality_score": critique_result.overall_quality_score,
             "needed_refinement": critique_result.needs_refinement,
             "refinement_iterations": refinement_iterations,
-        },
-    )
-
-    langfuse_context.update_current_trace(
-        user_id=user_email,
-        input={"template": TemplateName.CRISSA, "dialogue_entries": transcript_string},
-        output=html_to_markdown(final_report),
-        metadata={
-            "process": "critique_and_refinement",
-            "iterations": refinement_iterations,
-            "initial_critique": critique_result.model_dump(),
         },
     )
 

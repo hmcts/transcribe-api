@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from collections.abc import Callable
 from enum import StrEnum
 from pathlib import Path
@@ -8,9 +9,9 @@ from typing import Any
 
 import litellm
 from hmcts_otel import ai_fallback
-from langfuse import Langfuse
-from langfuse.decorators import langfuse_context, observe
+from langfuse import Langfuse, observe
 from litellm import acompletion
+from opentelemetry.sdk.trace import TracerProvider
 from pydantic import BaseModel
 
 from transcribe_api.runtime.settings_dictation import get_settings
@@ -56,11 +57,20 @@ _settings = get_settings()
 langfuse_client = Langfuse(
     public_key=_settings.LANGFUSE_PUBLIC_KEY,
     secret_key=_settings.LANGFUSE_SECRET_KEY,
-    host=_settings.LANGFUSE_HOST,
+    base_url=_settings.LANGFUSE_HOST,
     environment=_settings.ENVIRONMENT,
+    # Its own provider, not the global one: Langfuse spans carry prompts and transcripts,
+    # which must not reach the App Insights exporter, and app spans must not reach Langfuse.
+    tracer_provider=TracerProvider(),
 )
 
-langfuse_context.configure(environment=_settings.ENVIRONMENT)
+
+def langfuse_trace_id(trace_id: str | None) -> str | None:
+    """The trace id if Langfuse can attach to it, else None.
+
+    Minutes made under the Langfuse v2 SDK hold UUID trace ids; v3 and later accept
+    only 32 lowercase hex characters and raise on anything else."""
+    return trace_id if trace_id and re.fullmatch(r"[0-9a-f]{32}", trace_id) else None
 
 
 class LangfuseAuthManager:
@@ -254,7 +264,7 @@ async def _completion_with_multi_fallback(*, model: str, messages: list, **kwarg
         # Try Gemini first
         result = await gemini_eu_fallback_acompletion(model=model, messages=messages, **kwargs)
         # Update observation to track successful Gemini usage
-        langfuse_context.update_current_observation(
+        langfuse_client.update_current_generation(
             metadata={
                 "actual_model_used": model,
                 "fallback_triggered": False,
@@ -273,7 +283,7 @@ async def _completion_with_multi_fallback(*, model: str, messages: list, **kwarg
                 with ai_fallback():  # OBS-5: usage metrics record it as a fallback
                     result = await azure_grok_acompletion(model=LLMModel.AZURE_GROK_3, messages=messages, **kwargs)
                 # Update observation to track Grok fallback usage
-                langfuse_context.update_current_observation(
+                langfuse_client.update_current_generation(
                     metadata={
                         "requested_model": model,
                         "actual_model_used": LLMModel.AZURE_GROK_3,
@@ -288,7 +298,7 @@ async def _completion_with_multi_fallback(*, model: str, messages: list, **kwarg
                 with ai_fallback():
                     result = await azure_acompletion(model=LLMModel.AZURE_GPT_4O, messages=messages, **kwargs)
                 # Update observation to track final fallback usage
-                langfuse_context.update_current_observation(
+                langfuse_client.update_current_generation(
                     metadata={
                         "requested_model": model,
                         "actual_model_used": LLMModel.AZURE_GPT_4O,

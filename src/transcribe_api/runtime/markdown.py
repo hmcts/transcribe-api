@@ -2,10 +2,10 @@ import textwrap
 
 import commonmark
 import html2text
-from langfuse.decorators import observe
+from langfuse import observe
 
 
-@observe(name="markdown_to_html", as_type="conversion")
+@observe(name="markdown_to_html")
 def markdown_to_html(markdown_text: str, strip: bool = True) -> str:
     """
     Convert markdown text to HTML using CommonMark (for better nested list support).
@@ -26,7 +26,7 @@ def markdown_to_html(markdown_text: str, strip: bool = True) -> str:
     return html.strip() if strip else html
 
 
-@observe(name="html_to_markdown", as_type="conversion")
+@observe(name="html_to_markdown")
 def html_to_markdown(html_text: str) -> str:
     """
     Convert HTML text to markdown.
