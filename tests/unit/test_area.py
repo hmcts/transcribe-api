@@ -17,7 +17,6 @@ from hmcts_otel.testing import capture_telemetry
 
 from transcribe_api.runtime.telemetry import AREA_DICTATION, AREA_RECORDING
 
-
 PROBE = "/zz-area-probe"
 
 

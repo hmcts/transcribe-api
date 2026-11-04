@@ -19,7 +19,6 @@ from sqlalchemy.ext.compiler import compiles
 from sqlmodel import Session
 
 from transcribe_api.domain.jurisdictions import JurisdictionFeatures, JurisdictionSettings, Membership
-from transcribe_api.domain.models_recording import Caller, SpeechBatchJob
 from transcribe_api.domain.models_dictation import (
     AuditLog,
     DocumentContent,
@@ -33,6 +32,7 @@ from transcribe_api.domain.models_dictation import (
     UploadJurisdiction,
     User,
 )
+from transcribe_api.domain.models_recording import Caller, SpeechBatchJob
 
 IAC_JURISDICTION_ID = UUID("6a1c0f3e-3b7d-4c2a-9e51-1ac000000001")
 

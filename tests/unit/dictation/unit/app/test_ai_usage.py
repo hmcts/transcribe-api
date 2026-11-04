@@ -26,7 +26,7 @@ llm_client = llm_calls = LLMModel = general_template = configure_telemetry = Non
 
 @pytest.fixture(autouse=True)
 def _application(setup_test_environment):  # the env the client imports with
-    global llm_client, llm_calls, LLMModel, general_template, configure_telemetry  # noqa: PLW0603
+    global llm_client, llm_calls, LLMModel, general_template, configure_telemetry
     # Other test modules stub transcribe_api.documents.minutes.llm_calls with a MagicMock: this needs the real one.
     if not isinstance(sys.modules.get("transcribe_api.documents.minutes.llm_calls", ModuleType("")), ModuleType):
         del sys.modules["transcribe_api.documents.minutes.llm_calls"]

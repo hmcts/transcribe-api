@@ -56,6 +56,12 @@ from transcribe_api.domain.interface_recording import (
     list_jobs_paginated,
     record_correction_dataset_entry,
 )
+from transcribe_api.domain.jurisdictions import (
+    ActiveJurisdiction,
+    job_owner_and_jurisdiction,
+    record_upload_jurisdiction,
+    recorded_upload_jurisdiction,
+)
 from transcribe_api.domain.models_recording import (
     CorrectionEntry,
     DialogueEntry,
@@ -66,12 +72,6 @@ from transcribe_api.domain.models_recording import (
 )
 from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
 from transcribe_api.runtime.db_recording import get_session
-from transcribe_api.domain.jurisdictions import (
-    ActiveJurisdiction,
-    job_owner_and_jurisdiction,
-    record_upload_jurisdiction,
-    recorded_upload_jurisdiction,
-)
 from transcribe_api.runtime.security_events import (
     AUDIO,
     JOB,
@@ -608,7 +608,7 @@ def _to_response(job: SpeechBatchJob) -> JobResponse:
 
 
 def _recording_jurisdiction(
-    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> ActiveJurisdiction:
     """The request's jurisdiction, which must use hearing recordings (DIAAT-334): the
     area answers 404 to any other, as if it were not there."""
@@ -627,8 +627,8 @@ def _job_in_jurisdiction(resource_type: str):
     def check(
         request: Request,
         job_id: UUID,
-        current_user: AuthenticatedUser = Depends(get_current_user),  # noqa: B008
-        jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),  # noqa: B008
+        current_user: AuthenticatedUser = Depends(get_current_user),
+        jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),
     ) -> None:
         exists, owner_id, job_jurisdiction = job_owner_and_jurisdiction(job_id)
         if not exists or not (_is_admin(current_user) or owner_id == current_user.id):
@@ -754,7 +754,7 @@ async def upload_audio(
     request: Request,
     file: UploadFile = File(...),
     current_user: AuthenticatedUser = Depends(get_current_user),
-    jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),
     x_hearing_id: Annotated[str | None, Header()] = None,
     x_hearing_file_count: Annotated[str | None, Header()] = None,
 ) -> UploadResponse:
@@ -892,7 +892,7 @@ async def submit_job(
     body: Annotated[SubmitJobRequest, Body()],
     session: Session = Depends(get_session),
     current_user: AuthenticatedUser = Depends(get_current_user),
-    jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),
 ) -> JobResponse:
     # DIAAT-286: "did X submit Y". An idempotent replay is recorded too (detail.replayed).
     with audited("job.submit", current_user.id) as audit:
@@ -1002,7 +1002,7 @@ async def _submit_job(
 async def list_jobs(
     session: Session = Depends(get_session),
     current_user: AuthenticatedUser = Depends(get_current_user),
-    jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),
     status: str | None = Query(default=None, description="Filter by job status"),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),

@@ -21,9 +21,9 @@ from hmcts_otel.testing import capture_telemetry
 from sqlalchemy.exc import OperationalError
 
 from transcribe_api.domain import audit_recording as audit
-from transcribe_api.domain.audit_recording import AuditRecord, audited, denied, write_audit
 from transcribe_api.domain.audit import ATTR_ACTION as ATTR_AUDIT_ACTION
 from transcribe_api.domain.audit import EVENT_WRITE_FAILED as EVENT_AUDIT_WRITE_FAILED
+from transcribe_api.domain.audit_recording import AuditRecord, audited, denied, write_audit
 from transcribe_api.runtime.telemetry import configure_telemetry
 from transcribe_api.runtime.telemetry_schema import AUDIT_ACTIONS
 

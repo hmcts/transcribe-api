@@ -14,12 +14,11 @@ import sqlalchemy
 from hmcts_otel import request_id_context
 from sqlmodel import Session, SQLModel, create_engine, select
 
+from transcribe_api.domain import audit as audit_core
 from transcribe_api.domain import audit_recording as audit
 from transcribe_api.domain.audit_recording import AuditRecord, denied, write_audit
 from transcribe_api.domain.audit_recording import _insert as real_insert
-from transcribe_api.runtime.db_recording import get_engine
 from transcribe_api.domain.interface_recording import get_job_by_id, save_job_results
-from transcribe_api.domain import audit as audit_core
 from transcribe_api.domain.models_dictation import AuditLog  # the shared audit_log
 from transcribe_api.domain.models_recording import (
     BatchJobStatus,
@@ -27,6 +26,7 @@ from transcribe_api.domain.models_recording import (
     SpeechBatchJob,
 )
 from transcribe_api.domain.provenance_recording import TranscriptProvenance
+from transcribe_api.runtime.db_recording import get_engine
 
 from .test_dialogue_entries_persistence import _CONNECT_ARGS, _DB_URL, _SHOULD_RUN
 

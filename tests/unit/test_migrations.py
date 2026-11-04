@@ -676,22 +676,22 @@ def test_0004_and_0005_keep_every_existing_value_unchanged():
         ids = {"u": "3f2a9c1e-8b7d-4e6f-9a1b-2c3d4e5f6a7b", "t": "0f8fad5b-d9cb-469f-a165-70867728950e"}
         with engine.begin() as connection:
             for statement in (
-                'INSERT INTO "user" (id, created_datetime, updated_datetime, email, azure_user_id,'
+                ('INSERT INTO "user" (id, created_datetime, updated_datetime, email, azure_user_id,'
                 " has_completed_onboarding, role) VALUES (:u, '2026-01-02 03:04:05', '2026-01-03 03:04:05',"
-                " 'judge@example.test', 'oid', true, 'Judge')",
-                "INSERT INTO transcription (id, created_datetime, user_id, title)"
-                " VALUES (:t, '2026-01-02 03:04:05', :u, 'A v B')",
-                "INSERT INTO minuteversion (id, created_datetime, html_content, template, transcription_id,"
-                " star_rating) VALUES (gen_random_uuid(), now(), '<p>Decision</p>', '{\"name\": \"General\"}', :t, 4)",
-                "INSERT INTO transcriptionjob (id, created_datetime, transcription_id, dialogue_entries, s3_audio_url,"
+                " 'judge@example.test', 'oid', true, 'Judge')"),
+                ("INSERT INTO transcription (id, created_datetime, user_id, title)"
+                " VALUES (:t, '2026-01-02 03:04:05', :u, 'A v B')"),
+                ("INSERT INTO minuteversion (id, created_datetime, html_content, template, transcription_id,"
+                " star_rating) VALUES (gen_random_uuid(), now(), '<p>Decision</p>', '{\"name\": \"General\"}', :t, 4)"),
+                ("INSERT INTO transcriptionjob (id, created_datetime, transcription_id, dialogue_entries, s3_audio_url,"
                 " provenance, needs_cleanup) VALUES (gen_random_uuid(), now(), :t,"
                 " '[{\"speaker\": \"Judge\", \"text\": \"words\"}]', 'user-uploads/oid/hearing-document-1.docx',"
-                " '{\"output\": \"document\"}', false)",
-                "INSERT INTO transcription_job (id, created_datetime, user_id, status, audio_url, locale,"
+                " '{\"output\": \"document\"}', false)"),
+                ("INSERT INTO transcription_job (id, created_datetime, user_id, status, audio_url, locale,"
                 " enable_diarization, needs_cleanup, metadata, dialogue_entries) VALUES (gen_random_uuid(), now(), :u,"
-                " 'SUCCEEDED', 'https://blob/a.wav', 'en-GB', true, false, '{\"case_reference\": \"PA/1/2026\"}', '[]')",
-                "INSERT INTO live_transcript_draft (id, created_datetime, user_id, transcript, form_data)"
-                " VALUES (gen_random_uuid(), now(), :u, '{\"background\": [\"words\"]}', '{\"appellantName\": \"A\"}')",
+                " 'SUCCEEDED', 'https://blob/a.wav', 'en-GB', true, false, '{\"case_reference\": \"PA/1/2026\"}', '[]')"),
+                ("INSERT INTO live_transcript_draft (id, created_datetime, user_id, transcript, form_data)"
+                " VALUES (gen_random_uuid(), now(), :u, '{\"background\": [\"words\"]}', '{\"appellantName\": \"A\"}')"),
                 "INSERT INTO document_content (id, content, updated_at) VALUES (1, '{\"legal_frameworks\": [1]}', now())",
             ):
                 connection.execute(text(statement), ids)

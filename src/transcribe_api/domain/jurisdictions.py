@@ -130,10 +130,9 @@ def parse_settings(raw: dict | None, code: str = "") -> JurisdictionSettings:
         len(kept) != len(wording)
         or template not in (None, TEMPLATE_IAC_DECISION)
         or not isinstance(hearing_recordings, bool)
-    ):
-        if code not in _warned_about:  # once per jurisdiction: this runs on every request
-            _warned_about.add(code)
-            logger.warning("Jurisdiction %s settings have values this release does not know; ignored", code)
+    ) and code not in _warned_about:  # once per jurisdiction: this runs on every request
+        _warned_about.add(code)
+        logger.warning("Jurisdiction %s settings have values this release does not know; ignored", code)
     return JurisdictionSettings.model_construct(
         wording=kept,
         template=template if template == TEMPLATE_IAC_DECISION else None,
@@ -365,7 +364,7 @@ def jurisdiction_dependency(current_user_dep):
     get_current_user so it shares the request's cached user with get_allowlisted_user
     (domain/auth/dependencies_dictation.py and dependencies_recording.py)."""
 
-    def get_active_jurisdiction(request: Request, current_user: User = Depends(current_user_dep)) -> ActiveJurisdiction:  # noqa: B008
+    def get_active_jurisdiction(request: Request, current_user: User = Depends(current_user_dep)) -> ActiveJurisdiction:
         return resolve(current_user.id, current_user.active_jurisdiction_id, request.headers.get(HEADER))
 
     return get_active_jurisdiction

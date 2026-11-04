@@ -198,7 +198,7 @@ def _write_failed(action: AuditAction, exc: BaseException) -> None:
             audit_core.EVENT_WRITE_FAILED,
             {audit_core.ATTR_ACTION: action, c.ERROR_CODE: audit_core.EVENT_WRITE_FAILED},
         )
-    except Exception:  # noqa: BLE001, S110 - reporting the failure must not raise either
+    except Exception:  # noqa: S110 - reporting the failure must not raise either
         pass
 
 

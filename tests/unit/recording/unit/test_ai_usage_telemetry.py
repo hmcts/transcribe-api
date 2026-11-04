@@ -23,6 +23,8 @@ from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
+from transcribe_api.domain.models_recording import BatchJobStatus, JobStatus, SpeechBatchJob
+from transcribe_api.runtime.telemetry import configure_telemetry
 from transcribe_api.stt.batch_client import (
     BatchResultError,
     BatchResults,
@@ -31,8 +33,6 @@ from transcribe_api.stt.batch_client import (
 )
 from transcribe_api.stt.job_telemetry import METRIC_SPEECH_USAGE_JOBS
 from transcribe_api.stt.polling_service import BatchPollingService, _PendingJob
-from transcribe_api.domain.models_recording import BatchJobStatus, JobStatus, SpeechBatchJob
-from transcribe_api.runtime.telemetry import configure_telemetry
 
 SPEECH_URL = (
     "https://uksouth.api.cognitive.microsoft.com/speechtotext/v3.2/transcriptions/0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"

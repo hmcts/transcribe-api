@@ -27,6 +27,7 @@ import io
 import wave
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from typing import Self
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
@@ -53,6 +54,10 @@ from tests.unit.recording.unit.validation.prohibited_content import (
     TRANSCRIPT_TEXT,
     USER_EMAIL,
 )
+from transcribe_api.domain.interface_recording import save_job_results
+from transcribe_api.domain.models_recording import JobStatus, SpeechBatchJob, User
+from transcribe_api.runtime.settings_recording import get_settings
+from transcribe_api.runtime.telemetry import JOURNEY_JOB, JOURNEY_UPLOAD, upload_id_from_blob
 from transcribe_api.stt import polling_service
 from transcribe_api.stt.job_telemetry import (
     METRIC_JOB_DURATION,
@@ -61,10 +66,6 @@ from transcribe_api.stt.job_telemetry import (
 )
 from transcribe_api.stt.polling_service import BatchPollingService
 from transcribe_api.stt.speech_telemetry import METRIC_SPEECH_THROTTLED
-from transcribe_api.runtime.settings_recording import get_settings
-from transcribe_api.domain.interface_recording import save_job_results
-from transcribe_api.domain.models_recording import JobStatus, SpeechBatchJob, User
-from transcribe_api.runtime.telemetry import JOURNEY_JOB, JOURNEY_UPLOAD, upload_id_from_blob
 
 ENDPOINT = "https://test.cognitiveservices.azure.com"
 # OBS-5: the audio length in Azure's results file (the job is submitted with 1.5 s).
@@ -221,7 +222,7 @@ class FakeBlobs:
     def __call__(self, *_args, **_kwargs) -> FakeBlobs:  # AsyncAzureBlobManager()
         return self
 
-    async def __aenter__(self) -> FakeBlobs:
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, *_exc) -> bool:
@@ -331,9 +332,9 @@ def engine():
 @pytest.fixture
 def service(tel, engine, monkeypatch) -> Iterator[Service]:
     from transcribe_api.api.app import create_app
-    from transcribe_api.runtime.db_recording import get_session
     from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
     from transcribe_api.domain.auth.dependencies_recording import get_current_user
+    from transcribe_api.runtime.db_recording import get_session
 
     # The deployment's settings, whatever earlier tests left in the environment.
     monkeypatch.setenv("ENVIRONMENT", "test")

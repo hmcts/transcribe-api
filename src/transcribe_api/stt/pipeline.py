@@ -19,7 +19,6 @@ from transcribe_api.documents.minutes.templates.templates_metadata import (
     general_template,
 )
 from transcribe_api.domain.exceptions import OwnershipConflictError
-from transcribe_api.domain.jurisdictions import upload_jurisdiction_id
 from transcribe_api.domain.interface_dictation import (
     get_transcription_title,
     load_or_create_transcription,
@@ -27,6 +26,7 @@ from transcribe_api.domain.interface_dictation import (
     save_transcription_title,
     user_error_message,
 )
+from transcribe_api.domain.jurisdictions import upload_jurisdiction_id
 from transcribe_api.domain.models_dictation import (
     Transcription,
     TranscriptionJob,

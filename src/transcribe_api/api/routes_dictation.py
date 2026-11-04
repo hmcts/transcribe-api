@@ -65,12 +65,6 @@ from transcribe_api.domain.blob_ownership import (
     blob_owner_segment,
     segment_belongs_to_user,
 )
-from transcribe_api.domain.jurisdictions import (
-    TEMPLATE_IAC_DECISION,
-    ActiveJurisdiction,
-    owned_transcription_jurisdiction,
-    record_upload_jurisdiction,
-)
 from transcribe_api.domain.exceptions import JurisdictionConflictError, OwnershipConflictError
 from transcribe_api.domain.interface_dictation import (
     add_tag_to_transcription,
@@ -92,6 +86,12 @@ from transcribe_api.domain.interface_dictation import (
     save_transcription_job,
     update_user,
     upsert_live_draft,
+)
+from transcribe_api.domain.jurisdictions import (
+    TEMPLATE_IAC_DECISION,
+    ActiveJurisdiction,
+    owned_transcription_jurisdiction,
+    record_upload_jurisdiction,
 )
 from transcribe_api.domain.models_dictation import (
     DialogueEntry,
@@ -217,8 +217,8 @@ def _in_jurisdiction(resource_type: str):
     def check(
         request: Request,
         transcription_id: UUID,
-        current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
-        jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
+        current_user: User = Depends(_ANY_APP_ROLE),
+        jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
     ) -> None:
         _refuse_other_jurisdiction(
             transcription_id, current_user, jurisdiction, resource_type, action_for_method(request.method)
@@ -312,7 +312,7 @@ def _require_decision_template(jurisdiction: ActiveJurisdiction) -> None:
 async def get_document_content_route(
     response: Response,
     current_user: User = Depends(get_allowlisted_user()),  # noqa: B008
-    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> DocumentContentResponse:
     """Return editable document content for allowlisted recorder users.
 
@@ -478,8 +478,8 @@ async def azure_storage_health_check():
 @router.post("/get-upload-url", response_model=UploadUrlResponse)
 async def get_upload_url(
     request: UploadUrlRequest,
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
-    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> UploadUrlResponse:
     """Generate an upload URL for the client.
 
@@ -548,8 +548,8 @@ async def _verified_upload_transcription_id(key: str, current_user: User) -> str
 async def upload_audio_proxy(
     key: str,
     request: Request,
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
-    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ):
     """Receive a raw audio upload and write it to blob storage.
 
@@ -652,8 +652,8 @@ def _validate_transcription_for_minutes(transcription_id: UUID, user_id: UUID) -
 @router.post("/generate-or-edit-minutes")
 async def generate_or_edit_minutes(
     request: GenerateMinutesRequest,
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
-    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ):
     """
     Initiate minute generation or editing as an async background task.
@@ -740,8 +740,8 @@ async def get_templates(
 
 @router.get("/transcriptions-metadata", response_model=list[TranscriptionMetadata])
 async def get_transcriptions_metadata(
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
-    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
     timezone: str = "Europe/London",  # Optional parameter with UK default
 ):
     """Get metadata for all transcriptions. Requires Judge, LegalTextManager, or SystemAdministrator role."""
@@ -759,7 +759,7 @@ async def get_transcriptions_metadata(
 @router.get("/transcriptions/{transcription_id}", dependencies=[_in_jurisdiction(TRANSCRIPTION)], response_model=Transcription)
 async def get_transcription(
     transcription_id: UUID,
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
     timezone: str = "Europe/London",  # Optional parameter with UK default
 ):
     """Get a specific transcription by ID."""
@@ -781,8 +781,8 @@ async def get_transcription(
 @router.post("/transcriptions", response_model=Transcription)
 async def save_transcription_route(
     transcription_data: Transcription,
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
-    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ):
     """Save or update a transcription."""
     logger.info("saving transcription for user %s", _sanitize_for_log(current_user.id))
@@ -803,7 +803,7 @@ async def save_transcription_route(
 @router.get("/transcriptions/{transcription_id}/document-download", dependencies=[_in_jurisdiction(DOCUMENT)])
 async def get_document_download_url(
     transcription_id: UUID,
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
 ):
     """Generate a fresh, time-limited download URL for a hearing document.
 
@@ -883,7 +883,7 @@ async def _document_download_url(transcription_id: UUID, current_user: User, aud
 async def download_document(
     transcription_id: UUID,
     request: Request,
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
 ):
     """Stream a transcript document from blob storage, verifying ownership before serving."""
     async with audited(
@@ -969,7 +969,7 @@ async def _stream_document(
 @router.delete("/transcriptions/{transcription_id}", dependencies=[_in_jurisdiction(TRANSCRIPTION)], status_code=204)
 async def delete_transcription(
     transcription_id: UUID,
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
 ):
     """Delete a specific transcription by ID. Audited (DIAAT-286); a refusal (404:
     unknown or another user's) is ``denied``, an error ``failed``."""
@@ -984,7 +984,7 @@ async def delete_transcription(
 async def get_minute_version_by_id_route(
     transcription_id: UUID,
     minute_version_id: UUID,
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
 ):
     """Get a specific minute version by its ID for a given transcription."""
     # Verify user has access to the associated transcription
@@ -1003,7 +1003,7 @@ async def get_minute_version_by_id_route(
 )
 async def get_minute_versions_route(
     transcription_id: UUID,
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
 ):
     """Get all minute versions for a specific transcription."""
     # Verify user has access to this transcription
@@ -1018,7 +1018,7 @@ async def get_minute_versions_route(
 async def save_minute_version_route(
     transcription_id: UUID,
     minute_data: MinuteVersion,
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
 ):
     """Create or update a minute version for a transcription."""
     transcription = get_transcription_by_id(transcription_id, current_user.id, UK_TIMEZONE)
@@ -1044,7 +1044,7 @@ async def save_minute_version_route(
 async def save_transcription_job_route(
     transcription_id: UUID,
     job_data: TranscriptionJob,
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
 ) -> TranscriptionJob:
     """Create a new transcription job for a transcription."""
     # Verify user has access to this transcription
@@ -1071,7 +1071,7 @@ async def save_transcription_job_route(
 @router.get("/transcriptions/{transcription_id}/jobs", dependencies=[_in_jurisdiction(TRANSCRIPTION_JOB)], response_model=list[TranscriptionJob])
 async def get_transcription_jobs_route(
     transcription_id: UUID,
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
 ) -> list[TranscriptionJob]:
     """Get all transcription jobs for a specific transcription: the transcript text,
     so audited as a view of the transcript (DIAAT-286)."""
@@ -1089,7 +1089,7 @@ async def stream_audio(
     transcription_id: UUID,
     job_id: UUID,
     request: Request,
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
 ):
     """Stream audio from blob storage with HTTP Range support for seekable playback.
 
@@ -1284,7 +1284,7 @@ class LiveDraftResponse(BaseModel):
 )
 async def get_sectioned_transcript_route(
     transcription_id: UUID,
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
 ) -> TranscriptViewerResponse:
     """Get the recorder-style sectioned transcript for a hearing if available.
 
@@ -1388,8 +1388,8 @@ async def _render_hearing_document_off_loop(**kwargs) -> Path:
 @router.post("/live-transcription/submission", response_model=LiveTranscriptionSubmissionResponse)
 async def save_live_transcription_submission(
     request: LiveTranscriptionSubmissionRequest,
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
-    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
     dictation_session_id: str | None = Header(default=None, alias="X-Dictation-Session-Id"),
 ) -> LiveTranscriptionSubmissionResponse:
     """Persist live transcription form and transcript data as JSON in the audio uploads bucket."""
@@ -1658,7 +1658,7 @@ class AddTagRequest(BaseModel):
 @router.get("/transcriptions/{transcription_id}/tags", dependencies=[_in_jurisdiction(TRANSCRIPTION)], response_model=list[Tag])
 async def get_transcription_tags_route(
     transcription_id: UUID,
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
 ) -> list[Tag]:
     """Get all tags for a specific transcription."""
     return get_tags_for_transcription(transcription_id, current_user.id)
@@ -1668,7 +1668,7 @@ async def get_transcription_tags_route(
 async def add_tag_to_transcription_route(
     transcription_id: UUID,
     tag_request: AddTagRequest,
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
 ) -> Tag:
     """Add a tag to a transcription."""
     return add_tag_to_transcription(transcription_id, tag_request.name, current_user.id)
@@ -1678,7 +1678,7 @@ async def add_tag_to_transcription_route(
 async def remove_tag_from_transcription_route(
     transcription_id: UUID,
     tag_name: str,
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
 ):
     """Remove a tag from a transcription."""
     remove_tag_from_transcription(transcription_id, tag_name, current_user.id)
@@ -1783,7 +1783,7 @@ async def submit_langfuse_score(
 
 @router.get("/get-speech-token")
 async def get_speech_token(
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
 ):
     """
     Get Azure Speech Services token for real-time transcription.
@@ -1839,7 +1839,7 @@ async def get_speech_token(
 @router.post("/generate-realtime-summary")
 async def generate_realtime_summary_endpoint(
     request: GenerateSummaryRequest,
-    current_user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
+    current_user: User = Depends(_ANY_APP_ROLE),
 ) -> GenerateSummaryResponse:
     """
     Generate a real-time summary of conversation transcript entries.
@@ -1880,7 +1880,7 @@ async def generate_realtime_summary_endpoint(
 @router.get("/live-draft", response_model=LiveDraftResponse)
 async def get_live_draft_route(
     current_user: User = Depends(get_allowlisted_user()),  # noqa: B008
-    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> LiveDraftResponse:
     """Return the current user's in-progress draft in this jurisdiction, or 404 if none or expired."""
     draft = get_live_draft(current_user.id, jurisdiction.id)
@@ -1900,7 +1900,7 @@ async def get_live_draft_route(
 async def upsert_live_draft_route(
     payload: LiveDraftPayload,
     current_user: User = Depends(get_allowlisted_user()),  # noqa: B008
-    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> None:
     """Create or overwrite the current user's in-progress draft in this jurisdiction."""
     upsert_live_draft(current_user.id, jurisdiction.id, payload.transcript, payload.form_data)
@@ -1909,7 +1909,7 @@ async def upsert_live_draft_route(
 @router.delete("/live-draft", status_code=204)
 async def delete_live_draft_route(
     current_user: User = Depends(get_allowlisted_user()),  # noqa: B008
-    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> None:
     """Delete the current user's in-progress draft in this jurisdiction (on restore, discard, or submit)."""
     delete_live_draft(current_user.id, jurisdiction.id)
