@@ -37,9 +37,6 @@ from fastapi.testclient import TestClient
 from hmcts_otel import conventions as c
 from hmcts_otel.fastapi import RequestIdMiddleware, instrument_fastapi
 
-from transcribe_api.runtime.browser_telemetry import JOURNEY_DICTATION_SESSION
-from transcribe_api.domain.models_dictation import User
-from transcribe_api.runtime.telemetry import JOURNEY_SUBMISSION
 from tests.unit.dictation.unit.validation.pii_scan import (
     APPELLANT_EMAIL,
     BEARER_TOKEN,
@@ -51,6 +48,9 @@ from tests.unit.dictation.unit.validation.pii_scan import (
     SAS_URL,
     TRANSCRIPT_TEXT,
 )
+from transcribe_api.domain.models_dictation import User
+from transcribe_api.runtime.browser_telemetry import JOURNEY_DICTATION_SESSION
+from transcribe_api.runtime.telemetry import JOURNEY_SUBMISSION
 
 OID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 SPEECH_SESSION_1 = "0f" * 16  # Speech SDK session IDs: 32 hex
@@ -177,7 +177,7 @@ class Services:
             message = f"template field missing for {request.form_data.appellant_name}"
             raise RuntimeError(message)
         path = MagicMock(spec=Path)
-        path.__str__ = lambda _: "/tmp/hearing-document.docx"  # noqa: S108
+        path.__str__ = lambda _: "/tmp/hearing-document.docx"
         path.exists.return_value = False
         return path
 
@@ -427,7 +427,7 @@ def _named(events, *names):
     return [e for e in events if e[c.CUSTOM_EVENT_NAME] in names]
 
 
-def panel_values(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:  # noqa: C901, PLR0912
+def panel_values(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Panel or alert -> {row label: value}, for the panels these events reach."""
     out: dict[str, Counter | dict] = {name: Counter() for name in PANEL_SOURCES}
     for e in _named(events, "dictation.session_ended"):

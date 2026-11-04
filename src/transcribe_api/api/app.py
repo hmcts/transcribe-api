@@ -141,7 +141,7 @@ class AreaMiddleware:
         with area(name):
             try:
                 trace.get_current_span().set_attribute(c.AREA, name)
-            except Exception:  # noqa: BLE001 - telemetry never fails the request
+            except Exception:
                 log.debug("Could not stamp the request span with its area")
             await self.app(scope, receive, send)
 

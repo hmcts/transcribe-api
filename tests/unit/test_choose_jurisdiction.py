@@ -9,6 +9,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
+
 from tests.unit.jurisdiction_fixtures import (
     add_jurisdiction,
     add_member,

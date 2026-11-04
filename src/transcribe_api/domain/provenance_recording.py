@@ -37,6 +37,8 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict
 
+from transcribe_api.runtime.settings_recording import get_settings
+from transcribe_api.runtime.telemetry import batch_job_id_from_url
 from transcribe_api.runtime.version import APP_VERSION
 from transcribe_api.stt import batch_client
 from transcribe_api.stt.speakers_recording import SpeakerStepReport
@@ -45,8 +47,6 @@ from transcribe_api.stt.speech_telemetry import (
     model_ref,
     speech_region,
 )
-from transcribe_api.runtime.settings_recording import get_settings
-from transcribe_api.runtime.telemetry import batch_job_id_from_url
 
 logger = logging.getLogger(__name__)
 

@@ -18,7 +18,6 @@ from tests.unit.jurisdiction_fixtures import add_jurisdiction, add_member, add_u
 from transcribe_api.api.routes_dictation import TEMPLATE_NOT_AVAILABLE
 from transcribe_api.domain import interface_dictation, jurisdictions
 from transcribe_api.domain.exceptions import JurisdictionConflictError
-from transcribe_api.runtime.telemetry import transcription_id_from_key
 from transcribe_api.domain.jurisdictions import (
     CHOICE_REQUIRED,
     NO_JURISDICTION,
@@ -36,6 +35,7 @@ from transcribe_api.domain.models_dictation import (
     Transcription,
     User,
 )
+from transcribe_api.runtime.telemetry import transcription_id_from_key
 
 pytestmark = pytest.mark.real_jurisdictions
 

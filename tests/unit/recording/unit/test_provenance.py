@@ -17,12 +17,12 @@ from uuid import uuid4
 import pytest
 
 from transcribe_api.domain import provenance_recording as provenance_module
-from transcribe_api.stt.polling_service import BatchPollingService, _PendingJob
-from transcribe_api.stt.speakers_recording import process_speakers, speaker_step_report
-from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.domain.interface_recording import save_job_results
 from transcribe_api.domain.models_recording import BatchJobStatus, DialogueEntry, SpeechBatchJob
 from transcribe_api.domain.provenance_recording import TranscriptProvenance, build_provenance
+from transcribe_api.runtime.settings_recording import get_settings
+from transcribe_api.stt.polling_service import BatchPollingService, _PendingJob
+from transcribe_api.stt.speakers_recording import process_speakers, speaker_step_report
 
 SPEECH_JOB_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 SPEECH_URL = f"https://test.cognitiveservices.azure.com/speechtotext/v3.2/transcriptions/{SPEECH_JOB_ID}"

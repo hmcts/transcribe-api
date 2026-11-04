@@ -253,15 +253,15 @@ def pytest_sessionfinish(session, exitstatus):
     try:
         commit = (
             os.environ.get("GIT_COMMIT")
-            or subprocess.run(  # noqa: S603 - fixed arguments
-                ["git", "rev-parse", "HEAD"],  # noqa: S607
+            or subprocess.run(
+                ["git", "rev-parse", "HEAD"],
                 capture_output=True,
                 text=True,
                 check=True,
                 timeout=5,
             ).stdout.strip()
         )
-    except Exception:  # noqa: BLE001 - evidence metadata is best effort
+    except Exception:
         commit = None
     telemetry_scan.write_evidence(
         telemetry_scan.evidence_path(session.config.rootpath),

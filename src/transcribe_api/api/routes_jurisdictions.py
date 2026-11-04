@@ -20,6 +20,7 @@ from pydantic import BaseModel, StringConstraints
 from sqlmodel import Session
 
 from transcribe_api import jurisdictions_admin
+from transcribe_api.domain.audit import record_audit
 from transcribe_api.domain.auth.approles_dictation import get_role
 from transcribe_api.domain.auth.dependencies_dictation import (
     get_active_jurisdiction,
@@ -41,7 +42,6 @@ from transcribe_api.domain.jurisdictions import (
     resolve,
 )
 from transcribe_api.domain.models_dictation import User
-from transcribe_api.domain.audit import record_audit
 from transcribe_api.runtime.db_connection import get_engine
 
 router = APIRouter(tags=["jurisdictions"])
@@ -169,8 +169,8 @@ _ANY_APP_ROLE = get_allowlisted_user(
 
 def _as_its_admin(
     response: Response,
-    _user: User = Depends(_ANY_APP_ROLE),  # noqa: B008
-    active: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
+    _user: User = Depends(_ANY_APP_ROLE),
+    active: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> ActiveJurisdiction:
     """The request's jurisdiction, if the user is one of its admins. Being an admin in
     one jurisdiction gives nothing in another: the jurisdiction is the one they are
@@ -192,7 +192,7 @@ def _wording(active: ActiveJurisdiction, wording: dict[str, str], version: str) 
 
 # Plain defs, as above.
 @router.get("/jurisdictions/wording", response_model=JurisdictionWording)
-def jurisdiction_wording(active: ActiveJurisdiction = Depends(_as_its_admin)) -> JurisdictionWording:  # noqa: B008
+def jurisdiction_wording(active: ActiveJurisdiction = Depends(_as_its_admin)) -> JurisdictionWording:
     """The wording of the jurisdiction the admin is working in."""
     with Session(get_engine()) as session:
         wording, version = jurisdictions_admin.wording_and_version(session, active.code)
@@ -202,8 +202,8 @@ def jurisdiction_wording(active: ActiveJurisdiction = Depends(_as_its_admin)) ->
 @router.put("/jurisdictions/wording", response_model=JurisdictionWording)
 def update_jurisdiction_wording(
     body: WordingUpdate,
-    current_user: User = Depends(get_current_user),  # noqa: B008
-    active: ActiveJurisdiction = Depends(_as_its_admin),  # noqa: B008
+    current_user: User = Depends(get_current_user),
+    active: ActiveJurisdiction = Depends(_as_its_admin),
 ) -> JurisdictionWording:
     """Replace that jurisdiction's wording; blank text means the default. 400 for an
     unknown key or text that is too long, 409 if it changed since ``version``."""

@@ -128,7 +128,7 @@ async def _record_fast_transcription_usage(
     If neither is available nothing is recorded (and a warning is logged): a guess
     would skew the usage share that cost is allocated by.
     """
-    if not 200 <= status_code < 300:  # noqa: PLR2004 - not transcribed, so not billed
+    if not 200 <= status_code < 300:
         return
     seconds = _reported_audio_seconds(response)
     if seconds is None:

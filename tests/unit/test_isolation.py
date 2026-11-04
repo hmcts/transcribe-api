@@ -408,7 +408,7 @@ def test_a_recording_uploaded_in_one_jurisdiction_cannot_be_submitted_in_another
     user alone: an SSCS upload submitted in the IAC would be played there."""
     from transcribe_api.domain.jurisdictions import record_upload_jurisdiction
 
-    judge, iac, sscs, *_ = judge_in_two
+    judge, _iac, sscs, *_ = judge_in_two
     submit = mocker.patch("transcribe_api.api.routes_recording.submit_and_queue_batch_job")
     upload_id = uuid4()
     record_upload_jurisdiction(upload_id, sscs.id)  # as POST /uploads does

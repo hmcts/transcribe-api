@@ -3,9 +3,9 @@
 import time
 
 from transcribe_api.stt.wer import (
-    split_by_alignment,
     aggregate_word_error_rate,
     baseline_word_error_rate,
+    split_by_alignment,
     word_error_rate,
 )
 

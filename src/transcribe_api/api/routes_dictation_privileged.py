@@ -6,7 +6,6 @@ All endpoints require authenticated users to pass JWT role checks.
 from __future__ import annotations
 
 import hashlib
-
 import logging
 import urllib.parse
 from datetime import UTC, datetime
@@ -20,6 +19,7 @@ from pydantic import BaseModel, StringConstraints
 from pydantic import Field as PydanticField
 from sqlmodel import Field, Session, select
 
+from transcribe_api import jurisdictions_admin
 from transcribe_api.api.document_content_models import (
     AnonymityStatusPayload,
     DocumentContentResponse,
@@ -29,7 +29,6 @@ from transcribe_api.api.document_content_models import (
 from transcribe_api.documents.content_loader import clear_cache as clear_content_cache
 from transcribe_api.documents.content_loader import get_document_content as load_document_content
 from transcribe_api.documents.minutes.types import AdminTranscriptionListResponse, AdminTranscriptionRecord
-from transcribe_api import jurisdictions_admin
 from transcribe_api.domain.audit import (
     TRANSCRIPT_EXPORTED,
     TRANSCRIPT_VIEWED,
@@ -50,10 +49,10 @@ from transcribe_api.domain.interface_dictation import (
     update_user,
 )
 from transcribe_api.domain.jurisdictions import WORDING_KEYS, ActiveJurisdiction
-from transcribe_api.runtime.security_events import DOCUMENT, READ, TRANSCRIPTION, record_jurisdiction_blocked
 from transcribe_api.domain.models_dictation import BaseTable, DocumentContent, Transcription
 from transcribe_api.runtime.db_connection import get_engine
 from transcribe_api.runtime.log_sanitization import sanitize_for_log
+from transcribe_api.runtime.security_events import DOCUMENT, READ, TRANSCRIPTION, record_jurisdiction_blocked
 from transcribe_api.runtime.settings_dictation import get_settings
 from transcribe_api.stt.utils import generate_blob_download_url
 
@@ -383,7 +382,7 @@ async def admin_list_transcriptions(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
     admin_user: User = Depends(get_allowlisted_user(required_roles_all=[_require_role("SystemAdministrator")], audit_writer=write_audit_event)),  # noqa: B008
-    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> AdminTranscriptionListResponse:
     """List all transcriptions across all judges in the admin's jurisdiction (DIAAT-334),
     with optional filters. SystemAdministrator only."""
@@ -449,7 +448,7 @@ class AdminTranscriptionDetail(BaseTable):
 async def admin_get_transcription(
     transcription_id: UUID,
     admin_user: User = Depends(get_allowlisted_user(required_roles_all=[_require_role("SystemAdministrator")], audit_writer=write_audit_event)),  # noqa: B008
-    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> AdminTranscriptionDetail:
     """View any transcription regardless of owner, with the provenance of its outputs.
     SystemAdministrator only. Audited (DIAAT-286) as a privileged view."""
@@ -485,7 +484,7 @@ async def admin_get_transcription(
 async def admin_get_document_download_url(
     transcription_id: UUID,
     admin_user: User = Depends(get_allowlisted_user(required_roles_all=[_require_role("SystemAdministrator")], audit_writer=write_audit_event)),  # noqa: B008
-    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
+    jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> dict[str, str]:
     """Download any transcript document regardless of owner. SystemAdministrator only.
     Audited (DIAAT-286) as a privileged export."""
@@ -775,7 +774,7 @@ def _member_target(email: str) -> dict[str, Any]:
 
 @router.get("/jurisdictions", response_model=list[JurisdictionAdminRecord])
 def admin_list_jurisdictions(
-    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),  # noqa: B008
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),
 ) -> list[JurisdictionAdminRecord]:
     """Every jurisdiction, with its settings and member count."""
     return [JurisdictionAdminRecord(**row) for row in _admin_session_run(jurisdictions_admin.jurisdictions_overview)]
@@ -783,7 +782,7 @@ def admin_list_jurisdictions(
 
 @router.get("/jurisdictions/wording-keys", response_model=WordingKeysResponse)
 def admin_jurisdiction_wording_keys(
-    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),  # noqa: B008
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),
 ) -> WordingKeysResponse:
     """The screen text a jurisdiction can set, with what each is for."""
     return WordingKeysResponse(keys=WORDING_KEYS)
@@ -793,7 +792,7 @@ def admin_jurisdiction_wording_keys(
 def admin_put_jurisdiction(
     code: str,
     body: JurisdictionWrite,
-    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),  # noqa: B008
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),
 ) -> JurisdictionAdminRecord:
     """Create or update a jurisdiction. Its settings are validated first (400); a
     stale ``version`` is refused (409)."""
@@ -835,7 +834,7 @@ def admin_put_jurisdiction(
 @router.get("/jurisdictions/{code}/members", response_model=list[JurisdictionMemberRecord])
 def admin_list_jurisdiction_members(
     code: str,
-    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),  # noqa: B008
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),
 ) -> list[JurisdictionMemberRecord]:
     """A jurisdiction's members, including people added who have not signed in yet."""
     return [
@@ -847,7 +846,7 @@ def admin_list_jurisdiction_members(
 def admin_add_jurisdiction_member(
     code: str,
     body: JurisdictionMemberWrite,
-    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),  # noqa: B008
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),
 ) -> JurisdictionMemberRecord:
     """Add someone by their sign-in email, or change their role. Someone who has not
     signed in yet joins when they first do (pending)."""
@@ -870,7 +869,7 @@ def admin_add_jurisdiction_member(
 def admin_remove_jurisdiction_member(
     code: str,
     email: str = Query(min_length=3, max_length=320),
-    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),  # noqa: B008
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),
 ) -> None:
     """Remove someone from a jurisdiction (by email, as listed)."""
     _admin_session_run(lambda s: jurisdictions_admin.remove_member(s, code, email))

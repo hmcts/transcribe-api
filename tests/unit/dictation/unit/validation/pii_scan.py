@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import base64
 
-from tests.unit.telemetry_scan import PATTERNS, RE2_PATTERNS, Exported, scan, scan_items  # noqa: F401 - shared
 from tests.unit.dictation.unit.api.test_live_transcription_submission_logging import (
     PII_APPELLANT,
     PII_EMAIL,
@@ -33,6 +32,7 @@ from tests.unit.dictation.unit.api.test_live_transcription_submission_logging im
     PII_RESPONDENT,
     PII_TRANSCRIPT,
 )
+from tests.unit.telemetry_scan import PATTERNS, RE2_PATTERNS, Exported, scan, scan_items  # noqa: F401 - shared
 
 # The synthetic case the validation tests submit. Built so that each pattern class
 # below has a real value in the requests, not only in the scanner's self-test.

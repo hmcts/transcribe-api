@@ -21,10 +21,10 @@ from hmcts_otel.testing import capture_telemetry
 
 from tests.unit.jurisdiction_fixtures import IAC_JURISDICTION_ID
 from transcribe_api.domain import audit_recording as audit
-from transcribe_api.runtime.settings_recording import get_settings
-from transcribe_api.domain.models_recording import JobStatus, SpeechBatchJob, User
 from transcribe_api.domain.audit import EVENT_WRITE_FAILED as EVENT_AUDIT_WRITE_FAILED
+from transcribe_api.domain.models_recording import JobStatus, SpeechBatchJob, User
 from transcribe_api.runtime.security_events import EVENT_OWNERSHIP_VIOLATION
+from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.runtime.telemetry import configure_telemetry
 
 ROUTES = "transcribe_api.api.routes_recording"
@@ -82,9 +82,9 @@ def _job(user_id: uuid.UUID | None = CALLER_ID, status: JobStatus = JobStatus.SU
 
 def _client(roles: list[str] | None = None) -> TestClient:
     from transcribe_api.api.app import create_app
-    from transcribe_api.runtime.db_recording import get_session
     from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
     from transcribe_api.domain.auth.dependencies_recording import get_current_user
+    from transcribe_api.runtime.db_recording import get_session
 
     user = User(
         id=CALLER_ID,
