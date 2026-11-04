@@ -194,13 +194,16 @@ async def ai_edit_task(
             raise HTTPException(status_code=400, detail="No dialogue entries found")
 
         current_minutes = get_minute_version_by_id(current_minute_version_id, transcription_id)
+        # A legacy (UUID) or missing trace id gets a new trace, saved on the new version so
+        # that feedback on this edit reaches it.
+        trace_id = langfuse_trace_id(current_minutes.trace_id) or langfuse_client.create_trace_id()
 
         new_minute_version = MinuteVersion(
             id=new_minute_version_id,
             transcription_id=transcription_id,
             html_content="",
             template=current_minutes.template,
-            trace_id=current_minutes.trace_id,
+            trace_id=trace_id,
             is_generating=True,
         )
         save_minute_version(new_minute_version, check_owner=False)
@@ -210,7 +213,7 @@ async def ai_edit_task(
                 edit_instructions,
                 dialogue_entries,
                 user_id,
-                langfuse_trace_id=langfuse_trace_id(current_minutes.trace_id),
+                langfuse_trace_id=trace_id,
             )
 
             new_minute_version.html_content = llm_output

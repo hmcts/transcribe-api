@@ -1726,12 +1726,16 @@ async def submit_langfuse_trace(
     current_user: User = Depends(get_allowlisted_user()),  # noqa: B008
 ):
     """Submit a trace to Langfuse via backend proxy for security."""
+    trace_id = langfuse_trace_id(request.trace_id)
+    if trace_id is None:
+        # Langfuse v3+ cannot attach an event to a v2 (UUID) trace; without a trace
+        # context the event would land in this request's trace instead.
+        raise HTTPException(status_code=400, detail="Trace id is not a Langfuse v3+ trace id")
     try:
-        trace_id = langfuse_trace_id(request.trace_id)
         # The user goes in the event's metadata: propagate_attributes would also set it
         # on the current span, here the request span that App Insights exports.
         langfuse_client.create_event(
-            trace_context={"trace_id": trace_id} if trace_id else None,
+            trace_context={"trace_id": trace_id},
             name=request.name,
             metadata={**(request.metadata or {}), "user_id": str(current_user.id)},
             input=request.input_data,
