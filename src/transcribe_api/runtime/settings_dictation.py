@@ -42,6 +42,14 @@ class Settings(BaseSettings):
     # (domain/auth/token_auth.py). Refused unless ENVIRONMENT is "preview".
     AUTH_PREVIEW_USER_ENABLED: bool = False
     AUTH_PREVIEW_USER_ROLES: str | None = None
+    # DIAAT-373: signs the BenchNotes access token (domain/auth/app_token.py). Required
+    # outside local and test (the API refuses to start without it): at least 32 characters.
+    # Generate: python -c "import secrets; print(secrets.token_urlsafe(48))"
+    APP_JWT_SIGNING_KEY: str | None = None
+    # How long a BenchNotes token lives. A change to a user's assignments, and a
+    # deactivation, reaches them at their next token (the web app mints a new one shortly
+    # before expiry).
+    APP_JWT_TTL_SECONDS: int = 300
     GOOGLE_APPLICATION_CREDENTIALS_JSON_OBJECT: str | None = None
     GOV_NOTIFY_API_KEY: str | None = None
     # JWT Verification Settings - Strict by default

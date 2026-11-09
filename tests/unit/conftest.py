@@ -59,6 +59,9 @@ TEST_ENV: dict[str, str] = {
     "LANGFUSE_SECRET_KEY": "sk-lf-test-secret-key-123456",
     "LANGFUSE_HOST": "https://langfuse-ai.justice.gov.uk",
     "JWT_SECRET_KEY": "test-jwt-secret",
+    # DIAAT-373: signs the BenchNotes access token. A fixed key for the tests only.
+    "APP_JWT_SIGNING_KEY": "test-benchnotes-signing-key-0123456789abcdef",  # pragma: allowlist secret
+    "APP_JWT_TTL_SECONDS": "300",
     "DISABLE_FASTAPI_INSTRUMENTATION": "true",
     "RUN_WORKERS": "false",
 }

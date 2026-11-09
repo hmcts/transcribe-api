@@ -220,6 +220,14 @@ async def lifespan(app: FastAPI):
     if settings.ENVIRONMENT not in ("local", "test"):
         validate_approles_config()
 
+    # DIAAT-373: without the key no request after sign-in can be authenticated.
+    from transcribe_api.domain.auth.app_token import signing_key_problem
+
+    key_problem = signing_key_problem(settings.ENVIRONMENT, settings.APP_JWT_SIGNING_KEY)
+    if key_problem:
+        log.error(key_problem)
+        raise RuntimeError(key_problem)
+
     # Before serving: without these every recording upload fails.
     await ensure_ffmpeg_tools(settings.ENVIRONMENT)
 
@@ -314,9 +322,20 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
         # The headers the web app sends, for local development, which calls the API
-        # cross-origin: X-Jurisdiction (the tab's, DIAAT-322), X-Dictation-Session-Id,
+        # cross-origin: X-Jurisdiction and X-Role (the tab's context, advisory: a mismatch with
+        # the token's is 409 context_changed), X-Requested-Context (the context to keep when
+        # a new token is minted), X-Dev-Persona (local only), X-Dictation-Session-Id,
         # X-Upload-Filename (a template's, DIAAT-344).
-        allow_headers=["Authorization", "Content-Type", "X-Jurisdiction", "X-Dictation-Session-Id", "X-Upload-Filename"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "X-Jurisdiction",
+            "X-Role",
+            "X-Requested-Context",
+            "X-Dev-Persona",
+            "X-Dictation-Session-Id",
+            "X-Upload-Filename",
+        ],
     )
 
     # hmcts.area from the path, before routing and body parsing (AreaMiddleware).
