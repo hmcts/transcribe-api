@@ -48,8 +48,10 @@ from transcribe_api.domain.audit_recording import (
     write_audit,
 )
 from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
+from transcribe_api.domain.auth.context import context_of
 from transcribe_api.domain.auth.authorisation import public_endpoint, signed_url_endpoint
 from transcribe_api.domain.auth.dependencies_recording import get_active_jurisdiction, require_permission
+from transcribe_api.domain.job_history import job_history
 from transcribe_api.domain.interface_recording import (
     get_job_by_id,
     get_job_by_idempotency_key_for_user,
@@ -617,19 +619,19 @@ def _recording_jurisdiction(
     return jurisdiction
 
 
-def _job_in_jurisdiction(resource_type: str):
+def _job_in_jurisdiction(resource_type: str, permission: str = "recording.own"):
     """A route dependency for a route naming a job: a job of the caller's but of another
     jurisdiction is refused with the 404 of an unknown job, and recorded (DIAAT-334); a job
-    that is not theirs is left to _check_job_access. The caller holds ``recording.own``
-    (checked first, as this depends on it).
+    that is not theirs is left to _check_job_access. The caller holds ``permission`` (the route's
+    own, ``recording.own`` unless it says otherwise; checked first, as this depends on it).
     ``resource_type`` is the route's, as it passes to _check_job_access. A plain def:
     the lookup is synchronous, so FastAPI runs it in the threadpool."""
 
     def check(
         request: Request,
         job_id: UUID,
-        current_user: AuthenticatedUser = Depends(require_permission("recording.own")),  # noqa: B008
-        jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),
+        current_user: AuthenticatedUser = Depends(require_permission(permission)),  # noqa: B008
+        jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),  # noqa: B008
     ) -> None:
         exists, owner_id, job_jurisdiction = job_owner_and_jurisdiction(job_id)
         if not exists or owner_id != current_user.id:
@@ -1125,11 +1127,13 @@ async def upload_baseline_transcript(
     if not text.strip():
         raise HTTPException(status_code=422, detail="Baseline transcript file is empty")
 
-    job.baseline_transcript = text
-    job.updated_datetime = datetime.now(UTC)
-    session.add(job)
-    session.commit()
-    session.refresh(job)
+    with audited("transcript.edit", current_user.id, job.id) as audit:
+        audit.detail.update({"kind": "baseline"})
+        job.baseline_transcript = text
+        job.updated_datetime = datetime.now(UTC)
+        session.add(job)
+        session.commit()
+        session.refresh(job)
     return _to_response(job)
 
 
@@ -1280,6 +1284,12 @@ def _save_entries(session: Session, job: SpeechBatchJob, entries: list) -> None:
     session.refresh(job)
 
 
+def _actor_fields(current_user: AuthenticatedUser) -> dict[str, str | None]:
+    """Who made a change and acting as which role, for the correction history entry (DIAAT-395)."""
+    ctx = context_of(current_user)
+    return {"actor_id": str(current_user.id), "actor_role": ctx.role if ctx else None}
+
+
 @router.patch("/jobs/{job_id}/segments/{segment}", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
 async def correct_segment(
     job_id: UUID,
@@ -1307,6 +1317,7 @@ async def correct_segment(
         *(entry.correction_history or []),
         CorrectionEntry(
             timestamp=datetime.now(UTC).isoformat(),
+            **_actor_fields(current_user),
             kind="segment",
             previous_text=previous_text,
             new_text=body.corrected_text,
@@ -1329,7 +1340,9 @@ async def correct_segment(
         speaker=entry.speaker,
     )
 
-    _save_corrected_entry(session, job, index, entry)
+    with audited("transcript.edit", current_user.id, job.id) as audit:
+        audit.detail.update({"kind": "segment", "segment": segment})
+        _save_corrected_entry(session, job, index, entry)
     return _to_response(job)
 
 
@@ -1403,6 +1416,7 @@ async def correct_word_range(
         *(entry.correction_history or []),
         CorrectionEntry(
             timestamp=datetime.now(UTC).isoformat(),
+            **_actor_fields(current_user),
             kind="word_range",
             previous_text=previous_text,
             new_text=entry.effective_text(),
@@ -1443,7 +1457,16 @@ async def correct_word_range(
         end_word_index=body.end_word_index,
     )
 
-    _save_corrected_entry(session, job, index, entry)
+    with audited("transcript.edit", current_user.id, job.id) as audit:
+        audit.detail.update(
+            {
+                "kind": "word_range",
+                "segment": segment,
+                "start_word_index": body.start_word_index,
+                "end_word_index": body.end_word_index,
+            }
+        )
+        _save_corrected_entry(session, job, index, entry)
     return _to_response(job)
 
 
@@ -1479,7 +1502,9 @@ async def merge_segment_with_next(
     merged = merge_dialogue_entries(entry, _to_dialogue_entry(next_raw))
     entries = list(job.dialogue_entries)
     entries[index : index + 2] = [merged.model_dump()]
-    _save_entries(session, job, entries)
+    with audited("transcript.edit", current_user.id, job.id) as audit:
+        audit.detail.update({"kind": "merge", "segment": segment})
+        _save_entries(session, job, entries)
     return _to_response(job)
 
 
@@ -1517,7 +1542,9 @@ async def rollback_segment(
     if entry.merged:
         entry.unreviewed_confidence = entry.confidence
 
-    _save_corrected_entry(session, job, index, entry)
+    with audited("transcript.rollback", current_user.id, job.id) as audit:
+        audit.detail.update({"kind": "reset", "segment": segment})
+        _save_corrected_entry(session, job, index, entry)
     return _to_response(job)
 
 
@@ -1555,13 +1582,16 @@ async def accept_segment(
         *(entry.correction_history or []),
         CorrectionEntry(
             timestamp=datetime.now(UTC).isoformat(),
+            **_actor_fields(current_user),
             kind="accept_all",
             previous_text=current_text,
             new_text=current_text,
         ),
     ]
 
-    _save_corrected_entry(session, job, index, entry)
+    with audited("transcript.accept", current_user.id, job.id) as audit:
+        audit.detail.update({"segment": segment})
+        _save_corrected_entry(session, job, index, entry)
     return _to_response(job)
 
 
@@ -1601,7 +1631,9 @@ async def rename_speaker(
         updated["speaker"] = body.speaker
         entries[i] = updated
 
-    _save_entries(session, job, entries)
+    with audited("transcript.rename_speaker", current_user.id, job.id) as audit:
+        audit.detail.update({"segment": segment, "apply_to_all": body.apply_to_all, "segments_changed": len(targets)})
+        _save_entries(session, job, entries)
     return _to_response(job)
 
 
@@ -1698,6 +1730,7 @@ async def rollback_to_history_entry(
             *history,
             CorrectionEntry(
                 timestamp=datetime.now(UTC).isoformat(),
+                **_actor_fields(current_user),
                 kind="rollback",
                 previous_text=previous_text,
                 new_text=entry.effective_text(),
@@ -1716,14 +1749,58 @@ async def rollback_to_history_entry(
             *history,
             CorrectionEntry(
                 timestamp=datetime.now(UTC).isoformat(),
+                **_actor_fields(current_user),
                 kind="rollback",
                 previous_text=previous_text,
                 new_text=restored_text,
             ),
         ]
 
-    _save_corrected_entry(session, job, index, entry)
+    with audited("transcript.rollback", current_user.id, job.id) as audit:
+        audit.detail.update({"kind": "history_entry", "segment": segment, "history_index": history_index})
+        _save_corrected_entry(session, job, index, entry)
     return _to_response(job)
+
+
+class HistoryItemResponse(BaseModel):
+    id: UUID
+    timestamp: datetime
+    action: str
+    # The owner's name for their own actions; "Another user" (and no role) for anyone else's.
+    actor_label: str
+    actor_role: str | None
+    outcome: str
+
+
+class JobHistoryResponse(BaseModel):
+    items: list[HistoryItemResponse]
+    total: int
+
+
+@router.get(
+    "/jobs/{job_id}/history",
+    dependencies=[_job_in_jurisdiction(TRANSCRIPT, "recording.audit.read")],
+    response_model=JobHistoryResponse,
+)
+async def get_job_history(
+    job_id: UUID,
+    session: Session = Depends(get_session),
+    current_user: AuthenticatedUser = Depends(require_permission("recording.audit.read")),  # noqa: B008
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+) -> JobHistoryResponse:
+    """The recording's audit history (DIAAT-395), newest first and paged: what was done to it
+    (viewed, edited, rolled back, accepted, speaker renamed, audio played, deleted), when, by whom
+    and how it ended. For its owner acting as a Judge only (``recording.audit.read``): anyone else
+    gets the 404 of a recording they cannot see. No transcript text is in the answer."""
+    job = get_job_by_id(session, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    _check_job_access(job, current_user, "transcript", "read")
+    items, total = job_history(
+        session, job.id, current_user.id, current_user.name or current_user.email, page=page, page_size=page_size
+    )
+    return JobHistoryResponse(items=[HistoryItemResponse(**item.__dict__) for item in items], total=total)
 
 
 @router.get("/jobs/{job_id}/audio", dependencies=[_job_in_jurisdiction(AUDIO)])

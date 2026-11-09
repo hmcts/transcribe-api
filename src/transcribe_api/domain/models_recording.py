@@ -114,6 +114,10 @@ class CorrectionEntry(SQLModel):
     # rollback_to_history_entry restores from them.
     previous_phrase: str | None = None
     new_phrase: str | None = None
+    # DIAAT-395: who made the change (the internal user id) and acting as which role. None on
+    # entries made before it was recorded. Never sent to the browser with the transcript.
+    actor_id: str | None = None
+    actor_role: str | None = None
 
 
 def new_segment_id() -> str:

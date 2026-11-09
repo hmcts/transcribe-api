@@ -73,7 +73,9 @@ Access and retention (AC3)
 --------------------------
 Pending the linked security and data decision (open question).
 
-* Access: database access only. No route reads ``audit_log``; the admin routes write
+* Access: database access, plus two read-only routes: the role-change history (``GET /api/admin/role-history``,
+  domain/user_admin.py, DIAAT-383) and a recording's own history for its owner (``GET /api/v1/jobs/{id}/history``,
+  domain/job_history.py, DIAAT-395). The admin routes write
   it but do not show it.
 * Retention: none is implemented. Nothing deletes ``audit_log`` rows (the table has
   no purge job and no foreign keys, so rows outlive the users and transcriptions they
