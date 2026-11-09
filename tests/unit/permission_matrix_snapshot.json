@@ -1,0 +1,306 @@
+{
+  "DELETE /api/admin/assignments/{assignment_id}": [
+    "jurisdiction_admin.assign",
+    "jurisdiction_super_admin.assign",
+    "users.manage"
+  ],
+  "DELETE /api/admin/document-content/hearing-types/{item_id}": [
+    "legal_text.manage"
+  ],
+  "DELETE /api/admin/document-content/legal-frameworks/{item_id}": [
+    "legal_text.manage"
+  ],
+  "DELETE /api/live-draft": [
+    "dictation.use"
+  ],
+  "DELETE /api/me/jurisdictions/{code}": [
+    "exempt:signed_in"
+  ],
+  "DELETE /api/transcriptions/{transcription_id}": [
+    "dictation.use"
+  ],
+  "DELETE /api/transcriptions/{transcription_id}/tags/{tag_name}": [
+    "dictation.use"
+  ],
+  "DELETE /api/v1/jobs/{job_id}": [
+    "recording.own"
+  ],
+  "GET /api/access-requests/mine": [
+    "exempt:signed_in"
+  ],
+  "GET /api/admin/access-requests": [
+    "access.approve"
+  ],
+  "GET /api/admin/document-content": [
+    "legal_text.manage"
+  ],
+  "GET /api/admin/feature-flags": [
+    "feature_flags.manage"
+  ],
+  "GET /api/admin/jurisdictions": [
+    "jurisdictions.manage"
+  ],
+  "GET /api/admin/jurisdictions/wording-keys": [
+    "jurisdictions.manage"
+  ],
+  "GET /api/admin/jurisdictions/{code}/wording": [
+    "jurisdiction.wording.edit"
+  ],
+  "GET /api/admin/me": [
+    "admin.access"
+  ],
+  "GET /api/admin/role-history": [
+    "role_audit.read"
+  ],
+  "GET /api/admin/roles": [
+    "jurisdiction_admin.assign",
+    "jurisdiction_super_admin.assign",
+    "users.manage"
+  ],
+  "GET /api/admin/users": [
+    "jurisdiction_super_admin.assign",
+    "users.manage"
+  ],
+  "GET /api/document-content": [
+    "document_content.read"
+  ],
+  "GET /api/download": [
+    "documents.export"
+  ],
+  "GET /api/flags": [
+    "exempt:signed_in"
+  ],
+  "GET /api/get-speech-token": [
+    "dictation.use"
+  ],
+  "GET /api/health": [
+    "exempt:public"
+  ],
+  "GET /api/health/dependencies": [
+    "exempt:public"
+  ],
+  "GET /api/healthcheck": [
+    "exempt:public"
+  ],
+  "GET /api/healthcheck/azure-storage": [
+    "system.settings"
+  ],
+  "GET /api/jurisdictions/current": [
+    "app.access"
+  ],
+  "GET /api/jurisdictions/public": [
+    "exempt:signed_in"
+  ],
+  "GET /api/jurisdictions/wording": [
+    "jurisdiction.wording.edit"
+  ],
+  "GET /api/live-draft": [
+    "dictation.use"
+  ],
+  "GET /api/me/permissions": [
+    "exempt:signed_in"
+  ],
+  "GET /api/templates": [
+    "document_content.read"
+  ],
+  "GET /api/transcriptions-metadata": [
+    "dictation.use"
+  ],
+  "GET /api/transcriptions/{transcription_id}": [
+    "dictation.use"
+  ],
+  "GET /api/transcriptions/{transcription_id}/document-download": [
+    "documents.export"
+  ],
+  "GET /api/transcriptions/{transcription_id}/jobs": [
+    "dictation.use"
+  ],
+  "GET /api/transcriptions/{transcription_id}/jobs/{job_id}/audio": [
+    "dictation.use"
+  ],
+  "GET /api/transcriptions/{transcription_id}/minute-versions": [
+    "dictation.use"
+  ],
+  "GET /api/transcriptions/{transcription_id}/minute-versions/{minute_version_id}": [
+    "dictation.use"
+  ],
+  "GET /api/transcriptions/{transcription_id}/sectioned-transcript": [
+    "dictation.use"
+  ],
+  "GET /api/transcriptions/{transcription_id}/tags": [
+    "dictation.use"
+  ],
+  "GET /api/user": [
+    "app.access"
+  ],
+  "GET /api/user/onboarding-status": [
+    "app.access"
+  ],
+  "GET /api/user/profile": [
+    "app.access"
+  ],
+  "GET /api/users/me": [
+    "app.access"
+  ],
+  "GET /api/v1/health": [
+    "exempt:public"
+  ],
+  "GET /api/v1/jobs": [
+    "recording.own"
+  ],
+  "GET /api/v1/jobs/{job_id}": [
+    "recording.own"
+  ],
+  "GET /api/v1/jobs/{job_id}/audio": [
+    "recording.own"
+  ],
+  "GET /api/v1/jobs/{job_id}/history": [
+    "recording.audit.read"
+  ],
+  "GET /api/v1/local-audio/{blob_name}": [
+    "exempt:signed_url"
+  ],
+  "GET /api/v1/version": [
+    "exempt:public"
+  ],
+  "GET /health": [
+    "exempt:public"
+  ],
+  "PATCH /api/v1/jobs/{job_id}/segments/{segment}": [
+    "recording.own"
+  ],
+  "PATCH /api/v1/jobs/{job_id}/segments/{segment}/speaker": [
+    "recording.own"
+  ],
+  "PATCH /api/v1/jobs/{job_id}/segments/{segment}/words": [
+    "recording.own"
+  ],
+  "POST /api/access-requests": [
+    "exempt:signed_in"
+  ],
+  "POST /api/access-requests/{request_id}/withdraw": [
+    "exempt:signed_in"
+  ],
+  "POST /api/admin/access-requests/{request_id}/approve": [
+    "access.approve"
+  ],
+  "POST /api/admin/access-requests/{request_id}/reject": [
+    "access.approve"
+  ],
+  "POST /api/admin/assignments": [
+    "jurisdiction_admin.assign",
+    "jurisdiction_super_admin.assign",
+    "users.manage"
+  ],
+  "POST /api/admin/document-content/hearing-types": [
+    "legal_text.manage"
+  ],
+  "POST /api/admin/document-content/legal-frameworks": [
+    "legal_text.manage"
+  ],
+  "POST /api/admin/users/{user_id}/deactivate": [
+    "users.manage"
+  ],
+  "POST /api/admin/users/{user_id}/reactivate": [
+    "users.manage"
+  ],
+  "POST /api/auth/session": [
+    "exempt:sign_in"
+  ],
+  "POST /api/generate-or-edit-minutes": [
+    "dictation.use"
+  ],
+  "POST /api/generate-realtime-summary": [
+    "dictation.use"
+  ],
+  "POST /api/get-upload-url": [
+    "dictation.use"
+  ],
+  "POST /api/langfuse/score": [
+    "dictation.use"
+  ],
+  "POST /api/langfuse/trace": [
+    "dictation.use"
+  ],
+  "POST /api/live-transcription/submission": [
+    "dictation.use"
+  ],
+  "POST /api/security/alert-test": [
+    "security.alert_test"
+  ],
+  "POST /api/telemetry": [
+    "app.access"
+  ],
+  "POST /api/transcriptions": [
+    "dictation.use"
+  ],
+  "POST /api/transcriptions/{transcription_id}/jobs": [
+    "dictation.use"
+  ],
+  "POST /api/transcriptions/{transcription_id}/minute-versions": [
+    "dictation.use"
+  ],
+  "POST /api/transcriptions/{transcription_id}/tags": [
+    "dictation.use"
+  ],
+  "POST /api/user": [
+    "app.access"
+  ],
+  "POST /api/user/complete-onboarding": [
+    "app.access"
+  ],
+  "POST /api/user/reset-onboarding": [
+    "app.access"
+  ],
+  "POST /api/v1/jobs": [
+    "recording.upload"
+  ],
+  "POST /api/v1/jobs/{job_id}/baseline": [
+    "recording.own"
+  ],
+  "POST /api/v1/jobs/{job_id}/segments/{segment}/accept": [
+    "recording.own"
+  ],
+  "POST /api/v1/jobs/{job_id}/segments/{segment}/history/{history_index}/rollback": [
+    "recording.own"
+  ],
+  "POST /api/v1/jobs/{job_id}/segments/{segment}/merge-next": [
+    "recording.own"
+  ],
+  "POST /api/v1/jobs/{job_id}/segments/{segment}/rollback": [
+    "recording.own"
+  ],
+  "POST /api/v1/uploads": [
+    "recording.upload"
+  ],
+  "PUT /api/admin/document-content/anonymity-statuses/{item_id}": [
+    "legal_text.manage"
+  ],
+  "PUT /api/admin/document-content/hearing-types/{item_id}": [
+    "legal_text.manage"
+  ],
+  "PUT /api/admin/document-content/legal-frameworks/{item_id}": [
+    "legal_text.manage"
+  ],
+  "PUT /api/admin/feature-flags/{name}": [
+    "feature_flags.manage"
+  ],
+  "PUT /api/admin/jurisdictions/{code}": [
+    "jurisdictions.manage"
+  ],
+  "PUT /api/admin/jurisdictions/{code}/wording": [
+    "jurisdiction.wording.edit"
+  ],
+  "PUT /api/jurisdictions/wording": [
+    "jurisdiction.wording.edit"
+  ],
+  "PUT /api/live-draft": [
+    "dictation.use"
+  ],
+  "PUT /api/me/context": [
+    "exempt:signed_in"
+  ],
+  "PUT /api/upload-audio": [
+    "dictation.use"
+  ]
+}

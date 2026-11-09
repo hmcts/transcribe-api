@@ -357,13 +357,12 @@ def _truncates_a_live_table(statement: str) -> bool:
 # DIAAT-342 adds document_content.jurisdiction_id in 0006 and backfills that column
 # alone: it may set jurisdiction_id (one assignment, optionally with a WHERE) and
 # nothing else, so the admin's wording in `content` is never touched.
-# DIAAT-373 sets jurisdiction.auto_enrol false in 0007 (nobody is enrolled automatically
-# any more) and that column alone: the settings are untouched.
+# (0007 writes no live-edited table: jurisdiction.auto_enrol is set false by scripts-cutover-authz.py at
+# cutover, not by the migration, which ships first and must not change what the previous release does.)
 ALLOWED_LIVE_WRITES = {
     "0006": re.compile(
         r'^\s*UPDATE\s+"?document_content"?\s+SET\s+"?jurisdiction_id"?\s*=\s*[^,]+?(?:\s+WHERE\s.+)?$', re.IGNORECASE | re.DOTALL
     ),
-    "0007": re.compile(r'^\s*UPDATE\s+"?jurisdiction"?\s+SET\s+"?auto_enrol"?\s*=\s*false\s*$', re.IGNORECASE),
 }
 
 
@@ -966,12 +965,13 @@ def test_0007_adds_the_user_and_audit_columns_without_breaking_the_previous_rele
     assert "jurisdiction_membership" not in re.sub(r"INSERT INTO role_assignment.*?ON CONFLICT DO NOTHING", "", sql, flags=re.DOTALL)
 
 
-def test_0007_backfills_the_assignments_from_the_memberships_and_turns_auto_enrol_off(monkeypatch):
+def test_0007_backfills_the_assignments_from_the_memberships_and_leaves_auto_enrol_alone(monkeypatch):
     sql = _offline_sql(monkeypatch, "0006:0007")
     assert "CASE m.role WHEN 'admin' THEN 'JurisdictionAdministrator' ELSE 'Judge' END" in sql
     assert "CASE WHEN m.user_id IS NULL THEN lower(m.email) END" in sql  # pending stays pending, lower case
     assert "FROM jurisdiction_membership m" in sql
-    assert "UPDATE jurisdiction SET auto_enrol = false;" in sql
+    assert "auto_enrol" not in sql  # review MIG-2: the old pods read it; the cutover script sets it
+    assert not re.search(r"UPDATE\s+\"?jurisdiction\"?", sql)
     assert sql.index("INSERT INTO role_assignment") > sql.index("CREATE TABLE role_assignment")
 
 
@@ -1116,8 +1116,8 @@ def test_0007_backfills_memberships_as_assignments_and_goes_up_down_up():
         ]
         with engine.connect() as connection:
             assert assignments(connection) == expected
-            # Nobody is auto-enrolled, whatever it was.
-            assert connection.execute(text("SELECT count(*) FROM jurisdiction WHERE auto_enrol")).scalar_one() == 0
+            # auto_enrol is as it was (the old pods read it): the cutover script turns it off, not the migration.
+            assert connection.execute(text("SELECT count(*) FROM jurisdiction WHERE auto_enrol")).scalar_one() == 2
             # Existing users stay active, with a name to come; the old tables are untouched.
             assert connection.execute(text('SELECT bool_and(is_active) FROM "user"')).scalar_one() is True
             assert connection.execute(text("SELECT count(*) FROM jurisdiction_membership")).scalar_one() == 6
@@ -1336,11 +1336,10 @@ def test_0007_keeps_every_existing_value_unchanged():
         after = snapshot()
         for table in ("user", "audit_log", "jurisdiction_membership"):
             assert after[table] == before[table], table
-        # The IAC's row: everything as it was but auto_enrol (0004 set it true; 0007 turns it off).
+        # The IAC's row: everything as it was, auto_enrol included (0004 set it true; 0007 leaves it).
         [iac_after] = [dict(row[0]) for row in after["jurisdiction"]]
         [iac_before] = before_jurisdiction
-        assert iac_before.pop("auto_enrol") is True
-        assert iac_after.pop("auto_enrol") is False
+        assert iac_before["auto_enrol"] is True
         assert iac_after == iac_before
     finally:
         engine.dispose()

@@ -9,6 +9,7 @@ or the decision.
 from __future__ import annotations
 
 import logging
+from uuid import UUID
 
 import pytest
 from sqlmodel import Session
@@ -197,6 +198,24 @@ def test_a_withdrawal_sends_no_email_to_anyone(world, cast, notify):
     notify.sent.clear()
     assert cast.requester.post(f"/api/access-requests/{request_id}/withdraw").status_code == 200
     assert notify.sent == []
+
+
+def test_the_requester_function_itself_sends_nothing_for_a_request_that_is_pending_or_withdrawn(world, cast, notify):
+    """The route never calls it for a withdrawal, so the function's own guard needs its own test (a request
+    that is not approved or rejected has no outcome to tell)."""
+    request_id = ask(cast.requester).json()["id"]
+    notify.sent.clear()
+    access_request_emails.notify_requester(UUID(request_id))  # pending
+    assert notify.sent == []
+    assert cast.requester.post(f"/api/access-requests/{request_id}/withdraw").status_code == 200
+    access_request_emails.notify_requester(UUID(request_id))  # withdrawn
+    assert notify.sent == []
+    # A decided one is told, so the guard is not simply silent.
+    decided = ask(cast.requester, roles=(LTM,)).json()["id"]
+    assert cast.admin_iac.post(f"/api/admin/access-requests/{decided}/reject", role=ADMIN, jurisdiction="IAC").status_code == 200
+    notify.sent.clear()
+    access_request_emails.notify_requester(UUID(decided))
+    assert len(notify.sent) == 1
 
 
 def test_a_refused_decision_sends_no_email(world, cast, notify):

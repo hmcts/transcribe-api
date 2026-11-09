@@ -18,8 +18,11 @@ explicit and small, and nobody holds the ``*.any.*`` permissions. Read the print
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import uuid4
 
 import fastapi.routing as fastapi_routing
@@ -184,6 +187,54 @@ def guarded(routes: list[Route]) -> list[Route]:
 
 def test_every_route_declares_exactly_one_permission_or_exemption(routes):
     assert undeclared(routes) == []
+
+
+# ---------------------------------------------------------------------------
+# The declared permission of every route, pinned (review mutations M21 and M33)
+# ---------------------------------------------------------------------------
+
+SNAPSHOT = Path(__file__).with_name("permission_matrix_snapshot.json")
+
+
+def declared_matrix(routes: list[Route]) -> dict[str, list[str]]:
+    """``"METHOD /path"`` -> the permissions the route asks for (any one of them), or ``["exempt:<kind>"]``."""
+    matrix: dict[str, list[str]] = {}
+    for route in routes:
+        (permissions,) = route.permission_sets() or [frozenset()]
+        matrix[f"{route.method} {route.path}"] = (
+            sorted(permissions) if permissions else [f"exempt:{kind}" for kind in sorted(route.exemptions())]
+        )
+    return dict(sorted(matrix.items()))
+
+
+def test_the_declared_permission_of_every_route_is_the_committed_snapshot(routes):
+    """The generated test below trusts what each route declares, so a route quietly weakened (re-declared
+    with a permission more roles hold, or an exemption) would pass it. This pins every declaration: changing
+    one is a visible diff of ``permission_matrix_snapshot.json`` to review, not a silent edit.
+
+    A deliberate change: ``UPDATE_PERMISSION_SNAPSHOT=1 pytest tests/unit/test_permission_matrix.py -k committed_snapshot``
+    rewrites the file; commit it with the change and say why in the message."""
+    actual = declared_matrix(routes)
+    if os.getenv("UPDATE_PERMISSION_SNAPSHOT"):
+        SNAPSHOT.write_text(json.dumps(actual, indent=2) + "\n")
+    committed = json.loads(SNAPSHOT.read_text())
+    added = sorted(set(actual) - set(committed))
+    removed = sorted(set(committed) - set(actual))
+    changed = sorted(f"{key}: {committed[key]} -> {actual[key]}" for key in set(actual) & set(committed) if actual[key] != committed[key])
+    assert (added, removed, changed) == ([], [], []), (
+        "the routes' declared permissions differ from tests/unit/permission_matrix_snapshot.json: "
+        "review, then regenerate it with UPDATE_PERMISSION_SNAPSHOT=1"
+    )
+
+
+def test_a_weakened_declaration_is_what_the_snapshot_catches(routes):
+    """The mutation the review ran (``POST /api/user/reset-onboarding``: app.access -> document_content.read, and
+    ``GET /api/templates``: document_content.read -> app.access) changes the matrix this test compares."""
+    committed = json.loads(SNAPSHOT.read_text())
+    assert committed["POST /api/user/reset-onboarding"] == ["app.access"]
+    assert committed["GET /api/templates"] == ["document_content.read"]
+    weakened = dict(committed) | {"GET /api/templates": ["app.access"]}
+    assert weakened != declared_matrix(routes)
 
 
 def test_a_route_without_a_declaration_fails_the_check():

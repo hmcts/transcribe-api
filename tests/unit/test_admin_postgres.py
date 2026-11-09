@@ -324,3 +324,32 @@ def test_a_system_administrator_gives_themselves_the_global_role_on_the_real_sch
             )
             == 403
         )
+
+
+# --- feature flags -------------------------------------------------------------------------------------------------
+
+
+def test_two_first_writes_of_a_feature_flag_at_the_same_moment_both_succeed(pg):
+    """Review finding D6: both read 'no row' and both inserted, so one failed on the primary key (a 500)."""
+    from transcribe_api.domain import feature_flags
+
+    user = signed_up(pg, "Sysadmin")
+    writers = 6
+    barrier = threading.Barrier(writers)
+
+    def attempt(value: bool) -> bool:
+        with Session(pg) as session:
+            barrier.wait()
+            return feature_flags.set_flag(
+                session, "dictation_enabled", value, updated_by=user.id, acted_as=["SystemAdministrator"]
+            )
+
+    with ThreadPoolExecutor(writers) as pool:
+        results = [f.result() for f in [pool.submit(attempt, n % 2 == 0) for n in range(writers)]]
+
+    assert len(results) == writers  # none raised
+    with Session(pg) as session:
+        (row,) = session.exec(select(feature_flags.SystemFeatureFlag)).all()
+        assert row.value in (True, False) and row.updated_by == user.id
+        audited = session.exec(select(AuditLog).where(AuditLog.event_type == "feature_flag.changed")).all()
+    assert len(audited) == writers  # each change has its row, written with it

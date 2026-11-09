@@ -23,9 +23,16 @@ session (DIAAT-382, DIAAT-390):
 
 Backfill from jurisdiction_membership: ``admin`` becomes JurisdictionAdministrator and
 ``judge`` becomes Judge; a membership still pending by email stays pending (claimed at
-first sign-in). Users of courtstranscribe are not touched. jurisdiction.auto_enrol is
-set false everywhere: nobody is enrolled automatically any more (a new user has no role
-until an administrator adds them or approves their request); the column stays.
+first sign-in). Users of courtstranscribe are not touched. jurisdiction.auto_enrol is NOT
+changed here: the previous release still reads it, and a migration that ships on ``master``
+before the new code would change what the old pods do (first-time users would get no
+jurisdiction and the old web has no request form). The new code never reads it (nobody is
+enrolled automatically: a new user has no role until an administrator adds them or approves
+their request), and ``scripts-cutover-authz.py`` sets it false at cutover.
+
+The backfill is one-shot: memberships the previous release writes after this runs reach no
+assignment. ``scripts-cutover-authz.py`` (run once, when the new release goes live; see
+docs/authz-cutover.md) repeats it for the memberships that have no assignment.
 
 Additive, so the previous release keeps working against this schema while a release
 rolls out: jurisdiction_membership, user.role and jurisdiction.auto_enrol stay (dropped
@@ -176,7 +183,6 @@ def upgrade() -> None:
             " ON CONFLICT DO NOTHING"
         )
     )
-    op.execute(sa.text("UPDATE jurisdiction SET auto_enrol = false"))
 
 
 def downgrade() -> None:
@@ -207,4 +213,4 @@ def downgrade() -> None:
     ):
         op.drop_index(index, table_name="role_assignment")
     op.drop_table("role_assignment")
-    # auto_enrol is not restored: what it was is not known.
+    # auto_enrol was not touched by the upgrade, so there is nothing to restore (the cutover script sets it).
