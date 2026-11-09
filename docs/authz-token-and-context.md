@@ -1,0 +1,153 @@
+# The BenchNotes access token, contexts and local personas (DIAAT-373)
+
+Who a user is and what they may do is decided in BenchNotes, not in Entra. Entra proves who someone
+is (sign-in) and carries one thing: the `SystemAdministrator` app role. Everything else (which
+jurisdictions someone works in, as which role) is a `role_assignment` row (DIAAT-382), and the
+user acts in **one (jurisdiction, role) context at a time** (DIAAT-390).
+
+This page is for people building against the API or testing it locally. The permission map is
+`domain/auth/permissions.py`; the token is `domain/auth/app_token.py`; sign-in and the session are
+`domain/auth/sessions.py` and `api/routes_session.py`.
+
+## The flow
+
+```
+browser ── Entra OIDC ──> web (server-side session)
+web ── POST /api/auth/session  (Authorization: Bearer <Entra ID token>) ──> API
+API ── { token, expires_at, me } ──> web           (token kept in the web session, never in the browser)
+web ── any other request  (Authorization: Bearer <BenchNotes token>) ──> API
+web ── before expiry: POST /api/auth/session again, with X-Requested-Context
+```
+
+* `POST /api/auth/session` is the **only** route that accepts an Entra ID token (or, locally,
+  `X-Dev-Persona`). It creates the user at their first sign-in (with no role; what was assigned to their
+  email beforehand is theirs), reads their assignments and returns the token.
+* **Every other route accepts only the BenchNotes token**, and refuses an Entra token (401). The sign-in
+  refuses the BenchNotes token. Health and version endpoints need none.
+* Nothing authorises a request by reading the database: the token's signature, issuer, audience and
+  expiry are checked, and what it says is trusted until it expires. (The user row is still read, for the
+  request's data, and a user deactivated since the token was minted is refused at once: 403
+  `user_deactivated`.)
+
+## The token
+
+HS256, signed with `APP_JWT_SIGNING_KEY`. `iss` is `benchnotes-api`, `aud` is `benchnotes`, lifetime
+`APP_JWT_TTL_SECONDS` (default 300).
+
+| claim | meaning |
+|---|---|
+| `sub` | the user's UUID |
+| `iat`, `exp` | issued at, expires |
+| `sysadmin` | true if the Entra `roles` claim held `SystemAdministrator` at mint time. Never read from the database |
+| `assignments` | `[{"jurisdiction": "ET" \| null, "role": "Judge"}, ...]`, the distinct pairs the user holds |
+| `ctx` | `{"jurisdiction": "ET" \| null, "role": "Judge"}`, the pair they act in, or `null` until chosen |
+| `name` | display name (informational; never used to authorise) |
+
+Permissions are **not** in the token: they are derived from `ctx.role` (plus `sysadmin`) with the role
+map in code, so a change to the map needs no new tokens. The roles are `Judge`, `LegalTextManager`,
+`JurisdictionAdministrator` and `JurisdictionSuperAdministrator` (stored; the last is global, with a null
+jurisdiction) and `SystemAdministrator` (Entra only: never stored, never an assignment, never a context).
+
+Settings (`runtime/settings_dictation.py`):
+
+* `APP_JWT_SIGNING_KEY`: required outside `local` and `test` (the API refuses to start without it, or
+  with fewer than 32 characters). Generate one with
+  `python -c "import secrets; print(secrets.token_urlsafe(48))"`. Locally it is in `.env`; if it is
+  missing there, local mode signs with a key for that process only (tokens do not survive a restart).
+  It is a new Key Vault secret and chart value (not yet added: nothing here touches the cluster config).
+* `APP_JWT_TTL_SECONDS`: default 300. A change to someone's assignments, or their removal of their
+  active role, reaches them at their next token: within this time, and at once for their own actions
+  (choosing a context, leaving a jurisdiction).
+
+## Choosing the context
+
+* Exactly one distinct (jurisdiction, role) pair and the token carries it already: no choice to make.
+* Several pairs: `ctx` is `null` and `me.status` is `choose` until `PUT /api/me/context`.
+* No pair and not a SystemAdministrator: `no_access`. A SystemAdministrator with no pair is `ready` (the
+  system pages only); their system permissions apply whatever the context, also with none.
+* On a new token (`POST /api/auth/session`), `X-Requested-Context: <jurisdiction|->:<role>` (`-` for the
+  global role) keeps the context the web session chose, **only if the user still holds it**. Otherwise
+  `ctx` is `null` and they choose again.
+* A route that needs a context, reached with none, is 403 `context_required` (a SystemAdministrator is
+  let through to the routes that do not need one).
+* Advisory headers: the browser sends `X-Jurisdiction: <code|->` and `X-Role: <role>` for its tab. If
+  present and different from the token's `ctx`, the answer is 409 `context_changed` and the tab reloads.
+  Absent is fine, and they are not checked on the no-context endpoints.
+
+## Endpoints
+
+All under `/api`. Errors are `{"detail": {"code": ..., "message": ...}}`.
+
+| endpoint | needs a context? | |
+|---|---|---|
+| `POST /auth/session` | no (Entra token or `X-Dev-Persona`) | `{token, expires_at, me}`. 403 `user_deactivated` |
+| `GET /me/permissions` | no | `MeResponse` |
+| `PUT /me/context` `{jurisdiction, role}` | no | `{token, expires_at, me}`; 403 `context_not_available` for a pair not held (nothing changes) |
+| `DELETE /me/jurisdictions/{code}` | no | leave a jurisdiction: deletes the user's assignments **there only**, audited `membership.leave`; same body as the session. 404 `not_a_member` |
+| `GET /jurisdictions/public` | no | `[{code, name, roles}]`, the enabled jurisdictions and the roles that can be requested there (`Judge`, `LegalTextManager`) |
+| `GET /jurisdictions/current` | yes | the active jurisdiction's `{code, name, template, features, wording}` (replaces what `GET /jurisdictions/me` gave the web app for its wording and features) |
+
+`MeResponse`:
+
+```json
+{
+  "user": {"id": "...", "email": "...", "name": "..."},
+  "status": "ready | choose | no_access",
+  "assignments": [{"jurisdiction": {"code": "ET", "name": "Employment Tribunal"} | null, "role": "Judge"}],
+  "active": {"jurisdiction": {...} | null, "role": "Judge"} | null,
+  "permissions": ["app.access", "..."],
+  "pending_requests": []
+}
+```
+
+`GET /api/jurisdictions/me` and `PUT /api/jurisdictions/active` are gone.
+
+## What is audited
+
+Every `audit_log` row written during a request carries `active_jurisdiction_id` and `active_role`: the
+context the token acts in (null for a global role's jurisdiction, with no context, and in the worker).
+Leaving a jurisdiction is `membership.leave`.
+
+## Local development personas
+
+With `ENVIRONMENT=local`, `POST /api/auth/session` accepts `X-Dev-Persona: <name>` instead of an Entra
+token, and goes through the same mint as a real sign-in. Anywhere else the header is refused (401
+`dev_persona_disabled`), whatever else the request carries.
+
+```bash
+docker compose up -d postgres azurite
+cp .env.example .env            # add APP_JWT_SIGNING_KEY (see above)
+.venv/bin/alembic upgrade head
+.venv/bin/python scripts-seed-personas.py    # idempotent; refuses a database that is not your own
+./run-local.sh
+
+curl -s -X POST localhost:8000/api/auth/session -H 'X-Dev-Persona: judge-et'
+curl -s localhost:8000/api/me/permissions -H "Authorization: Bearer $TOKEN"
+```
+
+| name | assignments | sysadmin |
+|---|---|---|
+| `judge-et` | Judge in ET | no |
+| `judge-iac` | Judge in IAC | no |
+| `multi` | Judge in ET, JurisdictionAdministrator in IAC | no |
+| `jadmin-iac` | JurisdictionAdministrator in IAC | no |
+| `jadmin-et` | JurisdictionAdministrator in ET | no |
+| `legal-iac` | LegalTextManager in IAC | no |
+| `jsuper` | JurisdictionSuperAdministrator (global) | no |
+| `sysadmin` | none | yes |
+| `no-role` | none | no |
+
+Emails are `<name>@localhost.test`. The seed script creates the jurisdictions ET ("Employment Tribunal")
+and IAC if missing, the users and their assignments, and never deletes anything. A persona with
+assignments that has not been seeded is 409 `persona_not_seeded`.
+
+Local mode no longer signs every request in as one developer with all roles: without a persona (or a
+token) a route is 401, as anywhere else.
+
+## Not here yet (later phases of DIAAT-373)
+
+The permission checks on every route (`require_permission`, replacing the role-name lists in the routes:
+for now they read the roles derived from the active context, `domain/auth/legacy_roles.py`); the
+assignment and user administration endpoints; access requests; feature flags; the web app's use of all of
+this. `user.role`, `jurisdiction_membership` and `jurisdiction.auto_enrol` are no longer read (nobody is
+enrolled automatically; a new user has no role) and are dropped in a later release.

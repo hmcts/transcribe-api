@@ -14,8 +14,8 @@ one of those pods gets no jurisdiction; add them on the Jurisdictions tab.
 
 A SystemAdministrator manages them in the admin area, on the **Jurisdictions** tab
 (DIAAT-356): add or edit a jurisdiction (its name, wording, template, hearing
-recordings, auto-enrol, enabled), and add or remove its members by email, as judge
-or admin. Behind it is `/api/admin/jurisdictions`. Every change is audited. A save
+recordings, enabled), and add or remove its members by email, as judge
+or admin (these are now role assignments: DIAAT-382). Behind it is `/api/admin/jurisdictions`. Every change is audited. A save
 made from a form opened before someone else's change is refused (409), not applied
 over it.
 
@@ -50,18 +50,20 @@ missing, and moving it to test or live is refused (400 `jurisdiction_not_ready`)
 A jurisdiction also has an optional **display name**, which is what users see (for
 example "Employment Tribunals (ET)"), and an optional **service**, where it applies.
 
-A member who is an **admin** of a jurisdiction changes that jurisdiction's wording,
-and nothing else, from the **Wording** link in the header (`/jurisdiction-wording`,
-behind it `/api/jurisdictions/wording`). Being an admin in one jurisdiction gives
-nothing in another.
+A user acting as the **JurisdictionAdministrator** of a jurisdiction changes that
+jurisdiction's wording, and nothing else, from the **Wording** link in the header
+(`/jurisdiction-wording`, behind it `/api/jurisdictions/wording`). Being an administrator
+in one jurisdiction gives nothing in another.
 
 A jurisdiction's **legal wording** (hearing types, legal frameworks, anonymity text: what
 its decision document is built from) is its own too, edited by its admins and, for the
 IAC, by the LegalTextManager role as before: see
 [`../jurisdiction-legal-wording.md`](../jurisdiction-legal-wording.md) (DIAAT-342).
 
-A membership does not replace the BenchNotes app role in Entra: someone with neither
-role cannot sign in, whatever their memberships.
+A user's roles are `role_assignment` rows, and they act in one (jurisdiction, role) at a
+time, chosen after sign-in: see [`../authz-token-and-context.md`](../authz-token-and-context.md).
+Nobody is enrolled automatically (DIAAT-373): a new user has no role until an administrator adds
+them (or, later, approves their request).
 
 The same operations run from a command line, for local development:
 
@@ -73,14 +75,13 @@ python -m transcribe_api.jurisdictions_admin put ET --name "Employment Tribunal"
 python -m transcribe_api.jurisdictions_admin list
 ```
 
-`put` changes `--auto-enrol`, `--enabled` (and their `--no-` forms), `--stage`,
-`--display-name` and `--service` only when you give them. A new jurisdiction starts
-enabled, as a draft, without auto-enrol.
+`put` changes `--enabled` (and `--no-enabled`), `--stage`, `--display-name` and
+`--service` only when you give them. A new jurisdiction starts enabled, as a draft.
+There is no auto-enrol any more.
 
-- **Add judges before they first sign in.** A new user claims any memberships added
-  for their email. A new user with none is made a judge in every `auto_enrol`
-  jurisdiction (the IAC), which is how sign-up worked before jurisdictions. An ET test
-  judge added in advance therefore sees only the ET.
+- **Add judges before they first sign in.** A new user claims any assignments added
+  for their email (whatever its case). A new user with none has no role and sees "no access
+  yet". An ET test judge added in advance therefore sees only the ET.
 - **Settings** are validated before they are saved (`JurisdictionSettings` in
   `domain/jurisdictions.py`):
   - `wording`: only the keys in `WORDING_KEYS`. Any key a jurisdiction does not set
@@ -93,9 +94,9 @@ enabled, as a draft, without auto-enrol.
 - **[`et.example.json`](et.example.json)** is a starting point for the ET. Its wording
   is a placeholder until the ET's own wording is agreed.
 
-A request works in the jurisdiction named by its `X-Jurisdiction` header (the web app
-sends the one its tab is in). Without the header it uses the user's last choice, or
-their only jurisdiction.
+A request works in the jurisdiction of the user's active context (their BenchNotes token's
+`ctx`). The `X-Jurisdiction` header the web app sends for its tab is advisory: if it differs
+from the token's context the answer is 409 `context_changed`.
 
 ## Uploaded Word templates (DIAAT-344)
 
