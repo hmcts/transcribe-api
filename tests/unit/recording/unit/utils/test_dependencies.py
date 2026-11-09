@@ -54,7 +54,7 @@ def _resolve(user, principal=None):
 
 
 class TestResolveUserLoadsTheTokensUser:
-    def test_returns_the_user_with_the_roles_and_context_the_token_carries(self):
+    def test_returns_the_user_with_the_context_the_token_carries(self):
         from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
 
         user = _existing_user()
@@ -64,30 +64,36 @@ class TestResolveUserLoadsTheTokensUser:
 
         assert isinstance(result, AuthenticatedUser)
         assert result.db_user is user
-        assert result.app_roles == ["LegalTextManager", "SystemAdministrator"]
         assert result.ctx == Context("ET", "LegalTextManager") and result.sysadmin is True
         assert result.assignments == (Context("ET", "LegalTextManager"),)
         mock_session.get.assert_called_once()
 
-    def test_the_roles_are_those_of_the_active_context_only(self):
+    def test_the_permissions_are_those_of_the_active_context_only(self):
+        from transcribe_api.domain.auth.authorisation import permissions_of
+
         principal = _principal(Context("IAC", "Judge"))
         principal = AppPrincipal(
             **{**principal.__dict__, "assignments": (Context("IAC", "Judge"), Context("ET", "JurisdictionAdministrator"))}
         )
         result, _ = _resolve(_existing_user(), principal)
-        assert result.app_roles == ["Judge"]
+        assert "dictation.use" in permissions_of(result) and "users.manage" not in permissions_of(result)
 
-    def test_a_system_administrator_with_no_context_holds_only_that_role(self):
+    def test_a_system_administrator_with_no_context_holds_only_the_system_permissions(self):
+        from transcribe_api.domain.auth.authorisation import permissions_of
+        from transcribe_api.domain.auth.permissions import SYSTEM_ADMIN_PERMISSIONS
+
         result, _ = _resolve(_existing_user(), _principal(ctx=None, sysadmin=True))
-        assert result.app_roles == ["SystemAdministrator"] and result.ctx is None
+        assert set(permissions_of(result)) == SYSTEM_ADMIN_PERMISSIONS and result.ctx is None
 
-    def test_no_context_and_no_sysadmin_holds_no_role_at_all(self):
+    def test_no_context_and_no_sysadmin_holds_no_permission_at_all(self):
+        from transcribe_api.domain.auth.authorisation import permissions_of
+
         result, _ = _resolve(_existing_user(), _principal(ctx=None))
-        assert result.app_roles == []
+        assert permissions_of(result) == []
 
 
 class TestResolveUserNeverWritesOrCreates:
-    @pytest.mark.parametrize("role", [None, "Normal", "Judge"])
+    @pytest.mark.parametrize("role", [None, "Judge", "LegalTextManager"])
     def test_user_role_is_not_overwritten_from_the_token(self, role):
         user = _existing_user(role=role)
         _, mock_session = _resolve(user, _principal(sysadmin=True))

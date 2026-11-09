@@ -5,12 +5,13 @@ which is sampled, capped and expires (DIAAT-286, decision OD7).
 
 What is recorded
 ----------------
-* ``ACCESS_DENIED`` from the auth library (a role check refused a request; written
-  by ``write_audit_event``, the ``audit_writer`` of ``get_allowlisted_user``), and
+* ``ACCESS_DENIED`` from the permission checks (``require_permission`` refused a request, or the
+  dictation off-switch did: domain/auth/authorisation.py; written by ``write_audit_event``), and
   from the ownership checks of DIAAT-285 (``security.ownership_violation``): the
   same call sites write the audit row, with the identifiers the telemetry event
   deliberately leaves out.
-* ``ROLE_CHANGE`` (written by the auth library) and ``user.delete`` (admin routes).
+* ``ROLE_CHANGE`` (written by the auth library; ``user.delete`` rows of the old admin route
+  remain in the vocabulary for the migrated history: the route is gone).
 * ``transcript.view``, ``transcript.export``, ``transcript.delete``: the sensitive
   actions on a transcription, its transcript or its decision document (``audited``).
 
@@ -131,7 +132,6 @@ ACCESS_DENIED = AuditEventType.ACCESS_DENIED.value
 TRANSCRIPT_VIEWED = "transcript.view"
 TRANSCRIPT_EXPORTED = "transcript.export"
 TRANSCRIPT_DELETED = "transcript.delete"
-USER_DELETED = "user.delete"
 
 # Outcomes
 SUCCESS = "success"
@@ -175,11 +175,8 @@ def _persist(row: AuditLog) -> bool:
 def write_audit_event(event: AuditEvent) -> None:
     """Write an AuditEvent from the auth library or an admin route.
 
-    get_allowlisted_user calls it in a worker thread on every 403; an async route calls
-    it the same way (``await asyncio.to_thread(write_audit_event, ...)``). Called on the
-    event loop by mistake, it is not inserted there but handed to a worker thread, as
-    for record_audit. Failures are logged but do not propagate: a logging failure must
-    never block a response.
+    Called by the permission checks (domain/auth/authorisation.py) on every refusal. Failures are logged but
+    do not propagate: a logging failure must never block a response.
     """
     try:  # building the row is part of the write: fail-open too
         row = AuditLog(

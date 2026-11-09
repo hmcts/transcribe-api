@@ -39,21 +39,16 @@ def get_job_by_id(session: Session, job_id: UUID) -> SpeechBatchJob | None:
 
 def list_jobs_paginated(
     session: Session,
-    user_id: UUID | None = None,
+    user_id: UUID,
     status: JobStatus | None = None,
     limit: int = 20,
     offset: int = 0,
     *,
     jurisdiction_id: UUID,
 ) -> tuple[list[SpeechBatchJob], int]:
-    """List jobs in one jurisdiction (DIAAT-334), with an optional user_id filter.
-
-    Pass user_id=None to return all jobs regardless of owner (admin use).
-    Pass a specific user_id to return only that user's jobs.
-    """
-    conditions = [SpeechBatchJob.jurisdiction_id == jurisdiction_id]
-    if user_id is not None:
-        conditions.append(SpeechBatchJob.user_id == user_id)
+    """List one user's jobs in one jurisdiction (DIAAT-334). The owner is required: nobody
+    lists another's jobs or the ownerless pre-migration ones (DIAAT-389, DIAAT-397)."""
+    conditions = [SpeechBatchJob.jurisdiction_id == jurisdiction_id, SpeechBatchJob.user_id == user_id]
     if status is not None:
         conditions.append(SpeechBatchJob.status == status)
 

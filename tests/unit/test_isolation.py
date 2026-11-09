@@ -214,29 +214,20 @@ def test_a_jurisdiction_the_user_does_not_belong_to_cannot_be_named(jurisdiction
 # Administrators ------------------------------------------------------------------------------
 
 
-@pytest.fixture
-def admin_app():
-    from transcribe_api.api.routes_dictation_privileged import router
+def test_nobody_but_the_owner_reaches_a_record_whatever_role_they_act_in(jurisdiction_db, judge_in_two):
+    """DIAAT-389: an administrator does not see "any judge's material in their jurisdiction" any more:
+    the admin transcription routes are gone, and the Judge's own routes are the owner's alone."""
+    from transcribe_api.api.routes_dictation_privileged import router as admin_router
 
-    app = FastAPI()
-    app.include_router(router, prefix="/api")
-    return app
-
-
-def test_an_administrator_sees_only_the_jurisdiction_they_work_in(jurisdiction_db, judge_in_two, admin_app):
-    _judge, iac, _sscs, in_iac, in_sscs = judge_in_two
+    _judge, iac, _sscs, in_iac, _in_sscs = judge_in_two
     admin = add_user(jurisdiction_db, roles=("SystemAdministrator",))
     add_member(jurisdiction_db, admin, iac, role="admin")
-    client = client_as(admin_app, jurisdiction_db, admin)
+    app = FastAPI()
+    app.include_router(admin_router, prefix="/api")
+    client = client_as(app, jurisdiction_db, admin)
 
-    listed = client.get("/api/admin/transcriptions").json()
-    with capture_telemetry() as telemetry:
-        other = client.get(f"/api/admin/transcriptions/{in_sscs.id}")
-
-    assert [t["id"] for t in listed["items"]] == [str(in_iac.id)]
-    assert other.status_code == 404
-    assert client.get(f"/api/admin/transcriptions/{in_iac.id}").status_code == 200
-    assert [e["security.resource_type"] for e in _blocked(telemetry)] == ["transcription"]
+    assert client.get("/api/admin/transcriptions").status_code == 404
+    assert client.get(f"/api/admin/transcriptions/{in_iac.id}").status_code == 404
 
 
 # Hearing recordings --------------------------------------------------------------------------

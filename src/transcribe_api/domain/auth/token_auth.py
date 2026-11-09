@@ -28,8 +28,9 @@ So identity here comes only from the token. This mirrors the CNP reference for
 internal users (DARTS): the frontend runs the OIDC login and keeps tokens in a
 server-side session, and the API validates the bearer JWT it is sent. The
 library's verifier is reused unchanged for the Entra token — signature against
-Entra's JWKS, audience (our client ID), issuer (our tenant), expiry — and so are
-its role checks (get_allowlisted_user accepts our dependency via current_user_dep).
+Entra's JWKS, audience (our client ID), issuer (our tenant), expiry — and so is
+its role check, for the sign-in gate below only: what a user may do after sign-in is
+decided by the permission checks (domain/auth/authorisation.py), not by Entra roles.
 
 One deliberate tightening: the library's verifier returns None, rather than
 raising, when verification is disabled or strict mode is off. Here None is
@@ -38,7 +39,7 @@ always a 401. There is no path on which an unverified token authenticates.
 App access roles
 ----------------
 When AUTH_ACCESS_ROLES is set (a comma-separated list, e.g.
-"Judge,LegalTextManager,SystemAdministrator,Normal"), a caller holding none of
+"Judge,LegalTextManager,SystemAdministrator"), a caller holding none of
 those Entra app roles is refused with 403 at sign-in, before any application user
 is resolved or created. It backs up "Assignment required" on the app
 registration: if that were ever switched off, any user in the tenant could get
@@ -46,7 +47,8 @@ a token. The check is the library's own role check, so the 403 and the
 UNAUTHORISED_ACCESS_ATTEMPT log line match every other role-gated route.
 Unset or blank: not checked. DIAAT-386 empties it in each environment once the
 permissions are enforced, so that a tenant member with no role can sign in and
-see "no access yet".
+see "no access yet". The setting and this check still exist (they are removed with the Entra
+role groups: DIAAT-386/DIAAT-387, Phase 8: a configuration change, not code).
 
 PR previews
 -----------

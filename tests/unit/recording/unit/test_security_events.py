@@ -90,8 +90,9 @@ def _job(user_id: uuid.UUID | None = OWNER_ID, text: str = TRANSCRIPT_TEXT) -> S
     return job
 
 
-def _client(roles: list[str] | None = None) -> TestClient:
+def _client(sysadmin: bool = False) -> TestClient:
     from transcribe_api.api.app import create_app
+    from transcribe_api.domain.auth.app_token import Context
     from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
     from transcribe_api.domain.auth.dependencies_recording import get_current_user
 
@@ -99,11 +100,12 @@ def _client(roles: list[str] | None = None) -> TestClient:
         id=CALLER_ID,
         azure_user_id="caller-azure-oid",
         email=CALLER_EMAIL,
-        role="Normal",
+        role="Judge",
         created_datetime=datetime(2026, 1, 1, tzinfo=UTC),
     )
     app = create_app()
-    current = AuthenticatedUser(db_user=user, app_roles=roles or ["Normal"])
+    # A Judge in the IAC; ``sysadmin``: who is also a SystemAdministrator, which gives no access to others' jobs.
+    current = AuthenticatedUser(db_user=user, ctx=Context("IAC", "Judge"), sysadmin=sysadmin)
     app.dependency_overrides[get_current_user] = lambda: current
     return TestClient(app, raise_server_exceptions=False)
 
@@ -225,14 +227,24 @@ def test_another_users_job_is_blocked_with_the_not_found_response(tel, mocker, r
     _assert_no_pii(tel)
 
 
-@pytest.mark.parametrize(("owner", "roles"), [(CALLER_ID, None), (OWNER_ID, ["SystemAdministrator"])])
-def test_owner_and_administrator_reads_are_not_violations(tel, mocker, owner, roles):
-    mocker.patch(f"{ROUTES}.get_job_by_id", return_value=_job(owner))
+def test_an_owners_read_is_not_a_violation(tel, mocker):
+    mocker.patch(f"{ROUTES}.get_job_by_id", return_value=_job(CALLER_ID))
 
-    response = _client(roles).get(f"/api/v1/jobs/{uuid.uuid4()}")
+    response = _client().get(f"/api/v1/jobs/{uuid.uuid4()}")
 
     assert response.status_code == 200
     assert _violations(tel) == []
+
+
+def test_a_system_administrators_read_of_another_users_job_is_a_blocked_violation(tel, mocker):
+    # DIAAT-389: no bypass: it is recorded like anyone's attempt on a job that is not theirs.
+    mocker.patch(f"{ROUTES}.get_job_by_id", return_value=_job(OWNER_ID))
+
+    response = _client(sysadmin=True).get(f"/api/v1/jobs/{uuid.uuid4()}")
+
+    assert response.status_code == 404
+    (event,) = _violations(tel)
+    _assert_types(event, "transcript", "read", "blocked")
 
 
 # detected: the post-authorisation assertion ------------------------------------------------
@@ -259,14 +271,16 @@ def test_assertion_blocks_what_a_broken_authorisation_check_lets_through(tel, mo
     _assert_no_pii(tel)
 
 
-def test_assertion_lets_an_administrator_through(tel, mocker):
+def test_assertion_has_no_exception_for_a_system_administrator(tel, mocker):
+    # DIAAT-389: a broken authorisation check does not let the Entra role through either.
     mocker.patch(f"{ROUTES}._check_job_access")
     mocker.patch(f"{ROUTES}.get_job_by_id", return_value=_job(None))
 
-    response = _client(["SystemAdministrator"]).get(f"/api/v1/jobs/{uuid.uuid4()}")
+    response = _client(sysadmin=True).get(f"/api/v1/jobs/{uuid.uuid4()}")
 
-    assert response.status_code == 200
-    assert _violations(tel) == []
+    assert response.status_code == 404
+    (event,) = _violations(tel)
+    _assert_types(event, "transcript", "read", "detected")
 
 
 def test_list_drops_a_foreign_row_the_user_filter_let_through(tel, mocker):

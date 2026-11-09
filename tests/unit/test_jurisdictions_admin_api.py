@@ -1,5 +1,7 @@
-"""DIAAT-356: SystemAdministrators add jurisdictions and their members from the admin
-area, so nobody runs anything on a cluster. Real lookups on SQLite."""
+"""DIAAT-356, DIAAT-376: jurisdiction administrators add jurisdictions and their members from the
+admin area, so nobody runs anything on a cluster. A JurisdictionSuperAdministrator manages (and
+creates) any jurisdiction; a JurisdictionAdministrator only the one it works in; nobody else, a
+SystemAdministrator included. Real lookups on SQLite."""
 
 from __future__ import annotations
 
@@ -13,7 +15,7 @@ from sqlmodel import Session, select
 
 from tests.unit.jurisdiction_fixtures import add_jurisdiction, add_member, add_user, client_as, sign_up
 from transcribe_api.domain import jurisdictions
-from transcribe_api.domain.assignments import load_assignments
+from transcribe_api.domain.assignments import add_assignment, load_assignments
 from transcribe_api.domain.models_dictation import AuditLog, Jurisdiction
 
 pytestmark = pytest.mark.real_jurisdictions
@@ -35,8 +37,12 @@ def admin_app(jurisdiction_db, monkeypatch):
 
 @pytest.fixture
 def as_admin(jurisdiction_db, admin_app):
-    admin = add_user(jurisdiction_db, "admin@example.test", roles=("SystemAdministrator",))
-    add_member(jurisdiction_db, admin, add_jurisdiction(jurisdiction_db, "IAC"), role="admin")
+    """A JurisdictionSuperAdministrator (global), with an IAC to manage."""
+    admin = add_user(jurisdiction_db, "admin@example.test", roles=("JurisdictionSuperAdministrator",))
+    add_jurisdiction(jurisdiction_db, "IAC")
+    with Session(jurisdiction_db) as session:
+        add_assignment(session, role="JurisdictionSuperAdministrator", jurisdiction_id=None, user_id=admin.id)
+        session.commit()
     return client_as(admin_app, jurisdiction_db, admin)
 
 
@@ -64,7 +70,7 @@ def test_an_administrator_adds_the_et_and_its_test_judges(jurisdiction_db, as_ad
         "saad.shaukat@hmcts.net",
     ]
     listed = {j["code"]: j["member_count"] for j in as_admin.get("/api/admin/jurisdictions").json()}
-    assert listed == {"ET": 3, "IAC": 1}
+    assert listed == {"ET": 3, "IAC": 0}
     assert _audit(jurisdiction_db).count(("membership.add", "success")) == 3
     assert ("jurisdiction.edit", "success") in _audit(jurisdiction_db)
 
@@ -120,12 +126,65 @@ def test_the_wording_keys_are_listed_for_the_form(as_admin):
 
 
 @pytest.mark.parametrize("roles", [("Judge",), ("LegalTextManager",)])
-def test_only_a_system_administrator_may_manage_jurisdictions(jurisdiction_db, admin_app, roles):
+def test_only_jurisdiction_administrators_may_manage_jurisdictions(jurisdiction_db, admin_app, roles):
     other = add_user(jurisdiction_db, roles=roles)
     client = client_as(admin_app, jurisdiction_db, other)
     assert client.get("/api/admin/jurisdictions").status_code == 403
     assert client.put("/api/admin/jurisdictions/ET", json={"name": "ET", "settings": {}}).status_code == 403
     assert client.post("/api/admin/jurisdictions/IAC/members", json={"email": "x@example.test"}).status_code == 403
+
+
+def test_a_system_administrator_manages_no_jurisdiction(jurisdiction_db, admin_app):
+    """DIAAT-389: the Entra role gives system-level work only, wherever (and whether) it acts."""
+    add_jurisdiction(jurisdiction_db, "IAC")
+    for roles, ctx in ((("SystemAdministrator",), None), (("Judge", "SystemAdministrator"), ("IAC", "Judge"))):
+        sysadmin = add_user(jurisdiction_db, roles=roles)
+        client = client_as(admin_app, jurisdiction_db, sysadmin, ctx=ctx, sysadmin=True)
+        assert client.get("/api/admin/jurisdictions").status_code == 403
+        assert client.put("/api/admin/jurisdictions/ET", json={"name": "ET", "settings": {}}).status_code == 403
+        assert client.get("/api/admin/jurisdictions/IAC/members").status_code == 403
+        assert client.post("/api/admin/jurisdictions/IAC/members", json={"email": "x@example.test"}).status_code == 403
+
+
+@pytest.fixture
+def as_iac_admin(jurisdiction_db, admin_app):
+    """A JurisdictionAdministrator of the IAC, in a world with an ET too."""
+    iac = add_jurisdiction(jurisdiction_db, "IAC")
+    et = add_jurisdiction(jurisdiction_db, "ET")
+    admin = add_user(jurisdiction_db, "iac.admin@example.test")
+    add_member(jurisdiction_db, admin, iac, role="admin")
+    add_member(jurisdiction_db, add_user(jurisdiction_db), et)
+    return client_as(admin_app, jurisdiction_db, admin)
+
+
+def test_a_jurisdiction_administrator_sees_and_manages_only_the_jurisdiction_it_works_in(as_iac_admin):
+    assert [j["code"] for j in as_iac_admin.get("/api/admin/jurisdictions").json()] == ["IAC"]
+    assert as_iac_admin.get("/api/admin/jurisdictions/IAC/members").status_code == 200
+    changed = as_iac_admin.put("/api/admin/jurisdictions/IAC", json={"name": "Immigration", "settings": {}})
+    assert changed.status_code == 200
+    added = as_iac_admin.post("/api/admin/jurisdictions/IAC/members", json={"email": "j@example.test"})
+    assert added.status_code == 201
+    for refused in (
+        as_iac_admin.get("/api/admin/jurisdictions/ET/members"),
+        as_iac_admin.put("/api/admin/jurisdictions/ET", json={"name": "ET", "settings": {}}),
+        as_iac_admin.post("/api/admin/jurisdictions/ET/members", json={"email": "j@example.test"}),
+        as_iac_admin.delete("/api/admin/jurisdictions/ET/members", params={"email": "j@example.test"}),
+    ):
+        assert refused.status_code == 403
+        assert refused.json()["detail"]["code"] == "jurisdiction_not_in_scope"
+
+
+def test_a_jurisdiction_administrator_cannot_create_a_jurisdiction_or_make_another_administrator(as_iac_admin):
+    created = as_iac_admin.put("/api/admin/jurisdictions/SSCS", json={"name": "SSCS", "settings": {}})
+    assert (created.status_code, created.json()["detail"]["code"]) == (403, "permission_denied")
+    made = as_iac_admin.post("/api/admin/jurisdictions/IAC/members", json={"email": "j@example.test", "role": "admin"})
+    assert (made.status_code, made.json()["detail"]["code"]) == (403, "permission_denied")
+
+
+def test_a_super_administrator_creates_jurisdictions_and_makes_administrators(as_admin):
+    assert as_admin.put("/api/admin/jurisdictions/SSCS", json={"name": "SSCS", "settings": {}}).status_code == 200
+    made = as_admin.post("/api/admin/jurisdictions/SSCS/members", json={"email": "j@example.test", "role": "admin"})
+    assert made.status_code == 201
 
 
 def _audit_details(engine, action: str) -> list[dict]:
@@ -241,3 +300,56 @@ def test_a_judge_made_admin_here_edits_the_wording_and_loses_it_when_removed(jur
     as_admin.delete("/api/admin/jurisdictions/ET/members", params={"email": "et.judge@example.test"})
     # With no role left, no context.
     assert judge_client.get("/api/jurisdictions/wording", headers=headers).status_code == 403
+
+
+# --- the interim user list (replaced by the assignment-based one in Phase 4) ---------------------------
+
+
+@pytest.fixture
+def two_jurisdictions(jurisdiction_db):
+    iac = add_jurisdiction(jurisdiction_db, "IAC")
+    et = add_jurisdiction(jurisdiction_db, "ET")
+    in_iac = add_user(jurisdiction_db, "in.iac@example.test")
+    in_et = add_user(jurisdiction_db, "in.et@example.test")
+    add_member(jurisdiction_db, in_iac, iac)
+    add_member(jurisdiction_db, in_et, et)
+    return iac, et, in_iac, in_et
+
+
+def _emails(response) -> list[str]:
+    return sorted(item["email"] for item in response.json()["items"])
+
+
+def test_a_jurisdiction_administrator_lists_only_the_users_of_the_jurisdiction_it_works_in(
+    jurisdiction_db, admin_app, two_jurisdictions
+):
+    iac, et, in_iac, in_et = two_jurisdictions
+    admin = add_user(jurisdiction_db, "iac.admin@example.test")
+    add_member(jurisdiction_db, admin, iac, role="admin")
+    client = client_as(admin_app, jurisdiction_db, admin)
+
+    listed = client.get("/api/admin/users")
+    assert _emails(listed) == ["iac.admin@example.test", "in.iac@example.test"]
+    assert client.get(f"/api/admin/users/{in_iac.id}").status_code == 200
+    assert client.get(f"/api/admin/users/{in_et.id}").status_code == 404  # another jurisdiction's user: unknown to them
+
+
+def test_super_and_system_administrators_list_every_user(jurisdiction_db, admin_app, two_jurisdictions):
+    _iac, _et, _in_iac, in_et = two_jurisdictions
+    super_admin = add_user(jurisdiction_db, "super@example.test")
+    with Session(jurisdiction_db) as session:
+        add_assignment(session, role="JurisdictionSuperAdministrator", jurisdiction_id=None, user_id=super_admin.id)
+        session.commit()
+    sysadmin = add_user(jurisdiction_db, "sysadmin@example.test", roles=("SystemAdministrator",))
+
+    everyone = ["in.et@example.test", "in.iac@example.test", "super@example.test", "sysadmin@example.test"]
+    assert _emails(client_as(admin_app, jurisdiction_db, super_admin).get("/api/admin/users")) == everyone
+    as_sysadmin = client_as(admin_app, jurisdiction_db, sysadmin, ctx=None, sysadmin=True)
+    assert _emails(as_sysadmin.get("/api/admin/users")) == everyone
+    assert as_sysadmin.get(f"/api/admin/users/{in_et.id}").status_code == 200
+
+
+@pytest.mark.parametrize("roles", [("Judge",), ("LegalTextManager",)])
+def test_judges_and_legal_text_managers_list_no_users(jurisdiction_db, admin_app, roles):
+    client = client_as(admin_app, jurisdiction_db, add_user(jurisdiction_db, roles=roles))
+    assert client.get("/api/admin/users").status_code == 403

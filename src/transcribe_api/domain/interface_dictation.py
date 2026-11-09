@@ -14,19 +14,14 @@ from transcribe_api.documents.minutes.types import TranscriptionMetadata
 from transcribe_api.domain.exceptions import (
     JurisdictionConflictError,
     OwnershipConflictError,
-    UserHasTranscriptionsError,
-    UserNotFoundError,
 )
 from transcribe_api.domain.models_dictation import (
-    AccessRequest,
-    AccessRequestRole,
     BaseTable,
     DialogueEntry,
-    JurisdictionMembership,
+    Jurisdiction,
     LiveTranscriptDraft,
     MinuteVersion,
     RoleAssignment,
-    SystemFeatureFlag,
     Tag,
     Transcription,
     TranscriptionJob,
@@ -666,77 +661,6 @@ def remove_tag_from_transcription(transcription_id: UUID, tag_name: str, user_id
             session.commit()
 
 
-# ---------------------------------------------------------------------------
-# Admin functions — bypass ownership filter
-# ---------------------------------------------------------------------------
-
-
-def admin_get_transcription_by_id(transcription_id: UUID) -> Transcription:
-    """Fetch a single transcription by ID with no user ownership check."""
-    with Session(engine) as session:
-        statement = (
-            select(Transcription)
-            .where(Transcription.id == transcription_id)
-            .options(
-                selectinload(Transcription.transcription_jobs),  # type: ignore[arg-type]
-                selectinload(Transcription.tags),  # type: ignore[arg-type]
-            )
-        )
-        transcription = session.exec(statement).first()
-        if not transcription:
-            raise HTTPException(status_code=404, detail="Transcription not found")
-        return transcription
-
-
-def admin_fetch_all_transcriptions(
-    *,
-    jurisdiction_id: UUID,
-    owner_email: str | None = None,
-    created_after: datetime | None = None,
-    created_before: datetime | None = None,
-    page: int = 1,
-    page_size: int = 50,
-) -> tuple[list[Transcription], int]:
-    """List all users' transcriptions in one jurisdiction (DIAAT-334), with optional
-    filters and pagination."""
-    if page < 1:
-        raise ValueError(f"page must be >= 1, got {page}")
-    if page_size < 1 or page_size > 200:
-        raise ValueError(f"page_size must be between 1 and 200, got {page_size}")
-
-    with Session(engine) as session:
-        filters = [Transcription.jurisdiction_id == jurisdiction_id]
-        if owner_email:
-            filters.append(User.email == owner_email)
-        if created_after:
-            filters.append(Transcription.created_datetime >= created_after)
-        if created_before:
-            filters.append(Transcription.created_datetime <= created_before)
-
-        count_stmt = (
-            select(func.count(Transcription.id))  # type: ignore[arg-type]
-            .join(User, Transcription.user_id == User.id)  # type: ignore[arg-type]
-        )
-        for f in filters:
-            count_stmt = count_stmt.where(f)
-        total = session.exec(count_stmt).one()
-
-        data_stmt = (
-            select(Transcription)
-            .join(User, Transcription.user_id == User.id)  # type: ignore[arg-type]
-            .options(
-                selectinload(Transcription.user),  # type: ignore[arg-type]
-                selectinload(Transcription.transcription_jobs),  # type: ignore[arg-type]
-                selectinload(Transcription.tags),  # type: ignore[arg-type]
-            )
-            .order_by(Transcription.created_datetime.desc())  # type: ignore[arg-type]
-        )
-        for f in filters:
-            data_stmt = data_stmt.where(f)
-        data_stmt = data_stmt.offset((page - 1) * page_size).limit(page_size)
-        transcriptions = session.exec(data_stmt).all()
-
-        return list(transcriptions), total
 _LIVE_DRAFT_MAX_AGE = timedelta(hours=24)
 
 
@@ -810,13 +734,30 @@ def delete_live_draft(user_id: UUID, jurisdiction_id: UUID) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _assigned_user_ids(jurisdiction_codes: frozenset[str]):
+    """A subquery of the users holding a role in one of the jurisdictions (by code)."""
+    return (
+        select(RoleAssignment.user_id)
+        .join(Jurisdiction, Jurisdiction.id == RoleAssignment.jurisdiction_id)  # type: ignore[arg-type]
+        .where(Jurisdiction.code.in_(sorted(jurisdiction_codes)))  # type: ignore[attr-defined]
+    )
+
+
+def user_in_jurisdictions(user_id: UUID, jurisdiction_codes: frozenset[str]) -> bool:
+    """Whether the user holds a role in one of the jurisdictions (by code)."""
+    with Session(engine) as session:
+        return session.exec(select(User.id).where(User.id == user_id, User.id.in_(_assigned_user_ids(jurisdiction_codes)))).first() is not None  # type: ignore[attr-defined]
+
+
 def admin_list_users(
     *,
     page: int = 1,
     page_size: int = 50,
     search_email: str | None = None,
+    jurisdiction_codes: frozenset[str] | None = None,
 ) -> tuple[list[User], int]:
-    """Return a paginated list of all users with an optional email substring filter."""
+    """Return a paginated list of users with an optional email substring filter, and, with
+    ``jurisdiction_codes``, only those with a role in one of those jurisdictions (None: all)."""
     if page < 1:
         raise HTTPException(status_code=422, detail="page must be >= 1")
     if page_size < 1 or page_size > 200:
@@ -826,6 +767,8 @@ def admin_list_users(
         filters = []
         if search_email:
             filters.append(User.email.ilike(f"%{search_email}%"))
+        if jurisdiction_codes is not None:
+            filters.append(User.id.in_(_assigned_user_ids(jurisdiction_codes)))  # type: ignore[attr-defined]
 
         count_stmt = select(func.count(User.id))  # type: ignore[arg-type]
         for f in filters:
@@ -838,53 +781,3 @@ def admin_list_users(
         data_stmt = data_stmt.offset((page - 1) * page_size).limit(page_size)
         users = list(session.exec(data_stmt).all())
         return users, total
-
-
-def admin_delete_user(user_id: UUID) -> None:
-    """Delete a user after verifying they have no transcriptions.
-
-    Raises UserNotFoundError if the user does not exist.
-    Raises UserHasTranscriptionsError if the user still owns transcriptions.
-    Automatically removes the user's live drafts and jurisdiction memberships first.
-    """
-    with Session(engine) as session:
-        user = session.get(User, user_id)
-        if not user:
-            raise UserNotFoundError(user_id)
-
-        transcription_count = session.exec(
-            select(func.count(Transcription.id)).where(Transcription.user_id == user_id)  # type: ignore[arg-type]
-        ).one()
-        if transcription_count > 0:
-            raise UserHasTranscriptionsError(user_id, transcription_count)
-
-        # A draft per jurisdiction, and the user's memberships and assignments (DIAAT-322,
-        # DIAAT-382), their access requests, and the mentions of them as who granted, decided
-        # or changed something.
-        for draft in session.exec(select(LiveTranscriptDraft).where(LiveTranscriptDraft.user_id == user_id)).all():
-            session.delete(draft)
-        for membership in session.exec(
-            select(JurisdictionMembership).where(JurisdictionMembership.user_id == user_id)
-        ).all():
-            session.delete(membership)
-        for assignment in session.exec(select(RoleAssignment).where(RoleAssignment.user_id == user_id)).all():
-            session.delete(assignment)
-        for assignment in session.exec(select(RoleAssignment).where(RoleAssignment.granted_by == user_id)).all():
-            assignment.granted_by = None
-            session.add(assignment)
-        for request in session.exec(select(AccessRequest).where(AccessRequest.user_id == user_id)).all():
-            for asked in session.exec(
-                select(AccessRequestRole).where(AccessRequestRole.access_request_id == request.id)
-            ).all():
-                session.delete(asked)
-            session.delete(request)
-        for request in session.exec(select(AccessRequest).where(AccessRequest.decided_by == user_id)).all():
-            request.decided_by = None
-            session.add(request)
-        for flag in session.exec(select(SystemFeatureFlag).where(SystemFeatureFlag.updated_by == user_id)).all():
-            flag.updated_by = None
-            session.add(flag)
-        session.flush()
-
-        session.delete(user)
-        session.commit()

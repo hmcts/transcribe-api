@@ -146,8 +146,7 @@ token) a route is 401, as anywhere else.
 
 ## Not here yet (later phases of DIAAT-373)
 
-The permission checks on every route (`require_permission`, replacing the role-name lists in the routes:
-for now they read the roles derived from the active context, `domain/auth/legacy_roles.py`); the
-assignment and user administration endpoints; access requests; feature flags; the web app's use of all of
-this. `user.role`, `jurisdiction_membership` and `jurisdiction.auto_enrol` are no longer read (nobody is
+The permission checks on every route are done (Phase 3: [`authz-permissions.md`](authz-permissions.md)). Still
+to come: the assignment and user administration endpoints; access requests; the feature flag admin endpoints; the
+web app's use of all of this. `user.role`, `jurisdiction_membership` and `jurisdiction.auto_enrol` are no longer read (nobody is
 enrolled automatically; a new user has no role) and are dropped in a later release.

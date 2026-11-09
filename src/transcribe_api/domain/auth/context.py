@@ -85,6 +85,19 @@ def check_advisory_headers(request: Request, ctx: Context | None) -> None:
         raise context_changed()
 
 
+def context_of(user: object) -> Context | None:
+    """The (jurisdiction, role) the BenchNotes token says ``user`` acts in, as the auth dependency
+    attached it (``AuthenticatedUser.ctx``); None until chosen. The one place that reads it:
+    the permission checks (authorisation.py) and the jurisdiction lookup (jurisdictions.py) both
+    come here, and tests replace it."""
+    return getattr(user, "ctx", None)
+
+
+def sysadmin_of(user: object) -> bool:
+    """Whether the token says ``user`` is a SystemAdministrator (``AuthenticatedUser.sysadmin``)."""
+    return bool(getattr(user, "sysadmin", False))
+
+
 @dataclass(frozen=True)
 class AuditContext:
     """The context a row is stamped with: the active jurisdiction (its ID: None for a

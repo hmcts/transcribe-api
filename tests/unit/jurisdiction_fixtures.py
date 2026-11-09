@@ -197,7 +197,6 @@ def acting_as(engine, user: User, ctx=AUTO, sysadmin: bool | None = None, *, are
 
     from transcribe_api.domain.assignments import distinct_contexts, load_assignments
     from transcribe_api.domain.auth.context import check_advisory_headers, context_required
-    from transcribe_api.domain.auth.legacy_roles import legacy_app_roles
 
     authenticated_user = importlib.import_module(f"transcribe_api.domain.auth.auth_models_{area}").AuthenticatedUser
     fake_roles = user.__dict__.get("app_roles", ["Judge"])
@@ -218,7 +217,6 @@ def acting_as(engine, user: User, ctx=AUTO, sysadmin: bool | None = None, *, are
         check_advisory_headers(request, context)
         return authenticated_user(
             db_user=fresh,
-            app_roles=legacy_app_roles(context, is_sysadmin),
             ctx=context,
             sysadmin=is_sysadmin,
             assignments=tuple(held),

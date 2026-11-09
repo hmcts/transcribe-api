@@ -23,7 +23,7 @@ from collections.abc import Callable, Coroutine
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from fastapi.exceptions import RequestValidationError
@@ -211,14 +211,7 @@ async def stop_background_workers(tasks: list[asyncio.Task]) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from hmcts_azure_auth.roles import validate_approles_config
-
     settings = get_settings()
-
-    # Fail fast on bad AUTH_APPROLES. Both upstream services did this; the
-    # dictation service skipped it locally so developers are not blocked.
-    if settings.ENVIRONMENT not in ("local", "test"):
-        validate_approles_config()
 
     # DIAAT-373: without the key no request after sign-in can be authenticated.
     from transcribe_api.domain.auth.app_token import signing_key_problem
@@ -389,10 +382,12 @@ def create_app() -> FastAPI:
     from transcribe_api.api.routes_dictation import router as dictation_router
     from transcribe_api.api.routes_dictation import telemetry_router
     from transcribe_api.api.routes_dictation_privileged import router as dictation_admin_router
+    from transcribe_api.api.routes_flags import router as flags_router
     from transcribe_api.api.routes_jurisdictions import router as jurisdictions_router
     from transcribe_api.api.routes_recording import limiter
     from transcribe_api.api.routes_recording import router as recording_router
     from transcribe_api.api.routes_session import router as session_router
+    from transcribe_api.domain.auth.authorisation import public_endpoint
 
     # Prefixes matter and differ between the two upstream apps:
     #   recording router declares its own prefix="/api/v1"  -> mount bare
@@ -410,10 +405,11 @@ def create_app() -> FastAPI:
     app.include_router(telemetry_router, prefix="/api")
     app.include_router(jurisdictions_router, prefix="/api")
     app.include_router(session_router, prefix="/api")
+    app.include_router(flags_router, prefix="/api")
     app.include_router(recording_router)
 
     # Polled by the CNP pipeline's startup check.
-    @app.get("/health", include_in_schema=False)
+    @app.get("/health", include_in_schema=False, dependencies=[Depends(public_endpoint)])
     async def root_health() -> dict[str, str]:
         return {"status": "ok"}
 

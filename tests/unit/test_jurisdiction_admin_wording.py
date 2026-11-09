@@ -85,7 +85,7 @@ def test_an_admin_in_one_jurisdiction_cannot_change_another(jurisdiction_db, jur
     ):
         refused = request()
         assert refused.status_code == 403
-        assert refused.json()["detail"]["code"] == "jurisdiction_admin_required"
+        assert refused.json()["detail"]["code"] == "permission_denied"
     assert _settings(jurisdiction_db, "IAC") == IAC_SETTINGS
 
 

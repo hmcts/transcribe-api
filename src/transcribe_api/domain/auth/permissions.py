@@ -124,6 +124,23 @@ SYSTEM_ADMIN_PERMISSIONS: frozenset[str] = frozenset(
     }
 )
 
+# Permissions that apply to a jurisdiction (DIAAT-391, DIAAT-394): held by a
+# JurisdictionAdministrator (or a LegalTextManager, for templates and legal text) only in the
+# jurisdiction they are acting in, and by the JurisdictionSuperAdministrator in every one.
+# Checked by ``authorisation.assert_jurisdiction_in_scope`` wherever a route names the
+# jurisdiction it works on.
+JURISDICTION_SCOPED_PERMISSIONS: frozenset[str] = frozenset(
+    {
+        "users.manage",
+        "jurisdictions.manage",
+        "jurisdiction.wording.edit",
+        "jurisdiction.features",
+        "templates.manage",
+        "access.approve",
+        "role_audit.read",
+    }
+)
+
 # Permissions no role has.
 UNGRANTED_PERMISSIONS: frozenset[str] = frozenset(PERMISSIONS) - set().union(
     SYSTEM_ADMIN_PERMISSIONS, *ROLE_PERMISSIONS.values()
@@ -143,3 +160,24 @@ def permissions_for(role: str | None, sysadmin: bool = False) -> list[str]:
 def role_needs_jurisdiction(role: str) -> bool:
     """Whether the stored role is held within a jurisdiction (all but the global one)."""
     return role in STORED_ROLES and role not in GLOBAL_ROLES
+
+
+# Who may assign which stored roles (contract s1, "Assignment rules"): the roles a caller
+# acting as ``role`` may give or take away. A SystemAdministrator (token claim) may assign the
+# two administrator roles and, on themselves only, any stored role; Phase 4 enforces the
+# rules per request; this is the list GET /admin/roles shows.
+_ASSIGNABLE_BY_ROLE: dict[str, tuple[str, ...]] = {
+    ROLE_JURISDICTION_ADMIN: (ROLE_JUDGE, ROLE_LEGAL_TEXT_MANAGER),
+    ROLE_JURISDICTION_SUPER_ADMIN: (ROLE_JUDGE, ROLE_LEGAL_TEXT_MANAGER, ROLE_JURISDICTION_ADMIN),
+}
+_ASSIGNABLE_BY_SYSADMIN: tuple[str, ...] = (ROLE_JURISDICTION_ADMIN, ROLE_JURISDICTION_SUPER_ADMIN)
+
+
+def assignable_roles(role: str | None, sysadmin: bool = False) -> list[str]:
+    """The stored roles a caller acting as ``role`` (plus SystemAdministrator if ``sysadmin``)
+    may assign to others, in ``STORED_ROLES`` order. Never SystemAdministrator: nobody can
+    grant it, and it is not a stored role."""
+    granted: set[str] = set(_ASSIGNABLE_BY_ROLE.get(role or "", ()))
+    if sysadmin:
+        granted |= set(_ASSIGNABLE_BY_SYSADMIN)
+    return [r for r in STORED_ROLES if r in granted]

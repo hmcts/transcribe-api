@@ -108,7 +108,7 @@ def test_a_first_login_creates_the_user_with_no_role(sqlite_engine):
     [stored] = _users(sqlite_engine)
     assert result.id == stored.id
     assert (stored.email, stored.azure_user_id, stored.name) == (EMAIL, AZURE_USER_ID, "Judge Real")
-    # Nothing of the old Normal default: a new user has no role (DIAAT-382), and is active.
+    # Nothing of the old default role: a new user has no role (DIAAT-382), and is active.
     assert stored.role is None and stored.is_active is True
     assert stored.has_completed_onboarding is False
 
@@ -153,7 +153,7 @@ def _principal(user_id, role="Judge", sysadmin=False):
 
 
 @pytest.mark.parametrize("module_name", RESOLVERS)
-def test_the_resolver_loads_the_user_the_token_names_and_derives_the_roles_from_the_context(module_name, sqlite_engine):
+def test_the_resolver_loads_the_user_the_token_names_and_derives_the_context_and_sysadmin(module_name, sqlite_engine):
     deps = importlib.import_module(module_name)
     user = _commit_user(sqlite_engine)
 
@@ -161,7 +161,6 @@ def test_the_resolver_loads_the_user_the_token_names_and_derives_the_roles_from_
         result = deps._resolve_user(_principal(user.id, "LegalTextManager", sysadmin=True))
 
     assert result.db_user.id == user.id
-    assert result.app_roles == ["LegalTextManager", "SystemAdministrator"]
     assert result.ctx.role == "LegalTextManager" and result.sysadmin is True
 
 
@@ -173,7 +172,7 @@ def test_the_resolver_never_rewrites_user_role_from_the_token(module_name, sqlit
     user = _commit_user(sqlite_engine)
     with Session(sqlite_engine) as session:
         stored = session.get(User, user.id)
-        stored.role = "Normal"
+        stored.role = "LegalTextManager"
         session.add(stored)
         session.commit()
 
@@ -181,7 +180,7 @@ def test_the_resolver_never_rewrites_user_role_from_the_token(module_name, sqlit
         deps._resolve_user(_principal(user.id, "Judge", sysadmin=True))
 
     [after] = _users(sqlite_engine)
-    assert after.role == "Normal"
+    assert after.role == "LegalTextManager"
 
 
 @pytest.mark.parametrize("module_name", RESOLVERS)

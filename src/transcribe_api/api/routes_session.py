@@ -20,7 +20,6 @@ import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
-from hmcts_azure_auth.roles import get_valid_roles
 from pydantic import BaseModel, StringConstraints
 from sqlmodel import Session, select
 from starlette.concurrency import run_in_threadpool
@@ -28,8 +27,9 @@ from starlette.concurrency import run_in_threadpool
 from transcribe_api.domain.assignments import distinct_contexts, leave_jurisdiction, load_assignments
 from transcribe_api.domain.audit import record_audit
 from transcribe_api.domain.auth.app_token import Context
+from transcribe_api.domain.auth.authorisation import sign_in_endpoint
 from transcribe_api.domain.auth.context import context_not_available, error, parse_requested_context
-from transcribe_api.domain.auth.dependencies_dictation import get_signed_in_user
+from transcribe_api.domain.auth.dependencies_dictation import signed_in_endpoint
 from transcribe_api.domain.auth.dev_personas import PERSONAS
 from transcribe_api.domain.auth.permissions import REQUESTABLE_ROLES, ROLE_SYSTEM_ADMIN
 from transcribe_api.domain.auth.sessions import (
@@ -85,8 +85,9 @@ async def get_sign_in_identity(
         azure_user_id=entra.user_id,
         email=entra.email,
         name=entra.name,
-        # Only the Entra roles claim says so, at sign-in; the database never does.
-        sysadmin=get_valid_roles()[ROLE_SYSTEM_ADMIN] in entra.roles,
+        # Only the Entra roles claim says so, at sign-in; the database never does. The role's
+        # value in the token is its name (the library's configurable role map is not used).
+        sysadmin=ROLE_SYSTEM_ADMIN in entra.roles,
     )
 
 
@@ -100,7 +101,7 @@ def _no_store(response: Response) -> None:
     response.headers["Cache-Control"] = "no-store"
 
 
-@router.post("/auth/session", response_model=SessionResponse)
+@router.post("/auth/session", response_model=SessionResponse, dependencies=[Depends(sign_in_endpoint)])
 def create_session(
     response: Response,
     identity: Annotated[SignInIdentity, Depends(get_sign_in_identity)],
@@ -126,7 +127,7 @@ def create_session(
 
 
 @router.get("/me/permissions", response_model=MeResponse)
-def my_permissions(response: Response, current_user: User = Depends(get_signed_in_user)) -> MeResponse:
+def my_permissions(response: Response, current_user: User = Depends(signed_in_endpoint)) -> MeResponse:
     """Who the signed-in user is, what they hold (read now), what they are acting as (the
     token's context) and the permissions of that role, plus the system ones for a
     SystemAdministrator. Works with no context chosen, and for a user with no role."""
@@ -144,7 +145,7 @@ class ContextBody(BaseModel):
 
 @router.put("/me/context", response_model=SessionResponse)
 def set_context(
-    body: ContextBody, response: Response, current_user: User = Depends(get_signed_in_user)
+    body: ContextBody, response: Response, current_user: User = Depends(signed_in_endpoint)
 ) -> SessionResponse:
     """Act as ``role`` in ``jurisdiction`` from now on: a new token with that context. 403
     ``context_not_available`` for a pair the user does not hold (SystemAdministrator is never
@@ -159,7 +160,7 @@ def set_context(
 
 
 @router.delete("/me/jurisdictions/{code}", response_model=SessionResponse)
-def leave(code: str, response: Response, current_user: User = Depends(get_signed_in_user)) -> SessionResponse:
+def leave(code: str, response: Response, current_user: User = Depends(signed_in_endpoint)) -> SessionResponse:
     """Leave a jurisdiction: the user's roles there are removed (and nobody else's), audited as
     ``membership.leave``. If they were acting in it they must choose again (or, with one pair
     left, it is selected); any other context is kept. 404 ``not_a_member`` if they held no role there."""
@@ -196,7 +197,7 @@ class PublicJurisdiction(JurisdictionRef):
 
 
 @router.get("/jurisdictions/public", response_model=list[PublicJurisdiction])
-def public_jurisdictions(response: Response, _user: User = Depends(get_signed_in_user)) -> list[PublicJurisdiction]:
+def public_jurisdictions(response: Response, _user: User = Depends(signed_in_endpoint)) -> list[PublicJurisdiction]:
     """Every enabled jurisdiction, by name, with the roles that can be requested in it: what a
     user with no role chooses from on the access request form. Any signed-in user, with or
     without a role or a context."""

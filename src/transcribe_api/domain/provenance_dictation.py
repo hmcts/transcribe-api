@@ -24,7 +24,8 @@ Investigators read it from the database, e.g.::
     SELECT j.id, j.created_datetime, j.provenance
     FROM transcriptionjob j WHERE j.transcription_id = '<transcription uuid>';
 
-and SystemAdministrators see it on ``GET /api/admin/transcriptions/{id}``.
+and nobody reads it through the API: the SystemAdministrator's view of it went with their access to
+other users' records (DIAAT-389).
 """
 
 from __future__ import annotations

@@ -21,21 +21,22 @@ From DIAAT-373 the role is the one the user is **acting as** in the active juris
 
 | Active jurisdiction | Acting as | Read | Write |
 |---|---|---|---|
-| any | **JurisdictionAdministrator** or **LegalTextManager** in it | yes | yes |
-| IAC only | **SystemAdministrator** (the Entra role, as before: read only) | yes | no |
-| any | everyone else (judges, an administrator or legal text manager of another jurisdiction) | no | no |
+| any | **LegalTextManager** in it (`legal_text.manage`) | yes | yes |
+| any | everyone else: a Judge, a JurisdictionAdministrator, a JurisdictionSuperAdministrator, a LegalTextManager of another jurisdiction | no | no |
 
-The LegalTextManager is now held in a jurisdiction (it was one global Entra role that meant the
-IAC), so the IAC's LegalTextManager sees no change. SystemAdministrator has no special access to
-other jurisdictions' legal wording.
+Since DIAAT-376 the permission is `legal_text.manage`, which only the LegalTextManager holds. A
+JurisdictionAdministrator (who could edit it under DIAAT-342) edits the *screen* wording of its
+jurisdiction (`jurisdiction.wording.edit`), not its legal text; and a SystemAdministrator no longer reads
+the IAC's legal wording either (DIAAT-389: system-level work only). The LegalTextManager is held in a
+jurisdiction (it was one global Entra role that meant the IAC).
 
 Errors (same shapes as the screen wording editor):
 
 - `409 {"detail": {"code": "context_changed", ...}}`: the header names a jurisdiction that is
   not the one the user's token acts in (a stale tab). `403 jurisdiction_not_available`: the
   token's jurisdiction has been disabled since. Read and write alike.
-- `403 {"detail": {"code": "jurisdiction_admin_required", "message": ...}}`: a member
-  who may not edit this jurisdiction's legal wording. The refusal is audited
+- `403 {"detail": {"code": "permission_denied", "message": ...}}`: someone acting as a role that
+  may not edit legal wording (was `jurisdiction_admin_required`). The refusal is audited
   (`ACCESS_DENIED`).
 - `403 context_required` (no context chosen) / `403 no_jurisdiction` (a global role): as everywhere else.
 - `404 {"detail": "Not available in this jurisdiction"}`: the jurisdiction does not use
@@ -47,8 +48,7 @@ Responses are `Cache-Control: no-store`.
 
 - `GET /api/me/permissions` says what the user is acting as (`active.role`), and
   `GET /api/jurisdictions/current` that the jurisdiction's `template == "iac_decision"`, which means
-  it has legal wording at all. Show the legal wording editor for a JurisdictionAdministrator or
-  LegalTextManager when it does.
+  it has legal wording at all. Show the legal wording editor for a LegalTextManager (`legal_text.manage`) when it does.
 - The editor's own `GET /api/admin/document-content` says which jurisdiction it edits
   (`jurisdiction`) and whether it has legal wording (`has_legal_wording`).
 

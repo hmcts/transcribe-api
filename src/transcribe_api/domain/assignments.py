@@ -5,7 +5,7 @@ The ``role_assignment`` table is the source of truth for what a user may be. A r
 (pending email, jurisdiction, role): claimed when they first sign in. Judge,
 LegalTextManager and JurisdictionAdministrator are held in a jurisdiction; the
 JurisdictionSuperAdministrator is global (no jurisdiction). SystemAdministrator is never
-stored (it comes only from the Entra token), and neither is Normal.
+stored (it comes only from the Entra token), and nor is the retired default role.
 
 These are the building blocks the sign-in (domain/auth/sessions.py), the user's own
 actions (leave a jurisdiction) and, later, the administration endpoints use. Nothing here

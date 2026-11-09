@@ -97,7 +97,9 @@ class TestBuildUrl:
 
         url = local_storage.build_url("uploads/caller-1/file.wav")
 
-        assert url == "https://abc123.ngrok-free.app/api/v1/local-audio/uploads/caller-1/file.wav"
+        path, _, query = url.partition("?")
+        assert path == "https://abc123.ngrok-free.app/api/v1/local-audio/uploads/caller-1/file.wav"
+        assert query.startswith("expires=") and "&sig=" in query
 
     def test_raises_when_base_url_not_configured(self, monkeypatch):
         monkeypatch.delenv("LOCAL_AUDIO_BASE_URL", raising=False)

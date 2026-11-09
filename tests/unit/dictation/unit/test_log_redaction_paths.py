@@ -83,10 +83,10 @@ def test_a_returning_user_is_logged_by_id(caplog: pytest.LogCaptureFixture) -> N
 
 
 def test_a_user_whose_role_the_token_names_is_logged_by_id_and_not_rewritten(caplog: pytest.LogCaptureFixture) -> None:
-    user = _existing_user("Normal")
+    user = _existing_user("Judge")
     with caplog.at_level(logging.DEBUG):
         _resolve_existing(user, role="LegalTextManager")
-    assert user.role == "Normal"  # DIAAT-375: never overwritten from the token
+    assert user.role == "Judge"  # DIAAT-375: never overwritten from the token
     _assert_email_not_logged(caplog)
 
 

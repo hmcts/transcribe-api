@@ -127,16 +127,27 @@ def every_user_is_an_iac_judge(request: pytest.FixtureRequest, monkeypatch: pyte
         return
     from tests.unit.jurisdiction_fixtures import IAC_JURISDICTION_ID, iac_membership
     from transcribe_api.domain import jurisdictions
+    from transcribe_api.domain.auth import context as auth_context
     from transcribe_api.domain.auth.app_token import Context
 
     def context_of(user):
-        # In the IAC, as the role the fake user's roles name: a Judge unless they are a
-        # LegalTextManager or a JurisdictionAdministrator (what the tests of the admin routes mean).
+        # An AuthenticatedUser says what its token says. A plain User a test injects stands for
+        # someone in the IAC, as the role its fake ``app_roles`` name: a Judge unless they are a
+        # LegalTextManager, a JurisdictionAdministrator or a JurisdictionSuperAdministrator
+        # (what the tests of the admin routes mean).
+        if hasattr(user, "db_user"):
+            return user.ctx
         roles = getattr(user, "__dict__", {}).get("app_roles", [])
-        role = next((r for r in ("JurisdictionAdministrator", "LegalTextManager") if r in roles), "Judge")
-        return Context("IAC", role)
+        role = next((r for r in ("JurisdictionSuperAdministrator", "JurisdictionAdministrator", "LegalTextManager") if r in roles), "Judge")
+        return Context(None if role == "JurisdictionSuperAdministrator" else "IAC", role)
 
-    monkeypatch.setattr(jurisdictions, "_context_of", context_of)
+    def sysadmin_of(user):
+        if hasattr(user, "db_user"):
+            return user.sysadmin
+        return "SystemAdministrator" in getattr(user, "__dict__", {}).get("app_roles", [])
+
+    monkeypatch.setattr(auth_context, "context_of", context_of)
+    monkeypatch.setattr(auth_context, "sysadmin_of", sysadmin_of)
     monkeypatch.setattr(
         jurisdictions, "_load_membership", lambda code, role: iac_membership(role) if code == "IAC" else None
     )
@@ -147,6 +158,18 @@ def every_user_is_an_iac_judge(request: pytest.FixtureRequest, monkeypatch: pyte
     # And every upload was made in the IAC.
     monkeypatch.setattr(jurisdictions, "_record_upload_jurisdiction", lambda upload_id, jurisdiction_id: None)
     monkeypatch.setattr(jurisdictions, "_recorded_upload_jurisdiction", lambda upload_id: iac_membership().jurisdiction_id)
+
+
+@pytest.fixture(autouse=True)
+def feature_flags_are_not_stored(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """DIAAT-388: no test reads the system_feature_flag table (and so connects to a database)
+    from every dictation request: no flag has a row, so each has its default (the
+    DICTATION_ENABLED setting). Tests of the flag layer itself mark themselves ``real_feature_flags``."""
+    if request.node.get_closest_marker("real_feature_flags"):
+        return
+    from transcribe_api.domain import feature_flags
+
+    monkeypatch.setattr(feature_flags, "_stored_value", lambda name: None)
 
 
 @pytest.fixture

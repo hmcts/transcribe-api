@@ -127,6 +127,7 @@ pythonpath = ["src", "."]
 addopts = "--cov=transcribe_api"
 markers = [
     "real_jurisdictions: use the real jurisdiction lookup, not every user an IAC judge (tests/unit/conftest.py)",
+    "real_feature_flags: read the system_feature_flag table, not assume no flag has a row (tests/unit/conftest.py)",
 ]
 
 [tool.ruff]

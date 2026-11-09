@@ -21,16 +21,14 @@ class AuthenticatedUser:
 
     ``ctx`` is the (jurisdiction, role) the user is acting in, None until chosen;
     ``assignments`` are the pairs they hold; ``sysadmin`` is the Entra SystemAdministrator
-    role, copied into the token when it was minted. ``app_roles`` is the role-name list the
-    existing route checks (``get_allowlisted_user(required_roles_*)``) read: derived from
-    those (domain/auth/legacy_roles.py), until the permission checks replace them.
+    role, copied into the token when it was minted. What they may do is derived from ``ctx`` and
+    ``sysadmin`` (domain/auth/authorisation.py).
     Attribute access falls through to the wrapped User for all fields not defined on this
     dataclass, so route code can use current_user.email, current_user.id, etc. without
     changes.
     """
 
     db_user: User
-    app_roles: list[str]
     ctx: Context | None = None
     sysadmin: bool = False
     assignments: tuple[Context, ...] = ()

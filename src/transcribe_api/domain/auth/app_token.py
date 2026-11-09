@@ -29,6 +29,8 @@ Permissions are not in the token: they are derived from ``ctx.role`` and ``sysad
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import secrets
 import time
@@ -126,6 +128,12 @@ def _signing_key() -> str:
         _ephemeral_key = secrets.token_urlsafe(48)
         logger.warning("APP_JWT_SIGNING_KEY is not set: using a key for this process only (local)")
     return _ephemeral_key
+
+
+def derived_key(purpose: str) -> bytes:
+    """A key for ``purpose`` derived from the signing key (HMAC-SHA256), so something else that needs
+    a signature (the signed local-audio URLs) never signs with the token key itself."""
+    return hmac.new(_signing_key().encode(), f"benchnotes:{purpose}".encode(), hashlib.sha256).digest()
 
 
 def ttl_seconds() -> int:

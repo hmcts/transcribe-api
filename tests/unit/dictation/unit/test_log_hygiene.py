@@ -49,7 +49,6 @@ _EXCLUDE_DIRS = {"tests", "migrations", "alembic", "__pycache__", ".venv", "vend
 _RECORDING_SERVICE_FILES = {
     "api/deps_recording.py",
     "api/routes_recording.py",
-    "domain/auth/approles_recording.py",
     "domain/auth/auth_models_recording.py",
     "domain/auth/dependencies_recording.py",
     "domain/interface_recording.py",

@@ -27,7 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlmodel import Session, select
 
 from transcribe_api.domain.assignments import claim_pending_assignments
-from transcribe_api.domain.auth.app_token import Context
+from transcribe_api.domain.auth import context as auth_context
 from transcribe_api.domain.auth.context import context_required
 from transcribe_api.domain.auth.context import error as _error
 from transcribe_api.domain.jurisdiction_stages import STAGE_DRAFT, STAGE_LIVE, STAGE_TEST, STAGES, sees  # noqa: F401
@@ -248,12 +248,6 @@ def _load_membership(code: str, role: str) -> Membership | None:
     )
 
 
-def _context_of(user: object) -> Context | None:
-    # The BenchNotes token's context, as the auth dependency attached it
-    # (domain/auth/dependencies_*.py: AuthenticatedUser.ctx). Tests replace this.
-    return getattr(user, "ctx", None)
-
-
 def active_jurisdiction(user: object) -> ActiveJurisdiction:
     """The jurisdiction the user's request works in, from their context.
 
@@ -261,7 +255,7 @@ def active_jurisdiction(user: object) -> ActiveJurisdiction:
     a global role's (no jurisdiction to work in); 403 ``jurisdiction_not_available`` when
     the jurisdiction is disabled or gone. No assignment is read: the token's context was
     checked against the assignments when it was minted."""
-    ctx = _context_of(user)
+    ctx = auth_context.context_of(user)
     if ctx is None:
         raise context_required()
     if ctx.jurisdiction is None:
@@ -393,7 +387,7 @@ def not_available() -> HTTPException:
 
 def jurisdiction_dependency(current_user_dep):
     """A FastAPI dependency giving the request's jurisdiction, bound to an area's
-    get_current_user so it shares the request's cached user with get_allowlisted_user
+    get_current_user so it shares the request's cached user with require_permission
     (domain/auth/dependencies_dictation.py and dependencies_recording.py)."""
 
     def get_active_jurisdiction(current_user: User = Depends(current_user_dep)) -> ActiveJurisdiction:

@@ -547,7 +547,8 @@ class CorrectionDatasetEntry(BaseTable, table=True):
 # models_dictation, and re-exported here so recording-side imports keep working.
 #
 # Behaviour change to note: recording had `role: str | None = None`; the merged
-# model uses dictation's `role: str = "Normal"` (indexed).
+# model has dictation's `role` column (indexed; nullable since 0007, and no longer read:
+# what a user may do is their role assignments, DIAAT-382).
 from transcribe_api.domain.models_dictation import User  # noqa: E402,F401  (re-export)
 
 

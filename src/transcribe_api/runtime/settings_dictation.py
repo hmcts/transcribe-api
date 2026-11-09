@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     # (domain/auth/token_auth.py). Refused unless ENVIRONMENT is "preview".
     AUTH_PREVIEW_USER_ENABLED: bool = False
     AUTH_PREVIEW_USER_ROLES: str | None = None
+    # DIAAT-388: whether dictation is on. The default, used when the system_feature_flag row
+    # ``dictation_enabled`` (set by a SystemAdministrator, DIAAT-392) does not exist. Off in
+    # prod through the chart; hearing recordings are not affected (domain/feature_flags.py).
+    DICTATION_ENABLED: bool = True
     # DIAAT-373: signs the BenchNotes access token (domain/auth/app_token.py). Required
     # outside local and test (the API refuses to start without it): at least 32 characters.
     # Generate: python -c "import secrets; print(secrets.token_urlsafe(48))"

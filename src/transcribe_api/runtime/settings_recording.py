@@ -69,7 +69,6 @@ class Settings(BaseSettings):
     AZURE_AD_TENANT_ID: str = ""
     JWT_ENABLE_VERIFICATION: bool = True
     JWT_VERIFICATION_STRICT: bool = True
-    AUTH_APPROLES: str | None = None
 
     # Auth
     LOCAL_API_KEY: str = "local-dev-key-change-me"

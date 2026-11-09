@@ -80,8 +80,9 @@ def _job(user_id: uuid.UUID | None = CALLER_ID, status: JobStatus = JobStatus.SU
     return job
 
 
-def _client(roles: list[str] | None = None) -> TestClient:
+def _client(sysadmin: bool = False) -> TestClient:
     from transcribe_api.api.app import create_app
+    from transcribe_api.domain.auth.app_token import Context
     from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
     from transcribe_api.domain.auth.dependencies_recording import get_current_user
     from transcribe_api.runtime.db_recording import get_session
@@ -90,11 +91,12 @@ def _client(roles: list[str] | None = None) -> TestClient:
         id=CALLER_ID,
         azure_user_id="caller-azure-oid",
         email=CALLER_EMAIL,
-        role="Normal",
+        role="Judge",
         created_datetime=datetime(2026, 1, 1, tzinfo=UTC),
     )
     app = create_app()
-    current = AuthenticatedUser(db_user=user, app_roles=roles or ["Normal"])
+    # A Judge in the IAC; ``sysadmin``: who is also a SystemAdministrator, which gives no access to others' jobs.
+    current = AuthenticatedUser(db_user=user, ctx=Context("IAC", "Judge"), sysadmin=sysadmin)
     app.dependency_overrides[get_current_user] = lambda: current
     app.dependency_overrides[get_session] = lambda: MagicMock()  # no database here
     return TestClient(app, raise_server_exceptions=False)
@@ -159,13 +161,14 @@ def test_failure_building_the_detail_after_authorisation_is_failed(mocker, audit
     _assert_safe(row)
 
 
-def test_administrator_view_of_another_users_job_names_the_administrator(mocker, audit_capture):
+def test_a_system_administrators_view_of_another_users_job_is_refused_and_audited_as_denied(mocker, audit_capture):
+    # DIAAT-389: the Entra role gives no access to anyone else's recording: it answers as for anyone.
     job = _job(OWNER_ID)
     mocker.patch(f"{ROUTES}.get_job_by_id", return_value=job)
 
-    assert _client(["SystemAdministrator"]).get(f"/api/v1/jobs/{job.id}").status_code == 200
+    assert _client(sysadmin=True).get(f"/api/v1/jobs/{job.id}").status_code == 404
     row = _only_row(audit_capture)
-    assert _summary(row) == ("transcript.view", "success", "job", job.id, None)
+    assert row["outcome"] == "denied"
     assert row["actor_id"] == CALLER_ID
 
 

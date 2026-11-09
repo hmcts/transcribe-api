@@ -9,7 +9,10 @@ change it are gone.
 loads once a context is chosen (its template, its features and its wording).
 
 ``/api/jurisdictions/wording`` is for a jurisdiction's own admins (DIAAT-356): the
-wording of the jurisdiction they are working in, and only that one.
+wording of the jurisdiction they are working in, and only that one. It needs
+``jurisdiction.wording.edit``, which a JurisdictionAdministrator holds in the jurisdiction it acts
+in (the jurisdiction is the token's context, so it is in scope by construction); the global
+JurisdictionSuperAdministrator has no active jurisdiction to edit here (403 ``no_jurisdiction``).
 """
 
 from __future__ import annotations
@@ -23,9 +26,8 @@ from transcribe_api.documents.content_loader import get_document_content
 from transcribe_api.domain.audit import record_audit
 from transcribe_api.domain.auth.dependencies_dictation import (
     get_active_jurisdiction,
-    get_current_user,
+    require_permission,
 )
-from transcribe_api.domain.auth.permissions import ROLE_JURISDICTION_ADMIN
 from transcribe_api.domain.jurisdictions import (
     WORDING_KEYS,
     ActiveJurisdiction,
@@ -50,6 +52,7 @@ class CurrentJurisdiction(BaseModel):
 @router.get("/jurisdictions/current", response_model=CurrentJurisdiction)
 def current_jurisdiction(
     response: Response,
+    _user=Depends(require_permission("app.access")),  # noqa: B008
     active: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> CurrentJurisdiction:
     """The jurisdiction the user is acting in: its template, features and wording. 403
@@ -81,22 +84,16 @@ class WordingUpdate(BaseModel):
     version: str | None = None
 
 
-ADMIN_REQUIRED = "jurisdiction_admin_required"
-
-
-def _as_its_admin(
+def _wording_scope(
     response: Response,
+    _user=Depends(require_permission("jurisdiction.wording.edit")),  # noqa: B008
     active: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> ActiveJurisdiction:
-    """The request's jurisdiction, if the user is acting as one of its administrators. Being
-    an admin in one jurisdiction gives nothing in another: the jurisdiction is the one they are
-    working in (the token's context), which is always one of their own."""
+    """The request's jurisdiction, for someone who may edit its wording (``jurisdiction.wording.edit``).
+    The permission is the active role's, and applies to the jurisdiction they are working in (the
+    token's context, which is always one of their own): holding it in one jurisdiction gives
+    nothing in another."""
     response.headers["Cache-Control"] = "no-store"
-    if active.current.role != ROLE_JURISDICTION_ADMIN:
-        raise HTTPException(
-            status_code=403,
-            detail={"code": ADMIN_REQUIRED, "message": f"Only an admin for {active.code} can change its wording."},
-        )
     return active
 
 
@@ -108,7 +105,7 @@ def _wording(active: ActiveJurisdiction, wording: dict[str, str], version: str) 
 
 # Plain defs, as above.
 @router.get("/jurisdictions/wording", response_model=JurisdictionWording)
-def jurisdiction_wording(active: ActiveJurisdiction = Depends(_as_its_admin)) -> JurisdictionWording:
+def jurisdiction_wording(active: ActiveJurisdiction = Depends(_wording_scope)) -> JurisdictionWording:
     """The wording of the jurisdiction the admin is working in."""
     with Session(get_engine()) as session:
         wording, version = jurisdictions_admin.wording_and_version(session, active.code)
@@ -118,8 +115,8 @@ def jurisdiction_wording(active: ActiveJurisdiction = Depends(_as_its_admin)) ->
 @router.put("/jurisdictions/wording", response_model=JurisdictionWording)
 def update_jurisdiction_wording(
     body: WordingUpdate,
-    current_user: User = Depends(get_current_user),
-    active: ActiveJurisdiction = Depends(_as_its_admin),
+    active: ActiveJurisdiction = Depends(_wording_scope),
+    current_user: User = Depends(require_permission("jurisdiction.wording.edit")),  # noqa: B008
 ) -> JurisdictionWording:
     """Replace that jurisdiction's wording; blank text means the default. 400 for an
     unknown key or text that is too long, 409 if it changed since ``version``."""

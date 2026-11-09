@@ -49,10 +49,12 @@ def world(db):
 def client(db):
     import transcribe_api.api.routes_dictation
     from transcribe_api.api import routes_dictation_privileged
+    from transcribe_api.api.routes_flags import router as flags_router
     from transcribe_api.api.routes_jurisdictions import router as jurisdictions_router
     from transcribe_api.api.routes_session import router as session_router
 
     app = FastAPI()
+    app.include_router(flags_router, prefix="/api")
     app.include_router(transcribe_api.api.routes_dictation.router, prefix="/api")
     app.include_router(jurisdictions_router, prefix="/api")
     app.include_router(session_router, prefix="/api")
@@ -128,7 +130,7 @@ def test_a_new_user_has_no_role_and_no_access(client, world, db):
     assert me["assignments"] == [] and me["active"] is None and me["permissions"] == []
     assert me["pending_requests"] == []
     assert me["user"]["email"] == person.email and me["user"]["name"] == "Judge Real"
-    # Created with no role: nothing of the old Normal default.
+    # Created with no role: nothing of the old default role.
     with Session(db) as session:
         user = session.exec(select(User)).one()
         assert user.role is None and user.is_active is True and user.name == "Judge Real"
@@ -166,7 +168,7 @@ def test_the_entra_access_roles_gate_still_guards_the_sign_in_until_it_is_emptie
     """DIAAT-386: with AUTH_ACCESS_ROLES set, a caller holding none of those Entra roles is refused at the
     door and no user is created; emptied (as it will be in each environment once the permissions are
     enforced), a tenant member with no role signs in and sees "no access yet"."""
-    monkeypatch.setenv("AUTH_ACCESS_ROLES", "Judge,LegalTextManager,SystemAdministrator,Normal")
+    monkeypatch.setenv("AUTH_ACCESS_ROLES", "Judge,LegalTextManager,SystemAdministrator")
     refused = Person(client, roles=[]).sign_in()
     assert refused.status_code == 403 and "token" not in refused.json()
     with Session(db) as session:
@@ -614,10 +616,10 @@ def test_a_stale_tab_can_still_ask_who_it_is_and_switch(client, world, db):
     assert switched.status_code == 200
 
 
-# --- the existing role checks follow the active role until the permission checks replace them ---
+# --- the permission checks follow the active role (DIAAT-376) ---
 
 
-def test_the_existing_role_checks_read_the_roles_derived_from_the_active_context(client, world, db, mocker):
+def test_the_permission_checks_follow_the_active_role(client, world, db, mocker):
     mocker.patch("transcribe_api.api.routes_dictation.fetch_transcriptions_metadata", return_value=[])
     person = user_with(
         client,
@@ -634,12 +636,12 @@ def test_the_existing_role_checks_read_the_roles_derived_from_the_active_context
         assert chosen.status_code == 200
         return bearer(chosen.json()["token"])
 
-    # Dictation routes: a Judge or a LegalTextManager (as before), not an administrator.
+    # Dictation routes: a Judge only (dictation.use), not any other role.
     assert client.get("/api/transcriptions-metadata", headers=acting("ET", "Judge")).status_code == 200
-    assert client.get("/api/transcriptions-metadata", headers=acting("IAC", "LegalTextManager")).status_code == 200
-    assert client.get("/api/transcriptions-metadata", headers=acting("IAC", ADMIN)).status_code == 403
-    assert client.get("/api/transcriptions-metadata", headers=acting(None, SUPER)).status_code == 403
-    # The admin area's landing route: the legal text manager, not the judge.
+    for jurisdiction, role in (("IAC", "LegalTextManager"), ("IAC", ADMIN), (None, SUPER)):
+        refused = client.get("/api/transcriptions-metadata", headers=acting(jurisdiction, role))
+        assert refused.status_code == 403 and refused.json()["detail"]["code"] == "permission_denied", role
+    # The admin area's landing route: those with admin.access, not the judge.
     assert client.get("/api/admin/me", headers=acting("IAC", "LegalTextManager")).status_code == 200
     assert client.get("/api/admin/me", headers=acting("ET", "Judge")).status_code == 403
 
@@ -650,18 +652,22 @@ def test_a_system_administrator_reaches_the_system_routes_with_no_context_and_no
     headers = bearer(token)
 
     # System-level: the Entra role is enough, with no assignment and no context.
-    assert client.get("/api/admin/jurisdictions", headers=headers).status_code == 200
     assert client.get("/api/admin/me", headers=headers).status_code == 200
-    # Not jurisdiction material: there is no jurisdiction to act in.
+    assert client.get("/api/flags", headers=headers).status_code == 200
+    # The security alert test passes the permission (and is then 404: not enabled in the tests).
+    assert client.post("/api/security/alert-test", headers=headers).status_code == 404
+    # Not jurisdiction material: there is no jurisdiction to act in, and no permission for it.
     refused = client.get("/api/jurisdictions/current", headers=headers)
     assert refused.status_code == 403 and refused.json()["detail"]["code"] == "context_required"
     assert client.get("/api/transcriptions-metadata", headers=headers).status_code == 403
+    assert client.get("/api/admin/jurisdictions", headers=headers).status_code == 403
 
 
 def test_the_system_routes_are_refused_to_everyone_without_the_entra_role(client, world, db):
     person = user_with(client, db, (world["et"], "judge"))
     token = person.sign_in().json()["token"]
-    assert client.get("/api/admin/jurisdictions", headers=bearer(token)).status_code == 403
+    refused = client.post("/api/security/alert-test", headers=bearer(token))
+    assert refused.status_code == 403 and refused.json()["detail"]["code"] == "permission_denied"
 
 
 # --- the jurisdiction of the context ----------------------------------------------------
@@ -997,12 +1003,12 @@ def test_the_recording_area_checks_the_tabs_context_headers_too(client, world, d
 
     @client.app.get("/api/v1/_probe")
     def probe(current_user=Depends(dependencies_recording.get_current_user)):
-        return {"role": current_user.ctx.role, "app_roles": current_user.app_roles}
+        return {"role": current_user.ctx.role}
 
     person = user_with(client, db, (world["et"], "judge"))
     token = person.sign_in().json()["token"]
     ok = client.get("/api/v1/_probe", headers=bearer(token, **{"X-Jurisdiction": "ET", "X-Role": "Judge"}))
-    assert ok.status_code == 200 and ok.json() == {"role": "Judge", "app_roles": ["Judge"]}
+    assert ok.status_code == 200 and ok.json() == {"role": "Judge"}
     for headers in ({"X-Jurisdiction": "IAC"}, {"X-Role": ADMIN}):
         stale = client.get("/api/v1/_probe", headers=bearer(token, **headers))
         assert stale.status_code == 409 and stale.json()["detail"]["code"] == "context_changed"

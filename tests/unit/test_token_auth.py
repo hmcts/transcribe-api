@@ -160,7 +160,7 @@ def test_local_mode_has_no_mock_identity_any_more(client, monkeypatch):
     assert client.get("/principal").status_code == 401
 
 
-APP_ROLES = "Judge,LegalTextManager,SystemAdministrator,Normal"
+APP_ROLES = "Judge,LegalTextManager,SystemAdministrator"
 
 
 def test_access_roles_set_and_none_held_is_403(client, monkeypatch):
@@ -178,7 +178,7 @@ def test_access_roles_set_and_one_held_authenticates(client, monkeypatch):
 
 def test_access_roles_ignores_roles_outside_the_list(client, monkeypatch):
     monkeypatch.setenv("AUTH_ACCESS_ROLES", "Judge, LegalTextManager")
-    r = client.get("/whoami", headers={"Authorization": f"Bearer {_token(roles=['Normal', 'SomethingElse'])}"})
+    r = client.get("/whoami", headers={"Authorization": f"Bearer {_token(roles=['Contributor', 'SomethingElse'])}"})
     assert r.status_code == 403
 
 

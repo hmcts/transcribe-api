@@ -95,11 +95,15 @@ def test_onboarding_status_is_allowlisted_when_user_has_valid_role(client, as_us
     assert body["is_allowlisted"] is True
 
 
-def test_onboarding_status_not_allowlisted_when_user_has_no_roles(client, as_user):
-    as_user(_make_user(roles=[]))
-    body = client.get("/api/user/onboarding-status").json()
-    assert body["is_allowlisted"] is False
-    assert body["should_show_coming_soon"] is True
+def test_onboarding_status_is_refused_to_a_user_with_no_role(client, as_user):
+    """DIAAT-376: the allowlist is the role assignment: with none (no context) the route is refused
+    (they get "no access yet" from GET /api/me/permissions), whatever the sign-in gate lets through."""
+    from transcribe_api.domain.auth.auth_models_dictation import AuthenticatedUser
+
+    as_user(AuthenticatedUser(db_user=_make_user(roles=[]), ctx=None))
+    response = client.get("/api/user/onboarding-status")
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "context_required"
 
 
 def test_onboarding_status_reflects_completion_state(client, as_user):

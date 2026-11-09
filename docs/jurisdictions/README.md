@@ -12,8 +12,9 @@ for those few minutes (the page keeps the text and saves again), and everything
 else they write lands in the IAC. Someone signing in for the first time through
 one of those pods gets no jurisdiction; add them on the Jurisdictions tab.
 
-A SystemAdministrator manages them in the admin area, on the **Jurisdictions** tab
-(DIAAT-356): add or edit a jurisdiction (its name, wording, template, hearing
+A JurisdictionSuperAdministrator (any jurisdiction, and creating one) or a JurisdictionAdministrator (the
+one it works in) manages them in the admin area, on the **Jurisdictions** tab (DIAAT-356, DIAAT-376;
+a SystemAdministrator has no access to them): add or edit a jurisdiction (its name, wording, template, hearing
 recordings, enabled), and add or remove its members by email, as judge
 or admin (these are now role assignments: DIAAT-382). Behind it is `/api/admin/jurisdictions`. Every change is audited. A save
 made from a form opened before someone else's change is refused (409), not applied
@@ -56,8 +57,7 @@ jurisdiction's wording, and nothing else, from the **Wording** link in the heade
 in one jurisdiction gives nothing in another.
 
 A jurisdiction's **legal wording** (hearing types, legal frameworks, anonymity text: what
-its decision document is built from) is its own too, edited by its admins and, for the
-IAC, by the LegalTextManager role as before: see
+its decision document is built from) is its own too, edited by its LegalTextManager: see
 [`../jurisdiction-legal-wording.md`](../jurisdiction-legal-wording.md) (DIAAT-342).
 
 A user's roles are `role_assignment` rows, and they act in one (jurisdiction, role) at a

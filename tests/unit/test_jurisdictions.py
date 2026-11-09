@@ -53,7 +53,7 @@ def _assignments(engine, user: User) -> list[tuple[str, str]]:
 
 def _acting_as(user: User, code: str | None, role: str = "Judge") -> AuthenticatedUser:
     """What the auth dependency makes of a token whose context is (code, role)."""
-    return AuthenticatedUser(db_user=user, app_roles=[role], ctx=Context(code, role) if code or role else None)
+    return AuthenticatedUser(db_user=user, ctx=Context(code, role) if code or role else None)
 
 
 # Settings ---------------------------------------------------------------------------
@@ -114,7 +114,7 @@ def _error_code(excinfo) -> tuple[int, str]:
 def test_a_request_with_no_context_works_in_no_jurisdiction(engine):
     user = add_user(engine, roles=())
     with pytest.raises(HTTPException) as excinfo:
-        active_jurisdiction(AuthenticatedUser(db_user=user, app_roles=[]))
+        active_jurisdiction(AuthenticatedUser(db_user=user))
     assert _error_code(excinfo) == (403, "context_required")
 
 

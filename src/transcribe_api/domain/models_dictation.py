@@ -175,8 +175,8 @@ class JurisdictionMembership(SQLModel, table=True):
     created_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
 
 
-# The roles a role_assignment may hold: SystemAdministrator (Entra only) and Normal (gone)
-# can never be stored (DIAAT-382).
+# The roles a role_assignment may hold: SystemAdministrator (Entra only) and the retired
+# default role can never be stored (DIAAT-382).
 STORED_ROLES_SQL = "'Judge', 'LegalTextManager', 'JurisdictionAdministrator', 'JurisdictionSuperAdministrator'"
 
 
@@ -421,7 +421,7 @@ class AuditLog(SQLModel, table=True):
     """Immutable record of a security-relevant event (see app/database/audit.py).
 
     Access denied by the auth layer (written by write_audit_event, passed as
-    audit_writer to get_allowlisted_user), role changes, user deletions and, since
+    audit_writer of the permission checks, domain/auth/authorisation.py), role changes, user deletions and, since
     DIAAT-286, the sensitive actions on records: viewed, exported, deleted and
     ownership refusals, with their outcome.
     """
