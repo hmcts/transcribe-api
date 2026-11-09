@@ -43,6 +43,11 @@ logger = logging.getLogger(__name__)
 
 HEADER = "X-Jurisdiction"
 
+# The IAC as migration 0004 creates it: fixed, so environments agree. Its legal wording
+# is the document_content row with id 1 (DIAAT-342), and only the IAC's.
+IAC_CODE = "IAC"
+IAC_JURISDICTION_ID = UUID("6a1c0f3e-3b7d-4c2a-9e51-1ac000000001")
+
 ROLE_JUDGE = "judge"
 ROLE_ADMIN = "admin"
 ROLES = (ROLE_JUDGE, ROLE_ADMIN)

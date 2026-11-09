@@ -46,6 +46,23 @@ class AnonymityContentResponse(BaseModel):
 
 
 class DocumentContentResponse(BaseModel):
+    """A jurisdiction's legal wording (DIAAT-342)."""
+
     hearing_types: list[HearingTypePayload] = Field(default_factory=list)
     legal_frameworks: list[LegalFrameworkPayload] = Field(default_factory=list)
     anonymity: AnonymityContentResponse = Field(default_factory=AnonymityContentResponse)
+    # False when there is no legal framework: no legal issues step in the form, and
+    # no Issues or Legal Framework section in the document.
+    has_legal_wording: bool
+
+
+class JurisdictionRef(BaseModel):
+    code: str
+    name: str
+
+
+class AdminDocumentContentResponse(DocumentContentResponse):
+    """What an admin edits: the legal wording of ``jurisdiction``, the one the request
+    works in (X-Jurisdiction)."""
+
+    jurisdiction: JurisdictionRef

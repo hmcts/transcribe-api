@@ -154,6 +154,20 @@ STORAGE_OPERATIONS = (
     "blob.mark_failed",
 )
 ATTR_WEBHOOK_NOTIFICATION = "webhook.notification"
+# DIAAT-343: at startup, the live document content differs from the bundled defaults
+# (documents/content_drift.py). Counts only, never the wording.
+EVENT_CONTENT_DRIFT_DETECTED = "content.drift_detected"
+ATTR_CONTENT_EDITED_COUNT = "content.edited_count"
+ATTR_CONTENT_LIVE_ONLY_COUNT = "content.live_only_count"
+ATTR_CONTENT_DEFAULT_ONLY_COUNT = "content.default_only_count"
+# DIAAT-343: at startup, the live IAC settings differ from the ones it was created with
+# (domain/jurisdiction_settings_drift.py). Counts and a flag only, never the wording.
+EVENT_SETTINGS_DRIFT_DETECTED = "settings.drift_detected"
+ATTR_SETTINGS_WORDING_EDITED_COUNT = "settings.wording_edited_count"
+ATTR_SETTINGS_LIVE_ONLY_COUNT = "settings.wording_live_only_count"
+ATTR_SETTINGS_DEFAULT_ONLY_COUNT = "settings.wording_default_only_count"
+ATTR_SETTINGS_TEMPLATE_CHANGED = "settings.template_changed"
+ATTR_SETTINGS_FEATURES_CHANGED_COUNT = "settings.features_changed_count"
 WEBHOOK_NOTIFICATIONS = ("succeeded", "failed")
 JOB_STATES = ("waiting", "running")
 RETRY_OPERATIONS = (

@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.responses import JSONResponse, StreamingResponse
 
 from transcribe_api.api.document_content_models import DocumentContentResponse
-from transcribe_api.documents.content_loader import get_document_content
+from transcribe_api.documents.content_loader import get_document_content, has_legal_wording
 from transcribe_api.documents.llm.langfuse_models import (
     LangfuseScoreRequest,
     LangfuseTraceRequest,
@@ -318,15 +318,18 @@ async def get_document_content_route(
     """Return editable document content for allowlisted recorder users.
 
     It is the IAC decision template's (legal frameworks, hearing types): a jurisdiction
-    without that template never sees it (DIAAT-330).
+    without that template never sees it (DIAAT-330). It is the active jurisdiction's
+    own legal wording (DIAAT-342); ``has_legal_wording`` is false when it has no legal
+    framework, and the form then has no legal issues step.
     """
     response.headers["Cache-Control"] = "no-store"
     _require_decision_template(jurisdiction)
-    data = get_document_content()
+    data = get_document_content(jurisdiction.id)
     return DocumentContentResponse(
         hearing_types=data.get("hearing_types", []),
         legal_frameworks=data.get("legal_frameworks", []),
         anonymity=data.get("anonymity", {}),
+        has_legal_wording=has_legal_wording(data),
     )
 
 
@@ -1506,6 +1509,9 @@ async def _save_live_transcription_submission(  # NOSONAR
                             request=request,
                             output_dir=temp_output_dir,
                             user_email=current_user.email,
+                            # DIAAT-342: the active jurisdiction's legal wording, not
+                            # the form's free-text jurisdiction.
+                            jurisdiction_id=jurisdiction.id,
                         )
                     except Exception:
                         document_stage.set_attribute("document.template_version", render.version)
