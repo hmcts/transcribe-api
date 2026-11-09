@@ -55,6 +55,7 @@ Both upstream surfaces are preserved unchanged, and they do not collide:
 - Feature branches start from `develop`, and their PRs go into `develop` (squash merge). Each PR gets its own preview.
 - `develop` deploys to demo (`benchnotes.demo.platform.hmcts.net`). The permanent draft PR #45 (`develop` -> `master`) rebuilds on every push to `develop`, and Flux deploys its `pr-45-*` image. Never merge, close, retarget or mark #45 ready.
 - To release, run the "Promote to master" workflow (Actions tab, from `develop`). It fast-forwards `master` to `develop` HEAD, or to the commit given as input, which must be on `develop`. It never force-pushes, and fails if `master` is not an ancestor of the target. Jenkins then builds `master`, which deploys to AAT, then prod.
+- Promoting `develop` HEAD makes GitHub mark #45 as merged and close it, which stops the demo builds. Do not run the promote workflow until demo no longer builds from #45 (DIAAT-399).
 - Nobody pushes or opens PRs to `master`: a ruleset lets only the promote workflow update it. Hotfixes go through `develop` like any other change.
 - Old `pr-*` images expire after about 3 weeks, and demo pods then fail to pull. If `develop` has had no merges for that long, re-run the latest Jenkins build of `PR-45`, which pushes a fresh tag.
 - Because `master` only ever moves to a commit already on `develop`, the two branches cannot diverge, and Alembic migrations land on `develop` like any other change.
