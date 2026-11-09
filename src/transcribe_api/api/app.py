@@ -382,6 +382,10 @@ def create_app() -> FastAPI:
     from transcribe_api.api.routes_dictation import router as dictation_router
     from transcribe_api.api.routes_dictation import telemetry_router
     from transcribe_api.api.routes_dictation_privileged import router as dictation_admin_router
+    from transcribe_api.api.routes_access_requests import admin_router as access_requests_admin_router
+    from transcribe_api.api.routes_access_requests import router as access_requests_router
+    from transcribe_api.api.routes_admin_flags import router as admin_flags_router
+    from transcribe_api.api.routes_admin_users import router as admin_users_router
     from transcribe_api.api.routes_flags import router as flags_router
     from transcribe_api.api.routes_jurisdictions import router as jurisdictions_router
     from transcribe_api.api.routes_recording import limiter
@@ -406,6 +410,10 @@ def create_app() -> FastAPI:
     app.include_router(jurisdictions_router, prefix="/api")
     app.include_router(session_router, prefix="/api")
     app.include_router(flags_router, prefix="/api")
+    app.include_router(admin_users_router, prefix="/api")
+    app.include_router(admin_flags_router, prefix="/api")
+    app.include_router(access_requests_router, prefix="/api")
+    app.include_router(access_requests_admin_router, prefix="/api")
     app.include_router(recording_router)
 
     # Polled by the CNP pipeline's startup check.

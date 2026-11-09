@@ -109,13 +109,21 @@ the shared routes.)
 | `DELETE` | `/api/admin/document-content/legal-frameworks/{item_id}` | `legal_text.manage` | LTM |
 | `PUT` | `/api/admin/document-content/anonymity-statuses/{item_id}` | `legal_text.manage` | LTM |
 | `GET` | `/api/admin/users` | `jurisdiction_super_admin.assign` or `users.manage` | JA, JSA, sysadmin |
-| `GET` | `/api/admin/users/{user_id}` | `jurisdiction_super_admin.assign` or `users.manage` | JA, JSA, sysadmin |
+| `POST` | `/api/admin/assignments` | `users.manage` or `jurisdiction_admin.assign` or `jurisdiction_super_admin.assign` (the rules decide which role) | JA, JSA, sysadmin |
+| `DELETE` | `/api/admin/assignments/{assignment_id}` | as `POST /api/admin/assignments` | JA, JSA, sysadmin |
+| `POST` | `/api/admin/users/{user_id}/deactivate` | `users.manage` | JA, JSA |
+| `POST` | `/api/admin/users/{user_id}/reactivate` | `users.manage` | JA, JSA |
+| `GET` | `/api/admin/role-history` | `role_audit.read` | JA, JSA |
+| `GET` | `/api/admin/access-requests` | `access.approve` | JA, JSA |
+| `POST` | `/api/admin/access-requests/{request_id}/approve` | `access.approve` | JA, JSA |
+| `POST` | `/api/admin/access-requests/{request_id}/reject` | `access.approve` | JA, JSA |
+| `GET` | `/api/admin/feature-flags` | `feature_flags.manage` | sysadmin |
+| `PUT` | `/api/admin/feature-flags/{name}` | `feature_flags.manage` | sysadmin |
 | `GET` | `/api/admin/jurisdictions` | `jurisdictions.manage` | JA, JSA |
 | `GET` | `/api/admin/jurisdictions/wording-keys` | `jurisdictions.manage` | JA, JSA |
-| `PUT` | `/api/admin/jurisdictions/{code}` | `jurisdictions.manage` | JA, JSA |
-| `GET` | `/api/admin/jurisdictions/{code}/members` | `jurisdictions.manage` | JA, JSA |
-| `POST` | `/api/admin/jurisdictions/{code}/members` | `jurisdictions.manage` | JA, JSA |
-| `DELETE` | `/api/admin/jurisdictions/{code}/members` | `jurisdictions.manage` | JA, JSA |
+| `PUT` | `/api/admin/jurisdictions/{code}` | `jurisdictions.manage` (creating: and `jurisdiction.create`) | JA, JSA |
+| `GET` | `/api/admin/jurisdictions/{code}/wording` | `jurisdiction.wording.edit` | JA, JSA |
+| `PUT` | `/api/admin/jurisdictions/{code}/wording` | `jurisdiction.wording.edit` | JA, JSA |
 | `POST` | `/api/telemetry` | `app.access` | Judge, LTM, JA, JSA |
 | `GET` | `/api/jurisdictions/current` | `app.access` | Judge, LTM, JA, JSA |
 | `GET` | `/api/jurisdictions/wording` | `jurisdiction.wording.edit` | JA, JSA |
@@ -126,6 +134,9 @@ the shared routes.)
 | `DELETE` | `/api/me/jurisdictions/{code}` | (exempt: signed_in) | - |
 | `GET` | `/api/jurisdictions/public` | (exempt: signed_in) | - |
 | `GET` | `/api/flags` | (exempt: signed_in) | - |
+| `POST` | `/api/access-requests` | (exempt: signed_in) | - |
+| `GET` | `/api/access-requests/mine` | (exempt: signed_in) | - |
+| `POST` | `/api/access-requests/{request_id}/withdraw` | (exempt: signed_in) | - |
 | `GET` | `/api/v1/health` | (exempt: public) | - |
 | `GET` | `/api/v1/version` | (exempt: public) | - |
 | `POST` | `/api/v1/uploads` | `recording.upload` | Judge |
@@ -141,6 +152,7 @@ the shared routes.)
 | `POST` | `/api/v1/jobs/{job_id}/segments/{segment}/accept` | `recording.own` | Judge |
 | `PATCH` | `/api/v1/jobs/{job_id}/segments/{segment}/speaker` | `recording.own` | Judge |
 | `POST` | `/api/v1/jobs/{job_id}/segments/{segment}/history/{history_index}/rollback` | `recording.own` | Judge |
+| `GET` | `/api/v1/jobs/{job_id}/history` | `recording.audit.read` | Judge (the owner) |
 | `GET` | `/api/v1/jobs/{job_id}/audio` | `recording.own` | Judge |
 | `DELETE` | `/api/v1/jobs/{job_id}` | `recording.own` | Judge |
 | `GET` | `/health` | (exempt: public) | - |
@@ -151,7 +163,7 @@ the shared routes.)
 |---|---|---|
 | `public_endpoint` | `GET /health`, `/api/health`, `/api/healthcheck`, `/api/health/dependencies`, `/api/v1/health`, `/api/v1/version` | health and version, for probes: no authentication. `/api/health/dependencies` shows names and states only |
 | `sign_in_endpoint` | `POST /api/auth/session` | authenticates by the Entra ID token (or, locally, a dev persona) and mints the BenchNotes token |
-| `signed_in_endpoint` | `GET /api/me/permissions`, `PUT /api/me/context`, `DELETE /api/me/jurisdictions/{code}`, `GET /api/jurisdictions/public`, `GET /api/flags` | any signed-in user, with or without a context or a role (contract section 3) |
+| `signed_in_endpoint` | `GET /api/me/permissions`, `PUT /api/me/context`, `DELETE /api/me/jurisdictions/{code}`, `GET /api/jurisdictions/public`, `GET /api/flags`, `POST /api/access-requests`, `GET /api/access-requests/mine`, `POST /api/access-requests/{request_id}/withdraw` | any signed-in user, with or without a context or a role (contract section 3): a user with no role is who asks for one |
 | `signed_url_endpoint` | `GET /api/v1/local-audio/{blob_name}` | Azure Speech fetches it without our token; see the decision below |
 
 `/api/openapi.json` (FastAPI's own, not an API route) is not guarded by the application; `/docs` is on only in local and dev.
@@ -176,7 +188,7 @@ the shared routes.)
   `is_allowlisted: true` (the allowlist is the role assignment: a user with none never reaches it); its fields stay for the web app.
 * **`GET /api/jurisdictions/current` is `app.access`** and needs a jurisdiction: a JurisdictionSuperAdministrator (global) gets 403 `no_jurisdiction`.
 * **`/api/jurisdictions/wording` is `jurisdiction.wording.edit`** on the active jurisdiction (in scope by construction). The JurisdictionSuperAdministrator has
-  the permission everywhere but no active jurisdiction on these routes; editing any jurisdiction's wording by code is Phase 4.
+  the permission everywhere but no active jurisdiction on these routes; editing any jurisdiction's wording by code is `GET/PUT /api/admin/jurisdictions/{code}/wording`.
 * **`/api/v1` uploads and job submission are `recording.upload`; everything else on a job is `recording.own`**, and a job is reachable only by its owner (404 as
   for an unknown job). There is no administrator or SystemAdministrator bypass; nothing lists or reads ownerless pre-migration jobs.
 * **`GET /api/admin/me` is `admin.access`**; its response is `{email, role, user_id}` where `role` is the stored role acted as, never SystemAdministrator (null for a
@@ -184,11 +196,25 @@ the shared routes.)
 * **`GET /api/admin/roles` returns `{"roles": [...]}`** (DIAAT-374), the roles the caller may assign by the contract's rules for the role they act as (JA: Judge,
   LegalTextManager; JSA: and JurisdictionAdministrator; sysadmin: JurisdictionAdministrator and JurisdictionSuperAdministrator), never SystemAdministrator. Any of
   `users.manage`, `jurisdiction_admin.assign`, `jurisdiction_super_admin.assign`. A pinned-shape test: `test_privileged_routes.py`.
-* **`GET /api/admin/users` and `/{id}` (interim, Phase 4 replaces them)** are `users.manage` or `jurisdiction_super_admin.assign`: a JurisdictionAdministrator sees
-  only users with a role in its jurisdiction (404 for any other), a JurisdictionSuperAdministrator and a SystemAdministrator every user.
+* **`GET /api/admin/users` is `users.manage` or `jurisdiction_super_admin.assign`** and answers the contract's list (users with their assignments, pending rows,
+  paging): a JurisdictionAdministrator lists the jurisdiction it acts in (and, searching with 3 or more characters and no `jurisdiction=`/`role=`, any user
+  who has signed in, with only their assignments there, so someone can be added); a JurisdictionSuperAdministrator and a SystemAdministrator list everyone.
+  Details and every rule of who may assign what: [`authz-admin-api.md`](authz-admin-api.md). The old-shape `GET /api/admin/users/{id}` and the interim
+  `/api/admin/jurisdictions/{code}/members` endpoints (and the `jurisdictions_admin` command line `add-member`/`remove-member`) are gone.
+* **`POST/DELETE /api/admin/assignments` accept three permissions**, because which one is enough depends on the role being assigned (Judge and LegalTextManager:
+  `users.manage`; JurisdictionAdministrator: `jurisdiction_admin.assign`; JurisdictionSuperAdministrator: `jurisdiction_super_admin.assign`), and that is
+  decided per request in `domain/user_admin.py` (403 `assignment_not_allowed`, or `jurisdiction_not_in_scope`), not by the route's declaration.
+* **The access request routes for the requester are exempt (`signed_in_endpoint`)**, not `access.request`: a user with no role has no context, and the
+  contract says any signed-in user. Approving and listing are `access.approve`: a JurisdictionAdministrator sees and decides the requests of the jurisdiction it
+  acts in, a JurisdictionSuperAdministrator all of them; a SystemAdministrator is refused (a SystemAdministrator with no context: `context_required`; acting
+  as any role: `permission_denied`).
+* **`GET /api/v1/jobs/{id}/history` is `recording.audit.read`** (Judge), and only the owner reads it: another Judge, or the owner in another jurisdiction, gets the
+  404 of a recording they cannot see. A role without the permission (JurisdictionAdministrator, JurisdictionSuperAdministrator, LegalTextManager,
+  SystemAdministrator) gets `permission_denied`, as on every other recording route.
+* **`GET/PUT /api/admin/jurisdictions/{code}/wording` is `jurisdiction.wording.edit`, scoped**: a JurisdictionSuperAdministrator edits any jurisdiction's,
+  a JurisdictionAdministrator its own (403 `jurisdiction_not_in_scope` for another). `/api/jurisdictions/wording` (the active jurisdiction's) stays.
 * **`/api/admin/jurisdictions...` is `jurisdictions.manage`, scoped** (JA: the one it works in; JSA: any; a SystemAdministrator none, DIAAT-389). Creating needs
-  `jurisdiction.create` too. The interim members endpoints keep working behind it; making someone an `admin` (JurisdictionAdministrator), or removing one, needs
-  `jurisdiction_admin.assign`, as the assignment rules say.
+  `jurisdiction.create` too.
 * **`GET /api/healthcheck/azure-storage` is `system.settings`** (a SystemAdministrator). It was open, called storage on every request and answered with the
   container name and the exception text. Nothing in the repository or the chart calls it; `GET /api/health/dependencies` has the storage state for probes.
 * **`POST /api/security/alert-test` is `security.alert_test`** (unchanged in effect: SystemAdministrator, and 404 unless the test is enabled).
@@ -202,7 +228,7 @@ the shared routes.)
 * `/api/admin/transcriptions`, `/api/admin/transcriptions/{id}`, `/api/admin/transcriptions/{id}/document-download` (DIAAT-389), with their schemas
   and the three data functions behind them. (The provenance of a job's outputs is still stored; nothing serves it. Read it with the query in
   `domain/provenance_dictation.py`.)
-* `PUT /api/admin/users/{id}/role` and `DELETE /api/admin/users/{id}` (the Users tab's role change had no lasting effect: DIAAT-375; Phase 4 adds the
+* `PUT /api/admin/users/{id}/role` and `DELETE /api/admin/users/{id}` (the Users tab's role change had no lasting effect: DIAAT-375; Phase 4 added the
   assignment endpoints and deactivation), and `admin_delete_user`.
 * `_ANY_APP_ROLE`, `_is_admin`, `is_admin`, `_require_role`, `_as_its_admin`, the `get_allowlisted_user(required_roles...)` wrapper, `legacy_roles.py`,
   `approles_*.py`, the role defaults of `hmcts-fastapi-azure-auth` for app roles (including its `Normal`), `AuthenticatedUser.app_roles`, and the
@@ -221,4 +247,6 @@ Pre-migration jobs with no `user_id` were visible, and changeable, only to a Sys
 
 `DICTATION_ENABLED` (setting, default true) is the default of the flag `dictation_enabled`; a row of `system_feature_flag` with that name overrides it
 (`domain/feature_flags.py`, read on every dictation request; if the database cannot be read the default applies). `GET /api/flags` returns
-`{"dictation_enabled": bool}` for any signed-in user. The admin endpoints that write the row are DIAAT-392 (not here). Hearing-recording routes do not look at it.
+`{"dictation_enabled": bool}` for any signed-in user. The admin endpoints that write the row are `GET/PUT /api/admin/feature-flags` (DIAAT-392, `feature_flags.manage`): each change is audited (`feature_flag.changed`, with
+from, to and the roles acted as) and clears the flag's in-process cache. The flag is cached for 5 seconds per process (`feature_flags.CACHE_TTL_SECONDS`), so the
+per-request read is one database read per process per 5 seconds; a change made on another replica is seen within that time. Hearing-recording routes do not look at it.

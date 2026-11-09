@@ -15,8 +15,9 @@ one of those pods gets no jurisdiction; add them on the Jurisdictions tab.
 A JurisdictionSuperAdministrator (any jurisdiction, and creating one) or a JurisdictionAdministrator (the
 one it works in) manages them in the admin area, on the **Jurisdictions** tab (DIAAT-356, DIAAT-376;
 a SystemAdministrator has no access to them): add or edit a jurisdiction (its name, wording, template, hearing
-recordings, enabled), and add or remove its members by email, as judge
-or admin (these are now role assignments: DIAAT-382). Behind it is `/api/admin/jurisdictions`. Every change is audited. A save
+recordings, enabled). Who holds a role in a jurisdiction is a role assignment (DIAAT-382), given and taken away on
+the **Users** tab through `/api/admin/assignments` (DIAAT-383: [`../authz-admin-api.md`](../authz-admin-api.md)).
+Behind the Jurisdictions tab is `/api/admin/jurisdictions`. Every change is audited. A save
 made from a form opened before someone else's change is refused (409), not applied
 over it.
 
@@ -65,12 +66,11 @@ time, chosen after sign-in: see [`../authz-token-and-context.md`](../authz-token
 Nobody is enrolled automatically (DIAAT-373): a new user has no role until an administrator adds
 them (or, later, approves their request).
 
-The same operations run from a command line, for local development:
+Creating and updating jurisdictions runs from a command line too, for local development (the members commands are gone: use the
+assignment endpoints):
 
 ```sh
 python -m transcribe_api.jurisdictions_admin put ET --name "Employment Tribunal" < et.json
-python -m transcribe_api.jurisdictions_admin add-member ET lead.admin@ejudiciary.net --role admin
-python -m transcribe_api.jurisdictions_admin add-member ET first.last@ejudiciary.net --role judge --tester
 python -m transcribe_api.jurisdictions_admin put ET --name "Employment Tribunal" --stage test < et.json
 python -m transcribe_api.jurisdictions_admin list
 ```

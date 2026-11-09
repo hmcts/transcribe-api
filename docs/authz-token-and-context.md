@@ -144,9 +144,9 @@ assignments that has not been seeded is 409 `persona_not_seeded`.
 Local mode no longer signs every request in as one developer with all roles: without a persona (or a
 token) a route is 401, as anywhere else.
 
-## Not here yet (later phases of DIAAT-373)
+## The administration endpoints (Phase 4)
 
-The permission checks on every route are done (Phase 3: [`authz-permissions.md`](authz-permissions.md)). Still
-to come: the assignment and user administration endpoints; access requests; the feature flag admin endpoints; the
-web app's use of all of this. `user.role`, `jurisdiction_membership` and `jurisdiction.auto_enrol` are no longer read (nobody is
-enrolled automatically; a new user has no role) and are dropped in a later release.
+The permission checks on every route are [`authz-permissions.md`](authz-permissions.md) (Phase 3). The endpoints that let administrators
+give and take away roles, decide access requests, set feature flags and read a recording's history are
+[`authz-admin-api.md`](authz-admin-api.md) (Phase 4), with an example for each. `user.role`, `jurisdiction_membership` and
+`jurisdiction.auto_enrol` are no longer read (nobody is enrolled automatically; a new user has no role) and are dropped in a later release.

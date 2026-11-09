@@ -65,6 +65,10 @@ EXEMPT_ROUTES: dict[tuple[str, str], str] = {
     ("DELETE", "/api/me/jurisdictions/{code}"): EXEMPT_SIGNED_IN,
     ("GET", "/api/jurisdictions/public"): EXEMPT_SIGNED_IN,
     ("GET", "/api/flags"): EXEMPT_SIGNED_IN,
+    # access requests (DIAAT-396): a user with no role asks for one (contract section 3); deciding them is access.approve
+    ("POST", "/api/access-requests"): EXEMPT_SIGNED_IN,
+    ("GET", "/api/access-requests/mine"): EXEMPT_SIGNED_IN,
+    ("POST", "/api/access-requests/{request_id}/withdraw"): EXEMPT_SIGNED_IN,
     # a signed, expiring URL (Azure Speech fetches it without our token; 404 unless the local backend is on)
     ("GET", "/api/v1/local-audio/{blob_name}"): EXEMPT_SIGNED_URL,
 }
@@ -209,7 +213,7 @@ def test_a_route_without_a_declaration_fails_the_check():
 def test_the_exemptions_are_explicit_and_small(routes):
     exempt = {r.key: next(iter(r.exemptions())) for r in routes if r.exemptions()}
     assert exempt == EXEMPT_ROUTES
-    assert len(EXEMPT_ROUTES) <= 15
+    assert len(EXEMPT_ROUTES) <= 16
     # An exempt route carries no permission as well.
     assert all(not r.permission_sets() for r in routes if r.key in EXEMPT_ROUTES)
 
@@ -463,7 +467,10 @@ def test_a_system_administrator_has_only_the_system_routes_and_the_admin_landing
         ("GET", "/api/admin/me"),  # admin.access
         ("GET", "/api/admin/roles"),  # jurisdiction_*_admin.assign: the roles they may assign
         ("GET", "/api/admin/users"),  # jurisdiction_super_admin.assign: to find who to promote
-        ("GET", "/api/admin/users/{user_id}"),
+        ("POST", "/api/admin/assignments"),  # jurisdiction_*_admin.assign: the rules decide which role
+        ("DELETE", "/api/admin/assignments/{assignment_id}"),
+        ("GET", "/api/admin/feature-flags"),  # feature_flags.manage (DIAAT-392)
+        ("PUT", "/api/admin/feature-flags/{name}"),
     }
 
 
@@ -476,3 +483,58 @@ def test_the_matrix_is_printed(routes, capsys):
             (wanted,) = route.permission_sets()
             who = [n for n in names if allowed(PERSONAS[n], route) and not n.startswith(("sysadmin+", "two-roles"))]
             print(f"{route.method:6} {route.path:75} {'|'.join(sorted(wanted)):45} {', '.join(who)}")
+
+
+# DIAAT-383, 391, 392, 394, 395, 396: what each new route of Phase 4 asks for, written out from the
+# contract (section 3), so that a route cannot drift to another permission unnoticed.
+ADMIN_ROUTE_PERMISSIONS: dict[tuple[str, str], set[str]] = {
+    ("GET", "/api/admin/users"): {"users.manage", "jurisdiction_super_admin.assign"},
+    ("POST", "/api/admin/assignments"): {"users.manage", "jurisdiction_admin.assign", "jurisdiction_super_admin.assign"},
+    ("DELETE", "/api/admin/assignments/{assignment_id}"): {
+        "users.manage",
+        "jurisdiction_admin.assign",
+        "jurisdiction_super_admin.assign",
+    },
+    ("POST", "/api/admin/users/{user_id}/deactivate"): {"users.manage"},
+    ("POST", "/api/admin/users/{user_id}/reactivate"): {"users.manage"},
+    ("GET", "/api/admin/role-history"): {"role_audit.read"},
+    ("GET", "/api/admin/access-requests"): {"access.approve"},
+    ("POST", "/api/admin/access-requests/{request_id}/approve"): {"access.approve"},
+    ("POST", "/api/admin/access-requests/{request_id}/reject"): {"access.approve"},
+    ("GET", "/api/admin/feature-flags"): {"feature_flags.manage"},
+    ("PUT", "/api/admin/feature-flags/{name}"): {"feature_flags.manage"},
+    ("GET", "/api/admin/jurisdictions/{code}/wording"): {"jurisdiction.wording.edit"},
+    ("PUT", "/api/admin/jurisdictions/{code}/wording"): {"jurisdiction.wording.edit"},
+    ("GET", "/api/v1/jobs/{job_id}/history"): {"recording.audit.read"},
+}
+
+
+def test_the_phase_4_routes_declare_the_permissions_the_contract_names(routes):
+    by_key = {r.key: r for r in routes}
+    for key, wanted in ADMIN_ROUTE_PERMISSIONS.items():
+        assert key in by_key, f"{key} is not a route"
+        assert by_key[key].permission_sets() == {frozenset(wanted)}, key
+
+
+def test_the_removed_interim_routes_are_gone(routes):
+    keys = {r.key for r in routes}
+    assert ("GET", "/api/admin/users/{user_id}") not in keys
+    assert not [k for k in keys if k[1].endswith("/members")]
+
+
+def test_a_system_administrator_is_refused_the_approvals_and_every_jurisdiction_route(routes):
+    """DIAAT-389 and DIAAT-396: no access.approve, no jurisdiction management, no wording."""
+    system = PERSONAS["sysadmin-only"]
+    for key in (
+        ("GET", "/api/admin/access-requests"),
+        ("POST", "/api/admin/access-requests/{request_id}/approve"),
+        ("POST", "/api/admin/access-requests/{request_id}/reject"),
+        ("GET", "/api/admin/jurisdictions"),
+        ("PUT", "/api/admin/jurisdictions/{code}"),
+        ("GET", "/api/admin/jurisdictions/{code}/wording"),
+        ("PUT", "/api/admin/jurisdictions/{code}/wording"),
+        ("GET", "/api/admin/role-history"),
+        ("POST", "/api/admin/users/{user_id}/deactivate"),
+    ):
+        route = next(r for r in routes if r.key == key)
+        assert not allowed(system, route), key
