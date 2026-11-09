@@ -124,16 +124,21 @@ def _preview_user() -> AuthUser:
     )
 
 
-def _unauthorised(detail: str) -> HTTPException:
-    return HTTPException(status_code=401, detail=detail, headers=_UNAUTHORISED_HEADERS)
+NOT_AUTHENTICATED = "not_authenticated"
+INVALID_TOKEN = "invalid_token"
+
+
+def _unauthorised(message: str, code: str = INVALID_TOKEN) -> HTTPException:
+    """The 401, in the API's error shape ``{"detail": {"code", "message"}}``, with the challenge."""
+    return HTTPException(status_code=401, detail={"code": code, "message": message}, headers=_UNAUTHORISED_HEADERS)
 
 
 def _bearer(authorization: str | None) -> str:
     if not authorization or not authorization.startswith("Bearer "):
-        raise _unauthorised("Bearer token required")
+        raise _unauthorised("Bearer token required", NOT_AUTHENTICATED)
     token = authorization[len("Bearer ") :].strip()
     if not token:
-        raise _unauthorised("Bearer token required")
+        raise _unauthorised("Bearer token required", NOT_AUTHENTICATED)
     return token
 
 

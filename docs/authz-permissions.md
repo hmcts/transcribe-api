@@ -121,7 +121,7 @@ the shared routes.)
 | `PUT` | `/api/admin/feature-flags/{name}` | `feature_flags.manage` | sysadmin |
 | `GET` | `/api/admin/jurisdictions` | `jurisdictions.manage` | JA, JSA |
 | `GET` | `/api/admin/jurisdictions/wording-keys` | `jurisdictions.manage` | JA, JSA |
-| `PUT` | `/api/admin/jurisdictions/{code}` | `jurisdictions.manage` (creating: and `jurisdiction.create`) | JA, JSA |
+| `PUT` | `/api/admin/jurisdictions/{code}` | `jurisdictions.manage` (creating, renaming and enabling or disabling: and `jurisdiction.create`) | JA (settings only), JSA |
 | `GET` | `/api/admin/jurisdictions/{code}/wording` | `jurisdiction.wording.edit` | JA, JSA |
 | `PUT` | `/api/admin/jurisdictions/{code}/wording` | `jurisdiction.wording.edit` | JA, JSA |
 | `POST` | `/api/telemetry` | `app.access` | Judge, LTM, JA, JSA |
@@ -214,13 +214,27 @@ the shared routes.)
 * **`GET/PUT /api/admin/jurisdictions/{code}/wording` is `jurisdiction.wording.edit`, scoped**: a JurisdictionSuperAdministrator edits any jurisdiction's,
   a JurisdictionAdministrator its own (403 `jurisdiction_not_in_scope` for another). `/api/jurisdictions/wording` (the active jurisdiction's) stays.
 * **`/api/admin/jurisdictions...` is `jurisdictions.manage`, scoped** (JA: the one it works in; JSA: any; a SystemAdministrator none, DIAAT-389). Creating needs
-  `jurisdiction.create` too.
+  `jurisdiction.create` too, and so does **changing `name` or `enabled`** of an existing one (review finding S5): a JurisdictionAdministrator could otherwise
+  disable its own jurisdiction (every member lost it at once, and only a JurisdictionSuperAdministrator could restore it). A JurisdictionAdministrator changes
+  the template, features and wording (`settings`) of its own jurisdiction only.
+* **A SystemAdministrator acting in a stored role has that role's scope.** `jurisdiction_super_admin.assign` is a system permission, held whatever the context;
+  it is not read as "global administrator". The user list and deactivation take their scope from the role acted in (`jurisdiction_scope`): only an active
+  JurisdictionSuperAdministrator is global (review finding S4). The SystemAdministrator's own listed effects remain: assigning the two administrator roles, listing
+  users (with no context or in a role without `users.manage`) to find who to assign, the feature flags, the system routes.
+* **Nobody gives themselves a role, nor decides their own access request** (403 `assignment_not_allowed` / `own_request`), except the SystemAdministrator's
+  self-assignment of any stored role (contract section 1). At most five access requests are pending per user (409 `too_many_pending_requests`).
 * **`GET /api/healthcheck/azure-storage` is `system.settings`** (a SystemAdministrator). It was open, called storage on every request and answered with the
   container name and the exception text. Nothing in the repository or the chart calls it; `GET /api/health/dependencies` has the storage state for probes.
 * **`POST /api/security/alert-test` is `security.alert_test`** (unchanged in effect: SystemAdministrator, and 404 unless the test is enabled).
 * **`GET /api/v1/local-audio/{blob_name}` stays exempt, because its URL is now signed**: `local_storage.build_url` appends `expires` and an HMAC `sig` (key derived from
   `APP_JWT_SIGNING_KEY`, 24 hours), and the route answers 404 for a missing, wrong or expired signature, and for everything unless `AUDIO_STORAGE_BACKEND=local`.
-  Before, the unguessable blob name was the only protection.
+  Before, the unguessable blob name was the only protection. A `sig` with non-ASCII characters is a 404 like any other wrong signature.
+* **The upload and job-submission rate limits (`POST /api/v1/uploads` 50/hour, `POST /api/v1/jobs` 100/hour) are per user**: keyed on the `sub` of the verified token,
+  not on the token string (a new token every few minutes, and on demand from `PUT /api/me/context`, would otherwise be a new bucket each time). A request with
+  no valid token is keyed on its address.
+* **The declared permission of every route is pinned** in `tests/unit/permission_matrix_snapshot.json`, compared by `test_permission_matrix.py`: the generated
+  matrix trusts what each route declares, so weakening a declaration (say `GET /api/templates` from `document_content.read` to `app.access`) is caught as a diff of
+  that file, which a deliberate change regenerates (`UPDATE_PERMISSION_SNAPSHOT=1`) and a reviewer reads.
 * **`/api/openapi.json`** is FastAPI's document and was already served unauthenticated; left as it is.
 
 ## Removed

@@ -345,6 +345,28 @@ def test_the_role_history_does_not_name_the_system_administrator_who_made_a_chan
         assert ordinary["actor_context"] == {"jurisdiction": None, "role": SUPER}
 
 
+def test_a_system_administrator_acting_in_a_role_is_named_only_when_it_used_the_roles_own_rights(world, cast, sysadmin_as_jadmin):
+    """Acting as a JurisdictionAdministrator: assigning the JurisdictionAdministrator role needs the system permission
+    (not named); assigning a Judge is the role's own right (shown as the role's holder)."""
+    assert sysadmin_as_jadmin.post(
+        "/api/admin/assignments",
+        role=ADMIN,
+        jurisdiction="IAC",
+        json=assign_body(user_id=str(cast.nobody.user_id), role=ADMIN),
+    ).status_code == 201
+    assert sysadmin_as_jadmin.post(
+        "/api/admin/assignments",
+        role=ADMIN,
+        jurisdiction="IAC",
+        json=assign_body(user_id=str(cast.nobody.user_id), role=JUDGE),
+    ).status_code == 201
+
+    history = cast.jsuper.get("/api/admin/role-history", role=SUPER).json()["items"]
+    by_role = {item["role"]: item for item in history if item["target"]["id"] == str(cast.nobody.user_id)}
+    assert by_role[ADMIN]["actor"] == {"id": None, "email": "system administrator"}
+    assert by_role[JUDGE]["actor"]["id"] == str(cast.sysadmin.user_id)  # the role's own right: its holder
+
+
 # --- D4: a JurisdictionAdministrator's list counts only what is in its scope ------------------------------------------------
 
 

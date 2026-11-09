@@ -38,10 +38,18 @@ HS256, signed with `APP_JWT_SIGNING_KEY`. `iss` is `benchnotes-api`, `aud` is `b
 |---|---|
 | `sub` | the user's UUID |
 | `iat`, `exp` | issued at, expires |
+| `sess_exp` | when the Entra-verified sign-in this token descends from stops being good: sign-in time plus one lifetime. Set only at `POST /api/auth/session`; a token minted by `PUT /api/me/context` or `DELETE /api/me/jurisdictions/{code}` carries the presenting token's and expires no later than it (`exp = min(now + TTL, sess_exp)`) |
 | `sysadmin` | true if the Entra `roles` claim held `SystemAdministrator` at mint time. Never read from the database |
 | `assignments` | `[{"jurisdiction": "ET" \| null, "role": "Judge"}, ...]`, the distinct pairs the user holds |
 | `ctx` | `{"jurisdiction": "ET" \| null, "role": "Judge"}`, the pair they act in, or `null` until chosen |
 | `name` | display name (informational; never used to authorise) |
+
+**Re-minting never extends the session.** `PUT /api/me/context` and `DELETE /api/me/jurisdictions/{code}` mint from the presenting BenchNotes token,
+not from Entra, and copy its `sysadmin` flag. Without a bound a holder could call either every few minutes and keep `sysadmin` for ever after the Entra
+role was removed. So the new token never outlives `sess_exp`: a chain of context changes ends one lifetime (300 s) after the last Entra verification, then
+the token is 401 as any expired one and the web re-mints from Entra (it already does so within 60 s of expiry and on a 401). The response shapes are
+unchanged; `expires_at` of a re-minted token is simply the session's end if that is sooner than a full lifetime. A token without `sess_exp` (minted
+before it existed) counts as its own session.
 
 Permissions are **not** in the token: they are derived from `ctx.role` (plus `sysadmin`) with the role
 map in code, so a change to the map needs no new tokens. The roles are `Judge`, `LegalTextManager`,
@@ -55,6 +63,9 @@ Settings (`runtime/settings_dictation.py`):
   `python -c "import secrets; print(secrets.token_urlsafe(48))"`. Locally it is in `.env`; if it is
   missing there, local mode signs with a key for that process only (tokens do not survive a restart).
   It is a new Key Vault secret and chart value (not yet added: nothing here touches the cluster config).
+* `ENVIRONMENT` is read case-insensitively by the settings and by the persona check (`LOCAL`, `Local` and `local` are one thing). **Unset** counts as
+  not local for the signing key: a process whose `ENVIRONMENT` was never set (not in the environment, not in `.env`) must have `APP_JWT_SIGNING_KEY`, whatever
+  the settings default says.
 * `APP_JWT_TTL_SECONDS`: default 300. A change to someone's assignments, or their removal of their
   active role, reaches them at their next token: within this time, and at once for their own actions
   (choosing a context, leaving a jurisdiction).
@@ -110,7 +121,8 @@ Leaving a jurisdiction is `membership.leave`.
 
 ## Local development personas
 
-With `ENVIRONMENT=local`, `POST /api/auth/session` accepts `X-Dev-Persona: <name>` instead of an Entra
+With `ENVIRONMENT=local` **and a local database** (the host of `DATABASE_CONNECTION_STRING` is `localhost`, `127.0.0.1` or `::1`, the same check as the seed
+script), `POST /api/auth/session` accepts `X-Dev-Persona: <name>` instead of an Entra
 token, and goes through the same mint as a real sign-in. Anywhere else the header is refused (401
 `dev_persona_disabled`), whatever else the request carries.
 
@@ -150,3 +162,19 @@ The permission checks on every route are [`authz-permissions.md`](authz-permissi
 give and take away roles, decide access requests, set feature flags and read a recording's history are
 [`authz-admin-api.md`](authz-admin-api.md) (Phase 4), with an example for each. `user.role`, `jurisdiction_membership` and
 `jurisdiction.auto_enrol` are no longer read (nobody is enrolled automatically; a new user has no role) and are dropped in a later release.
+
+## Identity: the email claim is not verified (a decision for the owner)
+
+BenchNotes keys two things on the `email` (or `preferred_username`) claim of the Entra token, which Entra does not guarantee unique or verified
+(guest or B2B accounts, a tenant where users can edit `mail`):
+
+* **Pending assignments.** An administrator adds `someone@justice.gov.uk` by email; the first account whose token carries that address gets the roles at its
+  first sign-in. A second identity with the same address that signs in first takes them, and the real person later signs in with nothing.
+* **Assign by email to someone who has already signed in.** The assignment goes to the user row with that address.
+
+What is done (cheap hardening, not a redesign): assigning by an email that matches **more than one** user row is refused (409 `ambiguous_email`: choose the
+person from the user list); a pending assignment claimed at a first sign-in when another user row already has the same address is still claimed (first match)
+but logged as a warning (no addresses in it). **Residual risk, for the owner to decide:** the address itself is still trusted. Options, none built: require the
+`xms_edov` (email domain owner verified) claim or a member (non-guest) account at sign-in; a unique index on `lower(user.email)` with the clash treated as an
+error for an administrator to resolve; an administrator confirmation step for pending administrator roles. Until then, the sign-in gate (who may obtain a token for this
+app at all) is the control that matters: keep guest accounts out of the app registration's assignment.

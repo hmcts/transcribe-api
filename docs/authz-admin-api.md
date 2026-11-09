@@ -24,7 +24,12 @@ JADMIN=$(tok jadmin-iac IAC:JurisdictionAdministrator)     # acting as the IAC's
 | `JurisdictionSuperAdministrator` (global, no jurisdiction) | a SystemAdministrator only (`jurisdiction_super_admin.assign`) | everyone else: 403 `assignment_not_allowed` |
 | `SystemAdministrator` | nobody (it is not a stored role) | 403 `assignment_not_allowed` |
 | any stored role, **to themselves** | a SystemAdministrator (how the first JurisdictionSuperAdministrator is set up) | |
-| their own `JurisdictionAdministrator` / `JurisdictionSuperAdministrator` | nobody else changes their own administrator role | 403 `assignment_not_allowed` |
+| any role, **to themselves** | nobody else: you cannot give yourself Judge, LegalTextManager or an administrator role | 403 `assignment_not_allowed` |
+| their own `JurisdictionAdministrator` / `JurisdictionSuperAdministrator` (removing) | nobody else changes their own administrator role | 403 `assignment_not_allowed` |
+
+Nothing is assigned into a **disabled** jurisdiction: 409 `jurisdiction_disabled` (also for a SystemAdministrator, and when approving a request for one
+that was disabled after the request was made; rejecting still works). An email that matches **more than one** user row (two Entra accounts have signed in with
+the same address) is not guessed: 409 `ambiguous_email`, choose the person from the user list and assign by `user_id`.
 
 Removing follows the same rules. Nobody deactivates themselves (403 `cannot_deactivate_self`). A name that is not a
 role at all is 400 `invalid_role`. Which of the three permissions the assignment routes accept is enough depends on the
@@ -73,7 +78,7 @@ curl -s "localhost:8000/api/admin/users?search=walkthrough" -H "Authorization: B
 and `email`): **201** with the assignment. An email that belongs to someone who has signed in is assigned to them; any other email makes a
 **pending** assignment, claimed at that person's first sign-in (compared case-insensitively). 400 `invalid_target`, `invalid_role`, `invalid_email`,
 `invalid_assignment` (a role in a jurisdiction needs one; the global role has none), 403 per the rules, 404 `user_not_found` / `jurisdiction_not_found`,
-409 `already_assigned`.
+409 `already_assigned`, 409 `jurisdiction_disabled`, 409 `ambiguous_email`.
 
 ```bash
 curl -s -X POST localhost:8000/api/admin/assignments -H "Authorization: Bearer $JADMIN" -H 'Content-Type: application/json' \
@@ -114,6 +119,10 @@ on their next request and cannot sign in. 404 `user_not_found` (also for a user 
 `cannot_deactivate_self`; `assignment_not_allowed` for a user who holds a role the caller may not assign (a JurisdictionAdministrator cannot
 deactivate another one, and nobody can deactivate a JurisdictionSuperAdministrator: a SystemAdministrator has no `users.manage`), and, for a JurisdictionAdministrator, for a
 user who also works in another jurisdiction (deactivation is across all of them: remove their role in yours instead).
+The scope is the **role** the caller acts in: a SystemAdministrator who gave themselves a stored role and acts in it has that role's scope (a
+JurisdictionAdministrator's: its jurisdiction) and the role's assignment rights, not a global one, so it cannot deactivate a JurisdictionSuperAdministrator or list the
+users of another jurisdiction. (Its own permission, `jurisdiction_super_admin.assign`, still lets it list every user, with no context or in a role with no `users.manage`, to find who to make a
+JurisdictionSuperAdministrator.)
 
 ## Role-change history
 
@@ -134,6 +143,14 @@ is one of `assignment.added`, `assignment.removed`, `user.deactivated`, `user.re
 `actor_context` is null when the actor had no context (a SystemAdministrator with none); `target.id` is null, and `target.email` the address,
 for a person who has not signed in. (The audit log keeps an email only for such a target: there is no user to name.)
 
+A SystemAdministrator is not named: an assignment added or removed through the SystemAdministrator's own permissions (no context, or a role
+that could not have made it: the audit row carries `by_system`) shows `"actor": {"id": null, "email": "system administrator"}` to every reader (and `actor_context`
+is null with no context). One acting in a stored role and using that role's own rights is stamped with the role and shown as its holder: the row cannot tell them apart.
+
+Every role change, access request and feature flag change is written to the audit log **in the same transaction** as the change (`audit.stage_audit`,
+fail-closed): if the row cannot be written the change is not made (500), so a committed change always has its history row. The audit of everything
+else (refusals, recording access, jurisdiction edits) stays fail-open.
+
 ## Access requests
 
 For any signed-in user, with or without a role:
@@ -141,7 +158,7 @@ For any signed-in user, with or without a role:
 * `POST /api/access-requests` body `{"jurisdiction": "IAC", "roles": ["Judge", "LegalTextManager"]}` -> **201** `AccessRequest`
   `{id, jurisdiction: {code, name}, roles, status, created_at, decided_at, reason}`. 400 `role_not_requestable` for anything but Judge and
   LegalTextManager (400 `roles_required` for none), 404 `jurisdiction_not_found` (unknown or disabled), 409 `duplicate_request` (an identical
-  pending request), 409 `already_assigned` (they hold a requested role there).
+  pending request), 409 `already_assigned` (they hold a requested role there), 409 `too_many_pending_requests` (five are waiting already: withdraw one).
 * `GET /api/access-requests/mine` -> every request they made, newest first.
 * `POST /api/access-requests/{id}/withdraw` -> the request, `withdrawn`. 404 for someone else's, 409 `request_not_pending` once decided.
 
@@ -151,7 +168,8 @@ For an approver (`access.approve`: a JurisdictionAdministrator of the jurisdicti
   `"requester": {id, email, name}`, oldest first.
 * `POST /api/admin/access-requests/{id}/approve` and `/reject`, body `{"reason": str | null}` (optional, at most 500 characters) -> the request. Approving
   writes the requested assignments **in the same transaction** as the new status (a role already held is left as it is); if that fails the request stays pending.
-  403 `jurisdiction_not_in_scope` for another jurisdiction's request, 404 `request_not_found`, 409 `request_not_pending` once decided (also if withdrawn).
+  403 `jurisdiction_not_in_scope` for another jurisdiction's request, 403 `own_request` for your own (nobody decides their own request: another
+  administrator does), 404 `request_not_found`, 409 `request_not_pending` once decided (also if withdrawn), 409 `jurisdiction_disabled` (approving only).
 
 ```json
 {"id": "febfd968-…", "jurisdiction": {"code": "IAC", "name": "Immigration and Asylum Chamber"}, "roles": ["Judge", "LegalTextManager"],
@@ -194,7 +212,10 @@ read per process per 5 seconds; the PUT clears the cache of the process that too
 ## Jurisdictions
 
 `GET /api/admin/jurisdictions` and `PUT /api/admin/jurisdictions/{code}` keep their shapes (`jurisdictions.manage`, scoped; creating needs
-`jurisdiction.create`, a JurisdictionSuperAdministrator's); there is no `auto_enrol` and no members endpoint any more. A jurisdiction's wording by code:
+`jurisdiction.create`, a JurisdictionSuperAdministrator's); there is no `auto_enrol` and no members endpoint any more. A JurisdictionAdministrator changes only
+the `settings` (template, features, wording) of its own jurisdiction: changing `name` or `enabled` also needs `jurisdiction.create` (403 `permission_denied`; send the
+name and `enabled` it already has, or leave `enabled` out). Errors on this endpoint are `{code, message}` like the others (409 `edit_conflict` for a stale `version`,
+`already_exists` for adding one that exists). A jurisdiction's wording by code:
 
 * `GET /api/admin/jurisdictions/{code}/wording` -> `{code, name, keys, wording, version}`
 * `PUT /api/admin/jurisdictions/{code}/wording` body `{"wording": {key: text}, "version": "<as read>"}` -> the same. 400 for an unknown key, 404 for an unknown

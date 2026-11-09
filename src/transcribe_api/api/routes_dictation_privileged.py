@@ -425,7 +425,9 @@ def _admin_session_run(operation):
         except jurisdictions_admin.NotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         except jurisdictions_admin.ConflictError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from None
+            # In the API's error shape; a save of a version that is stale is ``edit_conflict``.
+            code = "already_exists" if str(exc).endswith("already exists") else "edit_conflict"
+            raise auth_context.error(409, code, str(exc)) from None
         except jurisdictions_admin.AdminError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
 

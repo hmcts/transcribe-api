@@ -94,7 +94,7 @@ def test_a_stale_version_is_a_conflict_and_changes_nothing(world, cast):
     assert cast.jsuper.put("/api/admin/jurisdictions/ET/wording", role=SUPER, json={"wording": {"home.intro": "A"}, "version": version}).status_code == 200
 
     stale = cast.jsuper.put("/api/admin/jurisdictions/ET/wording", role=SUPER, json={"wording": {"home.intro": "B"}, "version": version})
-    assert stale.status_code == 409 and "changed by someone else" in stale.json()["detail"]
+    assert stale.status_code == 409 and stale.json()["detail"]["code"] == "edit_conflict" and "changed by someone else" in stale.json()["detail"]["message"]
     assert stored(world.engine, "ET")["wording"]["home.intro"] == "A"
 
 

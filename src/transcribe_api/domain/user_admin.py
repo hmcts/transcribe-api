@@ -224,6 +224,15 @@ def _users_by_email(session: Session, email: str) -> list[User]:
     )
 
 
+def _by_system_permission(actor: object, role: str | None) -> bool:
+    """Whether an assignment change of ``role`` by ``actor`` was made through the SystemAdministrator's own
+    permissions: the actor is one and the role they act in (if any) could not have made it."""
+    if role is None or not auth_context.sysadmin_of(actor):
+        return False
+    ctx = auth_context.context_of(actor)
+    return role not in assignable_roles(ctx.role if ctx else None, sysadmin=False)
+
+
 def audit_role_change(
     session: Session,
     action: str,
@@ -245,6 +254,9 @@ def audit_role_change(
         "role": role,
         **(extra or {}),
     }
+    if action in (CHANGE_ASSIGNMENT_ADDED, CHANGE_ASSIGNMENT_REMOVED) and _by_system_permission(actor, role):
+        # The role history does not name the SystemAdministrator (it is not named in the app).
+        detail["by_system"] = True
     if target_user_id is None and target_email:
         detail["target_email"] = target_email
     stage_audit(
@@ -722,11 +734,11 @@ def role_history(
         target_uuid = _uuid(target_id)
         roles = detail.get("roles")
         role = detail.get("role") or (roles[0] if isinstance(roles, list) and len(roles) == 1 else None)
-        # An assignment made or removed with NO active role was made through a SystemAdministrator's own
-        # permissions (every other way needs a role to act in, which the row is stamped with): the
-        # SystemAdministrator is invisible in the app, so the actor is not named. (One acting in a
-        # stored role is stamped with it and cannot be told from that role's holder: shown as such.)
-        by_system = row.active_role is None and row.event_type in (CHANGE_ASSIGNMENT_ADDED, CHANGE_ASSIGNMENT_REMOVED)
+        # An assignment made or removed through a SystemAdministrator's own permissions (the row says so:
+        # ``audit_role_change``) does not name the actor: the SystemAdministrator is invisible in the app.
+        # (One acting in a stored role and using that role's rights is stamped with the role and shown as
+        # its holder: the row cannot tell them apart.)
+        by_system = bool(detail.get("by_system"))
         items.append(
             HistoryEntry(
                 id=row.id,

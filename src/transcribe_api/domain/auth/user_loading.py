@@ -32,7 +32,9 @@ def load_user(session: Session, principal: AppPrincipal) -> User:
     if user is None:
         logger.warning("A BenchNotes token names a user that does not exist: id=%s", principal.user_id)
         raise HTTPException(
-            status_code=401, detail="Unknown user", headers={"WWW-Authenticate": "Bearer"}
+            status_code=401,
+            detail={"code": "unknown_user", "message": "Unknown user"},
+            headers={"WWW-Authenticate": "Bearer"},
         )
     if not user.is_active:
         raise user_deactivated()

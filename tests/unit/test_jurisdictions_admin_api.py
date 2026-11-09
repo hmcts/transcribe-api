@@ -197,7 +197,8 @@ def test_a_save_from_a_stale_form_does_not_undo_a_change_made_meanwhile(jurisdic
         "/api/admin/jurisdictions/ET", json={"name": "ET", "settings": {}, "version": opened["version"]}
     )
     assert stale.status_code == 409
-    assert "changed by someone else" in stale.json()["detail"]
+    assert stale.json()["detail"]["code"] == "edit_conflict"
+    assert "changed by someone else" in stale.json()["detail"]["message"]
     [et] = [j for j in as_admin.get("/api/admin/jurisdictions").json() if j["code"] == "ET"]
     assert et["settings"]["wording"] == ET_SETTINGS["wording"]
 
@@ -207,7 +208,7 @@ def test_adding_a_jurisdiction_never_overwrites_an_existing_one(jurisdiction_db,
         "/api/admin/jurisdictions/iac", json={"name": "Mistake", "settings": {}, "enabled": True, "version": ""}
     )
     assert refused.status_code == 409
-    assert refused.json()["detail"] == "IAC already exists"
+    assert refused.json()["detail"] == {"code": "already_exists", "message": "IAC already exists"}
     [iac] = as_admin.get("/api/admin/jurisdictions").json()
     assert iac["name"] == "IAC name"
 

@@ -551,6 +551,24 @@ def test_an_invalid_app_token_is_401_on_every_kind_of_route(client, world, db, c
         assert client.get(path, headers=bearer(token)).status_code == 401, path
 
 
+def test_every_401_is_in_the_apis_error_shape_with_a_challenge(client, world, db):
+    """Integration finding: the 401s had a plain-string ``detail`` where every other refusal has ``{code, message}``."""
+    person = user_with(client, db, (world["et"], "judge"))
+    unknown = af.forged_app_token({"sub": str(uuid4())})
+    cases = {
+        "not_authenticated": client.get("/api/me/permissions"),
+        "invalid_token": client.get("/api/me/permissions", headers=bearer("not-a-token")),
+        "unknown_user": client.get("/api/me/permissions", headers=bearer(unknown)),
+    }
+    for code, response in cases.items():
+        assert response.status_code == 401, code
+        assert response.json()["detail"]["code"] == code and response.json()["detail"]["message"]
+        assert response.headers["www-authenticate"] == "Bearer"
+    # The sign-in's own 401s too: no bearer, an unverifiable one.
+    assert client.post("/api/auth/session").json()["detail"]["code"] == "not_authenticated"
+    assert person  # (signed in above only to have a database with a user in it)
+
+
 def test_the_context_in_a_valid_token_is_trusted_without_reading_the_assignments(client, world, db):
     """DIAAT-373: no database read authorises a request, so a token minted for a context is good for
     it until it expires, whatever the assignments say now."""
