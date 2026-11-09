@@ -20,13 +20,13 @@ from dataclasses import dataclass
 from typing import NamedTuple
 from uuid import UUID
 
-from sqlalchemy import delete
+from sqlalchemy import delete, func
 from sqlmodel import Session, select
 
 from transcribe_api.domain.auth.app_token import Context
 from transcribe_api.domain.auth.permissions import GLOBAL_ROLES, STORED_ROLES
 from transcribe_api.domain.jurisdiction_stages import sees
-from transcribe_api.domain.models_dictation import Jurisdiction, RoleAssignment
+from transcribe_api.domain.models_dictation import Jurisdiction, RoleAssignment, User
 
 logger = logging.getLogger(__name__)
 
@@ -189,13 +189,28 @@ def claim_pending_assignments(session: Session, user_id: UUID, email: str | None
     """Give a user who has just signed in for the first time what was assigned to their
     email beforehand. Case-insensitive (the email is matched in the lower case it is
     stored in). A pending row for something the user already holds is dropped, not
-    claimed twice. Returns how many were claimed. Flushed, not committed."""
+    claimed twice. Returns how many were claimed. Flushed, not committed.
+
+    The email is a claim of the Entra token that BenchNotes cannot verify, so the first account to
+    sign in with the address gets what was assigned to it. When another user row already has that
+    address the claim is still made (first match) but logged as a warning, without the address."""
     pending_email = normalise_email(email)
     if not pending_email:
         return 0
     pending = session.exec(
         select(RoleAssignment).where(RoleAssignment.user_id.is_(None), RoleAssignment.pending_email == pending_email)
     ).all()
+    if pending:
+        others = session.exec(
+            select(func.count(User.id)).where(func.lower(User.email) == pending_email, User.id != user_id)  # type: ignore[arg-type]
+        ).one()
+        if others:
+            logger.warning(
+                "Claiming %d pending assignment(s) for user id=%s: %d other user row(s) already have the same email",
+                len(pending),
+                user_id,
+                others,
+            )
     claimed = 0
     for row in pending:
         held = find_assignment(session, role=row.role, jurisdiction_id=row.jurisdiction_id, user_id=user_id)

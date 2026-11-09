@@ -111,6 +111,12 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+    @field_validator("ENVIRONMENT", mode="before")
+    @classmethod
+    def normalise_environment(cls, v):
+        """One spelling of an environment, as the dictation settings read it (``LOCAL`` is ``local``)."""
+        return v.strip().lower() if isinstance(v, str) else v
+
     @field_validator("SECURITY_ALERT_TEST_TRIGGER_ENABLED", mode="before")
     @classmethod
     def blank_security_alert_trigger_is_disabled(cls, v: object) -> object:

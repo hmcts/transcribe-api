@@ -8,6 +8,9 @@ a JurisdictionAdministrator of it, or a JurisdictionSuperAdministrator, approves
 * Approving writes the requested assignments, idempotently (a role the user already holds is
   left as it is), **in the same transaction** as the request's new status: if the write fails, the
   request stays pending. A request is decided once: 409 ``request_not_pending`` after that.
+* Nobody decides their own request (403 ``own_request``); a request for a jurisdiction that has been
+  disabled since cannot be approved (409 ``jurisdiction_disabled``); a user has at most
+  ``MAX_PENDING_REQUESTS`` waiting (409 ``too_many_pending_requests``).
 * The approver acts in the request's jurisdiction (a JurisdictionSuperAdministrator in any):
   403 ``jurisdiction_not_in_scope`` otherwise. ``access.approve`` is the JurisdictionAdministrator's
   and the JurisdictionSuperAdministrator's: a SystemAdministrator is refused by the permission check.
@@ -25,12 +28,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from transcribe_api.domain import assignments as assignment_service
 from transcribe_api.domain import user_admin
-from transcribe_api.domain.audit import record_audit
+from transcribe_api.domain.audit import stage_audit
 from transcribe_api.domain.auth.authorisation import jurisdiction_in_scope, jurisdiction_scope
 from transcribe_api.domain.auth.context import error
 from transcribe_api.domain.auth.permissions import REQUESTABLE_ROLES, STORED_ROLES
@@ -46,6 +50,9 @@ from transcribe_api.domain.models_dictation import (
 logger = logging.getLogger(__name__)
 
 ACCESS_REQUEST_STATUSES = ("pending", "approved", "rejected", "withdrawn")
+# How many requests one user may have waiting at once (409 ``too_many_pending_requests``): each one
+# emails every approver of the jurisdiction.
+MAX_PENDING_REQUESTS = 5
 
 
 def _roles_of(session: Session, request_ids: list[UUID]) -> dict[UUID, list[str]]:
@@ -77,8 +84,12 @@ def _out(session: Session, request: AccessRequest) -> AccessRequestOut:
     return to_out(request, jurisdiction, _roles_of(session, [request.id])[request.id])  # type: ignore[arg-type]
 
 
-def _audit(action: str, actor_id: UUID, request: AccessRequest, jurisdiction: Jurisdiction, roles: list[str]) -> None:
-    record_audit(
+def _audit(
+    session: Session, action: str, actor_id: UUID, request: AccessRequest, jurisdiction: Jurisdiction, roles: list[str]
+) -> None:
+    """Add the audit row to the session: committed with the change, or the change is not made."""
+    stage_audit(
+        session,
         action,
         actor_id=actor_id,
         outcome="success",
@@ -131,15 +142,26 @@ def create_request(session: Session, user: User, *, jurisdiction_code: str, role
     pending_roles = _roles_of(session, [p.id for p in pending])
     if any(set(found) == set(asked) for found in pending_roles.values()):
         raise error(409, "duplicate_request", "You have already asked for that, and it is waiting to be decided.")
+    waiting = session.exec(
+        select(func.count(AccessRequest.id)).where(  # type: ignore[arg-type]
+            AccessRequest.user_id == user.id, AccessRequest.status == "pending"
+        )
+    ).one()
+    if waiting >= MAX_PENDING_REQUESTS:
+        raise error(
+            409,
+            "too_many_pending_requests",
+            f"You already have {MAX_PENDING_REQUESTS} requests waiting to be decided: withdraw one first.",
+        )
 
     request = AccessRequest(user_id=user.id, jurisdiction_id=jurisdiction.id)
     session.add(request)
     session.flush()
     for role in asked:
         session.add(AccessRequestRole(access_request_id=request.id, role=role))
+    _audit(session, "access_request.created", user.id, request, jurisdiction, asked)
     session.commit()
     session.refresh(request)
-    _audit("access_request.created", user.id, request, jurisdiction, asked)
     return to_out(request, jurisdiction, asked)
 
 
@@ -175,12 +197,14 @@ def withdraw_request(session: Session, user: User, request_id: UUID) -> AccessRe
     request.decided_by = user.id
     request.decided_at = datetime.now(UTC)
     session.add(request)
+    jurisdiction = session.get(Jurisdiction, request.jurisdiction_id)
+    _audit(
+        session, "access_request.withdrawn", user.id, request, jurisdiction,  # type: ignore[arg-type]
+        _roles_of(session, [request.id])[request.id],
+    )
     session.commit()
     session.refresh(request)
-    out = _out(session, request)
-    jurisdiction = session.get(Jurisdiction, request.jurisdiction_id)
-    _audit("access_request.withdrawn", user.id, request, jurisdiction, out.roles)  # type: ignore[arg-type]
-    return out
+    return _out(session, request)
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +262,12 @@ def decide_request(
         if request.status != "pending":
             session.rollback()
             raise error(409, "request_not_pending", f"That request is already {request.status}.")
+        if request.user_id == actor.id:  # type: ignore[attr-defined]
+            session.rollback()
+            raise user_admin.refuse(actor, "own_request", "You cannot decide your own access request.")
+        if approve and not jurisdiction.enabled:  # type: ignore[union-attr]
+            session.rollback()
+            raise error(409, "jurisdiction_disabled", "That jurisdiction is disabled: nobody can be given a role there.")
         roles = _roles_of(session, [request.id])[request.id]
         try:
             if approve:
@@ -254,6 +284,18 @@ def decide_request(
             request.decided_at = datetime.now(UTC)
             request.reason = text
             session.add(request)
+            # One history row per role, in the same transaction as the decision and the assignments.
+            for role in roles:
+                user_admin.audit_role_change(
+                    session,
+                    user_admin.CHANGE_REQUEST_APPROVED if approve else user_admin.CHANGE_REQUEST_REJECTED,
+                    actor,
+                    jurisdiction=jurisdiction,
+                    target_user_id=request.user_id,
+                    target_email=None,
+                    role=role,
+                    extra={"request_id": str(request.id)},
+                )
             session.commit()
         except IntegrityError:
             # An assignment made by someone else at this moment: look again (once), when
@@ -267,14 +309,4 @@ def decide_request(
             raise
         break
     session.refresh(request)
-    for role in roles:
-        user_admin.audit_role_change(
-            user_admin.CHANGE_REQUEST_APPROVED if approve else user_admin.CHANGE_REQUEST_REJECTED,
-            actor,
-            jurisdiction=jurisdiction,
-            target_user_id=request.user_id,
-            target_email=None,
-            role=role,
-            extra={"request_id": str(request.id)},
-        )
     return to_out(request, jurisdiction, roles)  # type: ignore[arg-type]

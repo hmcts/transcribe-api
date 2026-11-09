@@ -97,7 +97,9 @@ _UNAUTHORISED_HEADERS = {"WWW-Authenticate": "Bearer"}
 
 
 def _is_local_dev() -> bool:
-    return os.getenv("ENVIRONMENT", "production").lower() == "local"
+    """ENVIRONMENT is ``local`` (without regard to case or surrounding space, as the settings read it).
+    Unset is not local."""
+    return os.getenv("ENVIRONMENT", "production").strip().lower() == "local"
 
 
 def preview_user_enabled() -> bool:

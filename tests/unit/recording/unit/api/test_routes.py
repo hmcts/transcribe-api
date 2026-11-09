@@ -405,6 +405,17 @@ class TestLocalAudio:
         local_storage.save(b"OTHER", "uploads/x/other.wav")
         assert client.get(f"/api/v1/local-audio/uploads/x/other.wav?{query}").status_code == 404
 
+    def test_404_not_500_for_a_signature_with_non_ascii_characters(self, client, local_backend):
+        """Review finding S-low (d): ``hmac.compare_digest`` raises TypeError for a non-ASCII str."""
+        from transcribe_api.stt import local_storage
+
+        url = self._signed("uploads/x/hearing.wav")
+        path, _, query = url.partition("?")
+        expires = query.split("&")[0]
+        assert client.get(f"{path}?{expires}&sig=%C3%A9%E2%82%AC%F0%9F%98%80").status_code == 404
+        assert client.get(f"{path}?{expires}&sig=%ED%B2%80").status_code == 404  # a lone surrogate
+        assert local_storage.signature_is_valid("uploads/x/hearing.wav", int(time.time()) + 60, "é€") is False
+
     def test_404_when_the_url_has_expired(self, client, local_backend):
         from transcribe_api.stt import local_storage
 

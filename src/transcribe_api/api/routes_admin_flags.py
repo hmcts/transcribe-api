@@ -18,7 +18,6 @@ from pydantic import BaseModel, StrictBool
 from sqlmodel import Session
 
 from transcribe_api.domain import feature_flags
-from transcribe_api.domain.audit import record_audit
 from transcribe_api.domain.auth import context as auth_context
 from transcribe_api.domain.auth.context import error
 from transcribe_api.domain.auth.dependencies_dictation import require_permission
@@ -89,14 +88,11 @@ def set_feature_flag(
         raise error(404, "flag_not_found", "There is no such feature flag.")
     ctx = auth_context.context_of(user)
     with Session(db_connection.get_engine()) as session:
-        before = feature_flags.set_flag(session, name, body.value, updated_by=user.id)
-        result = _flags(session)
-    acted_as = [role for role in (ctx.role if ctx else None, ROLE_SYSTEM_ADMIN if auth_context.sysadmin_of(user) else None) if role]
-    record_audit(
-        "feature_flag.changed",
-        actor_id=user.id,
-        outcome="success",
-        object_type="feature_flag",
-        detail={"flag": name, "from": before, "to": body.value, "acted_as": acted_as},
-    )
-    return result
+        acted_as = [
+            role
+            for role in (ctx.role if ctx else None, ROLE_SYSTEM_ADMIN if auth_context.sysadmin_of(user) else None)
+            if role
+        ]
+        # Audited in the same transaction as the change (fail-closed: domain/feature_flags.set_flag).
+        feature_flags.set_flag(session, name, body.value, updated_by=user.id, acted_as=acted_as)
+        return _flags(session)

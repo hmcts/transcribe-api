@@ -214,9 +214,9 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
 
     # DIAAT-373: without the key no request after sign-in can be authenticated.
-    from transcribe_api.domain.auth.app_token import signing_key_problem
+    from transcribe_api.domain.auth.app_token import effective_environment, signing_key_problem
 
-    key_problem = signing_key_problem(settings.ENVIRONMENT, settings.APP_JWT_SIGNING_KEY)
+    key_problem = signing_key_problem(effective_environment(settings), settings.APP_JWT_SIGNING_KEY)
     if key_problem:
         log.error(key_problem)
         raise RuntimeError(key_problem)

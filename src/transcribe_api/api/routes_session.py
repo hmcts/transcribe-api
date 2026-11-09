@@ -25,7 +25,7 @@ from sqlmodel import Session, select
 from starlette.concurrency import run_in_threadpool
 
 from transcribe_api.domain.assignments import distinct_contexts, leave_jurisdiction, load_assignments
-from transcribe_api.domain.audit import record_audit
+from transcribe_api.domain.audit import stage_audit
 from transcribe_api.domain.auth.app_token import Context
 from transcribe_api.domain.auth.authorisation import sign_in_endpoint
 from transcribe_api.domain.auth.context import context_not_available, error, parse_requested_context
@@ -44,10 +44,19 @@ from transcribe_api.domain.auth.sessions import (
 from transcribe_api.domain.auth.token_auth import _is_local_dev, get_entra_identity
 from transcribe_api.domain.models_dictation import Jurisdiction, User
 from transcribe_api.runtime.db_connection import get_engine
+from transcribe_api.runtime.local_dev_database import UnsafeDatabaseURLError, local_dev_database_url
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["session"])
+
+
+def _persona_disabled(message: str) -> HTTPException:
+    return HTTPException(
+        status_code=401,
+        detail={"code": "dev_persona_disabled", "message": message},
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 async def get_sign_in_identity(
@@ -56,15 +65,18 @@ async def get_sign_in_identity(
 ) -> SignInIdentity:
     """Who is signing in: an Entra ID token, or, in local mode only, a dev persona.
 
-    The persona header is refused (401) anywhere but ENVIRONMENT=local, whatever else the
+    The persona header is refused (401) anywhere but ENVIRONMENT=local against a local database, whatever else the
     request carries: it names a user without proving anything."""
     if x_dev_persona is not None:
         if not _is_local_dev():
-            raise HTTPException(
-                status_code=401,
-                detail={"code": "dev_persona_disabled", "message": "Dev personas are only available locally."},
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+            raise _persona_disabled("Dev personas are only available locally.")
+        # ... and only against a database of the developer's own (as the seed script insists): a persona names a
+        # user, including a SystemAdministrator, without proving anything.
+        try:
+            local_dev_database_url()
+        except UnsafeDatabaseURLError:
+            logger.warning("Dev personas refused: the database is not a local one")
+            raise _persona_disabled("Dev personas are only available against a local database.") from None
         persona = PERSONAS.get(x_dev_persona.strip())
         if persona is None:
             raise error(400, "unknown_persona", f"Unknown persona. Known: {', '.join(sorted(PERSONAS))}.")
@@ -176,9 +188,10 @@ def leave(code: str, response: Response, current_user: User = Depends(signed_in_
         left = leave_jurisdiction(session, current_user.id, code)
         if not left.roles:
             raise error(404, "not_a_member", "You do not hold a role in that jurisdiction.")
-        session.commit()
-        # Audited in the context the user acted in when they left (the request's).
-        record_audit(
+        # Audited in the context the user acted in when they left (the request's), in the same
+        # transaction as the removal: if the row cannot be written, they have not left.
+        stage_audit(
+            session,
             "membership.leave",
             actor_id=current_user.id,
             outcome="success",
@@ -186,6 +199,7 @@ def leave(code: str, response: Response, current_user: User = Depends(signed_in_
             object_id=left.jurisdiction_id,
             detail={"code": code, "roles": left.roles},
         )
+        session.commit()
         previous = current_user.ctx
         keep = previous is not None and previous.jurisdiction != code
         return mint_session(

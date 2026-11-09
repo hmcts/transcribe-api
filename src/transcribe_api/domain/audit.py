@@ -39,6 +39,11 @@ Each DIAAT-286 row has:
   is chosen, a global role's jurisdiction);
 * ``detail``: controlled values only (how, why refused); never content.
 
+The role, access request and feature flag changes are the exception (``stage_audit``): their row is
+added in the same transaction as the change and fail-closed, so the change is not made if the row
+cannot be written, and a committed change always has its row (the role history is read only from
+these rows).
+
 Writing never breaks the user's request (fail-open): a failed write logs the event
 and error types only, records ``audit.write_failed`` (no identifiers) and the
 request carries on. Whether a failed audit write should block the action instead is
@@ -226,6 +231,30 @@ def record_audit(
         _write_failed(action, exc)
         return False
     return _submit(row)
+
+
+def stage_audit(
+    session: Session,
+    action: str,
+    *,
+    actor_id: UUID | str,
+    outcome: str = SUCCESS,
+    object_type: str | None = None,
+    object_id: UUID | str | None = None,
+    detail: dict[str, Any] | None = None,
+) -> AuditLog:
+    """Add one audit row to the caller's session, to be committed WITH the change it records
+    (fail-closed). For the role, access request and feature flag changes (DIAAT-383, 392, 396):
+    if the row cannot be built or inserted the exception propagates, the transaction is not
+    committed, and the change is not made, so a committed change always has its audit row.
+
+    Unlike ``record_audit`` (fail-open, in its own transaction after the action) this never swallows
+    an error and never writes by itself: the caller commits."""
+    row = _audit_row(
+        action, actor_id=actor_id, outcome=outcome, object_type=object_type, object_id=object_id, detail=detail
+    )
+    session.add(row)
+    return row
 
 
 def persist_rows(rows: list[AuditLog]) -> bool:

@@ -59,6 +59,15 @@ DEFAULT_TTL_SECONDS = 300
 MIN_KEY_LENGTH = 32
 
 _ENVIRONMENTS_WITHOUT_A_REQUIRED_KEY = ("local", "test")
+# What an ENVIRONMENT that was never set counts as: not local (the settings default of "local" is not a
+# decision), so a deployed pod that lost the variable is refused at startup, not given a key of its own.
+UNSET_ENVIRONMENT = "unset"
+
+
+def effective_environment(settings) -> str:
+    """The environment for the signing-key rule: ``settings.ENVIRONMENT`` (lower case), or ``unset``
+    when nothing set it (it would otherwise read as ``local``)."""
+    return settings.ENVIRONMENT if settings.environment_is_set() else UNSET_ENVIRONMENT
 
 
 class AppTokenError(Exception):
@@ -112,7 +121,7 @@ _ephemeral_key: str | None = None
 def signing_key_problem(environment: str, key: str | None) -> str | None:
     """Why ``key`` is unusable in ``environment`` (None if it is fine). Outside local and
     test it is required, and long enough for HS256."""
-    if environment in _ENVIRONMENTS_WITHOUT_A_REQUIRED_KEY:
+    if environment.strip().lower() in _ENVIRONMENTS_WITHOUT_A_REQUIRED_KEY:
         return None
     if not key:
         return "APP_JWT_SIGNING_KEY is not set"
@@ -126,7 +135,7 @@ def _signing_key() -> str:
     key = settings.APP_JWT_SIGNING_KEY
     if key:
         return key
-    if settings.ENVIRONMENT not in _ENVIRONMENTS_WITHOUT_A_REQUIRED_KEY:
+    if effective_environment(settings) not in _ENVIRONMENTS_WITHOUT_A_REQUIRED_KEY:
         msg = "APP_JWT_SIGNING_KEY is not set"
         raise RuntimeError(msg)
     # Local runs without a key in .env: one for this process, so sign-in still works. Tokens

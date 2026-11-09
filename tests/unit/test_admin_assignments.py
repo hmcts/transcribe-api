@@ -198,10 +198,18 @@ def test_a_super_administrator_cannot_change_their_own_administrator_roles(world
     assert world.assignments_of(cast.jsuper) == {(None, SUPER)}
 
 
-def test_adding_yourself_as_a_judge_is_not_changing_your_administrator_role(world, cast):
-    response = assign(cast.jadmin_iac, cast.jadmin_iac, "IAC", JUDGE, as_role=ADMIN, at="IAC")
-    assert response.status_code == 201
-    assert world.assignments_of(cast.jadmin_iac) == {("IAC", ADMIN), ("IAC", JUDGE)}
+def test_nobody_gives_themselves_any_role_not_even_judge(world, cast):
+    """Review finding S-low (a): a JurisdictionAdministrator or JurisdictionSuperAdministrator gave themselves Judge
+    (recording and dictation access) and approved their own requests. Now no one gives themselves a role."""
+    for person, role, where, jurisdiction in (
+        (cast.jadmin_iac, ADMIN, "IAC", "IAC"),
+        (cast.jsuper, SUPER, None, "ET"),
+    ):
+        for given in (JUDGE, LTM):
+            response = assign(person, person, jurisdiction, given, as_role=role, at=where)
+            assert response.status_code == 403 and code(response) == "assignment_not_allowed", (role, given)
+    assert world.assignments_of(cast.jadmin_iac) == {("IAC", ADMIN)}
+    assert world.assignments_of(cast.jsuper) == {(None, SUPER)}
 
 
 def test_the_email_of_your_own_account_is_still_you(world, cast):

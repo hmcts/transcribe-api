@@ -1014,3 +1014,86 @@ def test_the_recording_area_checks_the_tabs_context_headers_too(client, world, d
         assert stale.status_code == 409 and stale.json()["detail"]["code"] == "context_changed"
     none = Person(client).sign_in().json()["token"]
     assert client.get("/api/v1/_probe", headers=bearer(none)).json()["detail"]["code"] == "context_required"
+
+
+# --- where personas and the signing-key exemption apply (review finding S-low (c)) ---------
+
+
+@pytest.fixture
+def fresh_settings():
+    """The settings are cached: read again for the test, and again for the tests after it."""
+    from transcribe_api.runtime import settings_dictation, settings_recording
+
+    for module in (settings_dictation, settings_recording):
+        module.get_settings.cache_clear()
+    yield
+    for module in (settings_dictation, settings_recording):
+        module.get_settings.cache_clear()
+
+
+def test_a_persona_is_also_refused_against_a_database_that_is_not_local(client, db, local, monkeypatch, fresh_settings):
+    """A developer who runs ENVIRONMENT=local against a shared database must not get a SystemAdministrator
+    from an unproven header (the seed script refuses such a database too)."""
+    import os
+
+    from transcribe_api.runtime import settings_recording
+
+    seed_personas(db)
+    local_url = os.environ["DATABASE_CONNECTION_STRING"]
+    monkeypatch.setenv("DATABASE_CONNECTION_STRING", "postgresql://u:p@shared-db.example.com:5432/benchnotes")  # pragma: allowlist secret
+    settings_recording.get_settings.cache_clear()
+    refused = persona(client, "sysadmin")
+    assert refused.status_code == 401 and refused.json()["detail"]["code"] == "dev_persona_disabled"
+    assert "token" not in refused.json()
+    monkeypatch.setenv("DATABASE_CONNECTION_STRING", local_url)
+    settings_recording.get_settings.cache_clear()
+    assert persona(client, "no-role").status_code == 200  # a local database again
+
+
+@pytest.mark.parametrize("spelling", ["LOCAL", "Local", " local "])
+def test_the_environment_is_read_without_regard_to_case_by_the_persona_check_and_the_settings(
+    client, db, monkeypatch, spelling, fresh_settings
+):
+    """The two used to disagree: ``LOCAL`` enabled personas while the settings treated it as deployed."""
+    from transcribe_api.domain.auth.app_token import signing_key_problem
+    from transcribe_api.runtime import settings_dictation, settings_recording
+
+    monkeypatch.setenv("ENVIRONMENT", spelling)
+    assert persona(client, "no-role").status_code == 200
+    assert settings_dictation.get_settings().ENVIRONMENT == "local"
+    assert settings_recording.get_settings().ENVIRONMENT == "local"
+    assert signing_key_problem(spelling, None) is None  # local needs no key, in any spelling
+    assert type(settings_dictation.get_settings()).__name__ == "LocalSettings"
+
+
+def test_a_deployed_environment_in_any_case_is_still_deployed(monkeypatch):
+    from transcribe_api.domain.auth.app_token import signing_key_problem
+    from transcribe_api.runtime.settings_dictation import ProductionSettings
+
+    assert ProductionSettings(ENVIRONMENT="PROD").ENVIRONMENT == "prod"
+    assert signing_key_problem("AAT", None) == "APP_JWT_SIGNING_KEY is not set"
+    assert signing_key_problem("Preview", "short") is not None
+
+
+def test_an_environment_that_was_never_set_needs_the_signing_key(monkeypatch):
+    """The settings default (``local``) is not a decision: a pod that lost ENVIRONMENT must not be taken for a
+    developer's machine and start with a signing key of its own (which is different on every replica)."""
+    from transcribe_api.domain.auth import app_token
+    from transcribe_api.runtime.settings_dictation import LocalSettings
+
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.delenv("APP_JWT_SIGNING_KEY", raising=False)
+    unset = LocalSettings(_env_file=None)
+    assert unset.ENVIRONMENT == "local" and unset.environment_is_set() is False
+    assert app_token.effective_environment(unset) == "unset"
+    assert app_token.signing_key_problem(app_token.effective_environment(unset), unset.APP_JWT_SIGNING_KEY) == (
+        "APP_JWT_SIGNING_KEY is not set"
+    )
+    monkeypatch.setattr(app_token, "get_settings", lambda: unset)
+    with pytest.raises(RuntimeError, match="APP_JWT_SIGNING_KEY is not set"):
+        app_token.derived_key("anything")
+
+    monkeypatch.setenv("ENVIRONMENT", "local")
+    explicit = LocalSettings(_env_file=None)
+    assert explicit.environment_is_set() is True and app_token.effective_environment(explicit) == "local"
+    assert app_token.signing_key_problem("local", None) is None

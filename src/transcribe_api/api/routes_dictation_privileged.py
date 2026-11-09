@@ -39,6 +39,7 @@ from transcribe_api.domain.auth import context as auth_context
 from transcribe_api.domain.auth.authorisation import (
     assert_jurisdiction_in_scope,
     ensure_permission,
+    has_permission,
     jurisdiction_scope,
 )
 from transcribe_api.domain.auth.dependencies_dictation import (
@@ -433,6 +434,18 @@ def _audit_jurisdiction_change(action: str, admin_user: User, detail: dict[str, 
     record_audit(action, actor_id=admin_user.id, outcome="success", object_type="jurisdiction", detail=detail)
 
 
+def _refuse_name_or_enabled_change(admin_user: User, code: str, body: JurisdictionWrite) -> None:
+    """403 ``permission_denied`` (audited) if ``body`` would rename the jurisdiction or enable or disable it, for a
+    caller without ``jurisdiction.create``. Sending the name it already has, or the ``enabled`` it already has,
+    is no change."""
+    with Session(get_engine()) as session:
+        row = session.exec(select(Jurisdiction).where(Jurisdiction.code == code.strip().upper())).first()
+    if row is None:
+        return
+    if body.name != row.name or (body.enabled is not None and body.enabled != row.enabled):
+        ensure_permission(admin_user, "jurisdiction.create")
+
+
 def _jurisdiction_exists(code: str) -> bool:
     with Session(get_engine()) as session:
         return session.exec(select(Jurisdiction.id).where(Jurisdiction.code == code.strip().upper())).first() is not None
@@ -469,9 +482,13 @@ def admin_put_jurisdiction(
 ) -> JurisdictionAdminRecord:
     """Create or update a jurisdiction. Its settings are validated first (400); a
     stale ``version`` is refused (409). Updating needs the jurisdiction to be in the caller's
-    scope; creating one needs ``jurisdiction.create`` too (403 ``permission_denied``)."""
+    scope; creating one, renaming one and enabling or disabling one need ``jurisdiction.create``
+    too (403 ``permission_denied``): a JurisdictionAdministrator changes only the template, features
+    and wording of its own jurisdiction (the ``settings``), never its name or whether it is on."""
     if _jurisdiction_exists(code):
         assert_jurisdiction_in_scope(admin_user, code)
+        if not has_permission(admin_user, "jurisdiction.create"):
+            _refuse_name_or_enabled_change(admin_user, code, body)
     else:
         ensure_permission(admin_user, "jurisdiction.create")
     created = False

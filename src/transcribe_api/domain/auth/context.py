@@ -23,6 +23,7 @@ from uuid import UUID
 from fastapi import HTTPException, Request
 
 from transcribe_api.domain.auth.app_token import Context
+from transcribe_api.domain.auth.permissions import STORED_ROLES
 
 CONTEXT_REQUIRED = "context_required"
 CONTEXT_CHANGED = "context_changed"
@@ -33,6 +34,9 @@ HEADER_ROLE = "X-Role"
 HEADER_REQUESTED_CONTEXT = "X-Requested-Context"
 # The header's spelling of "no jurisdiction" (a global role).
 GLOBAL = "-"
+# The roles by their lower-case spelling, for the header (X-Requested-Context is matched like the advisory
+# X-Jurisdiction: without regard to case).
+_ROLES_BY_LOWER_CASE = {role.lower(): role for role in STORED_ROLES}
 
 
 def error(status_code: int, code: str, message: str) -> HTTPException:
@@ -59,14 +63,18 @@ def format_context(ctx: Context) -> str:
 
 def parse_requested_context(value: str | None) -> Context | None:
     """The context named by X-Requested-Context, or None if the header is absent or not of
-    the form ``<jurisdiction|->:<role>`` (the caller then treats it as not held)."""
+    the form ``<jurisdiction|->:<role>`` (the caller then treats it as not held). The jurisdiction code
+    and the role are matched without regard to case."""
     if not value or ":" not in value:
         return None
     jurisdiction, _, role = value.strip().rpartition(":")
     jurisdiction, role = jurisdiction.strip(), role.strip()
     if not jurisdiction or not role:
         return None
-    return Context(jurisdiction=None if jurisdiction == GLOBAL else jurisdiction.upper(), role=role)
+    return Context(
+        jurisdiction=None if jurisdiction == GLOBAL else jurisdiction.upper(),
+        role=_ROLES_BY_LOWER_CASE.get(role.lower(), role),
+    )
 
 
 def check_advisory_headers(request: Request, ctx: Context | None) -> None:

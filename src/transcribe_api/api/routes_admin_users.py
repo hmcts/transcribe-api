@@ -186,7 +186,9 @@ def reactivate_user(
 
 
 class PersonRef(BaseModel):
-    id: str
+    # null, with the email "system administrator", for a change made through a SystemAdministrator's
+    # own permissions: it is not named in the app.
+    id: str | None
     email: str
 
 

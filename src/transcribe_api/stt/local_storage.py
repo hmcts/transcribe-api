@@ -114,7 +114,9 @@ def signature_is_valid(blob_name: str, expires: int | None, signature: str | Non
         return False
     if expires < (time.time() if now is None else now):
         return False
-    return hmac.compare_digest(sign(blob_name, expires), signature)
+    # Bytes, not str: ``compare_digest`` raises TypeError for a str with non-ASCII characters, which a
+    # caller can put in ``sig``. A signature that is not ours is just invalid (404 at the route).
+    return hmac.compare_digest(sign(blob_name, expires).encode(), signature.encode(errors="replace"))
 
 
 def build_url(blob_name: str) -> str:

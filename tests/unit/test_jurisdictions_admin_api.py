@@ -132,11 +132,47 @@ def as_iac_admin(jurisdiction_db, admin_app):
 
 def test_a_jurisdiction_administrator_sees_and_manages_only_the_jurisdiction_it_works_in(as_iac_admin):
     assert [j["code"] for j in as_iac_admin.get("/api/admin/jurisdictions").json()] == ["IAC"]
-    changed = as_iac_admin.put("/api/admin/jurisdictions/IAC", json={"name": "Immigration", "settings": {}})
+    changed = as_iac_admin.put("/api/admin/jurisdictions/IAC", json={"name": "IAC name", "settings": {}})
     assert changed.status_code == 200
     refused = as_iac_admin.put("/api/admin/jurisdictions/ET", json={"name": "ET", "settings": {}})
     assert refused.status_code == 403
     assert refused.json()["detail"]["code"] == "jurisdiction_not_in_scope"
+
+
+def test_a_jurisdiction_administrator_cannot_rename_or_disable_its_own_jurisdiction(jurisdiction_db, as_iac_admin):
+    """Review finding S5: ``enabled`` and ``name`` need ``jurisdiction.create`` (the JurisdictionSuperAdministrator's)."""
+    current = as_iac_admin.get("/api/admin/jurisdictions").json()[0]
+    assert current["enabled"] is True
+    for change in ({"name": "Renamed by the administrator"}, {"enabled": False}):
+        body = {"name": current["name"], "settings": {}, "version": current["version"]} | change
+        refused = as_iac_admin.put("/api/admin/jurisdictions/IAC", json=body)
+        assert (refused.status_code, refused.json()["detail"]["code"]) == (403, "permission_denied"), change
+    with Session(jurisdiction_db) as session:
+        row = session.exec(select(Jurisdiction).where(Jurisdiction.code == "IAC")).one()
+        assert (row.name, row.enabled) == (current["name"], True)
+    assert [t for t in _audit(jurisdiction_db) if t[0] == "access.denied" or t[1] == "denied"]  # the refusals are audited
+
+
+def test_a_jurisdiction_administrator_may_change_the_settings_and_send_the_name_and_flag_it_already_has(as_iac_admin):
+    """What it may change (template, features, wording) still works, and so does sending what is already there."""
+    current = as_iac_admin.get("/api/admin/jurisdictions").json()[0]
+    body = {
+        "name": current["name"],
+        "enabled": True,
+        "settings": {"wording": {"no.such.key": "x"}},
+        "version": current["version"],
+    }
+    assert as_iac_admin.put("/api/admin/jurisdictions/IAC", json=body).status_code == 400  # settings are still validated
+    body["settings"] = {}
+    assert as_iac_admin.put("/api/admin/jurisdictions/IAC", json=body).status_code == 200
+
+
+def test_a_super_administrator_renames_and_disables_a_jurisdiction(as_admin):
+    current = as_admin.get("/api/admin/jurisdictions").json()[0]
+    done = as_admin.put(
+        "/api/admin/jurisdictions/IAC", json={"name": "Renamed", "settings": {}, "enabled": False, "version": current["version"]}
+    )
+    assert done.status_code == 200 and (done.json()["name"], done.json()["enabled"]) == ("Renamed", False)
 
 
 def test_a_jurisdiction_administrator_cannot_create_a_jurisdiction(as_iac_admin):

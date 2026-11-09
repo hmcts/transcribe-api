@@ -42,7 +42,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from transcribe_api.domain import assignments as assignment_service
-from transcribe_api.domain.audit import ACCESS_DENIED, DENIED, record_audit
+from transcribe_api.domain.audit import ACCESS_DENIED, DENIED, record_audit, stage_audit
 from transcribe_api.domain.auth import context as auth_context
 from transcribe_api.domain.auth.authorisation import (
     JURISDICTION_NOT_IN_SCOPE,
@@ -57,6 +57,7 @@ from transcribe_api.domain.auth.permissions import (
     ROLE_JURISDICTION_SUPER_ADMIN,
     ROLE_SYSTEM_ADMIN,
     STORED_ROLES,
+    assignable_roles,
 )
 from transcribe_api.domain.models_dictation import AuditLog, Jurisdiction, RoleAssignment, User
 
@@ -93,7 +94,7 @@ _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+$")
 # ---------------------------------------------------------------------------
 
 
-def _refuse(actor: object, code: str, message: str, *, detail: dict | None = None) -> HTTPException:
+def refuse(actor: object, code: str, message: str, *, detail: dict | None = None) -> HTTPException:
     """The 403 for a change the rules refuse, audited (as the permission checks audit theirs)."""
     record_audit(
         ACCESS_DENIED,
@@ -129,13 +130,14 @@ def jurisdiction_by_code(session: Session, code: str) -> Jurisdiction:
 
 
 def check_may_change_assignment(
-    actor: object, *, role: str, jurisdiction_code: str | None, target_user_id: UUID | None
+    actor: object, *, role: str, jurisdiction_code: str | None, target_user_id: UUID | None, adding: bool = False
 ) -> None:
     """Raise the 403 unless the actor may give (or take away) ``role`` in ``jurisdiction_code``
     (None for the global role) to the user ``target_user_id`` (None: someone who has not signed in).
+    ``adding``: the role is being given (not taken away): nobody gives themselves one.
     The role and where it is held are valid (``check_assignable``); this is only about who may."""
     if role == ROLE_SYSTEM_ADMIN:
-        raise _refuse(actor, ASSIGNMENT_NOT_ALLOWED, "SystemAdministrator cannot be assigned.", detail={"role": role})
+        raise refuse(actor, ASSIGNMENT_NOT_ALLOWED, "SystemAdministrator cannot be assigned.", detail={"role": role})
     me = getattr(actor, "id", None)
     is_self = target_user_id is not None and target_user_id == me
     sysadmin = auth_context.sysadmin_of(actor)
@@ -144,15 +146,17 @@ def check_may_change_assignment(
     # asked, in any jurisdiction.
     if is_self and sysadmin:
         return
-    # Nobody else changes their own administrator role.
+    # Nobody else gives themselves a role, nor changes their own administrator role.
+    if is_self and adding:
+        raise refuse(actor, ASSIGNMENT_NOT_ALLOWED, "You cannot give yourself a role.", detail={"role": role})
     if is_self and role in (ROLE_JURISDICTION_ADMIN, ROLE_JURISDICTION_SUPER_ADMIN):
-        raise _refuse(
+        raise refuse(
             actor, ASSIGNMENT_NOT_ALLOWED, "You cannot change your own administrator role.", detail={"role": role}
         )
 
     if role == ROLE_JURISDICTION_SUPER_ADMIN:
         if not has_permission(actor, "jurisdiction_super_admin.assign"):
-            raise _refuse(
+            raise refuse(
                 actor,
                 ASSIGNMENT_NOT_ALLOWED,
                 "Only a SystemAdministrator assigns the JurisdictionSuperAdministrator role.",
@@ -161,7 +165,7 @@ def check_may_change_assignment(
         return
     if role == ROLE_JURISDICTION_ADMIN:
         if not has_permission(actor, "jurisdiction_admin.assign"):
-            raise _refuse(
+            raise refuse(
                 actor,
                 ASSIGNMENT_NOT_ALLOWED,
                 "Only a JurisdictionSuperAdministrator or a SystemAdministrator assigns the "
@@ -171,7 +175,7 @@ def check_may_change_assignment(
         return
     # Judge and LegalTextManager: users.manage, in the jurisdiction.
     if not has_permission(actor, "users.manage"):
-        raise _refuse(
+        raise refuse(
             actor, ASSIGNMENT_NOT_ALLOWED, "Your role does not allow you to assign that role.", detail={"role": role}
         )
     # (With no jurisdiction there is nothing to be in scope of: the caller says it is invalid.)
@@ -209,15 +213,19 @@ def _view(row: RoleAssignment, jurisdiction: Jurisdiction | None, user: User | N
     )
 
 
-def _user_by_email(session: Session, email: str) -> User | None:
-    """The user who signed in with that email (the most recently created, when an Entra
-    account was deleted and recreated and so left two rows)."""
-    return session.exec(
-        select(User).where(func.lower(User.email) == email).order_by(User.created_datetime.desc())  # type: ignore[attr-defined]
-    ).first()
+def _users_by_email(session: Session, email: str) -> list[User]:
+    """Every user row that signed in with that email, newest first. Normally one: more than one
+    means the same address was claimed by two Entra accounts (an account deleted and recreated, a
+    guest with a look-alike address), and which of them an assignment is for is not for the code to guess."""
+    return list(
+        session.exec(
+            select(User).where(func.lower(User.email) == email).order_by(User.created_datetime.desc())  # type: ignore[attr-defined]
+        ).all()
+    )
 
 
 def audit_role_change(
+    session: Session,
     action: str,
     actor: object,
     *,
@@ -227,8 +235,9 @@ def audit_role_change(
     role: str | None,
     extra: dict | None = None,
 ) -> None:
-    """The audit row of a role change. Filed against the jurisdiction it concerns (the history
-    of a JurisdictionAdministrator reads those), else against the user. The email is kept only
+    """Add the audit row of a role change to ``session``, to be committed with the change itself (call it
+    before the commit: fail-closed, ``audit.stage_audit``). Filed against the jurisdiction it concerns (the
+    history of a JurisdictionAdministrator reads those), else against the user. The email is kept only
     for a target who has not signed in (no user to name)."""
     detail: dict = {
         "target_user_id": str(target_user_id) if target_user_id else None,
@@ -238,7 +247,8 @@ def audit_role_change(
     }
     if target_user_id is None and target_email:
         detail["target_email"] = target_email
-    record_audit(
+    stage_audit(
+        session,
         action,
         actor_id=actor.id,  # type: ignore[attr-defined]
         outcome="success",
@@ -274,8 +284,17 @@ def create_assignment(
         pending_email = assignment_service.normalise_email(email)
         if not _EMAIL.match(pending_email):
             raise error(400, "invalid_email", "That is not an email address.")
-        # Someone who has signed in already will never "first sign in" again: assign to them.
-        target = _user_by_email(session, pending_email)
+        # Someone who has signed in already will never "first sign in" again: assign to them. If
+        # the address belongs to more than one user row, refuse rather than pick one (the newest
+        # would be a look-alike's): assign to the person by user_id instead.
+        found = _users_by_email(session, pending_email)
+        if len(found) > 1:
+            raise error(
+                409,
+                "ambiguous_email",
+                "More than one user has signed in with that email address: choose the person from the user list.",
+            )
+        target = found[0] if found else None
         if target is not None:
             pending_email = None
 
@@ -286,8 +305,11 @@ def create_assignment(
         role=role,
         jurisdiction_code=jurisdiction_code.strip().upper() if jurisdiction_code else None,
         target_user_id=target.id if target else None,
+        adding=True,
     )
     jurisdiction = jurisdiction_by_code(session, jurisdiction_code) if jurisdiction_code else None
+    if jurisdiction is not None and not jurisdiction.enabled:
+        raise error(409, "jurisdiction_disabled", "That jurisdiction is disabled: nobody can be given a role there.")
     if role in GLOBAL_ROLES and jurisdiction is not None:
         raise error(400, "invalid_assignment", f"{role} is global: it has no jurisdiction.")
     if role not in GLOBAL_ROLES and jurisdiction is None:
@@ -301,6 +323,16 @@ def create_assignment(
             email=pending_email,
             granted_by=actor.id,  # type: ignore[attr-defined]
         )
+        # In the same transaction: if the audit row cannot be written the assignment is not made.
+        audit_role_change(
+            session,
+            CHANGE_ASSIGNMENT_ADDED,
+            actor,
+            jurisdiction=jurisdiction,
+            target_user_id=row.user_id,
+            target_email=row.pending_email,
+            role=role,
+        )
         session.commit()
     except assignment_service.DuplicateAssignmentError:
         session.rollback()
@@ -312,14 +344,6 @@ def create_assignment(
         session.rollback()
         raise error(400, "invalid_assignment", str(exc)) from None
     session.refresh(row)
-    audit_role_change(
-        CHANGE_ASSIGNMENT_ADDED,
-        actor,
-        jurisdiction=jurisdiction,
-        target_user_id=row.user_id,
-        target_email=row.pending_email,
-        role=role,
-    )
     return _view(row, jurisdiction, target)
 
 
@@ -338,8 +362,8 @@ def delete_assignment(session: Session, actor: object, assignment_id: UUID) -> N
     )
     user_id, pending_email, role = row.user_id, row.pending_email, row.role
     session.delete(row)
-    session.commit()
     audit_role_change(
+        session,
         CHANGE_ASSIGNMENT_REMOVED,
         actor,
         jurisdiction=jurisdiction,
@@ -347,11 +371,19 @@ def delete_assignment(session: Session, actor: object, assignment_id: UUID) -> N
         target_email=pending_email,
         role=role,
     )
+    session.commit()
 
 
 # ---------------------------------------------------------------------------
 # Deactivation
 # ---------------------------------------------------------------------------
+
+
+def _role_may_assign(actor: object, role: str) -> bool:
+    """Whether the stored role the actor acts in may assign ``role`` (permissions.assignable_roles, without
+    the SystemAdministrator's additions: they are for assigning, not for switching someone off)."""
+    ctx = auth_context.context_of(actor)
+    return role in assignable_roles(ctx.role if ctx else None, sysadmin=False)
 
 
 def set_user_active(session: Session, actor: object, user_id: UUID, *, active: bool) -> bool:
@@ -366,41 +398,42 @@ def set_user_active(session: Session, actor: object, user_id: UUID, *, active: b
     if target is None:
         raise error(404, "user_not_found", "There is no such user.")
     if user_id == actor.id:  # type: ignore[attr-defined]
-        raise _refuse(actor, "cannot_deactivate_self", "You cannot deactivate your own account.")
+        raise refuse(actor, "cannot_deactivate_self", "You cannot deactivate your own account.")
     held = session.exec(
         select(RoleAssignment, Jurisdiction)
         .join(Jurisdiction, Jurisdiction.id == RoleAssignment.jurisdiction_id, isouter=True)
         .where(RoleAssignment.user_id == user_id)
     ).all()
+    # The scope is the role's (a SystemAdministrator who acts in a stored role has that role's, not a
+    # global one: the system permissions give no say over users).
     scope = jurisdiction_scope(actor)
-    if has_permission(actor, "jurisdiction_super_admin.assign"):
-        scope = None
     if scope is not None:
         in_scope = [row for row, j in held if j is not None and j.code in scope]
         if not in_scope:
             raise error(404, "user_not_found", "There is no such user.")
         if len(in_scope) != len(held):
-            raise _refuse(
+            raise refuse(
                 actor,
                 ASSIGNMENT_NOT_ALLOWED,
                 "That user has roles in other jurisdictions too: remove their roles here instead.",
             )
     for row, j in held:
-        # Whoever may not assign a role may not switch its holder off.
-        if row.role == ROLE_JURISDICTION_SUPER_ADMIN and not has_permission(actor, "jurisdiction_super_admin.assign"):
-            raise _refuse(actor, ASSIGNMENT_NOT_ALLOWED, "You cannot deactivate a JurisdictionSuperAdministrator.")
-        if row.role == ROLE_JURISDICTION_ADMIN and not has_permission(actor, "jurisdiction_admin.assign"):
-            raise _refuse(actor, ASSIGNMENT_NOT_ALLOWED, "You cannot deactivate a JurisdictionAdministrator.")
+        # Whoever may not assign a role (as the role they act in: the SystemAdministrator's own
+        # permissions do not count here) may not switch its holder off.
+        if row.role == ROLE_JURISDICTION_SUPER_ADMIN and not _role_may_assign(actor, row.role):
+            raise refuse(actor, ASSIGNMENT_NOT_ALLOWED, "You cannot deactivate a JurisdictionSuperAdministrator.")
+        if row.role == ROLE_JURISDICTION_ADMIN and not _role_may_assign(actor, row.role):
+            raise refuse(actor, ASSIGNMENT_NOT_ALLOWED, "You cannot deactivate a JurisdictionAdministrator.")
     if target.is_active == active:
         return False
     target.is_active = active
     session.add(target)
-    session.commit()
     places = [j for _row, j in held]
     codes = sorted({j.code for j in places if j is not None})
     # Filed against the jurisdiction when it concerns exactly one (its administrators read that).
     single = places[0] if places and None not in places and len(codes) == 1 else None
     audit_role_change(
+        session,
         CHANGE_USER_REACTIVATED if active else CHANGE_USER_DEACTIVATED,
         actor,
         jurisdiction=single,
@@ -409,6 +442,7 @@ def set_user_active(session: Session, actor: object, user_id: UUID, *, active: b
         role=None,
         extra={"jurisdictions": codes},
     )
+    session.commit()  # the change and its audit row, or neither
     return True
 
 
@@ -441,12 +475,17 @@ def _like(text: str) -> str:
 
 
 def visible_scope(actor: object) -> frozenset[str] | None:
-    """The jurisdictions whose users the actor lists: None for all (a JurisdictionSuperAdministrator,
-    and a SystemAdministrator, who needs to find who to make a JurisdictionSuperAdministrator),
-    else the one they act in."""
-    if has_permission(actor, "jurisdiction_super_admin.assign"):
-        return None
-    return jurisdiction_scope(actor)
+    """The jurisdictions whose users the actor lists: None for all, else the one they act in.
+
+    Global only for a JurisdictionSuperAdministrator (the role it acts in), and for a
+    SystemAdministrator reaching the list through its own permission, ``jurisdiction_super_admin.assign``
+    (they need to find who to make a JurisdictionSuperAdministrator: the actor holds no
+    ``users.manage``, so no role is acting). A SystemAdministrator acting in a stored role that
+    has ``users.manage`` (they gave themselves one) has that role's scope: a JurisdictionAdministrator's
+    is its jurisdiction."""
+    if has_permission(actor, "users.manage"):
+        return jurisdiction_scope(actor)
+    return None
 
 
 def list_users(
@@ -601,11 +640,16 @@ def list_users(
 # ---------------------------------------------------------------------------
 
 
+# Shown for the actor of a change that only a SystemAdministrator acting through its own permissions
+# can have made (see ``role_history``): the SystemAdministrator is not named in the app.
+SYSTEM_ACTOR_LABEL = "system administrator"
+
+
 @dataclass(frozen=True)
 class HistoryEntry:
     id: UUID
     timestamp: datetime
-    actor_id: str
+    actor_id: str | None
     actor_email: str
     actor_jurisdiction: str | None
     actor_role: str | None
@@ -678,12 +722,17 @@ def role_history(
         target_uuid = _uuid(target_id)
         roles = detail.get("roles")
         role = detail.get("role") or (roles[0] if isinstance(roles, list) and len(roles) == 1 else None)
+        # An assignment made or removed with NO active role was made through a SystemAdministrator's own
+        # permissions (every other way needs a role to act in, which the row is stamped with): the
+        # SystemAdministrator is invisible in the app, so the actor is not named. (One acting in a
+        # stored role is stamped with it and cannot be told from that role's holder: shown as such.)
+        by_system = row.active_role is None and row.event_type in (CHANGE_ASSIGNMENT_ADDED, CHANGE_ASSIGNMENT_REMOVED)
         items.append(
             HistoryEntry(
                 id=row.id,
                 timestamp=row.timestamp,
-                actor_id=row.user_id,
-                actor_email=emails.get(actor_id, "") if actor_id else "",
+                actor_id=None if by_system else row.user_id,
+                actor_email=SYSTEM_ACTOR_LABEL if by_system else (emails.get(actor_id, "") if actor_id else ""),
                 actor_jurisdiction=codes.get(row.active_jurisdiction_id) if row.active_jurisdiction_id else None,
                 actor_role=row.active_role,
                 target_id=str(target_uuid) if target_uuid else None,

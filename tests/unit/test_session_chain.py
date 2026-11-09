@@ -16,7 +16,7 @@ import jwt
 import pytest
 
 from tests.unit import auth_fixtures as af
-from tests.unit.admin_fixtures import ADMIN, JUDGE, SYSTEM, make_world
+from tests.unit.admin_fixtures import ADMIN, JUDGE, make_world
 from transcribe_api.domain.auth import app_token
 
 pytestmark = pytest.mark.real_jurisdictions

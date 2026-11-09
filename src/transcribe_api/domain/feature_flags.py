@@ -32,6 +32,7 @@ from uuid import UUID
 
 from sqlmodel import Session, select
 
+from transcribe_api.domain.audit import stage_audit
 from transcribe_api.domain.models_dictation import SystemFeatureFlag, User
 from transcribe_api.runtime.db_connection import get_engine
 from transcribe_api.runtime.settings_dictation import get_settings
@@ -151,19 +152,52 @@ def current_value(session: Session, name: str) -> bool:
     return default_value(name) if row is None else bool(row.value)
 
 
-def set_flag(session: Session, name: str, value: bool, *, updated_by: UUID | None) -> bool:
-    """Store the flag's value (an upsert) and clear the cache. Returns the value it had.
-    Commits."""
+def set_flag(
+    session: Session,
+    name: str,
+    value: bool,
+    *,
+    updated_by: UUID | None,
+    acted_as: list[str] | None = None,
+) -> bool:
+    """Store the flag's value and clear the cache. Returns the value it had. Commits.
+
+    One atomic upsert (``INSERT .. ON CONFLICT DO UPDATE``), so two first-ever writes of a flag at
+    the same moment both succeed (the later one wins) instead of one failing on the primary key.
+    With ``updated_by`` the change is audited (``feature_flag.changed``: the flag, from, to and the
+    roles ``acted_as``) in the same transaction: if the audit row cannot be written, the flag is not
+    changed."""
     if name not in FLAG_DEFAULTS:
         raise UnknownFlagError(name)
     before = current_value(session, name)
-    row = session.exec(select(SystemFeatureFlag).where(SystemFeatureFlag.name == name)).first()
-    if row is None:
-        row = SystemFeatureFlag(name=name, value=value)
-    row.value = value
-    row.updated_at = datetime.now(UTC)
-    row.updated_by = updated_by
-    session.add(row)
+    now = datetime.now(UTC)
+    insert = _insert_for(session)
+    statement = insert(SystemFeatureFlag).values(name=name, value=value, updated_at=now, updated_by=updated_by)
+    session.execute(
+        statement.on_conflict_do_update(
+            index_elements=[SystemFeatureFlag.name],
+            set_={"value": value, "updated_at": now, "updated_by": updated_by},
+        )
+    )
+    if updated_by is not None:
+        stage_audit(
+            session,
+            "feature_flag.changed",
+            actor_id=updated_by,
+            outcome="success",
+            object_type="feature_flag",
+            detail={"flag": name, "from": before, "to": value, "acted_as": acted_as or []},
+        )
     session.commit()
     invalidate_cache()
     return before
+
+
+def _insert_for(session: Session):
+    """The dialect's ``INSERT`` (PostgreSQL in service; SQLite in the unit tests), which both
+    offer ``ON CONFLICT DO UPDATE``."""
+    if session.get_bind().dialect.name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert
+    else:
+        from sqlalchemy.dialects.sqlite import insert
+    return insert

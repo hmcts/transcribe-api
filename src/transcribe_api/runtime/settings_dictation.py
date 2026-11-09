@@ -84,6 +84,18 @@ class Settings(BaseSettings):
     CORS_ALLOWED_ORIGINS: str | None = None
     # Transcription polling service configuration
 
+    @field_validator("ENVIRONMENT", mode="before")
+    @classmethod
+    def normalise_environment(cls, v):
+        """``Local``, ``LOCAL `` and ``local`` are one environment (the persona check
+        normalises it the same way: they must not disagree)."""
+        return v.strip().lower() if isinstance(v, str) else v
+
+    def environment_is_set(self) -> bool:
+        """Whether ENVIRONMENT came from the environment (or .env) and not from the default
+        (``local``). A deployed process that lost its ENVIRONMENT must not be taken for a local one."""
+        return "ENVIRONMENT" in self.model_fields_set
+
     @field_validator("LANGFUSE_HOST")
     @classmethod
     def validate_langfuse_host(cls, v):
@@ -132,7 +144,7 @@ def get_settings(environment: str | None = None):
         Settings: Configured settings instance.
     """
     # Handle None case for lru_cache compatibility
-    env_key = environment if environment is not None else os.getenv("ENVIRONMENT", "local")
+    env_key = (environment if environment is not None else os.getenv("ENVIRONMENT", "local")).strip().lower()
 
     # Choose the appropriate settings class based on environment
     # Use LocalSettings for local and test environments (allows .env file and mocked values)
