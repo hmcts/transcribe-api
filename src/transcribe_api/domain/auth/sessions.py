@@ -206,12 +206,17 @@ def mint_session(
     requested: Context | None = None,
     requested_given: bool = False,
     chosen: Context | None = None,
+    session_expires_at: datetime | None = None,
 ) -> SessionResponse:
     """Read the user's assignments, pick the context, sign a token, and say who they are.
 
     ``chosen``: a context the caller has already checked against the assignments (the user
     asked for it: PUT /api/me/context). Otherwise it is ``requested`` / the auto rule
-    (``select_context``)."""
+    (``select_context``).
+
+    ``session_expires_at``: set by every mint that is not a sign-in (a context change, leaving a
+    jurisdiction), to the presenting token's: the new token never outlives it (``app_token.mint``).
+    Only a sign-in, which verified an Entra token, starts a new session."""
     assignments = load_assignments(session, user.id)
     contexts = distinct_contexts(assignments)
     ctx = chosen if chosen is not None else select_context(contexts, requested=requested, requested_given=requested_given)
@@ -221,6 +226,7 @@ def mint_session(
         assignments=contexts,
         ctx=ctx,
         name=user.name or "",
+        session_expires_at=session_expires_at,
     )
     return SessionResponse(
         token=token,

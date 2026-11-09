@@ -156,7 +156,13 @@ def set_context(
         held = distinct_contexts(load_assignments(session, current_user.id))
         if wanted not in held:
             raise context_not_available()
-        return mint_session(session, current_user.db_user, sysadmin=current_user.sysadmin, chosen=wanted)
+        return mint_session(
+            session,
+            current_user.db_user,
+            sysadmin=current_user.sysadmin,
+            chosen=wanted,
+            session_expires_at=current_user.session_expires_at,
+        )
 
 
 @router.delete("/me/jurisdictions/{code}", response_model=SessionResponse)
@@ -188,6 +194,7 @@ def leave(code: str, response: Response, current_user: User = Depends(signed_in_
             sysadmin=current_user.sysadmin,
             requested=previous if keep else None,
             requested_given=keep,
+            session_expires_at=current_user.session_expires_at,
         )
 
 

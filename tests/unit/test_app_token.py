@@ -71,7 +71,7 @@ def test_the_claims_are_the_contracts():
     assert claims["ctx"] is None
     # Permissions are not in the token: they are derived from the role.
     assert "permissions" not in claims
-    assert set(claims) == {"iss", "aud", "sub", "iat", "exp", "sysadmin", "assignments", "ctx", "name"}
+    assert set(claims) == {"iss", "aud", "sub", "iat", "exp", "sess_exp", "sysadmin", "assignments", "ctx", "name"}
 
 
 def test_the_lifetime_follows_the_setting(monkeypatch):

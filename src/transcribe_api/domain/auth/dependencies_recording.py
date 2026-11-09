@@ -36,6 +36,7 @@ def _resolve_user(principal: AppPrincipal) -> AuthenticatedUser:
         ctx=principal.ctx,
         sysadmin=principal.sysadmin,
         assignments=principal.assignments,
+        session_expires_at=principal.session_expires_at,
     )
 
 

@@ -17,6 +17,12 @@ Claims::
 
     sub          the user's UUID
     iat, exp     issued at, expires (seconds)
+    sess_exp     when the Entra-verified sign-in this token descends from stops being good
+                 (seconds): sign-in time + one lifetime. A token minted at sign-in has
+                 ``exp == sess_exp``; one minted without Entra (``PUT /api/me/context``,
+                 ``DELETE /api/me/jurisdictions/{code}``) carries the presenting token's
+                 ``sess_exp`` and expires no later than it, so re-minting never extends the
+                 ``sysadmin`` claim beyond one lifetime after the last Entra verification
     sysadmin     true when the Entra ``roles`` claim held SystemAdministrator at mint
                  time; never read from the database
     assignments  [{"jurisdiction": "ET" | null, "role": "Judge"}, ...]
@@ -96,6 +102,8 @@ class AppPrincipal:
     issued_at: datetime
     expires_at: datetime
     name: str = ""
+    # Where the chain of re-mints back to the last Entra-verified sign-in ends (see ``mint``).
+    session_expires_at: datetime | None = None
 
 
 _ephemeral_key: str | None = None
@@ -149,16 +157,26 @@ def mint(
     ctx: Context | None,
     name: str = "",
     now: float | None = None,
+    session_expires_at: datetime | None = None,
 ) -> tuple[str, datetime]:
-    """Sign a token. Returns it with its expiry."""
+    """Sign a token. Returns it with its expiry.
+
+    ``session_expires_at``: given when the token is minted from another BenchNotes token and not
+    from a verified Entra token (a context change): the presenting token's ``sess_exp``. The new
+    token never outlives it, so a chain of re-mints is over one lifetime after the Entra
+    verification it started from (and the ``sysadmin`` claim with it). Left out (a sign-in), the
+    session starts now."""
     issued = int(now if now is not None else time.time())
     expires = issued + ttl_seconds()
+    sess_exp = expires if session_expires_at is None else int(session_expires_at.timestamp())
+    expires = min(expires, sess_exp)
     claims = {
         "iss": ISSUER,
         "aud": AUDIENCE,
         "sub": str(user_id),
         "iat": issued,
         "exp": expires,
+        "sess_exp": sess_exp,
         "sysadmin": bool(sysadmin),
         "assignments": [assignment.to_claim() for assignment in assignments],
         "ctx": ctx.to_claim() if ctx is not None else None,
@@ -197,13 +215,20 @@ def verify(token: str) -> AppPrincipal:
         raw_ctx = claims.get("ctx")
         ctx = Context.from_claim(raw_ctx) if raw_ctx is not None else None
         name = claims.get("name") or ""
+        expires = int(claims["exp"])
+        # A token without it (minted before it existed) is its own session: never longer than itself.
+        sess_exp = claims.get("sess_exp", expires)
+        if isinstance(sess_exp, bool) or not isinstance(sess_exp, int):
+            msg = "sess_exp must be an integer"
+            raise AppTokenError(msg)
         return AppPrincipal(
             user_id=user_id,
             sysadmin=sysadmin,
             assignments=assignments,
             ctx=ctx,
             issued_at=datetime.fromtimestamp(int(claims["iat"]), tz=UTC),
-            expires_at=datetime.fromtimestamp(int(claims["exp"]), tz=UTC),
+            expires_at=datetime.fromtimestamp(expires, tz=UTC),
+            session_expires_at=datetime.fromtimestamp(sess_exp, tz=UTC),
             name=name if isinstance(name, str) else "",
         )
     except (ValueError, TypeError, KeyError) as exc:

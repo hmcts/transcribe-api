@@ -47,6 +47,8 @@ from transcribe_api.domain.audit_recording import (
     denied,
     write_audit,
 )
+from transcribe_api.domain.auth import app_token
+from transcribe_api.domain.auth.app_token import AppTokenError
 from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
 from transcribe_api.domain.auth.context import context_of
 from transcribe_api.domain.auth.authorisation import public_endpoint, signed_url_endpoint
@@ -133,11 +135,18 @@ def _sanitize_filename(filename: str) -> str:
     return _UNSAFE_FILENAME_CHARS_RE.sub("_", name)
 
 
-# Rate limiter — keyed on the bearer token so limits are per-caller, not per-IP.
-# Falls back to remote address for unauthenticated requests.
+# Rate limiter — keyed on the verified user (the token's ``sub``) so limits are per-caller, not
+# per-IP and not per-token: a BenchNotes token is replaced every few minutes (and on demand by
+# PUT /api/me/context), so a key on the raw token would give every new token an empty bucket.
+# Falls back to the remote address when the request carries no valid token.
 def _caller_key(request: Request) -> str:
     auth = request.headers.get("Authorization", "")
-    return auth[7:] if auth.startswith("Bearer ") else get_remote_address(request)
+    if auth.startswith("Bearer "):
+        try:
+            return f"user:{app_token.verify(auth[7:].strip()).user_id}"
+        except AppTokenError:
+            pass
+    return get_remote_address(request)
 
 
 limiter = Limiter(key_func=_caller_key)

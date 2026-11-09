@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from hmcts_azure_auth.models import AuthUser
@@ -32,6 +33,8 @@ class AuthenticatedUser:
     ctx: Context | None = None
     sysadmin: bool = False
     assignments: tuple[Context, ...] = ()
+    # Where the token's chain of re-mints ends (app_token.mint): a re-mint never outlives it.
+    session_expires_at: datetime | None = None
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.db_user, name)
