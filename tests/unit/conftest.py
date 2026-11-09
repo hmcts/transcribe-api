@@ -165,11 +165,19 @@ def feature_flags_are_not_stored(request: pytest.FixtureRequest, monkeypatch: py
     """DIAAT-388: no test reads the system_feature_flag table (and so connects to a database)
     from every dictation request: no flag has a row, so each has its default (the
     DICTATION_ENABLED setting). Tests of the flag layer itself mark themselves ``real_feature_flags``."""
-    if request.node.get_closest_marker("real_feature_flags"):
-        return
     from transcribe_api.domain import feature_flags
 
-    monkeypatch.setattr(feature_flags, "_stored_value", lambda name: None)
+    # The in-process cache (DIAAT-392) must not carry a value from one test to the next; the
+    # tests run with a TTL of 0 (every read goes through) unless they test the cache itself.
+    feature_flags.invalidate_cache()
+    monkeypatch.setattr(feature_flags, "CACHE_TTL_SECONDS", 0.0)
+    if request.node.get_closest_marker("real_feature_flags"):
+        yield
+        feature_flags.invalidate_cache()
+        return
+    monkeypatch.setattr(feature_flags, "_stored_value", lambda name: (None, True))
+    yield
+    feature_flags.invalidate_cache()
 
 
 @pytest.fixture

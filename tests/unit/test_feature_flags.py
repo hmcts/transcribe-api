@@ -207,7 +207,7 @@ def test_a_row_set_by_a_system_administrator_switches_it_off_in_the_running_api(
     """The table wins over the setting: on by default, off by the row, with no restart."""
     _set_default(monkeypatch, True)
     stored = {"value": None}
-    monkeypatch.setattr(feature_flags, "_stored_value", lambda name: stored["value"])
+    monkeypatch.setattr(feature_flags, "_stored_value", lambda name: (stored["value"], True))
     route = next(r for r in guarded(routes) if r.path == "/api/get-speech-token")
     (dependency,) = {c for c in route.calls() if declared_permissions(c) is not None}
     judge = _judge(DictationUser)
