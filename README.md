@@ -50,11 +50,14 @@ Both upstream surfaces are preserved unchanged, and they do not collide:
 
 ## Branches and environments
 
-- Feature branches start from `develop`, and their PRs go into `develop`. Each PR gets its own preview.
-- `develop` deploys to demo (`benchnotes.demo.platform.hmcts.net`). The permanent draft PR #45 (`develop` → `master`) rebuilds on every push to `develop`, and Flux deploys its `pr-45-*` image. Never merge, close or mark #45 ready.
-- To release, open a PR into `master` from a branch cut from `develop`. `master` deploys to AAT, then prod.
-- Merge `master` into `develop` at least every 2 weeks, by a PR from a branch cut from `master` (not from `master` itself: Jenkins stops building a branch that is the head of an open PR), with a merge commit. Old `pr-*` images expire after about 3 weeks, and demo pods then fail to pull. If there is nothing to merge, re-run the latest Jenkins build of `PR-45` instead, which pushes a fresh tag.
-- Migrations go only through `master`. A feature that needs schema first lands an additive migration on `master` by its own PR; then `master` is merged into `develop`, then the feature. Otherwise a revision on `develop` and a different one on `master` from the same parent give Alembic two heads at the next merge.
+`develop` is the default branch. All work flows one way: feature PR -> `develop` -> demo -> promote -> `master` -> AAT -> prod.
+
+- Feature branches start from `develop`, and their PRs go into `develop` (squash merge). Each PR gets its own preview.
+- `develop` deploys to demo (`benchnotes.demo.platform.hmcts.net`). The permanent draft PR #45 (`develop` -> `master`) rebuilds on every push to `develop`, and Flux deploys its `pr-45-*` image. Never merge, close, retarget or mark #45 ready.
+- To release, run the "Promote to master" workflow (Actions tab, from `develop`). It fast-forwards `master` to `develop` HEAD, or to the commit given as input, which must be on `develop`. It never force-pushes, and fails if `master` is not an ancestor of the target. Jenkins then builds `master`, which deploys to AAT, then prod.
+- Nobody pushes or opens PRs to `master`: a ruleset lets only the promote workflow update it. Hotfixes go through `develop` like any other change.
+- Old `pr-*` images expire after about 3 weeks, and demo pods then fail to pull. If `develop` has had no merges for that long, re-run the latest Jenkins build of `PR-45`, which pushes a fresh tag.
+- Because `master` only ever moves to a commit already on `develop`, the two branches cannot diverge, and Alembic migrations land on `develop` like any other change.
 - `demo` is the CNP branch for the demo Terraform only, and every `master` build overwrites it. Demo uses `master`'s Helm chart, so demo-only settings go in cnp-flux-config `apps/transcribe/transcribe-api/demo.yaml`.
 
 ## Local development
