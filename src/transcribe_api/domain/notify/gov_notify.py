@@ -16,6 +16,11 @@ def _get_notifications_client() -> NotificationsAPIClient | None:
     return NotificationsAPIClient(api_key)
 
 
+def notifications_client() -> NotificationsAPIClient | None:
+    """The Notify client, or None when no key is set (nothing is sent)."""
+    return _get_notifications_client()
+
+
 def send_email(user_email: str, meeting_link: str, meeting_title: str):
     client = _get_notifications_client()
     if client is None:

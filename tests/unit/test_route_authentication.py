@@ -37,6 +37,10 @@ NO_CONTEXT = {
     ("DELETE", "/api/me/jurisdictions/{code}"),
     ("GET", "/api/jurisdictions/public"),
     ("GET", "/api/flags"),
+    # DIAAT-396: a user with no role asks for one (contract section 3).
+    ("POST", "/api/access-requests"),
+    ("GET", "/api/access-requests/mine"),
+    ("POST", "/api/access-requests/{request_id}/withdraw"),
 }
 # These routes used to be open and are not any more (DIAAT-376): the storage probe needs system.settings.
 FORMERLY_OPEN = {("GET", "/api/healthcheck/azure-storage")}

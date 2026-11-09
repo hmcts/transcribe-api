@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     APP_JWT_TTL_SECONDS: int = 300
     GOOGLE_APPLICATION_CREDENTIALS_JSON_OBJECT: str | None = None
     GOV_NOTIFY_API_KEY: str | None = None
+    # DIAAT-398: the GOV.UK Notify templates of the access request emails (ids, not secrets).
+    # "new access request" goes to the people who can approve it; "access request decided" to
+    # the requester. Without a key nothing is sent (what would be is logged); a key with no
+    # template id sends nothing for that email and says so in the log (domain/notify/access_request_emails.py).
+    GOV_NOTIFY_TEMPLATE_ACCESS_REQUEST: str | None = None
+    GOV_NOTIFY_TEMPLATE_ACCESS_DECIDED: str | None = None
     # JWT Verification Settings - Strict by default
     JWT_ENABLE_VERIFICATION: bool = True
     JWT_VERIFICATION_STRICT: bool = True
