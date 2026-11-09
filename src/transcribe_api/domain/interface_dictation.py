@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 import pytz
 from fastapi import HTTPException
-from sqlalchemy import delete, event, func, update
+from sqlalchemy import delete, event, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
@@ -18,10 +18,8 @@ from transcribe_api.domain.exceptions import (
 from transcribe_api.domain.models_dictation import (
     BaseTable,
     DialogueEntry,
-    Jurisdiction,
     LiveTranscriptDraft,
     MinuteVersion,
-    RoleAssignment,
     Tag,
     Transcription,
     TranscriptionJob,
@@ -727,57 +725,3 @@ def delete_live_draft(user_id: UUID, jurisdiction_id: UUID) -> None:
         if draft:
             session.delete(draft)
             session.commit()
-
-
-# ---------------------------------------------------------------------------
-# Admin user management
-# ---------------------------------------------------------------------------
-
-
-def _assigned_user_ids(jurisdiction_codes: frozenset[str]):
-    """A subquery of the users holding a role in one of the jurisdictions (by code)."""
-    return (
-        select(RoleAssignment.user_id)
-        .join(Jurisdiction, Jurisdiction.id == RoleAssignment.jurisdiction_id)  # type: ignore[arg-type]
-        .where(Jurisdiction.code.in_(sorted(jurisdiction_codes)))  # type: ignore[attr-defined]
-    )
-
-
-def user_in_jurisdictions(user_id: UUID, jurisdiction_codes: frozenset[str]) -> bool:
-    """Whether the user holds a role in one of the jurisdictions (by code)."""
-    with Session(engine) as session:
-        return session.exec(select(User.id).where(User.id == user_id, User.id.in_(_assigned_user_ids(jurisdiction_codes)))).first() is not None  # type: ignore[attr-defined]
-
-
-def admin_list_users(
-    *,
-    page: int = 1,
-    page_size: int = 50,
-    search_email: str | None = None,
-    jurisdiction_codes: frozenset[str] | None = None,
-) -> tuple[list[User], int]:
-    """Return a paginated list of users with an optional email substring filter, and, with
-    ``jurisdiction_codes``, only those with a role in one of those jurisdictions (None: all)."""
-    if page < 1:
-        raise HTTPException(status_code=422, detail="page must be >= 1")
-    if page_size < 1 or page_size > 200:
-        raise HTTPException(status_code=422, detail="page_size must be between 1 and 200")
-
-    with Session(engine) as session:
-        filters = []
-        if search_email:
-            filters.append(User.email.ilike(f"%{search_email}%"))
-        if jurisdiction_codes is not None:
-            filters.append(User.id.in_(_assigned_user_ids(jurisdiction_codes)))  # type: ignore[attr-defined]
-
-        count_stmt = select(func.count(User.id))  # type: ignore[arg-type]
-        for f in filters:
-            count_stmt = count_stmt.where(f)
-        total = session.exec(count_stmt).one()
-
-        data_stmt = select(User)
-        for f in filters:
-            data_stmt = data_stmt.where(f)
-        data_stmt = data_stmt.offset((page - 1) * page_size).limit(page_size)
-        users = list(session.exec(data_stmt).all())
-        return users, total

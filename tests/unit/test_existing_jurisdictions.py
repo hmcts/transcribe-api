@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 import pytz
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from tests.unit.jurisdiction_fixtures import (
     add_iac_as_migrated,
@@ -25,7 +25,7 @@ from tests.unit.jurisdiction_fixtures import (
 )
 from transcribe_api import jurisdictions_admin as admin
 from transcribe_api.domain import interface_dictation
-from transcribe_api.domain.assignments import load_assignments
+from transcribe_api.domain.assignments import add_assignment, load_assignments
 from transcribe_api.domain.models_dictation import DocumentContent, Jurisdiction, Transcription
 
 pytestmark = pytest.mark.real_jurisdictions
@@ -81,8 +81,10 @@ def _add_the_et(engine) -> None:
     with Session(engine) as session:
         settings = json.loads(ET_EXAMPLE.read_text())
         admin.put_jurisdiction(session, "ET", "Employment Tribunal", settings)
-        admin.add_member(session, "ET", "et.judge@example.test")
-        admin.add_member(session, "ET", "et.admin@example.test", "admin")
+        et = session.exec(select(Jurisdiction).where(Jurisdiction.code == "ET")).one()
+        add_assignment(session, role="Judge", jurisdiction_id=et.id, email="et.judge@example.test")
+        add_assignment(session, role="JurisdictionAdministrator", jurisdiction_id=et.id, email="et.admin@example.test")
+        session.commit()
         admin.put_jurisdiction(session, "ET", "Employment Tribunal", settings, stage="live")  # DIAAT-345
 
 

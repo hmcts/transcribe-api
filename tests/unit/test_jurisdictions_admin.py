@@ -1,4 +1,4 @@
-"""DIAAT-322 "manual first": adding jurisdictions and members without a deployment."""
+"""DIAAT-322 "manual first": adding jurisdictions without a deployment (members: DIAAT-383, the assignment endpoints)."""
 
 from __future__ import annotations
 
@@ -119,68 +119,23 @@ def test_put_refuses_invalid_settings_and_codes(session):
     assert session.exec(select(Jurisdiction)).all() == []
 
 
-def test_a_member_who_has_signed_in_is_added_by_user(session):
-    admin.put_jurisdiction(session, "ET", "Employment Tribunal", {})
-    user = _user(session, "Judge.One@Example.test")
-
-    assert "signed-in user" in admin.add_member(session, "et", " judge.one@example.TEST ", "admin")
-    assert _members(session) == [("ET", user.id, None, "admin")]
-    # Again: the role is updated, not a second row.
-    assert admin.add_member(session, "ET", "judge.one@example.test", "judge").startswith("Updated judge")
-    assert _members(session) == [("ET", user.id, None, "judge")]
-
-
-def test_someone_who_has_not_signed_in_is_added_pending_by_email(session):
-    admin.put_jurisdiction(session, "ET", "Employment Tribunal", {})
-    assert "pending until they sign in" in admin.add_member(session, "ET", "New.Judge@Example.test")
-    assert _members(session) == [("ET", None, "new.judge@example.test", "judge")]
-
-
-def test_removing_a_member_removes_all_their_roles_there_and_only_there(session):
-    admin.put_jurisdiction(session, "ET", "Employment Tribunal", {})
-    admin.put_jurisdiction(session, "IAC", "Immigration and Asylum Chamber", {})
-    _user(session, "judge@example.test")
-    admin.add_member(session, "ET", "judge@example.test")
-    admin.add_member(session, "IAC", "judge@example.test")
-    # Also given another role there, which this tool does not name: it goes with the member.
-    from transcribe_api.domain.assignments import add_assignment
-
-    et = session.exec(select(Jurisdiction).where(Jurisdiction.code == "ET")).one()
-    user = session.exec(select(User)).one()
-    add_assignment(session, role="LegalTextManager", jurisdiction_id=et.id, user_id=user.id)
-    session.commit()
-
-    assert admin.remove_member(session, "ET", "judge@example.test") == "Removed from ET"
-    assert [(code, role) for code, _user_id, _email, role in _members(session)] == [("IAC", "judge")]
-    with pytest.raises(admin.AdminError, match="Not a member"):
-        admin.remove_member(session, "ET", "judge@example.test")
-
-
-def test_unknown_jurisdictions_and_roles_are_refused(session):
-    with pytest.raises(admin.AdminError, match="No jurisdiction ET"):
-        admin.add_member(session, "ET", "a@example.test")
-    admin.put_jurisdiction(session, "ET", "Employment Tribunal", {})
-    with pytest.raises(admin.AdminError, match="role"):
-        admin.add_member(session, "ET", "a@example.test", "clerk")
-
-
-def test_two_user_rows_with_one_email_are_one_person(session):
-    """An Entra account deleted and recreated leaves two rows: no developer is needed
-    to add or remove that judge (DIAAT-356)."""
-    admin.put_jurisdiction(session, "ET", "Employment Tribunal", {})
-    _user(session, "twin@example.test")
-    _user(session, "TWIN@example.test")
-
-    admin.add_member(session, "ET", "twin@example.test")
-    assert admin.members_of(session, "ET") == [{"email": "twin@example.test", "role": "judge", "tester": False, "pending": False}]
-    assert admin.remove_member(session, "ET", "Twin@example.test") == "Removed from ET"
-    assert admin.members_of(session, "ET") == []
+def test_the_command_line_no_longer_adds_or_removes_members(session):
+    """Who holds a role is the assignment endpoints' (DIAAT-383); argparse refuses the old commands."""
+    for command in ("add-member", "remove-member"):
+        with pytest.raises(SystemExit):
+            admin.run([command, "ET", "a@example.test"], session)
+    for name in ("add_member", "remove_member", "members_of", "user_ids_for"):
+        assert not hasattr(admin, name), name
 
 
 def test_list_shows_each_jurisdiction(session):
     admin.put_jurisdiction(session, "IAC", "Immigration and Asylum Chamber", {})
     admin.put_jurisdiction(session, "ET", "Employment Tribunal", {}, enabled=False)
-    admin.add_member(session, "IAC", "a@example.test")
+    from transcribe_api.domain.assignments import add_assignment
+
+    iac = session.exec(select(Jurisdiction).where(Jurisdiction.code == "IAC")).one()
+    add_assignment(session, role="Judge", jurisdiction_id=iac.id, email="a@example.test")
+    session.commit()
     assert admin.run(["list"], session).splitlines() == [
         "ET\tEmployment Tribunal\tdraft\t0 member(s)\tdisabled",
         "IAC\tImmigration and Asylum Chamber\tdraft\t1 member(s)\tenabled",
@@ -189,8 +144,9 @@ def test_list_shows_each_jurisdiction(session):
 
 def test_main_reports_a_refusal_without_a_traceback(monkeypatch, capsys, session):
     monkeypatch.setattr("transcribe_api.runtime.db_connection.get_engine", lambda: session.get_bind())
-    assert admin.main(["add-member", "ET", "a@example.test"]) == 1
-    assert "Refused: No jurisdiction ET" in capsys.readouterr().err
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    assert admin.main(["put", "E T", "--name", "Employment Tribunal"]) == 1
+    assert "Refused: The code must be letters and digits" in capsys.readouterr().err
 
 
 def test_a_jurisdiction_created_by_someone_else_at_the_same_moment_is_a_conflict(session, monkeypatch):

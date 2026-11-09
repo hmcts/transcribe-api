@@ -433,5 +433,6 @@ def test_the_admin_user_role_and_delete_endpoints_no_longer_exist(client, as_use
     as_user(_make_user(roles=["SystemAdministrator"]))
     user_id = uuid.uuid4()
     assert client.put(f"/api/admin/users/{user_id}/role", json={"role": "Judge"}).status_code == 404
-    # (the path exists for GET: 405, as for any method it has no handler for)
-    assert client.delete(f"/api/admin/users/{user_id}").status_code == 405
+    # Nor is there a path by a user's id any more (users are listed with their assignments: DIAAT-383).
+    assert client.delete(f"/api/admin/users/{user_id}").status_code == 404
+    assert client.get(f"/api/admin/users/{user_id}").status_code == 404

@@ -1,20 +1,19 @@
-"""Admin API routes: legal wording, the interim user and jurisdiction administration.
+"""Admin API routes: legal wording and jurisdictions (settings, wording).
 
 Every route declares the permission it needs (DIAAT-376, domain/auth/authorisation.py,
 docs/authz-permissions.md). ``/admin/transcriptions*`` (any user's dictation records, for a
-SystemAdministrator) and the user role and delete endpoints are gone (DIAAT-389, DIAAT-373);
-the assignment-based replacements are Phase 4.
+SystemAdministrator), the user role and delete endpoints, the old-shape user list and the
+jurisdiction members endpoints are gone (DIAAT-389, DIAAT-373): users and their roles are
+``role_assignment`` rows, managed in api/routes_admin_users.py.
 """
 
 from __future__ import annotations
 
 import asyncio
 import copy
-import hashlib
 import logging
 import urllib.parse
 from dataclasses import dataclass
-from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import UUID
 
@@ -31,6 +30,7 @@ from transcribe_api.api.document_content_models import (
     JurisdictionRef,
     LegalFrameworkPayload,
 )
+from transcribe_api.api.routes_jurisdictions import JurisdictionWording, WordingUpdate
 from transcribe_api.documents.content_loader import get_document_content as load_document_content
 from transcribe_api.documents.content_loader import has_legal_wording, save_document_content
 from transcribe_api.documents.uploaded_templates import MAX_TEMPLATE_BYTES, TemplateField
@@ -39,7 +39,6 @@ from transcribe_api.domain.auth import context as auth_context
 from transcribe_api.domain.auth.authorisation import (
     assert_jurisdiction_in_scope,
     ensure_permission,
-    has_permission,
     jurisdiction_scope,
 )
 from transcribe_api.domain.auth.dependencies_dictation import (
@@ -47,13 +46,7 @@ from transcribe_api.domain.auth.dependencies_dictation import (
     require_permission,
 )
 from transcribe_api.domain.auth.permissions import assignable_roles
-from transcribe_api.domain.interface_dictation import (
-    admin_list_users,
-    get_user_by_id,
-    user_in_jurisdictions,
-)
 from transcribe_api.domain.jurisdictions import (
-    ROLE_ADMIN,
     TEMPLATE_IAC_DECISION,
     WORDING_KEYS,
     ActiveJurisdiction,
@@ -359,98 +352,7 @@ async def update_anonymity_status(
 
 
 # ---------------------------------------------------------------------------
-# Admin user management
-# ---------------------------------------------------------------------------
-
-
-class AdminUserListItem(BaseModel):
-    id: str
-    email: str
-    # Retired (DIAAT-382): a user's roles are their assignments; None for a user created
-    # since. This list is replaced by the assignment-based one (DIAAT-383).
-    role: str | None = None
-    has_completed_onboarding: bool
-    created_datetime: datetime
-
-
-class AdminUserListResponse(BaseModel):
-    items: list[AdminUserListItem]
-    total: int
-    page: int
-    page_size: int
-
-
-# Who may list users: those who manage a jurisdiction's users, and the SystemAdministrator (to find
-# who to make a JurisdictionSuperAdministrator).
-_USER_ADMIN = require_permission("users.manage", "jurisdiction_super_admin.assign")
-
-
-def _user_scope(admin_user: User) -> frozenset[str] | None:
-    """The jurisdictions whose users the caller sees: None for all (a global role, or a
-    SystemAdministrator), else the one they are working in."""
-    if has_permission(admin_user, "jurisdiction_super_admin.assign"):
-        return None
-    return jurisdiction_scope(admin_user)
-
-
-@router.get("/users", response_model=AdminUserListResponse)
-async def admin_list_users_route(
-    search_email: str | None = None,
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=50, ge=1, le=200),
-    admin_user: User = Depends(_USER_ADMIN),
-) -> AdminUserListResponse:
-    """List registered users (interim list, replaced by the assignment-based one in Phase 4):
-    all of them for a JurisdictionSuperAdministrator or a SystemAdministrator, only those with
-    a role in the jurisdiction they are working in for a JurisdictionAdministrator."""
-    users, total = admin_list_users(
-        page=page, page_size=page_size, search_email=search_email, jurisdiction_codes=_user_scope(admin_user)
-    )
-    logger.info(
-        "ADMIN_USER_LIST admin_id=%s total=%d",
-        sanitize_for_log(str(admin_user.id)),
-        total,
-    )
-    items = [
-        AdminUserListItem(
-            id=str(u.id),
-            email=u.email,
-            role=u.role,
-            has_completed_onboarding=u.has_completed_onboarding,
-            created_datetime=u.created_datetime,
-        )
-        for u in users
-    ]
-    return AdminUserListResponse(items=items, total=total, page=page, page_size=page_size)
-
-
-@router.get("/users/{user_id}", response_model=AdminUserListItem)
-async def admin_get_user_route(
-    user_id: UUID,
-    admin_user: User = Depends(_USER_ADMIN),
-) -> AdminUserListItem:
-    """Get a single user by ID (the same people as the list: a user outside the caller's
-    scope is the 404 of an unknown one)."""
-    user = get_user_by_id(user_id)
-    scope = _user_scope(admin_user)
-    if scope is not None and not user_in_jurisdictions(user_id, scope):
-        raise HTTPException(status_code=404, detail="User not found")
-    logger.info(
-        "ADMIN_USER_VIEW admin_id=%s target_user_id=%s",
-        sanitize_for_log(str(admin_user.id)),
-        sanitize_for_log(str(user_id)),
-    )
-    return AdminUserListItem(
-        id=str(user.id),
-        email=user.email,
-        role=user.role,
-        has_completed_onboarding=user.has_completed_onboarding,
-        created_datetime=user.created_datetime,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Jurisdictions and their members (DIAAT-356, DIAAT-376)
+# Jurisdictions (DIAAT-356, DIAAT-376, DIAAT-391, DIAAT-394)
 # ---------------------------------------------------------------------------
 # What jurisdictions_admin does from a command line, from the admin area, so nobody
 # runs anything on a cluster. Plain defs: the database work is synchronous, so
@@ -460,8 +362,8 @@ async def admin_get_user_route(
 # sees and changes only the jurisdiction they are working in (403 ``jurisdiction_not_in_scope``
 # for another), a JurisdictionSuperAdministrator any. Creating one also needs
 # ``jurisdiction.create`` (JurisdictionSuperAdministrator). A SystemAdministrator has none of
-# these (DIAAT-389). The members endpoints are interim: Phase 4 replaces them with the
-# assignment endpoints.
+# these (DIAAT-389). Who holds a role in a jurisdiction is not here: it is the assignment
+# endpoints' (api/routes_admin_users.py).
 
 _JURISDICTION_ADMIN = require_permission("jurisdictions.manage")
 
@@ -493,21 +395,6 @@ class JurisdictionWrite(BaseModel):
     service: Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)] | None = None
     # The version edited ("" when adding one); left out, no check (the command line).
     version: str | None = None
-
-
-class JurisdictionMemberRecord(BaseModel):
-    email: str
-    role: str
-    # In the jurisdiction's test group (DIAAT-345).
-    tester: bool
-    pending: bool
-
-
-class JurisdictionMemberWrite(BaseModel):
-    email: str = PydanticField(min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+$")
-    role: str = "judge"
-    # Left out: unchanged (a new member is not a tester).
-    tester: bool | None = None
 
 
 class WordingKeysResponse(BaseModel):
@@ -546,27 +433,9 @@ def _audit_jurisdiction_change(action: str, admin_user: User, detail: dict[str, 
     record_audit(action, actor_id=admin_user.id, outcome="success", object_type="jurisdiction", detail=detail)
 
 
-def _member_target(email: str) -> dict[str, Any]:
-    """Who a membership change was for, without contact details (domain/audit.py): their
-    user IDs once they have signed in, else a hash of the email they were added by
-    (to check a known address against)."""
-    with Session(get_engine()) as session:
-        user_ids = jurisdictions_admin.user_ids_for(session, email)
-    if user_ids:
-        return {"target_user_ids": user_ids}
-    return {"target_email_sha256": hashlib.sha256(email.strip().lower().encode()).hexdigest()}
-
-
 def _jurisdiction_exists(code: str) -> bool:
     with Session(get_engine()) as session:
         return session.exec(select(Jurisdiction.id).where(Jurisdiction.code == code.strip().upper())).first() is not None
-
-
-def _may_assign(admin_user: User, member_role: str) -> None:
-    """Making someone a jurisdiction's ``admin`` (a JurisdictionAdministrator) is for those who may
-    assign that role (a JurisdictionSuperAdministrator), not for a JurisdictionAdministrator."""
-    if member_role == ROLE_ADMIN:
-        ensure_permission(admin_user, "jurisdiction_admin.assign")
 
 
 @router.get("/jurisdictions", response_model=list[JurisdictionAdminRecord])
@@ -644,66 +513,58 @@ def admin_put_jurisdiction(
     return JurisdictionAdminRecord(**record)
 
 
-@router.get("/jurisdictions/{code}/members", response_model=list[JurisdictionMemberRecord])
-def admin_list_jurisdiction_members(
+# ---------------------------------------------------------------------------
+# A jurisdiction's screen wording, by code (DIAAT-391, DIAAT-394)
+# ---------------------------------------------------------------------------
+# The same wording as ``/api/jurisdictions/wording`` (the jurisdiction the caller acts in), by
+# the jurisdiction's code, for the Jurisdictions screen: a JurisdictionSuperAdministrator edits
+# any jurisdiction's, a JurisdictionAdministrator only its own (403 ``jurisdiction_not_in_scope``
+# for another). ``jurisdiction.wording.edit``, scoped.
+
+
+def _wording_view(code: str) -> JurisdictionWording:
+    with Session(get_engine()) as session:
+        row = session.exec(select(Jurisdiction).where(Jurisdiction.code == code.strip().upper())).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"No jurisdiction {code.strip().upper()}")
+        wording, version = jurisdictions_admin.wording_and_version(session, row.code)
+        return JurisdictionWording(code=row.code, name=row.name, keys=WORDING_KEYS, wording=wording, version=version)
+
+
+@router.get("/jurisdictions/{code}/wording", response_model=JurisdictionWording)
+def admin_get_jurisdiction_wording(
     code: str,
-    admin_user: User = Depends(_JURISDICTION_ADMIN),
-) -> list[JurisdictionMemberRecord]:
-    """A jurisdiction's members, including people added who have not signed in yet."""
+    response: Response,
+    admin_user: User = Depends(require_permission("jurisdiction.wording.edit")),  # noqa: B008
+) -> JurisdictionWording:
+    """A jurisdiction's wording, with the keys it can set and the version to send back with a save."""
+    response.headers["Cache-Control"] = "no-store"
     assert_jurisdiction_in_scope(admin_user, code)
-    return [
-        JurisdictionMemberRecord(**m) for m in _admin_session_run(lambda s: jurisdictions_admin.members_of(s, code))
-    ]
+    return _wording_view(code)
 
 
-@router.post("/jurisdictions/{code}/members", response_model=JurisdictionMemberRecord, status_code=201)
-def admin_add_jurisdiction_member(
+@router.put("/jurisdictions/{code}/wording", response_model=JurisdictionWording)
+def admin_put_jurisdiction_wording(
     code: str,
-    body: JurisdictionMemberWrite,
-    admin_user: User = Depends(_JURISDICTION_ADMIN),
-) -> JurisdictionMemberRecord:
-    """Add someone by their sign-in email, or change their role. Someone who has not
-    signed in yet joins when they first do (pending). Making someone an ``admin`` needs
-    ``jurisdiction_admin.assign``."""
+    body: WordingUpdate,
+    response: Response,
+    admin_user: User = Depends(require_permission("jurisdiction.wording.edit")),  # noqa: B008
+) -> JurisdictionWording:
+    """Replace a jurisdiction's wording; blank text means the default. 400 for an unknown key or
+    text that is too long, 404 for an unknown jurisdiction, 409 if it changed since ``version``."""
+    response.headers["Cache-Control"] = "no-store"
     assert_jurisdiction_in_scope(admin_user, code)
-    _may_assign(admin_user, body.role)
-    email = body.email.strip().lower()
-
-    def add(session: Session) -> dict:
-        jurisdictions_admin.add_member(session, code, email, body.role, tester=body.tester)
-        return next(m for m in jurisdictions_admin.members_of(session, code) if m["email"] == email)
-
-    member = _admin_session_run(add)
+    saved = _admin_session_run(
+        lambda session: jurisdictions_admin.set_wording(session, code, body.wording, expected_version=body.version)
+    )
+    changed = sorted(key for key in set(saved.before) | set(saved.wording) if saved.before.get(key) != saved.wording.get(key))
     _audit_jurisdiction_change(
-        "membership.add",
+        "jurisdiction.edit",
         admin_user,
-        {
-            "code": code.strip().upper(),
-            **_member_target(email),
-            "role": member["role"],
-            "tester": member["tester"],
-            "pending": member["pending"],
-        },
+        {"code": code.strip().upper(), "fields": ["wording"], "wording_keys_changed": changed},
     )
-    return JurisdictionMemberRecord(**member)
-
-
-@router.delete("/jurisdictions/{code}/members", status_code=204)
-def admin_remove_jurisdiction_member(
-    code: str,
-    email: str = Query(min_length=3, max_length=320),
-    admin_user: User = Depends(_JURISDICTION_ADMIN),
-) -> None:
-    """Remove someone from a jurisdiction (by email, as listed). Removing an ``admin`` needs
-    ``jurisdiction_admin.assign``."""
-    assert_jurisdiction_in_scope(admin_user, code)
-    for member in _admin_session_run(lambda s: jurisdictions_admin.members_of(s, code)):
-        if member["email"] == email.strip().lower():
-            _may_assign(admin_user, member["role"])
-    _admin_session_run(lambda s: jurisdictions_admin.remove_member(s, code, email))
-    _audit_jurisdiction_change(
-        "membership.remove", admin_user, {"code": code.strip().upper(), **_member_target(email)}
-    )
+    view = _wording_view(code)
+    return view.model_copy(update={"wording": saved.wording, "version": saved.version})
 
 
 # ---------------------------------------------------------------------------
