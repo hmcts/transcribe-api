@@ -92,13 +92,22 @@ class Jurisdiction(SQLModel, table=True):
     """
 
     __tablename__ = "jurisdiction"
+    __table_args__ = (CheckConstraint("stage IN ('draft', 'test', 'live')", name="ck_jurisdiction_stage"),)
 
     id: UUID = Field(default_factory=uuid4, primary_key=True, nullable=False)
     # Short, stable, upper case ("IAC", "ET"): what the web app sends in X-Jurisdiction.
     code: str = Field(unique=True, index=True, max_length=16)
     name: str
+    # What users see, e.g. "Employment Tribunals (ET)"; None: the name (DIAAT-345).
+    display_name: str | None = Field(default=None)
+    # The service it is for, where that applies (DIAAT-345).
+    service: str | None = Field(default=None)
     # A disabled jurisdiction is invisible to its members, as if they had none.
     enabled: bool = Field(default=True)
+    # Who of its members sees it (DIAAT-345, 0007): draft, its admins; test, its
+    # testers and admins; live, all of them. The admin area creates drafts; a row
+    # made without a stage is live, as every jurisdiction was before stages.
+    stage: str = Field(default="live", max_length=8, sa_column_kwargs={"server_default": text("'live'")})
     # New users with no pending membership are made judges here on first sign-in,
     # so the IAC's sign-up works as it did before jurisdictions.
     auto_enrol: bool = Field(default=False)
@@ -152,6 +161,8 @@ class JurisdictionMembership(SQLModel, table=True):
     # Lower case. Only used to claim a pending membership on first sign-in.
     email: str | None = Field(default=None)
     role: str = Field(default="judge", max_length=16)
+    # In the jurisdiction's test group: sees it while it is in test (DIAAT-345).
+    tester: bool = Field(default=False, sa_column_kwargs={"server_default": text("false")})
     created_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
 
 

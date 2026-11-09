@@ -278,11 +278,12 @@ def test_me_gives_the_current_jurisdiction_with_its_wording(engine, jurisdiction
             "code": "IAC",
             "name": "IAC name",
             "role": "judge",
+            "stage": "live",
             "template": "iac_decision",
             "features": {"hearing_recordings": True},
             "wording": {"records.column_title": "Hearing"},
         },
-        "jurisdictions": [{"code": "IAC", "name": "IAC name", "role": "judge"}],
+        "jurisdictions": [{"code": "IAC", "name": "IAC name", "role": "judge", "stage": "live"}],
     }
 
 
