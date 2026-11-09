@@ -100,9 +100,8 @@ def test_a_deployment_keeps_live_edits_and_reports_the_differences(live_db, even
     from transcribe_api.api.app import create_app
 
     migrations.run_migrations(live_db)  # a later release's upgrade head: nothing to do, nothing rewritten
-    with caplog.at_level(logging.WARNING):
-        with TestClient(create_app()):  # and the startup of a pod: migrate, then the drift checks
-            pass
+    with caplog.at_level(logging.WARNING), TestClient(create_app()):  # and the startup of a pod: migrate, then the drift checks
+        pass
 
     assert _jurisdiction_rows(live_db) == jurisdictions_before  # settings and updated_datetime
     assert _content_rows(live_db) == content_before  # content and updated_at
@@ -137,9 +136,8 @@ def test_a_deployment_with_nothing_edited_is_silent(live_db, events, caplog):
     jurisdictions_before = _jurisdiction_rows(live_db)
     from transcribe_api.api.app import create_app
 
-    with caplog.at_level(logging.WARNING):
-        with TestClient(create_app()):
-            pass
+    with caplog.at_level(logging.WARNING), TestClient(create_app()):
+        pass
 
     assert _jurisdiction_rows(live_db) == jurisdictions_before
     assert _content_rows(live_db) == []  # not seeded by the check

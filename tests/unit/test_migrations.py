@@ -350,7 +350,7 @@ def _truncates_a_live_table(statement: str) -> bool:
 # nothing else, so the admin's wording in `content` is never touched.
 ALLOWED_LIVE_WRITES = {
     "0006": re.compile(
-        r'^\s*UPDATE\s+"?document_content"?\s+SET\s+"?jurisdiction_id"?\s*=\s*[^,]+?(?:\s+WHERE\s.+)?$', re.I | re.S
+        r'^\s*UPDATE\s+"?document_content"?\s+SET\s+"?jurisdiction_id"?\s*=\s*[^,]+?(?:\s+WHERE\s.+)?$', re.IGNORECASE | re.DOTALL
     ),
 }
 
@@ -474,12 +474,12 @@ def test_only_the_revision_that_backfills_a_new_jurisdiction_column_may_write_do
 @pytest.mark.parametrize(
     "statement",
     [
-        "UPDATE document_content SET jurisdiction_id = 'a' WHERE id IN "
-        "(WITH u AS (UPDATE document_content SET content = '{}' RETURNING id) SELECT id FROM u)",
-        "UPDATE document_content SET jurisdiction_id = "
-        "(WITH d AS (DELETE FROM jurisdiction RETURNING id) SELECT id FROM d LIMIT 1)",
-        "UPDATE document_content SET jurisdiction_id = (SELECT id FROM jurisdiction WHERE code = 'IAC'), "
-        "content = '{}'",
+        ("UPDATE document_content SET jurisdiction_id = 'a' WHERE id IN "
+        "(WITH u AS (UPDATE document_content SET content = '{}' RETURNING id) SELECT id FROM u)"),
+        ("UPDATE document_content SET jurisdiction_id = "
+        "(WITH d AS (DELETE FROM jurisdiction RETURNING id) SELECT id FROM d LIMIT 1)"),
+        ("UPDATE document_content SET jurisdiction_id = (SELECT id FROM jurisdiction WHERE code = 'IAC'), "
+        "content = '{}'"),
     ],
 )
 def test_the_allowed_backfill_cannot_carry_another_write(statement):

@@ -47,8 +47,8 @@ ET = {"X-Jurisdiction": "ET"}
 
 
 def _app() -> FastAPI:
-    from transcribe_api.api.routes_dictation_privileged import router as admin_router
     from tests.unit.jurisdiction_fixtures import jurisdiction_route_app
+    from transcribe_api.api.routes_dictation_privileged import router as admin_router
 
     app = jurisdiction_route_app()
     app.include_router(admin_router, prefix="/api")
@@ -515,7 +515,7 @@ def test_concurrent_renders_in_two_jurisdictions_do_not_see_each_others_wording(
             for _ in range(5):
                 text = " ".join(_all_text(_render(tmp_path, jurisdiction_id, [issue]))["raw"])
                 seen[name].append("ZEBRA-FRAMEWORK-TEXT" in text)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             errors.append(exc)
 
     threads = [

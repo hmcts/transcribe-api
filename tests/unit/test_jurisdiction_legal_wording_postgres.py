@@ -125,7 +125,7 @@ def _in_threads(count: int, target) -> list[BaseException]:
         try:
             barrier.wait()
             target(n)
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:
             errors.append(exc)
 
     threads = [threading.Thread(target=run, args=(n,)) for n in range(count)]

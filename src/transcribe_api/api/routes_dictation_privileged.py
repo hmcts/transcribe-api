@@ -226,8 +226,8 @@ def _legal_wording_access(*, write: bool):
     async def check(
         request: Request,
         response: Response,
-        current_user: User = Depends(get_current_user),  # noqa: B008
-        jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),  # noqa: B008
+        current_user: User = Depends(get_current_user),
+        jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
     ) -> LegalWordingScope:
         response.headers["Cache-Control"] = "no-store"
         roles: list[str] = current_user.__dict__.get("app_roles", [])
@@ -272,7 +272,7 @@ _LEGAL_WORDING_WRITE = _legal_wording_access(write=True)
 
 @router.get("/document-content", response_model=AdminDocumentContentResponse)
 async def get_document_content(
-    scope: LegalWordingScope = Depends(_LEGAL_WORDING_READ),  # noqa: B008
+    scope: LegalWordingScope = Depends(_LEGAL_WORDING_READ),
 ) -> AdminDocumentContentResponse:
     """Return the legal wording of the jurisdiction the admin is working in (and only
     that one), with ``has_legal_wording`` and which jurisdiction it is."""
@@ -295,7 +295,7 @@ async def get_document_content(
 async def update_hearing_type(
     item_id: str,
     payload: HearingTypePayload,
-    scope: LegalWordingScope = Depends(_LEGAL_WORDING_WRITE),  # noqa: B008
+    scope: LegalWordingScope = Depends(_LEGAL_WORDING_WRITE),
 ) -> dict[str, Any]:
     """Update an existing hearing type by ID."""
     data = _read_content(scope.jurisdiction.id)
@@ -312,7 +312,7 @@ async def update_hearing_type(
 @router.post("/document-content/hearing-types", status_code=201)
 async def create_hearing_type(
     payload: HearingTypePayload,
-    scope: LegalWordingScope = Depends(_LEGAL_WORDING_WRITE),  # noqa: B008
+    scope: LegalWordingScope = Depends(_LEGAL_WORDING_WRITE),
 ) -> dict[str, Any]:
     """Create a new hearing type."""
     data = _read_content(scope.jurisdiction.id)
@@ -329,7 +329,7 @@ async def create_hearing_type(
 @router.delete("/document-content/hearing-types/{item_id}", status_code=204)
 async def delete_hearing_type(
     item_id: str,
-    scope: LegalWordingScope = Depends(_LEGAL_WORDING_WRITE),  # noqa: B008
+    scope: LegalWordingScope = Depends(_LEGAL_WORDING_WRITE),
 ) -> None:
     """Delete a hearing type by ID."""
     data = _read_content(scope.jurisdiction.id)
@@ -351,7 +351,7 @@ async def delete_hearing_type(
 async def update_legal_framework(
     item_id: str,
     payload: LegalFrameworkPayload,
-    scope: LegalWordingScope = Depends(_LEGAL_WORDING_WRITE),  # noqa: B008
+    scope: LegalWordingScope = Depends(_LEGAL_WORDING_WRITE),
 ) -> dict[str, Any]:
     """Update an existing legal framework by ID."""
     data = _read_content(scope.jurisdiction.id)
@@ -368,7 +368,7 @@ async def update_legal_framework(
 @router.post("/document-content/legal-frameworks", status_code=201)
 async def create_legal_framework(
     payload: LegalFrameworkPayload,
-    scope: LegalWordingScope = Depends(_LEGAL_WORDING_WRITE),  # noqa: B008
+    scope: LegalWordingScope = Depends(_LEGAL_WORDING_WRITE),
 ) -> dict[str, Any]:
     """Create a new legal framework. A jurisdiction's first one turns its legal wording
     on: its form gets the legal issues step and its documents the Issues and Legal
@@ -389,7 +389,7 @@ async def create_legal_framework(
 @router.delete("/document-content/legal-frameworks/{item_id}", status_code=204)
 async def delete_legal_framework(
     item_id: str,
-    scope: LegalWordingScope = Depends(_LEGAL_WORDING_WRITE),  # noqa: B008
+    scope: LegalWordingScope = Depends(_LEGAL_WORDING_WRITE),
 ) -> None:
     """Delete a legal framework by ID. Deleting the last one turns the jurisdiction's
     legal wording off."""
@@ -412,7 +412,7 @@ async def delete_legal_framework(
 async def update_anonymity_status(
     item_id: str,
     payload: AnonymityStatusPayload,
-    scope: LegalWordingScope = Depends(_LEGAL_WORDING_WRITE),  # noqa: B008
+    scope: LegalWordingScope = Depends(_LEGAL_WORDING_WRITE),
 ) -> dict[str, Any]:
     """Update an existing anonymity status by ID."""
     data = _read_content(scope.jurisdiction.id)

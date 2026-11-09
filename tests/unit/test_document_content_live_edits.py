@@ -214,9 +214,8 @@ def test_startup_keeps_an_edited_row_and_reports_the_difference(engine, monkeypa
     monkeypatch.setenv("RUN_MIGRATIONS", "true")
     from transcribe_api.api.app import create_app
 
-    with caplog.at_level("WARNING", logger="transcribe_api.documents.content_drift"):
-        with TestClient(create_app()):
-            assert content_loader.get_document_content() == edited
+    with caplog.at_level("WARNING", logger="transcribe_api.documents.content_drift"), TestClient(create_app()):
+        assert content_loader.get_document_content() == edited
 
     assert _stored_rows(engine) == before
     assert f"hearing_types/{_load_from_file()['hearing_types'][0]['id']}" in caplog.text
