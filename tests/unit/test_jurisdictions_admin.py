@@ -12,7 +12,7 @@ from sqlmodel import Session, select
 
 from transcribe_api import jurisdictions_admin as admin
 from transcribe_api.domain.jurisdictions import JurisdictionSettings
-from transcribe_api.domain.models_dictation import Jurisdiction, JurisdictionMembership, User
+from transcribe_api.domain.models_dictation import Jurisdiction, RoleAssignment, User
 
 pytestmark = pytest.mark.real_jurisdictions
 
@@ -44,12 +44,18 @@ def _user(session, email: str) -> User:
     return user
 
 
+_MEMBER_ROLE = {"Judge": "judge", "JurisdictionAdministrator": "admin"}
+
+
 def _members(session) -> list[tuple]:
+    """(jurisdiction, user, pending email, member role) of every assignment: members are
+    role_assignment rows (DIAAT-382)."""
     rows = session.exec(
-        select(Jurisdiction.code, JurisdictionMembership.user_id, JurisdictionMembership.email, JurisdictionMembership.role)
-        .join(Jurisdiction, Jurisdiction.id == JurisdictionMembership.jurisdiction_id)
+        select(Jurisdiction.code, RoleAssignment.user_id, RoleAssignment.pending_email, RoleAssignment.role).join(
+            Jurisdiction, Jurisdiction.id == RoleAssignment.jurisdiction_id
+        )
     ).all()
-    return sorted(tuple(r) for r in rows)
+    return sorted(((code, user, email, _MEMBER_ROLE[role]) for code, user, email, role in rows), key=str)
 
 
 def test_the_et_example_settings_are_valid():
@@ -62,14 +68,15 @@ def test_put_creates_then_updates_a_jurisdiction(session, put):
     assert put(session, "et", "--name", "Employment Tribunal") == (
         "Created ET"
     )
-    assert admin.put_jurisdiction(session, "ET", "Employment Tribunals", {}, auto_enrol=True) == "Updated ET"
+    assert admin.put_jurisdiction(session, "ET", "Employment Tribunals", {}, enabled=False) == "Updated ET"
 
     [row] = session.exec(select(Jurisdiction)).all()
+    # Nobody is enrolled automatically any more (DIAAT-373): a new jurisdiction never is.
     assert (row.code, row.name, row.auto_enrol, row.enabled, row.settings["wording"]) == (
         "ET",
         "Employment Tribunals",
-        True,
-        True,
+        False,
+        False,
         {},
     )
 
@@ -85,21 +92,23 @@ def test_put_opens_no_file_named_on_its_command_line(session, tmp_path):
         admin.run(["put", "ET", "--name", "Employment Tribunal", "--settings", str(named)], session)
     assert session.exec(select(Jurisdiction)).all() == []
 
-def test_put_keeps_the_flags_it_is_not_given(session, put):
-    """Updating the IAC's wording must not turn its auto-enrol off (new users would
-    then get no jurisdiction), nor re-enable a disabled jurisdiction."""
-    admin.put_jurisdiction(session, "IAC", "Immigration and Asylum Chamber", {}, auto_enrol=True)
+def test_put_keeps_the_flag_it_is_not_given(session, put):
+    """Updating a jurisdiction's wording must not re-enable a disabled jurisdiction."""
+    admin.put_jurisdiction(session, "IAC", "Immigration and Asylum Chamber", {})
     admin.put_jurisdiction(session, "OLD", "Retired", {}, enabled=False)
 
     put(session, "IAC", "--name", "Immigration and Asylum Chamber")
     put(session, "OLD", "--name", "Retired")
 
-    flags = {r.code: (r.auto_enrol, r.enabled) for r in session.exec(select(Jurisdiction)).all()}
-    assert flags == {"IAC": (True, True), "OLD": (False, False)}
-    put(session, "IAC", "--name", "IAC", "--no-auto-enrol")
+    assert {r.code: r.enabled for r in session.exec(select(Jurisdiction)).all()} == {"IAC": True, "OLD": False}
     put(session, "OLD", "--name", "Retired", "--enabled")
-    flags = {r.code: (r.auto_enrol, r.enabled) for r in session.exec(select(Jurisdiction)).all()}
-    assert flags == {"IAC": (False, True), "OLD": (False, True)}
+    put(session, "IAC", "--name", "IAC", "--no-enabled")
+    assert {r.code: r.enabled for r in session.exec(select(Jurisdiction)).all()} == {"IAC": False, "OLD": True}
+
+
+def test_there_is_no_auto_enrol_option_any_more(session, put):
+    with pytest.raises(SystemExit):
+        put(session, "ET", "--name", "Employment Tribunal", "--auto-enrol")
 
 
 def test_put_refuses_invalid_settings_and_codes(session):
@@ -127,18 +136,22 @@ def test_someone_who_has_not_signed_in_is_added_pending_by_email(session):
     assert _members(session) == [("ET", None, "new.judge@example.test", "judge")]
 
 
-def test_removing_a_member_forgets_their_choice_of_that_jurisdiction(session):
+def test_removing_a_member_removes_all_their_roles_there_and_only_there(session):
     admin.put_jurisdiction(session, "ET", "Employment Tribunal", {})
-    user = _user(session, "judge@example.test")
+    admin.put_jurisdiction(session, "IAC", "Immigration and Asylum Chamber", {})
+    _user(session, "judge@example.test")
     admin.add_member(session, "ET", "judge@example.test")
-    user.active_jurisdiction_id = session.exec(select(Jurisdiction.id)).one()
-    session.add(user)
+    admin.add_member(session, "IAC", "judge@example.test")
+    # Also given another role there, which this tool does not name: it goes with the member.
+    from transcribe_api.domain.assignments import add_assignment
+
+    et = session.exec(select(Jurisdiction).where(Jurisdiction.code == "ET")).one()
+    user = session.exec(select(User)).one()
+    add_assignment(session, role="LegalTextManager", jurisdiction_id=et.id, user_id=user.id)
     session.commit()
 
     assert admin.remove_member(session, "ET", "judge@example.test") == "Removed from ET"
-    assert _members(session) == []
-    session.refresh(user)
-    assert user.active_jurisdiction_id is None
+    assert [(code, role) for code, _user_id, _email, role in _members(session)] == [("IAC", "judge")]
     with pytest.raises(admin.AdminError, match="Not a member"):
         admin.remove_member(session, "ET", "judge@example.test")
 
@@ -165,12 +178,12 @@ def test_two_user_rows_with_one_email_are_one_person(session):
 
 
 def test_list_shows_each_jurisdiction(session):
-    admin.put_jurisdiction(session, "IAC", "Immigration and Asylum Chamber", {}, auto_enrol=True)
+    admin.put_jurisdiction(session, "IAC", "Immigration and Asylum Chamber", {})
     admin.put_jurisdiction(session, "ET", "Employment Tribunal", {}, enabled=False)
     admin.add_member(session, "IAC", "a@example.test")
     assert admin.run(["list"], session).splitlines() == [
         "ET\tEmployment Tribunal\tdraft\t0 member(s)\tdisabled",
-        "IAC\tImmigration and Asylum Chamber\tdraft\t1 member(s)\tenabled, auto-enrol",
+        "IAC\tImmigration and Asylum Chamber\tdraft\t1 member(s)\tenabled",
     ]
 
 

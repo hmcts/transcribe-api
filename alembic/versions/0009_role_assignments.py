@@ -5,7 +5,8 @@ A user's roles move from the Entra token and ``user.role`` to the database, as
 session (DIAAT-382, DIAAT-390):
 
 - role_assignment: user (or, before their first sign-in, a lower-case pending email),
-  jurisdiction, role, granted by and at. Checks: the role is one of the four stored
+  jurisdiction, role, granted by and at, and ``tester`` (DIAAT-345: in the jurisdiction's
+  test group, carried over from jurisdiction_membership.tester). Checks: the role is one of the four stored
   roles (SystemAdministrator is Entra only and Normal is gone, so neither can be
   stored); a jurisdiction is required for Judge, LegalTextManager and
   JurisdictionAdministrator and NULL for JurisdictionSuperAdministrator; a user or a
@@ -63,6 +64,7 @@ def upgrade() -> None:
         sa.Column("role", sa.String(length=32), nullable=False),
         sa.Column("granted_by", sa.Uuid(), nullable=True),
         sa.Column("granted_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("tester", sa.Boolean(), nullable=False, server_default=sa.text("false")),
         sa.ForeignKeyConstraint(["user_id"], ["user.id"]),
         sa.ForeignKeyConstraint(["jurisdiction_id"], ["jurisdiction.id"]),
         sa.ForeignKeyConstraint(["granted_by"], ["user.id"]),
@@ -163,12 +165,13 @@ def upgrade() -> None:
     # emails differ only in case collapse to one.
     op.execute(
         sa.text(
-            "INSERT INTO role_assignment (id, user_id, pending_email, jurisdiction_id, role, granted_by, granted_at)"
+            "INSERT INTO role_assignment"
+            " (id, user_id, pending_email, jurisdiction_id, role, granted_by, granted_at, tester)"
             " SELECT gen_random_uuid(), m.user_id,"
             " CASE WHEN m.user_id IS NULL THEN lower(m.email) END,"
             " m.jurisdiction_id,"
             " CASE m.role WHEN 'admin' THEN 'JurisdictionAdministrator' ELSE 'Judge' END,"
-            " NULL, m.created_datetime"
+            " NULL, m.created_datetime, m.tester"
             " FROM jurisdiction_membership m"
             " ON CONFLICT DO NOTHING"
         )

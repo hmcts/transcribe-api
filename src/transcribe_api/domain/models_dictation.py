@@ -182,7 +182,7 @@ STORED_ROLES_SQL = "'Judge', 'LegalTextManager', 'JurisdictionAdministrator', 'J
 
 class RoleAssignment(SQLModel, table=True):
     """A user's role in a jurisdiction (DIAAT-382, 0007): the source of truth for what a
-    user may be, replacing user.role and jurisdiction_membership.
+    user may be, replacing user.role and jurisdiction_membership (and its ``tester`` flag).
 
     One row per (user, jurisdiction, role). Judge, LegalTextManager and
     JurisdictionAdministrator are held in a jurisdiction; the JurisdictionSuperAdministrator
@@ -252,6 +252,9 @@ class RoleAssignment(SQLModel, table=True):
     # NULL for a row the migration made from a membership, or made by a script.
     granted_by: UUID | None = Field(default=None, foreign_key="user.id")
     granted_at: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
+    # In the jurisdiction's test group (DIAAT-345): of a non-administrator's row, it lets them see
+    # the jurisdiction while it is at stage "test" (an administrator always sees it).
+    tester: bool = Field(default=False, sa_column_kwargs={"server_default": text("false")})
 
 
 ACCESS_REQUEST_STATUSES = ("pending", "approved", "rejected", "withdrawn")

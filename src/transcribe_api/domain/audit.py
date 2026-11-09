@@ -32,6 +32,10 @@ Each DIAAT-286 row has:
 * ``request_id``: ``hmcts.request.id``, the join to telemetry, e.g. from a
   ``security.ownership_violation`` event (which carries no identifiers) to the row
   that says who and what;
+* ``active_jurisdiction_id`` and ``active_role``: the context the actor was acting in
+  (DIAAT-390: the BenchNotes token's, set per request by the auth dependency,
+  domain/auth/context.py); NULL where there is none (a worker, a request before a context
+  is chosen, a global role's jurisdiction);
 * ``detail``: controlled values only (how, why refused); never content.
 
 Writing never breaks the user's request (fail-open): a failed write logs the event
@@ -107,6 +111,7 @@ from sqlmodel import Session
 from starlette.requests import ClientDisconnect
 
 import transcribe_api.runtime.telemetry  # noqa: F401  (registers the merged schema)
+from transcribe_api.domain.auth.context import audit_context_fields
 from transcribe_api.domain.models_dictation import AuditLog
 from transcribe_api.runtime.db_connection import get_engine
 
@@ -189,6 +194,7 @@ def write_audit_event(event: AuditEvent) -> None:
             client_ip=event.client_ip,
             outcome=DENIED if event.event_type == ACCESS_DENIED else SUCCESS,
             request_id=get_request_id(),
+            **audit_context_fields(),
         )
     except Exception as exc:
         _write_failed(str(event.event_type), exc)
@@ -292,9 +298,11 @@ def _audit_row(
     object_id: UUID | str | None,
     detail: dict[str, Any] | None,
     request_id: str | None = None,
+    context: dict[str, object] | None = None,
 ) -> AuditLog:
-    """The row, with the request ID (and timestamp) of the calling request's context,
-    or the request ID given (captured earlier, e.g. for a streamed response)."""
+    """The row, with the request ID, timestamp and active context (jurisdiction and role) of
+    the calling request's context, or the request ID and context given (captured earlier,
+    e.g. for a streamed response)."""
     return AuditLog(
         event_type=action,
         user_id=str(actor_id),
@@ -303,6 +311,7 @@ def _audit_row(
         object_id=str(object_id) if object_id is not None else None,
         detail=detail or None,
         request_id=request_id or get_request_id(),
+        **(context if context is not None else audit_context_fields()),
     )
 
 
@@ -334,6 +343,7 @@ class AuditedAction:
         self.finished = False
         # Built in the request's context: a streamed body may be sent outside it.
         self._request_id = get_request_id()
+        self._context = audit_context_fields()
         self._streams = False  # the outcome is settled when the response body ends
         self._client_may_stop = False  # a client ending the stream early still received it
         self._stream_pending = False  # the row is still to be written by the stream
@@ -425,6 +435,7 @@ class AuditedAction:
             object_id=self.object_id,
             detail=self.detail,
             request_id=self._request_id,
+            context=self._context,
         )
 
 

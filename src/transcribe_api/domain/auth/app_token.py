@@ -121,7 +121,7 @@ def _signing_key() -> str:
         raise RuntimeError(msg)
     # Local runs without a key in .env: one for this process, so sign-in still works. Tokens
     # do not survive a restart.
-    global _ephemeral_key  # noqa: PLW0603
+    global _ephemeral_key
     if _ephemeral_key is None:
         _ephemeral_key = secrets.token_urlsafe(48)
         logger.warning("APP_JWT_SIGNING_KEY is not set: using a key for this process only (local)")

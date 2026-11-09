@@ -363,7 +363,7 @@ ALLOWED_LIVE_WRITES = {
     "0006": re.compile(
         r'^\s*UPDATE\s+"?document_content"?\s+SET\s+"?jurisdiction_id"?\s*=\s*[^,]+?(?:\s+WHERE\s.+)?$', re.IGNORECASE | re.DOTALL
     ),
-    "0007": re.compile(r'^\s*UPDATE\s+"?jurisdiction"?\s+SET\s+"?auto_enrol"?\s*=\s*false\s*$', re.I),
+    "0007": re.compile(r'^\s*UPDATE\s+"?jurisdiction"?\s+SET\s+"?auto_enrol"?\s*=\s*false\s*$', re.IGNORECASE),
 }
 
 
@@ -963,7 +963,7 @@ def test_0007_adds_the_user_and_audit_columns_without_breaking_the_previous_rele
     # Additive: nothing is dropped or renamed, and the old tables are not rewritten.
     assert not re.search(r"DROP (TABLE|COLUMN|INDEX|CONSTRAINT)", sql)
     assert "RENAME" not in sql
-    assert "jurisdiction_membership" not in re.sub(r"INSERT INTO role_assignment.*?ON CONFLICT DO NOTHING", "", sql, flags=re.S)
+    assert "jurisdiction_membership" not in re.sub(r"INSERT INTO role_assignment.*?ON CONFLICT DO NOTHING", "", sql, flags=re.DOTALL)
 
 
 def test_0007_backfills_the_assignments_from_the_memberships_and_turns_auto_enrol_off(monkeypatch):

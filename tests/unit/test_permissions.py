@@ -7,14 +7,7 @@ import pytest
 from transcribe_api.domain.auth import permissions as p
 
 # The contract's list, exactly (authz-contract.md section 1).
-CONTRACT_PERMISSIONS = (
-    "app.access context.switch access.request access.approve dictation.use recording.upload recording.own "
-    "documents.export recording.audit.read recording.any.read recording.any.edit recording.any.delete "
-    "dictation.any.read admin.access legal_text.manage templates.manage document_content.read "
-    "document_content.write users.manage jurisdiction_admin.assign jurisdiction_super_admin.assign "
-    "role_audit.read jurisdiction.create jurisdictions.manage jurisdiction.wording.edit jurisdiction.features "
-    "feature_flags.manage system.settings security.alert_test"
-).split()
+CONTRACT_PERMISSIONS = ["app.access", "context.switch", "access.request", "access.approve", "dictation.use", "recording.upload", "recording.own", "documents.export", "recording.audit.read", "recording.any.read", "recording.any.edit", "recording.any.delete", "dictation.any.read", "admin.access", "legal_text.manage", "templates.manage", "document_content.read", "document_content.write", "users.manage", "jurisdiction_admin.assign", "jurisdiction_super_admin.assign", "role_audit.read", "jurisdiction.create", "jurisdictions.manage", "jurisdiction.wording.edit", "jurisdiction.features", "feature_flags.manage", "system.settings", "security.alert_test"]
 
 COMMON = ["app.access", "context.switch", "access.request"]
 

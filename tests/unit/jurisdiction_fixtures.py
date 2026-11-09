@@ -14,18 +14,24 @@ from pathlib import Path
 from types import ModuleType
 from uuid import UUID, uuid4
 
+from fastapi import Request
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
 from sqlmodel import Session
 
+from transcribe_api.domain.assignments import add_assignment
+from transcribe_api.domain.auth.app_token import Context
 from transcribe_api.domain.jurisdictions import JurisdictionFeatures, JurisdictionSettings, Membership
 from transcribe_api.domain.models_dictation import (
+    AccessRequest,
+    AccessRequestRole,
     AuditLog,
     DocumentContent,
     Jurisdiction,
     JurisdictionMembership,
     JurisdictionTemplate,
     MinuteVersion,
+    RoleAssignment,
     Tag,
     Transcription,
     TranscriptionJob,
@@ -43,6 +49,9 @@ JURISDICTION_TABLES = [
     Jurisdiction.__table__,
     JurisdictionMembership.__table__,
     JurisdictionTemplate.__table__,
+    RoleAssignment.__table__,
+    AccessRequest.__table__,
+    AccessRequestRole.__table__,
     UploadJurisdiction.__table__,
     Transcription.__table__,
     TranscriptionJob.__table__,
@@ -61,7 +70,7 @@ def _jsonb_as_json(element, compiler, **kw):
     return "JSON"
 
 
-def iac_membership(role: str = "judge") -> Membership:
+def iac_membership(role: str = "Judge") -> Membership:
     return Membership(
         jurisdiction_id=IAC_JURISDICTION_ID,
         code="IAC",
@@ -125,23 +134,33 @@ def add_user(engine, email: str | None = None, roles: tuple[str, ...] = ("Judge"
 
 
 def sign_up(engine, email: str) -> User:
-    """A first sign-in through the real auth resolver, which creates the user and
-    enrols them (needs jurisdiction_db, which points the resolver at ``engine``)."""
-    from transcribe_api.domain.auth.dependencies_dictation import _resolve_user
+    """A first sign-in through the real sign-in (domain/auth/sessions.sign_in), which creates the
+    user and gives them what was assigned to their email beforehand, and nothing else (needs
+    jurisdiction_db)."""
+    from transcribe_api.domain.auth.sessions import sign_in
 
-    user = _resolve_user(str(uuid4()), email, ["Judge"]).db_user
+    with Session(engine) as session:
+        user = sign_in(session, azure_user_id=str(uuid4()), email=email, name="")
     user.__dict__["app_roles"] = ["Judge"]
     return user
+
+
+_ASSIGNED = {"judge": "Judge", "admin": "JurisdictionAdministrator"}
 
 
 def add_member(
     engine, user: User | None, jurisdiction: Jurisdiction, role="judge", email=None, *, tester=False
 ) -> None:
+    """Give ``user`` (or, with none, the pending ``email``) a role in a jurisdiction: ``judge`` or
+    ``admin`` as the member roles of jurisdictions_admin, or a role's own name."""
     with Session(engine) as session:
-        session.add(
-            JurisdictionMembership(
-                jurisdiction_id=jurisdiction.id, user_id=user.id if user else None, email=email, role=role, tester=tester
-            )
+        add_assignment(
+            session,
+            role=_ASSIGNED.get(role, role),
+            jurisdiction_id=jurisdiction.id,
+            user_id=user.id if user else None,
+            email=None if user else email,
+            tester=tester,
         )
         session.commit()
 
@@ -159,21 +178,61 @@ def jurisdiction_route_app():
     return app
 
 
-def client_as(app, engine, user: User):
-    """A client signed in as ``user``, read afresh on each request as the auth resolver
-    does (so a remembered choice is seen). The sign-in is the app's: a second
-    client_as on the same app signs every client in as the second user."""
+AUTO = object()
+
+
+def acting_as(engine, user: User, ctx=AUTO, sysadmin: bool | None = None, *, area: str = "dictation"):
+    """A ``get_current_user`` replacement for ``user`` as the BenchNotes token the web app would hold
+    for them (DIAAT-373), read afresh on each request as the auth resolver does. ``area``: whose
+    AuthenticatedUser it returns, "dictation" or "recording".
+
+    ``ctx``: the context they act in, a Context or a (jurisdiction code, role) pair, or None for
+    none chosen. Left out, it is the one a tab would have: the assignment in the jurisdiction the
+    request names with ``X-Jurisdiction`` if they hold one there, else their first assignment (so
+    a user with one pair just acts in it). And as for a real token, a header that names another
+    jurisdiction is 409 ``context_changed``, and no context is 403 ``context_required`` (except for
+    a SystemAdministrator). ``sysadmin``: the Entra role; left out, whether ``SystemAdministrator``
+    is among the roles ``add_user`` was given."""
+    import importlib
+
+    from transcribe_api.domain.assignments import distinct_contexts, load_assignments
+    from transcribe_api.domain.auth.context import check_advisory_headers, context_required
+    from transcribe_api.domain.auth.legacy_roles import legacy_app_roles
+
+    authenticated_user = importlib.import_module(f"transcribe_api.domain.auth.auth_models_{area}").AuthenticatedUser
+    fake_roles = user.__dict__.get("app_roles", ["Judge"])
+    is_sysadmin = ("SystemAdministrator" in fake_roles) if sysadmin is None else sysadmin
+
+    def current_user(request: Request):
+        with Session(engine) as session:
+            fresh = session.get(User, user.id)
+            held = distinct_contexts(load_assignments(session, user.id))
+        if ctx is AUTO:
+            named = (request.headers.get("X-Jurisdiction") or "").strip().upper()
+            context = next((c for c in held if c.jurisdiction == named), None) if named else None
+            context = context or (held[0] if held else None)
+        else:
+            context = Context(*ctx) if isinstance(ctx, tuple) else ctx
+        if context is None and not is_sysadmin:  # as build_token_user_dep does
+            raise context_required()
+        check_advisory_headers(request, context)
+        return authenticated_user(
+            db_user=fresh,
+            app_roles=legacy_app_roles(context, is_sysadmin),
+            ctx=context,
+            sysadmin=is_sysadmin,
+            assignments=tuple(held),
+        )
+
+    return current_user
+
+
+def client_as(app, engine, user: User, ctx=AUTO, sysadmin: bool | None = None):
+    """A client of the dictation app signed in as ``user`` (see ``acting_as``). The sign-in is the
+    app's: a second client_as on the same app signs every client in as the second user."""
     from fastapi.testclient import TestClient
 
     from transcribe_api.domain.auth.dependencies_dictation import get_current_user
 
-    roles = user.__dict__.get("app_roles", ["Judge"])
-
-    def current_user():
-        with Session(engine) as session:
-            fresh = session.get(User, user.id)
-        fresh.__dict__["app_roles"] = roles
-        return fresh
-
-    app.dependency_overrides[get_current_user] = current_user
+    app.dependency_overrides[get_current_user] = acting_as(engine, user, ctx, sysadmin)
     return TestClient(app)

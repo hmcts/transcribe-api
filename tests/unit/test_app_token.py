@@ -204,3 +204,36 @@ class TestTheSigningKey:
         # And it is not the test key, so a token signed with that is not accepted.
         with pytest.raises(AppTokenError):
             app_token.verify(_forge())
+
+
+class TestStartup:
+    """The API refuses to start without a usable signing key outside local and test."""
+
+    @staticmethod
+    def _start(monkeypatch, environment: str, key: str | None):
+        from fastapi.testclient import TestClient
+
+        from transcribe_api.api.app import create_app
+
+        monkeypatch.setenv("ENVIRONMENT", environment)
+        if key is None:
+            monkeypatch.delenv("APP_JWT_SIGNING_KEY", raising=False)
+        else:
+            monkeypatch.setenv("APP_JWT_SIGNING_KEY", key)
+        get_settings.cache_clear()
+        with TestClient(create_app()):
+            pass
+
+    @pytest.mark.parametrize("environment", ["production", "aat", "demo", "preview", "dev"])
+    def test_a_deployed_environment_without_the_key_does_not_start(self, monkeypatch, environment):
+        with pytest.raises(RuntimeError, match="APP_JWT_SIGNING_KEY is not set"):
+            self._start(monkeypatch, environment, None)
+
+    def test_a_blank_or_short_key_does_not_start(self, monkeypatch):
+        for key in ("", "too-short"):
+            with pytest.raises(RuntimeError, match="APP_JWT_SIGNING_KEY"):
+                self._start(monkeypatch, "production", key)
+
+    def test_local_and_test_start_without_one(self, monkeypatch):
+        for environment in ("local", "test"):
+            self._start(monkeypatch, environment, None)

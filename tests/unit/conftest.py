@@ -118,16 +118,29 @@ def isolate_test_environment(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture(autouse=True)
 def every_user_is_an_iac_judge(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
-    """DIAAT-322: every user belongs to the IAC alone, without a database: the
-    jurisdiction lookup is replaced. Tests of jurisdictions themselves mark themselves
-    ``real_jurisdictions`` and keep the real one."""
+    """DIAAT-322, DIAAT-390: every request acts in the IAC (as a Judge, or as the admin role a fake
+    user holds), without a database:
+    the context the auth dependency would carry from the BenchNotes token, and the jurisdiction
+    lookup behind it, are replaced. Tests of jurisdictions and contexts themselves mark
+    themselves ``real_jurisdictions`` and keep the real ones."""
     if request.node.get_closest_marker("real_jurisdictions"):
         return
-    from tests.unit.jurisdiction_fixtures import iac_membership
+    from tests.unit.jurisdiction_fixtures import IAC_JURISDICTION_ID, iac_membership
     from transcribe_api.domain import jurisdictions
+    from transcribe_api.domain.auth.app_token import Context
 
-    monkeypatch.setattr(jurisdictions, "_load_memberships", lambda user_id: [iac_membership()])
-    monkeypatch.setattr(jurisdictions, "_remembered_jurisdiction_id", lambda user_id: None)
+    def context_of(user):
+        # In the IAC, as the role the fake user's roles name: a Judge unless they are a
+        # LegalTextManager or a JurisdictionAdministrator (what the tests of the admin routes mean).
+        roles = getattr(user, "__dict__", {}).get("app_roles", [])
+        role = next((r for r in ("JurisdictionAdministrator", "LegalTextManager") if r in roles), "Judge")
+        return Context("IAC", role)
+
+    monkeypatch.setattr(jurisdictions, "_context_of", context_of)
+    monkeypatch.setattr(
+        jurisdictions, "_load_membership", lambda code, role: iac_membership(role) if code == "IAC" else None
+    )
+    monkeypatch.setattr(jurisdictions, "_assigned_jurisdiction_ids", lambda user_id: [IAC_JURISDICTION_ID])
     # Every record is in the IAC too (DIAAT-334): left to the ownership checks.
     monkeypatch.setattr(jurisdictions, "_owned_transcription_jurisdiction", lambda transcription_id, user_id: (False, None))
     monkeypatch.setattr(jurisdictions, "_job_owner_and_jurisdiction", lambda job_id: (False, None, None))
@@ -161,8 +174,10 @@ def jurisdiction_db(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(dependencies_dictation, "get_engine", lambda: engine)
     monkeypatch.setattr(audit, "get_engine", lambda: engine)  # audit rows land here too
     content_loader.clear_cache()
+    jurisdictions._jurisdiction_ids.clear()  # code -> ID, looked up once a process: not across databases
     yield engine
     content_loader.clear_cache()
+    jurisdictions._jurisdiction_ids.clear()
     engine.dispose()
 
 

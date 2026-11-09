@@ -1,9 +1,11 @@
 """FastAPI authentication and RBAC dependencies for courtstranscribe.
 
-Authentication and role enforcement are provided by the hmcts-fastapi-azure-auth
-library. This module wires the library's factories to the application's User DB
-model, exposing the same get_current_user / get_allowlisted_user interface that
-all route files already import.
+Authentication is the BenchNotes access token (domain/auth/token_auth.py); role
+enforcement is the hmcts-fastapi-azure-auth library's, over the roles derived from the
+token's active context (domain/auth/legacy_roles.py), until the central permission checks
+replace them (DIAAT-376). This module wires the factories to the application's User DB
+model, exposing the same get_current_user / get_allowlisted_user interface that all
+route files already import.
 """
 
 from __future__ import annotations
@@ -13,14 +15,14 @@ import re
 
 from hmcts_azure_auth import get_allowlisted_user as _lib_get_allowlisted_user
 from hmcts_azure_auth.audit import AuditWriter
-from hmcts_azure_auth.roles import get_valid_roles
-from sqlmodel import Session, select
+from sqlmodel import Session
 
+from transcribe_api.domain.auth.app_token import AppPrincipal
 from transcribe_api.domain.auth.auth_models_dictation import AuthenticatedUser
+from transcribe_api.domain.auth.legacy_roles import legacy_app_roles
 from transcribe_api.domain.auth.token_auth import build_token_user_dep
-from transcribe_api.domain.auth.user_creation import insert_user_or_load_existing
+from transcribe_api.domain.auth.user_loading import load_user
 from transcribe_api.domain.jurisdictions import jurisdiction_dependency
-from transcribe_api.domain.models_dictation import User
 from transcribe_api.runtime.db_connection import get_engine
 
 logger = logging.getLogger(__name__)
@@ -81,50 +83,34 @@ for _logger_name in list(logging.root.manager.loggerDict):
         setattr(_logger, _marker_attr, True)
 
 
-# Highest privilege is listed first; the first match wins.
-_ROLE_PRIORITY = ("SystemAdministrator", "LegalTextManager", "Judge", "Normal")
+def _resolve_user(principal: AppPrincipal) -> AuthenticatedUser:
+    """The application User the BenchNotes token names, with what it says about them.
 
-
-def _resolve_user(azure_user_id: str, email: str, roles: list[str]) -> AuthenticatedUser:
-    """Fetch or create the application User from the database.
-
-    Called by the library after identity and roles have been verified.
-    Opens its own session so it is independent of request-scoped sessions.
+    Opens its own session so it is independent of request-scoped sessions. A user is
+    created at sign-in (domain/auth/sessions.py), never here: a token for a user who is
+    not in the database is refused, so a deleted or deactivated user is not brought back
+    by a request.
     """
-    valid_roles = get_valid_roles()
-    roles_set = set(roles)
-    primary_role = next(
-        (valid_roles[key] for key in _ROLE_PRIORITY if valid_roles.get(key) in roles_set),
-        None,
+    with Session(get_engine()) as session:
+        user = load_user(session, principal)
+    logger.info("Found existing user id=%s", user.id)
+    return AuthenticatedUser(
+        db_user=user,
+        app_roles=legacy_app_roles(principal.ctx, principal.sysadmin),
+        ctx=principal.ctx,
+        sysadmin=principal.sysadmin,
+        assignments=principal.assignments,
     )
 
-    with Session(get_engine()) as session:
-        statement = select(User).where(User.azure_user_id == azure_user_id)
-        user = session.exec(statement).first()
 
-        if not user:
-            user = insert_user_or_load_existing(
-                session, User(email=email, azure_user_id=azure_user_id, role=primary_role or "Normal")
-            )
-        elif primary_role and user.role != primary_role:
-            logger.info(
-                "Syncing User.role from Azure AD for user_id=%s: %s -> %s",
-                user.id, user.role, primary_role,
-            )
-            user.role = primary_role
-            session.add(user)
-            session.commit()
-            session.refresh(user)
-        else:
-            logger.info("Found existing user id=%s", user.id)
-
-    return AuthenticatedUser(db_user=user, app_roles=roles)
-
-
-# FastAPI dependency that resolves the current authenticated User from a
-# verified bearer token only — see domain/auth/token_auth.py for why this is not
-# the library's Easy Auth based dependency.
+# FastAPI dependency that resolves the current authenticated User from a verified
+# BenchNotes access token only, acting in a chosen context (403 context_required without
+# one) — see domain/auth/token_auth.py.
 get_current_user = build_token_user_dep(_resolve_user)
+
+# The same for the no-context endpoints (who am I, choose a context, leave a jurisdiction,
+# the public jurisdictions): any signed-in user, with or without a context.
+get_signed_in_user = build_token_user_dep(_resolve_user, require_context=False)
 
 # The request's jurisdiction (DIAAT-322): domain/jurisdictions.py.
 get_active_jurisdiction = jurisdiction_dependency(get_current_user)

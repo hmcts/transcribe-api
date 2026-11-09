@@ -392,6 +392,7 @@ def create_app() -> FastAPI:
     from transcribe_api.api.routes_jurisdictions import router as jurisdictions_router
     from transcribe_api.api.routes_recording import limiter
     from transcribe_api.api.routes_recording import router as recording_router
+    from transcribe_api.api.routes_session import router as session_router
 
     # Prefixes matter and differ between the two upstream apps:
     #   recording router declares its own prefix="/api/v1"  -> mount bare
@@ -408,6 +409,7 @@ def create_app() -> FastAPI:
     app.include_router(dictation_admin_router, prefix="/api")
     app.include_router(telemetry_router, prefix="/api")
     app.include_router(jurisdictions_router, prefix="/api")
+    app.include_router(session_router, prefix="/api")
     app.include_router(recording_router)
 
     # Polled by the CNP pipeline's startup check.

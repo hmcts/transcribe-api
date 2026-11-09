@@ -40,6 +40,7 @@
         "job.submit",
         "jurisdiction.edit",
         "membership.add",
+        "membership.leave",
         "membership.remove",
         "template.add",
         "template.delete",

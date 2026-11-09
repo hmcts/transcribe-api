@@ -206,8 +206,9 @@ def test_a_jurisdiction_the_user_does_not_belong_to_cannot_be_named(jurisdiction
     response = client_as(jurisdiction_app, jurisdiction_db, judge).get(
         "/api/transcriptions-metadata", headers={"X-Jurisdiction": "ET"}
     )
-    assert response.status_code == 403
-    assert response.json()["detail"]["code"] == "jurisdiction_not_available"
+    # The judge's context is the IAC: a tab naming another jurisdiction is out of step with it.
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "context_changed"
 
 
 # Administrators ------------------------------------------------------------------------------
@@ -254,16 +255,15 @@ def recording_app(jurisdiction_db):
             yield s
 
     app.dependency_overrides[get_session] = session
+    app.state.engine = jurisdiction_db
     return app
 
 
 def _recording_client(app, user) -> TestClient:
-    from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
+    from tests.unit.jurisdiction_fixtures import acting_as
     from transcribe_api.domain.auth.dependencies_recording import get_current_user
 
-    app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(
-        db_user=user, app_roles=list(user.__dict__.get("app_roles", ["Judge"]))
-    )
+    app.dependency_overrides[get_current_user] = acting_as(app.state.engine, user, area="recording")
     return TestClient(app)
 
 
@@ -354,13 +354,13 @@ def test_every_route_naming_a_recording_job_checks_its_jurisdiction():
 # Edge cases ---------------------------------------------------------------------------------
 
 
-def test_a_caller_without_a_role_is_refused_by_the_role_check_not_recorded(
+def test_a_caller_whose_role_does_not_allow_the_route_is_refused_by_the_role_check_not_recorded(
     jurisdiction_db, judge_in_two, jurisdiction_app
 ):
     judge, _iac, _sscs, _in_iac, in_sscs = judge_in_two
-    judge.__dict__["app_roles"] = []
+    # Acting as an administrator (a role the dictation routes do not allow), not as a judge.
     with capture_telemetry() as telemetry:
-        response = client_as(jurisdiction_app, jurisdiction_db, judge).get(
+        response = client_as(jurisdiction_app, jurisdiction_db, judge, ctx=("IAC", "JurisdictionAdministrator")).get(
             f"/api/transcriptions/{in_sscs.id}", headers={"X-Jurisdiction": "IAC"}
         )
     assert response.status_code == 403

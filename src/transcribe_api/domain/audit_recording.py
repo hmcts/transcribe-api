@@ -65,6 +65,7 @@ from hmcts_otel import conventions as c
 from hmcts_otel import get_request_id, record_event
 
 from transcribe_api.domain import audit as audit_core
+from transcribe_api.domain.auth.context import audit_context_fields
 from transcribe_api.domain.models_dictation import AuditLog
 
 logger = logging.getLogger(__name__)
@@ -171,7 +172,9 @@ def write_audit(*records: AuditRecord) -> None:
 
 
 def _insert(rows: list[dict[str, object]]) -> None:
-    """Hand the rows to the shared writer (domain/audit.py), as audit_log rows."""
+    """Hand the rows to the shared writer (domain/audit.py), as audit_log rows, stamped with the
+    context the request acts in, as the shared writer's own rows are (DIAAT-390)."""
+    context = audit_context_fields()
     audit_core.persist_rows(
         [
             AuditLog(
@@ -184,6 +187,7 @@ def _insert(rows: list[dict[str, object]]) -> None:
                 object_id=str(row["object_id"]) if row["object_id"] is not None else None,
                 request_id=row["request_id"],
                 detail=row["detail"],
+                **context,
             )
             for row in rows
         ]

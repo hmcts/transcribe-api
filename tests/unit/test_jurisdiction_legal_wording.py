@@ -70,28 +70,28 @@ def world(jurisdiction_db):
     w = World()
     w.engine, w.iac, w.et, w.sscs = engine, iac, et, sscs
 
-    # The IAC's holder of the global LegalTextManager role, a judge in the IAC.
-    w.ltm = add_user(engine, roles=("Judge", "LegalTextManager"))
-    add_member(engine, w.ltm, iac)
-    # A SystemAdministrator, a judge in the IAC.
+    # The IAC's LegalTextManager (DIAAT-373: a role held in a jurisdiction, no longer a global Entra one).
+    w.ltm = add_user(engine)
+    add_member(engine, w.ltm, iac, role="LegalTextManager")
+    # A SystemAdministrator (the Entra role), a judge in the IAC.
     w.sysadmin = add_user(engine, roles=("Judge", "SystemAdministrator"))
     add_member(engine, w.sysadmin, iac)
-    # An admin member of the IAC without the global role.
-    w.iac_admin = add_user(engine, roles=("Judge",))
+    # An administrator of the IAC.
+    w.iac_admin = add_user(engine)
     add_member(engine, w.iac_admin, iac, role="admin")
     # An admin of the ET who is only a judge in the IAC.
-    w.et_admin = add_user(engine, roles=("Judge",))
+    w.et_admin = add_user(engine)
     add_member(engine, w.et_admin, iac)
     add_member(engine, w.et_admin, et, role="admin")
-    # An ET judge, and a LegalTextManager who is only a judge in the ET.
-    w.et_judge = add_user(engine, roles=("Judge",))
+    # An ET judge, and the ET's LegalTextManager.
+    w.et_judge = add_user(engine)
     add_member(engine, w.et_judge, et)
-    w.ltm_et_only = add_user(engine, roles=("Judge", "LegalTextManager"))
-    add_member(engine, w.ltm_et_only, et)
+    w.ltm_et_only = add_user(engine)
+    add_member(engine, w.ltm_et_only, et, role="LegalTextManager")
     # An IAC judge, and an admin of the SSCS (which has no decision template).
-    w.iac_judge = add_user(engine, roles=("Judge",))
+    w.iac_judge = add_user(engine)
     add_member(engine, w.iac_judge, iac)
-    w.sscs_admin = add_user(engine, roles=("Judge",))
+    w.sscs_admin = add_user(engine)
     add_member(engine, w.sscs_admin, sscs, role="admin")
     return w
 
@@ -188,25 +188,31 @@ def test_an_et_admin_cannot_read_or_change_the_iacs_legal_wording(world):
 
 
 def test_an_iac_admin_cannot_read_or_change_the_ets_legal_wording(world):
-    """The IAC's admin does not belong to the ET: naming it is refused, for every route."""
+    """The IAC's admin does not work in the ET: a tab naming it is out of step with their token's
+    context (the IAC), for every route (409: the tab reloads, nothing is changed)."""
     for user in (world.iac_admin, world.ltm):
         c = client(world, user)
         for name, response in _every_request(c, ET).items():
-            assert response.status_code == 403, name
-            assert response.json()["detail"]["code"] == "jurisdiction_not_available", name
+            assert response.status_code == 409, name
+            assert response.json()["detail"]["code"] == "context_changed", name
     assert row(world, world.et) is None
 
 
-def test_a_legal_text_manager_has_no_say_outside_the_iac(world):
-    """The global role is the IAC's only: held by someone who is only an ET judge it
-    gives nothing in the ET, and nothing in the IAC they do not belong to."""
+def test_a_legal_text_manager_has_a_say_in_their_own_jurisdiction_only(world):
+    """DIAAT-373: the role is held in a jurisdiction (it was a global Entra role that meant the
+    IAC). The ET's can edit the ET's legal wording, and nothing in the IAC."""
     c = client(world, world.ltm_et_only)
-    for name, response in _every_request(c, ET).items():
-        assert response.status_code == 403, name
-        assert response.json()["detail"]["code"] == "jurisdiction_admin_required", name
+    assert c.get("/api/admin/document-content", headers=ET).status_code == 200
+    assert c.post("/api/admin/document-content/legal-frameworks", json=ET_FRAMEWORK, headers=ET).status_code == 201
     for name, response in _every_request(c, IAC).items():
-        assert response.status_code == 403, name
-        assert response.json()["detail"]["code"] == "jurisdiction_not_available", name
+        assert response.status_code == 409, name
+        assert response.json()["detail"]["code"] == "context_changed", name
+    assert [f["id"] for f in row(world, world.et).content["legal_frameworks"]] == ["et_unfair_dismissal"]
+
+
+def test_a_legal_text_manager_in_the_iac_has_no_say_in_the_et(world):
+    for name, response in _every_request(client(world, world.ltm), ET).items():
+        assert response.status_code == 409, name
     assert row(world, world.et) is None
 
 
@@ -231,7 +237,7 @@ def test_a_jurisdiction_without_the_decision_template_has_no_legal_wording_to_ed
 
 
 # ---------------------------------------------------------------------------
-# AC5: IAC admins (the global LegalTextManager) work as before
+# AC5: IAC admins (and its LegalTextManager) work as before
 # ---------------------------------------------------------------------------
 
 
@@ -269,10 +275,10 @@ def test_the_other_roles_keep_what_they_had_on_the_iac(world):
 
 
 def test_a_system_administrator_has_no_special_access_to_another_jurisdiction(world):
-    """SystemAdministrator is not a member of the ET and so cannot even name it."""
+    """SystemAdministrator does not work in the ET and so cannot even name it."""
     for name, response in _every_request(client(world, world.sysadmin), ET).items():
-        assert response.status_code == 403, name
-        assert response.json()["detail"]["code"] == "jurisdiction_not_available", name
+        assert response.status_code == 409, name
+        assert response.json()["detail"]["code"] == "context_changed", name
 
 
 # ---------------------------------------------------------------------------

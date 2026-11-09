@@ -47,7 +47,9 @@ def _jurisdiction_rows(engine) -> list[tuple]:
             tuple(r)
             for r in connection.execute(
                 text(
-                    "SELECT id, code, name, enabled, auto_enrol, settings, created_datetime, updated_datetime"
+                    # auto_enrol is left out (the tuple keeps its place): 0007 turns it off everywhere
+                    # (DIAAT-373: nobody is enrolled automatically); nothing an admin edits.
+                    "SELECT id, code, name, enabled, false, settings, created_datetime, updated_datetime"
                     " FROM jurisdiction ORDER BY code"
                 )
             )

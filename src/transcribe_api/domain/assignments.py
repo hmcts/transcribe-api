@@ -25,6 +25,7 @@ from sqlmodel import Session, select
 
 from transcribe_api.domain.auth.app_token import Context
 from transcribe_api.domain.auth.permissions import GLOBAL_ROLES, STORED_ROLES
+from transcribe_api.domain.jurisdiction_stages import sees
 from transcribe_api.domain.models_dictation import Jurisdiction, RoleAssignment
 
 logger = logging.getLogger(__name__)
@@ -67,7 +68,9 @@ def load_assignments(session: Session, user_id: UUID) -> list[Assignment]:
     """The user's assignments, by jurisdiction name then role.
 
     An assignment in a disabled jurisdiction is left out, as if the user had none there
-    (a disabled jurisdiction is invisible to its members). Global ones are always there.
+    (a disabled jurisdiction is invisible to its members), and so is one in a jurisdiction
+    whose stage does not let them see it (DIAAT-345: a draft only its administrators, one in
+    test its testers and administrators). Global ones are always there.
     """
     rows = session.exec(
         select(RoleAssignment, Jurisdiction)
@@ -83,7 +86,8 @@ def load_assignments(session: Session, user_id: UUID) -> list[Assignment]:
             jurisdiction_name=jurisdiction.name if jurisdiction else None,
         )
         for row, jurisdiction in rows
-        if row.role in STORED_ROLES and (jurisdiction is None or jurisdiction.enabled)
+        if row.role in STORED_ROLES
+        and (jurisdiction is None or (jurisdiction.enabled and sees(jurisdiction.stage, row.role, row.tester)))
     ]
     return sorted(assignments, key=_sort_key)
 
@@ -134,9 +138,11 @@ def add_assignment(
     user_id: UUID | None = None,
     email: str | None = None,
     granted_by: UUID | None = None,
+    tester: bool = False,
 ) -> RoleAssignment:
     """Give a signed-in user (``user_id``), or someone who has not signed in yet
-    (``email``: a pending assignment, claimed at their first sign-in), a role.
+    (``email``: a pending assignment, claimed at their first sign-in), a role. ``tester``: in
+    the jurisdiction's test group (DIAAT-345).
 
     Raises AssignmentError for what the rules refuse, and DuplicateAssignmentError when
     they already hold it there. The row is flushed, not committed."""
@@ -154,6 +160,7 @@ def add_assignment(
         jurisdiction_id=jurisdiction_id,
         role=role,
         granted_by=granted_by,
+        tester=tester,
     )
     session.add(row)
     session.flush()

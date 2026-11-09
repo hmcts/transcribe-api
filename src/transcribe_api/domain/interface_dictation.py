@@ -18,11 +18,15 @@ from transcribe_api.domain.exceptions import (
     UserNotFoundError,
 )
 from transcribe_api.domain.models_dictation import (
+    AccessRequest,
+    AccessRequestRole,
     BaseTable,
     DialogueEntry,
     JurisdictionMembership,
     LiveTranscriptDraft,
     MinuteVersion,
+    RoleAssignment,
+    SystemFeatureFlag,
     Tag,
     Transcription,
     TranscriptionJob,
@@ -854,13 +858,33 @@ def admin_delete_user(user_id: UUID) -> None:
         if transcription_count > 0:
             raise UserHasTranscriptionsError(user_id, transcription_count)
 
-        # A draft per jurisdiction, and the user's memberships (DIAAT-322).
+        # A draft per jurisdiction, and the user's memberships and assignments (DIAAT-322,
+        # DIAAT-382), their access requests, and the mentions of them as who granted, decided
+        # or changed something.
         for draft in session.exec(select(LiveTranscriptDraft).where(LiveTranscriptDraft.user_id == user_id)).all():
             session.delete(draft)
         for membership in session.exec(
             select(JurisdictionMembership).where(JurisdictionMembership.user_id == user_id)
         ).all():
             session.delete(membership)
+        for assignment in session.exec(select(RoleAssignment).where(RoleAssignment.user_id == user_id)).all():
+            session.delete(assignment)
+        for assignment in session.exec(select(RoleAssignment).where(RoleAssignment.granted_by == user_id)).all():
+            assignment.granted_by = None
+            session.add(assignment)
+        for request in session.exec(select(AccessRequest).where(AccessRequest.user_id == user_id)).all():
+            for asked in session.exec(
+                select(AccessRequestRole).where(AccessRequestRole.access_request_id == request.id)
+            ).all():
+                session.delete(asked)
+            session.delete(request)
+        for request in session.exec(select(AccessRequest).where(AccessRequest.decided_by == user_id)).all():
+            request.decided_by = None
+            session.add(request)
+        for flag in session.exec(select(SystemFeatureFlag).where(SystemFeatureFlag.updated_by == user_id)).all():
+            flag.updated_by = None
+            session.add(flag)
+        session.flush()
 
         session.delete(user)
         session.commit()

@@ -59,6 +59,8 @@ AUDIT_ACTIONS_APP = (
     "template.add",
     "template.edit",
     "template.delete",
+    # DIAAT-390: a user leaving a jurisdiction (their roles there are removed).
+    "membership.leave",
 )
 AUDIT_ACTIONS = AUDIT_ACTIONS_AUTH_LIBRARY + AUDIT_ACTIONS_APP
 

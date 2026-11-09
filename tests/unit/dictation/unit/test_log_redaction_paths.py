@@ -48,37 +48,45 @@ def test_redact_blob_path_removes_every_user_segment(path: str, expected: str) -
 # _resolve_user ----------------------------------------------------------------------
 
 
-def _resolve_existing(user: User, roles: list[str]) -> None:
+def _resolve_existing(user: User, role: str = "Judge") -> None:
+    from datetime import UTC, datetime
+
     from transcribe_api.domain.auth import dependencies_dictation as deps
+    from transcribe_api.domain.auth.app_token import AppPrincipal, Context
 
     session = MagicMock()
-    session.exec.return_value.first.return_value = user
-    with (
-        patch.object(deps, "get_engine"),
-        patch.object(deps, "Session") as session_cls,
-        patch.object(deps, "get_valid_roles", return_value={"Judge": "Judge", "Normal": "Normal"}),
-    ):
+    session.get.return_value = user
+    ctx = Context("IAC", role)
+    principal = AppPrincipal(
+        user_id=user.id,
+        sysadmin=False,
+        assignments=(ctx,),
+        ctx=ctx,
+        issued_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC),
+    )
+    with patch.object(deps, "get_engine"), patch.object(deps, "Session") as session_cls:
         session_cls.return_value.__enter__.return_value = session
-        deps._resolve_user("azure-123", EMAIL, roles)
+        deps._resolve_user(principal)
 
 
-def _existing_user(role: str) -> User:
+def _existing_user(role: str | None) -> User:
     return User(id=uuid.uuid4(), email=EMAIL, azure_user_id="azure-123", role=role)
 
 
 def test_a_returning_user_is_logged_by_id(caplog: pytest.LogCaptureFixture) -> None:
-    user = _existing_user("Normal")
+    user = _existing_user(None)
     with caplog.at_level(logging.DEBUG):
-        _resolve_existing(user, ["Normal"])
+        _resolve_existing(user)
     assert str(user.id) in caplog.text
     _assert_email_not_logged(caplog)
 
 
-def test_a_role_sync_is_logged_by_id(caplog: pytest.LogCaptureFixture) -> None:
+def test_a_user_whose_role_the_token_names_is_logged_by_id_and_not_rewritten(caplog: pytest.LogCaptureFixture) -> None:
     user = _existing_user("Normal")
     with caplog.at_level(logging.DEBUG):
-        _resolve_existing(user, ["Judge"])
-    assert user.role == "Judge"
+        _resolve_existing(user, role="LegalTextManager")
+    assert user.role == "Normal"  # DIAAT-375: never overwritten from the token
     _assert_email_not_logged(caplog)
 
 

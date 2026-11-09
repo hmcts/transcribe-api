@@ -48,6 +48,7 @@ from transcribe_api.domain.auth.dependencies_dictation import (
     get_allowlisted_user,
     get_current_user,
 )
+from transcribe_api.domain.auth.permissions import ROLE_JURISDICTION_ADMIN, ROLE_LEGAL_TEXT_MANAGER
 from transcribe_api.domain.exceptions import UserHasTranscriptionsError, UserNotFoundError
 from transcribe_api.domain.interface_dictation import (
     admin_delete_user,
@@ -59,7 +60,6 @@ from transcribe_api.domain.interface_dictation import (
 )
 from transcribe_api.domain.jurisdictions import (
     IAC_JURISDICTION_ID,
-    ROLE_ADMIN,
     TEMPLATE_IAC_DECISION,
     WORDING_KEYS,
     ActiveJurisdiction,
@@ -194,10 +194,10 @@ async def get_admin_roles(
 # The routes below edit the legal wording (hearing types, legal frameworks, anonymity
 # text) of ONE jurisdiction: the one the request works in (X-Jurisdiction, as for every
 # route: a jurisdiction the user does not belong to is 403 jurisdiction_not_available).
-# Who may:
-#   - an admin member of that jurisdiction (any BenchNotes app role): read and write;
-#   - for the IAC only, as before jurisdictions: the global LegalTextManager role (read
-#     and write) and SystemAdministrator (read only).
+# Who may (DIAAT-373: by the role the user is acting as in that jurisdiction, from their
+# BenchNotes token):
+#   - a JurisdictionAdministrator or LegalTextManager acting in it: read and write;
+#   - for the IAC only, as before: SystemAdministrator (read only).
 # A jurisdiction without the IAC decision template has no legal wording to edit (404, as
 # for its judges).
 # ---------------------------------------------------------------------------
@@ -214,12 +214,10 @@ class LegalWordingScope:
 
 
 def _may_edit_legal_wording(roles: list[str], jurisdiction: ActiveJurisdiction, *, write: bool) -> bool:
-    ltm, sysadmin = _require_role("LegalTextManager"), _require_role("SystemAdministrator")
-    has_app_role = any(r in roles for r in (_require_role("Normal"), _require_role("Judge"), ltm, sysadmin))
-    if jurisdiction.current.role == ROLE_ADMIN and has_app_role:
+    if jurisdiction.current.role in (ROLE_JURISDICTION_ADMIN, ROLE_LEGAL_TEXT_MANAGER):
         return True
     if jurisdiction.id == IAC_JURISDICTION_ID:
-        return ltm in roles or (not write and sysadmin in roles)
+        return not write and _require_role("SystemAdministrator") in roles
     return False
 
 
@@ -233,9 +231,7 @@ def _legal_wording_access(*, write: bool):
         response.headers["Cache-Control"] = "no-store"
         roles: list[str] = current_user.__dict__.get("app_roles", [])
         if not _may_edit_legal_wording(roles, jurisdiction, write=write):
-            required = [f"admin of {jurisdiction.code}"]
-            if jurisdiction.id == IAC_JURISDICTION_ID:
-                required.append(_require_role("LegalTextManager"))
+            required = [f"{ROLE_JURISDICTION_ADMIN} or {ROLE_LEGAL_TEXT_MANAGER} in {jurisdiction.code}"]
             await asyncio.to_thread(
                 write_audit_event,
                 AuditEvent(
@@ -626,7 +622,9 @@ async def _admin_document_download_url(
 class AdminUserListItem(BaseModel):
     id: str
     email: str
-    role: str
+    # Retired (DIAAT-382): a user's roles are their assignments; None for a user created
+    # since. This list is replaced by the assignment-based one (DIAAT-383).
+    role: str | None = None
     has_completed_onboarding: bool
     created_datetime: datetime
 
@@ -793,7 +791,6 @@ class JurisdictionAdminRecord(BaseModel):
     # DIAAT-345: draft (its admins see it), test (its testers too) or live (everyone).
     stage: Literal["draft", "test", "live"]
     enabled: bool
-    auto_enrol: bool
     settings: dict[str, Any]
     member_count: int
     # What stops it being switched on, in plain words; empty when it is ready.
@@ -805,9 +802,8 @@ class JurisdictionAdminRecord(BaseModel):
 class JurisdictionWrite(BaseModel):
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
     settings: dict[str, Any]
-    # Left out: unchanged (a new jurisdiction is enabled, without auto-enrol, a draft).
+    # Left out: unchanged (a new jurisdiction is enabled, a draft).
     enabled: bool | None = None
-    auto_enrol: bool | None = None
     stage: Literal["draft", "test", "live"] | None = None
     # Left out: unchanged; blank: none (the name is shown).
     display_name: Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)] | None = None
@@ -911,7 +907,6 @@ def admin_put_jurisdiction(
             code,
             body.name,
             body.settings,
-            auto_enrol=body.auto_enrol,
             enabled=body.enabled,
             expected_version=body.version,
             stage=body.stage,
@@ -934,7 +929,6 @@ def admin_put_jurisdiction(
             "service": record["service"],
             "stage": record["stage"],
             "enabled": record["enabled"],
-            "auto_enrol": record["auto_enrol"],
             "template": settings.get("template"),
             "features": settings.get("features"),
             "wording_keys": sorted(settings.get("wording", {})),

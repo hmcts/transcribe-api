@@ -13,6 +13,7 @@ from sqlmodel import Session, select
 
 from tests.unit.jurisdiction_fixtures import add_jurisdiction, add_member, add_user, client_as, sign_up
 from transcribe_api.domain import jurisdictions
+from transcribe_api.domain.assignments import load_assignments
 from transcribe_api.domain.models_dictation import AuditLog, Jurisdiction
 
 pytestmark = pytest.mark.real_jurisdictions
@@ -35,7 +36,7 @@ def admin_app(jurisdiction_db, monkeypatch):
 @pytest.fixture
 def as_admin(jurisdiction_db, admin_app):
     admin = add_user(jurisdiction_db, "admin@example.test", roles=("SystemAdministrator",))
-    add_member(jurisdiction_db, admin, add_jurisdiction(jurisdiction_db, "IAC", auto_enrol=True), role="admin")
+    add_member(jurisdiction_db, admin, add_jurisdiction(jurisdiction_db, "IAC"), role="admin")
     return client_as(admin_app, jurisdiction_db, admin)
 
 
@@ -48,7 +49,8 @@ def test_an_administrator_adds_the_et_and_its_test_judges(jurisdiction_db, as_ad
     created = as_admin.put("/api/admin/jurisdictions/et", json={"name": "Employment Tribunal", "settings": ET_SETTINGS})
     assert created.status_code == 200
     assert created.json()["code"] == "ET"
-    assert (created.json()["enabled"], created.json()["auto_enrol"]) == (True, False)
+    assert created.json()["enabled"] is True
+    assert "auto_enrol" not in created.json()  # DIAAT-373: nobody is enrolled automatically
 
     for email in ("saad.shaukat@hmcts.net", "Hamza.Ahmed@justice.gov.uk", "christopher.john@Justice.gov.uk"):
         added = as_admin.post("/api/admin/jurisdictions/ET/members", json={"email": email, "role": "judge"})
@@ -77,7 +79,8 @@ def test_a_test_judge_added_in_advance_works_in_the_et_only(jurisdiction_db, as_
 
     judge = sign_up(jurisdiction_db, "Hamza.Ahmed@justice.gov.uk")
 
-    assert [m.code for m in jurisdictions.load_memberships(judge.id)] == ["ET"]
+    with Session(jurisdiction_db) as session:
+        assert [a.jurisdiction_code for a in load_assignments(session, judge.id)] == ["ET"]
     [member] = [m for m in as_admin.get("/api/admin/jurisdictions/ET/members").json() if m["email"] == "hamza.ahmed@justice.gov.uk"]
     assert (member["pending"], member["tester"]) == (False, True)
 
@@ -157,7 +160,7 @@ def test_the_audit_says_who_was_added_or_removed_without_contact_details(jurisdi
 
 
 def test_a_pending_email_stored_in_another_case_is_still_one_member(jurisdiction_db, as_admin):
-    """A row put in by hand as Mixed@Case: adding again updates it, sign-in claims it."""
+    """Added as Mixed@Case (kept in lower case): adding again updates it, sign-in claims it."""
     with Session(jurisdiction_db) as session:
         et = session.exec(select(Jurisdiction).where(Jurisdiction.code == "IAC")).one()
     add_member(jurisdiction_db, None, et, email="Mixed@Example.test")
@@ -165,8 +168,11 @@ def test_a_pending_email_stored_in_another_case_is_still_one_member(jurisdiction
 
     members = [m for m in as_admin.get("/api/admin/jurisdictions/IAC/members").json() if m["pending"]]
     assert members == [{"email": "mixed@example.test", "role": "admin", "tester": False, "pending": True}]
-    judge = sign_up(jurisdiction_db, "mixed@example.test")
-    assert [(m.code, m.role) for m in jurisdictions.load_memberships(judge.id)] == [("IAC", "admin")]
+    judge = sign_up(jurisdiction_db, "MIXED@example.test")
+    with Session(jurisdiction_db) as session:
+        assert [(a.jurisdiction_code, a.role) for a in load_assignments(session, judge.id)] == [
+            ("IAC", "JurisdictionAdministrator")
+        ]
 
 
 def test_a_save_from_a_stale_form_does_not_undo_a_change_made_meanwhile(jurisdiction_db, as_admin):
@@ -194,7 +200,7 @@ def test_adding_a_jurisdiction_never_overwrites_an_existing_one(jurisdiction_db,
     assert refused.status_code == 409
     assert refused.json()["detail"] == "IAC already exists"
     [iac] = as_admin.get("/api/admin/jurisdictions").json()
-    assert (iac["name"], iac["auto_enrol"]) == ("IAC name", True)
+    assert iac["name"] == "IAC name"
 
 
 def test_a_blank_name_is_refused(as_admin):
@@ -228,8 +234,10 @@ def test_a_judge_made_admin_here_edits_the_wording_and_loses_it_when_removed(jur
     assert made_admin.json() == {"email": "et.judge@example.test", "role": "admin", "tester": False, "pending": False}
     saved = judge_client.put("/api/jurisdictions/wording", headers=headers, json={"wording": {"home.intro": "Hello"}})
     assert saved.status_code == 200
-    # The IAC, where they were enrolled as a judge on sign-up, stays out of reach.
-    assert judge_client.get("/api/jurisdictions/wording", headers={"X-Jurisdiction": "IAC"}).status_code == 403
+    # The IAC, where they are no admin (nor anything: nobody is enrolled on sign-up any more), stays
+    # out of reach: a tab naming it is out of step with the ET they act in.
+    assert judge_client.get("/api/jurisdictions/wording", headers={"X-Jurisdiction": "IAC"}).status_code == 409
 
     as_admin.delete("/api/admin/jurisdictions/ET/members", params={"email": "et.judge@example.test"})
+    # With no role left, no context.
     assert judge_client.get("/api/jurisdictions/wording", headers=headers).status_code == 403

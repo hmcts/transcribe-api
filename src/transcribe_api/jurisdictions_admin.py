@@ -12,14 +12,16 @@ can be reached, the same from the command line:
     python -m transcribe_api.jurisdictions_admin remove-member ET judge@ejudiciary.net
 
 ``put`` creates or updates a jurisdiction; its settings (wording, template, features:
-domain/jurisdictions.JurisdictionSettings) are validated first. ``add-member`` adds a
-user who has signed in, or, for someone who has not, a pending membership they claim
-on first sign-in (so an ET test judge is never put in the IAC). ``put`` reads the
-settings from standard input only: the tool opens no file named on its command line.
+domain/jurisdictions.JurisdictionSettings) are validated first. ``add-member`` gives a user
+who has signed in a role in the jurisdiction (``judge``: Judge, ``admin``:
+JurisdictionAdministrator), or, for someone who has not, a pending assignment they claim on
+first sign-in (domain/assignments.py). A member here is a ``role_assignment`` row (DIAAT-382):
+nothing is enrolled automatically any more (DIAAT-373). ``put`` reads the settings from
+standard input only: the tool opens no file named on its command line.
 
-DIAAT-345: a new jurisdiction is a draft, seen only by its admins. Moved to ``test``,
-its testers (``--tester``) see it too; ``live``, every member. It leaves draft only
-when it is ready (domain/jurisdictions.readiness_problems).
+DIAAT-345: a new jurisdiction is a draft, seen only by its admins. Moved to ``test``, its
+testers (``--tester``) see it too; ``live``, every member. It leaves draft only when it is
+ready (domain/jurisdictions.readiness_problems).
 """
 
 from __future__ import annotations
@@ -34,8 +36,16 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
+from transcribe_api.domain.assignments import (
+    DuplicateAssignmentError,
+    add_assignment,
+    find_assignment,
+)
+from transcribe_api.domain.auth.permissions import ROLE_JUDGE as ASSIGNED_JUDGE
+from transcribe_api.domain.auth.permissions import ROLE_JURISDICTION_ADMIN as ASSIGNED_ADMIN
 from transcribe_api.domain.jurisdictions import (
     ROLE_ADMIN,
+    ROLE_JUDGE,
     ROLES,
     STAGE_DRAFT,
     STAGES,
@@ -43,7 +53,13 @@ from transcribe_api.domain.jurisdictions import (
     parse_settings,
     readiness_problems,
 )
-from transcribe_api.domain.models_dictation import Jurisdiction, JurisdictionMembership, User
+from transcribe_api.domain.models_dictation import Jurisdiction, RoleAssignment, User
+
+# The member roles of this tool, and the assignments they stand for.
+_ASSIGNED_ROLE = {ROLE_JUDGE: ASSIGNED_JUDGE, ROLE_ADMIN: ASSIGNED_ADMIN}
+_MEMBER_ROLE = {assigned: member for member, assigned in _ASSIGNED_ROLE.items()}
+# Either role is a "member" role; the others (LegalTextManager, ...) are assigned by the
+# administration endpoints, and shown here as their own name.
 
 
 class AdminError(Exception):
@@ -66,13 +82,19 @@ class NotReadyError(AdminError):
         super().__init__(f"{code} is not ready to be switched on. {' '.join(problems)}")
 
 
+def _admin_counts(session: Session) -> dict:
+    """Its administrators, signed in or pending, by jurisdiction."""
+    return dict(
+        session.exec(
+            select(RoleAssignment.jurisdiction_id, func.count(RoleAssignment.id))
+            .where(RoleAssignment.role == ASSIGNED_ADMIN)
+            .group_by(RoleAssignment.jurisdiction_id)
+        ).all()
+    )
+
+
 def _admin_count(session: Session, jurisdiction_id) -> int:
-    """Its admins, signed in or pending."""
-    return session.exec(
-        select(func.count(JurisdictionMembership.id)).where(
-            JurisdictionMembership.jurisdiction_id == jurisdiction_id, JurisdictionMembership.role == ROLE_ADMIN
-        )
-    ).one()
+    return _admin_counts(session).get(jurisdiction_id, 0)
 
 
 def _optional_text(value: str | None) -> str | None:
@@ -129,20 +151,18 @@ def put_jurisdiction(
     name: str,
     settings: dict,
     *,
-    auto_enrol: bool | None = None,
     enabled: bool | None = None,
     expected_version: str | None = None,
     stage: str | None = None,
     display_name: str | None = None,
     service: str | None = None,
 ) -> str:
-    """Create or update a jurisdiction. A flag left as None keeps its current value (a
-    new jurisdiction: enabled, not auto-enrol, a draft), so updating the wording
-    cannot turn the IAC's auto-enrol off or re-enable a disabled jurisdiction. So
-    are the display name and service (blank: none).
+    """Create or update a jurisdiction. ``enabled`` left as None keeps its current value (a
+    new jurisdiction: enabled, a draft), so updating the wording cannot re-enable a disabled
+    jurisdiction. So are the stage, the display name and the service (blank: none).
 
-    It leaves draft only when it is ready (NotReadyError): its required screen
-    wording set, and an admin assigned.
+    It leaves draft only when it is ready (NotReadyError): its required screen wording set,
+    and an administrator assigned.
 
     ``expected_version``: the version the caller edited ("" for a new one). If the
     jurisdiction has changed since (or exists already), nothing is written."""
@@ -174,7 +194,7 @@ def put_jurisdiction(
         )
         raise ConflictError(msg)
     if created:
-        row = Jurisdiction(code=code, name=name, settings=validated, auto_enrol=False, enabled=True, stage=STAGE_DRAFT)
+        row = Jurisdiction(code=code, name=name, settings=validated, enabled=True, stage=STAGE_DRAFT)
     if stage is not None and stage != STAGE_DRAFT and row.stage == STAGE_DRAFT:
         admins = 0 if created else _admin_count(session, row.id)
         problems = readiness_problems(JurisdictionSettings.model_validate(validated), admin_count=admins)
@@ -187,8 +207,6 @@ def put_jurisdiction(
     if service is not None:
         row.service = _optional_text(service)
     row.settings = validated
-    if auto_enrol is not None:
-        row.auto_enrol = auto_enrol
     if enabled is not None:
         row.enabled = enabled
     if stage is not None:
@@ -245,47 +263,42 @@ def set_wording(
 
 def add_member(session: Session, code: str, email: str, role: str = "judge", *, tester: bool | None = None) -> str:
     """Add someone by sign-in email, or change their role. Someone who has not signed in
-    yet is added pending, and joins when they first do. ``tester``: in the test group
-    (DIAAT-345); None keeps it (a new member: not)."""
+    yet is added pending, and joins when they first do. The member roles are ``judge`` and
+    ``admin`` (Judge and JurisdictionAdministrator): the other roles are not given here.
+    ``tester``: in the test group (DIAAT-345); None keeps it (a new member: not)."""
     if role not in ROLES:
         msg = f"The role must be one of {', '.join(ROLES)}"
         raise AdminError(msg)
     jurisdiction = _jurisdiction(session, code)
     email = email.strip().lower()
     users = _users_by_email(session, email)
-    found: list[JurisdictionMembership | None]
+    assigned = _ASSIGNED_ROLE[role]
+    others = [r for r in _MEMBER_ROLE if r != assigned]
+    existed = False
     if users:
-        found = [
-            session.exec(
-                select(JurisdictionMembership).where(
-                    JurisdictionMembership.jurisdiction_id == jurisdiction.id, JurisdictionMembership.user_id == user.id
-                )
-            ).first()
-            for user in users
-        ]
-        rows = [
-            member or JurisdictionMembership(jurisdiction_id=jurisdiction.id, user_id=user.id)
-            for member, user in zip(found, users, strict=True)
-        ]
+        holders = [{"user_id": user.id} for user in users]
         what = "signed-in user"
     else:
-        found = [
-            session.exec(
-                select(JurisdictionMembership).where(
-                    JurisdictionMembership.jurisdiction_id == jurisdiction.id,
-                    JurisdictionMembership.user_id.is_(None),
-                    func.lower(JurisdictionMembership.email) == email,
-                )
-            ).first()
-        ]
-        rows = [found[0] or JurisdictionMembership(jurisdiction_id=jurisdiction.id, email=email)]
+        holders = [{"email": email}]
         what = "pending until they sign in"
-    existed = all(member is not None for member in found)
-    for row in rows:
-        row.role = role
+    for holder in holders:
+        # Changing a role: the other member role they held in this jurisdiction goes.
+        for other in others:
+            row = find_assignment(session, role=other, jurisdiction_id=jurisdiction.id, **holder)
+            if row is not None:
+                session.delete(row)
+                existed = True
+        try:
+            add_assignment(
+                session, role=assigned, jurisdiction_id=jurisdiction.id, tester=bool(tester), **holder
+            )
+        except DuplicateAssignmentError:
+            existed = True
         if tester is not None:
-            row.tester = tester
-        session.add(row)
+            # The test group is of the person in the jurisdiction: every row of theirs there.
+            for row in _holder_rows(session, jurisdiction.id, holder):
+                row.tester = tester
+                session.add(row)
     try:
         session.commit()
     except IntegrityError:
@@ -295,47 +308,51 @@ def add_member(session: Session, code: str, email: str, role: str = "judge", *, 
     return f"{'Updated' if existed else 'Added'} {role} in {jurisdiction.code} ({what})"
 
 
+def _holder_rows(session: Session, jurisdiction_id, holder: dict) -> list[RoleAssignment]:
+    """A holder's assignments in a jurisdiction (``holder``: ``user_id`` or ``email``)."""
+    query = select(RoleAssignment).where(RoleAssignment.jurisdiction_id == jurisdiction_id)
+    if "user_id" in holder:
+        query = query.where(RoleAssignment.user_id == holder["user_id"])
+    else:
+        query = query.where(RoleAssignment.user_id.is_(None), RoleAssignment.pending_email == holder["email"])
+    return list(session.exec(query).all())
+
+
 def remove_member(session: Session, code: str, email: str) -> str:
-    """Remove someone, signed in or pending, by sign-in email."""
+    """Remove someone, signed in or pending, by sign-in email: all their roles there."""
     jurisdiction = _jurisdiction(session, code)
     email = email.strip().lower()
     users = _users_by_email(session, email)
-    who = JurisdictionMembership.user_id.is_(None) & (func.lower(JurisdictionMembership.email) == email)
+    who = RoleAssignment.user_id.is_(None) & (RoleAssignment.pending_email == email)
     if users:
-        who = who | JurisdictionMembership.user_id.in_([user.id for user in users])
-    rows = session.exec(
-        select(JurisdictionMembership).where(JurisdictionMembership.jurisdiction_id == jurisdiction.id, who)
-    ).all()
+        who = who | RoleAssignment.user_id.in_([user.id for user in users])
+    rows = session.exec(select(RoleAssignment).where(RoleAssignment.jurisdiction_id == jurisdiction.id, who)).all()
     if not rows:
         msg = f"Not a member of {jurisdiction.code}"
         raise NotFoundError(msg)
     for row in rows:
         session.delete(row)
-    for user in users:
-        if user.active_jurisdiction_id == jurisdiction.id:
-            user.active_jurisdiction_id = None
-            session.add(user)
     session.commit()
     return f"Removed from {jurisdiction.code}"
+
+
+def _member_counts(session: Session) -> dict:
+    """Members by jurisdiction: people, not roles (someone who is both is one member)."""
+    members: dict = {}
+    for jurisdiction_id, user_id, pending_email in session.exec(
+        select(RoleAssignment.jurisdiction_id, RoleAssignment.user_id, RoleAssignment.pending_email).where(
+            RoleAssignment.jurisdiction_id.is_not(None)
+        )
+    ).all():
+        members.setdefault(jurisdiction_id, set()).add(user_id or pending_email)
+    return {jurisdiction_id: len(people) for jurisdiction_id, people in members.items()}
 
 
 def jurisdictions_overview(session: Session) -> list[dict]:
     """Every jurisdiction, with its settings, how many members it has, and what stops it
     being switched on (``problems``, DIAAT-345)."""
-    counts = dict(
-        session.exec(
-            select(JurisdictionMembership.jurisdiction_id, func.count(JurisdictionMembership.id)).group_by(
-                JurisdictionMembership.jurisdiction_id
-            )
-        ).all()
-    )
-    admins = dict(
-        session.exec(
-            select(JurisdictionMembership.jurisdiction_id, func.count(JurisdictionMembership.id))
-            .where(JurisdictionMembership.role == ROLE_ADMIN)
-            .group_by(JurisdictionMembership.jurisdiction_id)
-        ).all()
-    )
+    counts = _member_counts(session)
+    admins = _admin_counts(session)
     return [
         {
             "code": row.code,
@@ -344,7 +361,6 @@ def jurisdictions_overview(session: Session) -> list[dict]:
             "service": row.service,
             "stage": row.stage,
             "enabled": row.enabled,
-            "auto_enrol": row.auto_enrol,
             "settings": row.settings,
             "member_count": counts.get(row.id, 0),
             "problems": readiness_problems(parse_settings(row.settings, row.code), admin_count=admins.get(row.id, 0)),
@@ -355,33 +371,47 @@ def jurisdictions_overview(session: Session) -> list[dict]:
 
 
 def members_of(session: Session, code: str) -> list[dict]:
-    """A jurisdiction's members: who (their sign-in email), their role, whether they are
-    in its test group, and whether they have yet to sign in (pending)."""
+    """A jurisdiction's members: who (their sign-in email), their role, whether they are in
+    its test group, and whether they have yet to sign in (pending). The role is ``admin`` or
+    ``judge`` for those, else the assigned role's name."""
     jurisdiction = _jurisdiction(session, code)
     rows = session.exec(
-        select(JurisdictionMembership, User.email)
-        .join(User, User.id == JurisdictionMembership.user_id, isouter=True)
-        .where(JurisdictionMembership.jurisdiction_id == jurisdiction.id)
+        select(RoleAssignment, User.email)
+        .join(User, User.id == RoleAssignment.user_id, isouter=True)
+        .where(RoleAssignment.jurisdiction_id == jurisdiction.id)
     ).all()
-    # One entry per person: a pending row left beside their membership, or two user
-    # rows with one email, is still one member (signed in, if any row is).
+    # One entry per person: a pending row left beside their assignment, or two user
+    # rows with one email, is still one member (signed in, if any row is); and the
+    # highest role they hold there is the one shown.
     members: dict[str, dict] = {}
-    for membership, user_email in rows:
-        email = (user_email or membership.email or "").lower()
-        member = {"email": email, "role": membership.role, "tester": membership.tester, "pending": user_email is None}
-        if email not in members or (members[email]["pending"] and not member["pending"]):
+    for assignment, user_email in rows:
+        email = (user_email or assignment.pending_email or "").lower()
+        member = {
+            "email": email,
+            "role": _MEMBER_ROLE.get(assignment.role, assignment.role),
+            "tester": assignment.tester,
+            "pending": user_email is None,
+        }
+        current = members.get(email)
+        if current is None:
             members[email] = member
+            continue
+        if current["pending"] and not member["pending"]:
+            current["pending"] = False
+        current["tester"] = current["tester"] or member["tester"]
+        if member["role"] == ROLE_ADMIN:
+            current["role"] = ROLE_ADMIN
     return sorted(members.values(), key=lambda m: m["email"])
 
 
 def list_jurisdictions(session: Session) -> str:
+    counts = _member_counts(session)
     lines = []
     for row in session.exec(select(Jurisdiction).order_by(Jurisdiction.code)).all():
-        members = session.exec(
-            select(func.count(JurisdictionMembership.id)).where(JurisdictionMembership.jurisdiction_id == row.id)
-        ).one()
-        flags = [f for f, on in (("enabled", row.enabled), ("auto-enrol", row.auto_enrol)) if on]
-        lines.append(f"{row.code}\t{row.name}\t{row.stage}\t{members} member(s)\t{', '.join(flags) or 'disabled'}")
+        lines.append(
+            f"{row.code}\t{row.name}\t{row.stage}\t{counts.get(row.id, 0)} member(s)\t"
+            f"{'enabled' if row.enabled else 'disabled'}"
+        )
     return "\n".join(lines) or "No jurisdictions"
 
 
@@ -400,11 +430,6 @@ def run(argv: list[str], session: Session) -> str:
     put = commands.add_parser("put", help="create or update a jurisdiction; its settings (JSON) on standard input")
     put.add_argument("code")
     put.add_argument("--name", required=True)
-    put.add_argument(
-        "--auto-enrol",
-        action=argparse.BooleanOptionalAction,
-        help="new users with nothing pending join it (unchanged if not given; new: off)",
-    )
     put.add_argument(
         "--enabled", action=argparse.BooleanOptionalAction, help="(unchanged if not given; new: on)"
     )
@@ -430,7 +455,6 @@ def run(argv: list[str], session: Session) -> str:
             args.code,
             args.name,
             _read_settings(),
-            auto_enrol=args.auto_enrol,
             enabled=args.enabled,
             stage=args.stage,
             display_name=args.display_name,

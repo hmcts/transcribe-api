@@ -1,23 +1,18 @@
-"""Jurisdictions (DIAAT-322): which jurisdiction a user works in, and what it looks like.
+"""Jurisdictions (DIAAT-322): which jurisdiction a request works in, and what it looks like.
 
-Every user belongs to one or more jurisdictions (``jurisdiction_membership``), and
-every piece of judicial material belongs to exactly one. A request works in one
-jurisdiction, chosen in this order:
+Every piece of judicial material belongs to exactly one jurisdiction. A user acts in one
+(jurisdiction, role) context at a time, chosen after sign-in (DIAAT-390) and carried in
+the BenchNotes access token (``ctx``; domain/auth/app_token.py), and a request works in
+that context's jurisdiction. Nothing else chooses one: not a remembered preference, not a
+header (``X-Jurisdiction`` is advisory: a mismatch is 409 ``context_changed``,
+domain/auth/context.py), and not "their only jurisdiction".
 
-1. the ``X-Jurisdiction`` header (a jurisdiction code): the web app sends the one its
-   tab is in, so a switch in another tab cannot make this tab save elsewhere;
-2. the user's remembered choice (``user.active_jurisdiction_id``);
-3. their only jurisdiction.
+The jurisdiction must be enabled; a context in a disabled one, or in none (the global
+JurisdictionSuperAdministrator has no jurisdiction to work in) is 403. Who holds what is the
+``role_assignment`` table (domain/assignments.py).
 
-It must be one the user belongs to, that is enabled, and whose stage lets them see it
-(DIAAT-345: a draft only its admins, one in test its testers and admins, a live one
-every member). A user with none gets 403
-``no_jurisdiction``; a user with several and no choice gets 409
-``jurisdiction_choice_required``; a header naming a jurisdiction they do not belong to
-gets 403 ``jurisdiction_not_available`` (it names a code, not material).
-
-Membership and settings are rows, so a jurisdiction is added without a deployment
-(scripts-jurisdictions.py, until the admin area does it: DIAAT-328).
+Settings are rows, so a jurisdiction is added without a deployment
+(``python -m transcribe_api.jurisdictions_admin``, and the admin area: DIAAT-356).
 """
 
 from __future__ import annotations
@@ -27,14 +22,18 @@ from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import func, update
 from sqlmodel import Session, select
 
+from transcribe_api.domain.assignments import claim_pending_assignments
+from transcribe_api.domain.auth.app_token import Context
+from transcribe_api.domain.auth.context import context_required
+from transcribe_api.domain.auth.context import error as _error
+from transcribe_api.domain.jurisdiction_stages import STAGE_DRAFT, STAGE_LIVE, STAGE_TEST, STAGES, sees  # noqa: F401
 from transcribe_api.domain.models_dictation import (
     Jurisdiction,
-    JurisdictionMembership,
+    RoleAssignment,
     Transcription,
     UploadJurisdiction,
     User,
@@ -43,26 +42,24 @@ from transcribe_api.runtime.db_connection import get_engine
 
 logger = logging.getLogger(__name__)
 
-HEADER = "X-Jurisdiction"
+HEADER = "X-Jurisdiction"  # advisory (domain/auth/context.py)
 
 # The IAC as migration 0004 creates it: fixed, so environments agree. Its legal wording
 # is the document_content row with id 1 (DIAAT-342), and only the IAC's.
 IAC_CODE = "IAC"
 IAC_JURISDICTION_ID = UUID("6a1c0f3e-3b7d-4c2a-9e51-1ac000000001")
 
+# The member roles of the command line and the SystemAdministrator's members endpoints
+# (jurisdictions_admin), as before DIAAT-382; they stand for the assignments Judge and
+# JurisdictionAdministrator.
 ROLE_JUDGE = "judge"
 ROLE_ADMIN = "admin"
 ROLES = (ROLE_JUDGE, ROLE_ADMIN)
 
 # DIAAT-345: a new jurisdiction is set up as a draft, tried by its test group, then
-# switched on for every member (models_dictation.Jurisdiction.stage).
-STAGE_DRAFT = "draft"
-STAGE_TEST = "test"
-STAGE_LIVE = "live"
-STAGES = (STAGE_DRAFT, STAGE_TEST, STAGE_LIVE)
+# switched on for every member (models_dictation.Jurisdiction.stage): domain/jurisdiction_stages.py.
 
 NO_JURISDICTION = "no_jurisdiction"
-CHOICE_REQUIRED = "jurisdiction_choice_required"
 NOT_AVAILABLE = "jurisdiction_not_available"
 
 # The IAC decision document (documents/): the hearing form, submission and the
@@ -186,19 +183,9 @@ def readiness_problems(settings: JurisdictionSettings, *, admin_count: int) -> l
     return problems
 
 
-def sees(stage: str, role: str, tester: bool) -> bool:
-    """Whether a member with ``role`` (and in the test group or not) sees a jurisdiction
-    at ``stage`` (DIAAT-345). Its admins see it from the start, to set it up."""
-    if stage == STAGE_LIVE:
-        return True
-    if stage == STAGE_TEST:
-        return tester or role == ROLE_ADMIN
-    return stage == STAGE_DRAFT and role == ROLE_ADMIN
-
-
 @dataclass(frozen=True)
 class Membership:
-    """One of the user's enabled jurisdictions, with their role in it."""
+    """The jurisdiction a request works in, with the role the user acts as there."""
 
     jurisdiction_id: UUID
     code: str
@@ -216,10 +203,9 @@ class Membership:
 
 @dataclass(frozen=True)
 class ActiveJurisdiction:
-    """The jurisdiction a request works in, and every one the user may switch to."""
+    """The jurisdiction a request works in (the token's context)."""
 
     current: Membership
-    memberships: tuple[Membership, ...]
 
     @property
     def id(self) -> UUID:
@@ -234,67 +220,82 @@ class ActiveJurisdiction:
         return self.current.settings
 
 
-def _load_memberships(user_id: UUID) -> list[Membership]:
-    """The user's enabled jurisdictions that their stage lets them see, by name."""
-    with Session(get_engine()) as session:
-        rows = session.exec(
-            select(Jurisdiction, JurisdictionMembership.role, JurisdictionMembership.tester)
-            .join(JurisdictionMembership, JurisdictionMembership.jurisdiction_id == Jurisdiction.id)
-            .where(JurisdictionMembership.user_id == user_id, Jurisdiction.enabled)
-            .order_by(Jurisdiction.name)
-        ).all()
-    return [
-        Membership(
-            jurisdiction_id=jurisdiction.id,
-            code=jurisdiction.code,
-            name=jurisdiction.name,
-            role=role,
-            settings=parse_settings(jurisdiction.settings, jurisdiction.code),
-            display_name=jurisdiction.display_name or "",
-            stage=jurisdiction.stage,
-        )
-        for jurisdiction, role, tester in rows
-        if sees(jurisdiction.stage, role, tester)
-    ]
-
-
-def load_memberships(user_id: UUID) -> list[Membership]:
-    # Callers bind this name; the lookup behind it is what tests replace
-    # (tests/unit/conftest.py every_user_is_an_iac_judge).
-    return _load_memberships(user_id)
-
-
 def enrol_new_user(session: Session, user: User) -> None:
-    """Give a user their jurisdictions on first sign-in, in the caller's transaction
-    (the user row is flushed, not committed).
+    """On a user's first sign-in, in the caller's transaction (the user row is flushed,
+    not committed): give them what was assigned to their email before they signed in.
 
-    Memberships added by email before they signed in are claimed. With none, they are
-    made a judge in every enabled, live ``auto_enrol`` jurisdiction (the IAC), as anyone with
-    an app role could use BenchNotes before jurisdictions. Runs once: a user later
-    removed from every jurisdiction is not enrolled again.
+    Nobody is enrolled automatically any more (DIAAT-373): a new user has no role until
+    a JurisdictionAdministrator adds them or approves their request. Runs once, for a
+    new user: a user later removed from every jurisdiction is not given anything again.
     """
-    email = (user.email or "").strip().lower()
-    claimed = 0
-    if email:
-        claimed = session.execute(
-            update(JurisdictionMembership)
-            .where(JurisdictionMembership.user_id.is_(None), func.lower(JurisdictionMembership.email) == email)
-            .values(user_id=user.id, email=None)
-        ).rowcount
-    if claimed:
-        logger.info("Claimed pending jurisdiction memberships for user id=%s", user.id)
-        return
-    auto = session.exec(
-        select(Jurisdiction.id).where(Jurisdiction.auto_enrol, Jurisdiction.enabled, Jurisdiction.stage == STAGE_LIVE)
-    ).all()
-    for jurisdiction_id in auto:
-        session.add(JurisdictionMembership(jurisdiction_id=jurisdiction_id, user_id=user.id, role=ROLE_JUDGE))
-    logger.info("Enrolled user id=%s in %d auto-enrol jurisdiction(s)", user.id, len(auto))
+    claim_pending_assignments(session, user.id, user.email)
 
 
-def _remembered_jurisdiction_id(user_id: UUID) -> UUID | None:
+def _load_membership(code: str, role: str) -> Membership | None:
+    """The enabled jurisdiction ``code``, as the user acts in it as ``role``."""
     with Session(get_engine()) as session:
-        return session.exec(select(User.active_jurisdiction_id).where(User.id == user_id)).first()
+        row = session.exec(select(Jurisdiction).where(Jurisdiction.code == code, Jurisdiction.enabled)).first()
+    if row is None:
+        return None
+    return Membership(
+        jurisdiction_id=row.id,
+        code=row.code,
+        name=row.name,
+        role=role,
+        settings=parse_settings(row.settings, row.code),
+        display_name=row.display_name or "",
+        stage=row.stage,
+    )
+
+
+def _context_of(user: object) -> Context | None:
+    # The BenchNotes token's context, as the auth dependency attached it
+    # (domain/auth/dependencies_*.py: AuthenticatedUser.ctx). Tests replace this.
+    return getattr(user, "ctx", None)
+
+
+def active_jurisdiction(user: object) -> ActiveJurisdiction:
+    """The jurisdiction the user's request works in, from their context.
+
+    403 ``context_required`` with none chosen; 403 ``no_jurisdiction`` when the context is
+    a global role's (no jurisdiction to work in); 403 ``jurisdiction_not_available`` when
+    the jurisdiction is disabled or gone. No assignment is read: the token's context was
+    checked against the assignments when it was minted."""
+    ctx = _context_of(user)
+    if ctx is None:
+        raise context_required()
+    if ctx.jurisdiction is None:
+        raise _error(403, NO_JURISDICTION, "The role you are working as has no jurisdiction.")
+    membership = _load_membership(ctx.jurisdiction, ctx.role)
+    if membership is None:
+        raise not_available()
+    return ActiveJurisdiction(current=membership)
+
+
+_jurisdiction_ids: dict[str, UUID] = {}
+
+
+def known_jurisdiction_id(code: str) -> UUID | None:
+    """The ID of a jurisdiction already looked up by code (a code never changes ID), else None."""
+    return _jurisdiction_ids.get(code)
+
+
+def jurisdiction_id_for_code(code: str) -> UUID | None:
+    """The jurisdiction's ID, by code, for stamping audit rows. Looked up once a process (a code
+    keeps its ID for good); None if there is no such jurisdiction or the lookup fails (an audit
+    stamp never fails a request)."""
+    known = _jurisdiction_ids.get(code)
+    if known is not None:
+        return known
+    try:
+        with Session(get_engine()) as session:
+            found = session.exec(select(Jurisdiction.id).where(Jurisdiction.code == code)).first()
+    except Exception:
+        logger.warning("Could not look up the ID of jurisdiction %s for the audit stamp", code)
+        return None
+    if found is not None:
+        _jurisdiction_ids[code] = found
+    return found
 
 
 def _owned_transcription_jurisdiction(transcription_id: UUID, user_id: UUID) -> tuple[bool, UUID | None]:
@@ -363,68 +364,31 @@ def upload_jurisdiction_id(transcription_id: str | UUID | None, user_id: UUID) -
     return started_in if started_in is not None else default_jurisdiction_id(user_id)
 
 
+def _assigned_jurisdiction_ids(user_id: UUID) -> list[UUID]:
+    """The enabled jurisdictions the user holds a role in."""
+    with Session(get_engine()) as session:
+        return list(
+            session.exec(
+                select(Jurisdiction.id)
+                .join(RoleAssignment, RoleAssignment.jurisdiction_id == Jurisdiction.id)
+                .where(RoleAssignment.user_id == user_id, Jurisdiction.enabled)
+                .distinct()
+            ).all()
+        )
+
+
 def default_jurisdiction_id(user_id: UUID) -> UUID | None:
     """The jurisdiction for work with no request behind it and no record of where it
-    started: the user's remembered choice, else their only jurisdiction, else None
-    (the record is then in no jurisdiction, and nobody lists it)."""
-    try:
-        return choose(tuple(load_memberships(user_id)), _remembered_jurisdiction_id(user_id), None).id
-    except HTTPException:
-        return None
-
-
-def remember_choice(user_id: UUID, jurisdiction_id: UUID) -> bool:
-    """Store the jurisdiction the user chose (DIAAT-332), for requests that name none
-    and their next sign-in. False if there is no such user.
-
-    Not re-checked against their memberships here: a stored choice is only ever used
-    while it is one of their enabled jurisdictions (choose), so one an admin removes
-    a moment later is ignored, not obeyed."""
-    with Session(get_engine()) as session:
-        stored = session.execute(
-            update(User).where(User.id == user_id).values(active_jurisdiction_id=jurisdiction_id)
-        ).rowcount
-        session.commit()
-    if stored:
-        logger.info("User id=%s chose to work in jurisdiction id=%s", user_id, jurisdiction_id)
-    return stored == 1
-
-
-def _error(status_code: int, code: str, message: str) -> HTTPException:
-    return HTTPException(status_code=status_code, detail={"code": code, "message": message})
+    started (an upload made before DIAAT-322, or a file not named by its upload ID): the
+    user's only jurisdiction, else None (the record is then in no jurisdiction, and nobody
+    lists it). There is no remembered choice any more: the active context is per session."""
+    ids = _assigned_jurisdiction_ids(user_id)
+    return ids[0] if len(ids) == 1 else None
 
 
 def not_available() -> HTTPException:
-    """403: a jurisdiction the user does not belong to (a code, never material)."""
+    """403: a jurisdiction the user cannot work in (a code, never material)."""
     return _error(403, NOT_AVAILABLE, "You do not have access to that jurisdiction.")
-
-
-def choose(
-    memberships: tuple[Membership, ...], active_jurisdiction_id: UUID | None, requested_code: str | None
-) -> ActiveJurisdiction:
-    """Which of the user's jurisdictions a request works in (see the module docstring),
-    or the error. No database access."""
-    if not memberships:
-        raise _error(403, NO_JURISDICTION, "You have not been given access to a jurisdiction.")
-
-    if requested_code:
-        wanted = requested_code.strip().upper()
-        current = next((m for m in memberships if m.code == wanted), None)
-        if current is None:
-            raise not_available()
-        return ActiveJurisdiction(current=current, memberships=memberships)
-
-    current = next((m for m in memberships if m.jurisdiction_id == active_jurisdiction_id), None)
-    if current is None and len(memberships) == 1:
-        current = memberships[0]
-    if current is None:
-        raise _error(409, CHOICE_REQUIRED, "Choose the jurisdiction you are working in.")
-    return ActiveJurisdiction(current=current, memberships=memberships)
-
-
-def resolve(user_id: UUID, active_jurisdiction_id: UUID | None, requested_code: str | None) -> ActiveJurisdiction:
-    """The jurisdiction this request works in, from the user's memberships."""
-    return choose(tuple(load_memberships(user_id)), active_jurisdiction_id, requested_code)
 
 
 def jurisdiction_dependency(current_user_dep):
@@ -432,7 +396,7 @@ def jurisdiction_dependency(current_user_dep):
     get_current_user so it shares the request's cached user with get_allowlisted_user
     (domain/auth/dependencies_dictation.py and dependencies_recording.py)."""
 
-    def get_active_jurisdiction(request: Request, current_user: User = Depends(current_user_dep)) -> ActiveJurisdiction:
-        return resolve(current_user.id, current_user.active_jurisdiction_id, request.headers.get(HEADER))
+    def get_active_jurisdiction(current_user: User = Depends(current_user_dep)) -> ActiveJurisdiction:
+        return active_jurisdiction(current_user)
 
     return get_active_jurisdiction
