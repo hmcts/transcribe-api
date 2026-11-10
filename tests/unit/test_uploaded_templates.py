@@ -178,6 +178,46 @@ def test_a_box_that_cannot_be_used_is_named(paragraphs, says):
         t.find_boxes(make_template(paragraphs))
 
 
+_CELL = "<w:tc><w:p><w:r><w:t>Claimant</w:t></w:r></w:p></w:tc>"
+
+
+def _table(rows: str) -> str:
+    return f'<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>{rows}</w:tbl>'
+
+
+def _box(content: str) -> str:
+    return f'<w:sdt><w:sdtPr><w:tag w:val="Parties"/></w:sdtPr><w:sdtContent>{content}</w:sdtContent></w:sdt>'
+
+
+@pytest.mark.parametrize(
+    ("xml", "says"),
+    [
+        (_box(_table(f"<w:tr>{_CELL}</w:tr>")) + "<w:p/>", "holds a table, row or cell"),
+        (_table(_box(f"<w:tr>{_CELL}</w:tr>")) + "<w:p/>", "holds a table, row or cell"),
+        (_table(f"<w:tr>{_box(_CELL)}</w:tr>") + "<w:p/>", "holds a table, row or cell"),
+        (_box("<w:bookmarkStart w:id='0' w:name='b'/><w:bookmarkEnd w:id='0'/>") + "<w:p/>", "has no text"),
+    ],
+    ids=["table", "row", "cell", "no-text"],
+)
+def test_a_box_benchnotes_could_not_fill_is_refused_at_upload(xml, says):
+    """The value would never reach the document: the placeholder would stay."""
+    data = _with_body_xml(xml, make_template([[Sdt("JudgmentText")]]))
+    t.check_template_file(data)
+    with pytest.raises(t.TemplateFileError, match=f"“Parties” {says}"):
+        t.find_boxes(data)
+
+
+def test_a_box_inside_a_table_cell_is_filled(tmp_path):
+    data = _with_body_xml(
+        _table(f"<w:tr><w:tc><w:p><w:r><w:t>For: </w:t></w:r>{_box('<w:r><w:t>x</w:t></w:r>')}</w:p></w:tc></w:tr>")
+        + "<w:p/>",
+        make_template([[Sdt("JudgmentText")]]),
+    )
+    assert [b.key for b in t.find_boxes(data)] == ["JudgmentText", "Parties"]
+    output = t.fill_template(data, {"JudgmentText": "Granted.", "Parties": "Ms A"}, tmp_path / "out.docx")
+    assert "For: Ms A" in document_text(output.read_bytes())
+
+
 def test_each_box_gets_a_field_the_admin_can_change():
     fields = {f.tag: f for f in map(t.propose_field, t.find_boxes(make_template(JUDGMENT)))}
     assert (fields["Reference"].type, fields["Reference"].label, fields["Reference"].required) == (

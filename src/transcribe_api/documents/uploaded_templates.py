@@ -194,6 +194,22 @@ def _shown_text(sdt: Any) -> str:
     return text[:40] or "an empty box"
 
 
+_TABLE_PARTS = frozenset({qn("w:tbl"), qn("w:tr"), qn("w:tc")})
+
+
+def _unfillable(sdt: Any) -> str | None:
+    """Why BenchNotes cannot fill a box, or None. It writes the value into the box's
+    paragraphs or runs (WordDocument.set_content_control_text): a box around a table,
+    row or cell, or with neither, would keep its placeholder."""
+    content = sdt.find(qn("w:sdtContent"))
+    children = {child.tag for child in content} if content is not None else set()
+    if children & _TABLE_PARTS:
+        return "holds a table, row or cell, which BenchNotes cannot fill. Put the box inside the cell instead."
+    if not children & {qn("w:p"), qn("w:r")}:
+        return "has no text for BenchNotes to replace. Type placeholder text in it in Word."
+    return None
+
+
 def find_boxes(data: bytes) -> list[Box]:
     """The template's fields, in document order (TemplateFileError when a box cannot
     be used). Call check_template_file first."""
@@ -211,6 +227,9 @@ def find_boxes(data: bytes) -> list[Box]:
             )
         if props.find(qn("w:picture")) is not None or props.find(qn("w14:checkbox")) is not None:
             raise TemplateFileError(f"The box “{key}” is a picture or tick box, which BenchNotes cannot fill yet.")
+        unfillable = _unfillable(sdt)
+        if unfillable:
+            raise TemplateFileError(f"The box “{key}” {unfillable}")
         kind: BoxKind = "text"
         options: list[str] = []
         choices = props.find(qn("w:dropDownList"))
