@@ -26,6 +26,7 @@ EXPECTED_TABLES = {
     "document_content",
     "jurisdiction",
     "jurisdiction_membership",
+    "jurisdiction_template",
     "live_transcript_draft",
     "minuteversion",
     "tag",
@@ -56,6 +57,7 @@ ADDED_AWARE_TIMESTAMP_COLUMNS = {
     "jurisdiction": ["created_datetime", "updated_datetime"],  # 0004
     "jurisdiction_membership": ["created_datetime"],  # 0004
     "upload_jurisdiction": ["created_datetime"],  # 0004
+    "jurisdiction_template": ["created_datetime", "updated_datetime"],  # 0008
 }
 
 # Dictation migration a8f2c9d5e1b3 (fix for 15-20s p95 latency); 0001 lost them.
@@ -90,7 +92,7 @@ def _alter_type_sql(table: str, column: str, type_sql: str) -> re.Pattern[str]:
 def test_there_is_one_history_with_one_head():
     script = ScriptDirectory.from_config(migrations.alembic_config())
     assert script.get_bases() == ["0001"]
-    assert script.get_heads() == ["0007"]
+    assert script.get_heads() == ["0008"]
 
 
 def test_baseline_creates_every_table(monkeypatch):

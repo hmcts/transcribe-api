@@ -22,7 +22,7 @@ from pydantic import BaseModel, StringConstraints
 from pydantic import Field as PydanticField
 from sqlmodel import Field, Session
 
-from transcribe_api import jurisdictions_admin
+from transcribe_api import jurisdiction_templates, jurisdictions_admin
 from transcribe_api.api.document_content_models import (
     AdminDocumentContentResponse,
     AnonymityStatusPayload,
@@ -33,6 +33,7 @@ from transcribe_api.api.document_content_models import (
 from transcribe_api.documents.content_loader import get_document_content as load_document_content
 from transcribe_api.documents.content_loader import has_legal_wording, save_document_content
 from transcribe_api.documents.minutes.types import AdminTranscriptionListResponse, AdminTranscriptionRecord
+from transcribe_api.documents.uploaded_templates import MAX_TEMPLATE_BYTES, TemplateField
 from transcribe_api.domain.audit import (
     TRANSCRIPT_EXPORTED,
     TRANSCRIPT_VIEWED,
@@ -835,6 +836,7 @@ class WordingKeysResponse(BaseModel):
 
 
 JURISDICTION_NOT_READY = "jurisdiction_not_ready"
+TEMPLATE_NOT_READY = "template_not_ready"
 
 
 def _admin_session_run(operation):
@@ -843,6 +845,11 @@ def _admin_session_run(operation):
     with Session(get_engine()) as session:
         try:
             return operation(session)
+        except jurisdiction_templates.TemplateProblemsError as exc:  # DIAAT-344: which box
+            raise HTTPException(
+                status_code=400,
+                detail={"code": TEMPLATE_NOT_READY, "message": str(exc), "problems": exc.problems},
+            ) from None
         except jurisdictions_admin.NotReadyError as exc:  # DIAAT-345: what is missing
             raise HTTPException(
                 status_code=400,
@@ -987,3 +994,154 @@ def admin_remove_jurisdiction_member(
     _audit_jurisdiction_change(
         "membership.remove", admin_user, {"code": code.strip().upper(), **_member_target(email)}
     )
+
+
+# ---------------------------------------------------------------------------
+# A jurisdiction's Word templates (DIAAT-344, SystemAdministrator only)
+# ---------------------------------------------------------------------------
+# Uploaded as the raw request body with Content-Type exactly application/octet-stream,
+# like the browser's other uploads: Front Door's WAF blocks multipart bodies, and lets
+# this one through by a custom Allow rule (azure-platform-terraform). The file's name
+# comes in X-Upload-Filename (URL-encoded).
+
+UPLOAD_CONTENT_TYPE = "application/octet-stream"
+
+
+class TemplateAdminRecord(BaseModel):
+    id: str
+    name: str
+    service: str | None
+    file_name: str
+    enabled: bool
+    boxes: list[dict[str, Any]]
+    fields: list[dict[str, Any]]
+    # What stops it being saved or enabled; empty when it is complete.
+    problems: list[str]
+    version: str
+
+
+class TemplateWrite(BaseModel):
+    name: str = PydanticField(min_length=1, max_length=200)
+    service: str | None = PydanticField(default=None, max_length=200)
+    fields: list[TemplateField] = PydanticField(max_length=500)
+    enabled: bool = False
+    version: str
+
+
+def _audit_template_change(action: str, admin_user: User, code: str, row_id: str, detail: dict[str, Any]) -> None:
+    record_audit(
+        action,
+        actor_id=admin_user.id,
+        outcome="success",
+        object_type="template",
+        object_id=row_id,
+        detail={"code": code.strip().upper(), **detail},
+    )
+
+
+async def _read_template_upload(request: Request) -> tuple[str, bytes]:
+    """The uploaded file's name and bytes: 415 for another Content-Type, 413 when too
+    large, 400 for a file that is not a .docx by name."""
+    content_type = (request.headers.get("content-type") or "").strip().lower()
+    if content_type != UPLOAD_CONTENT_TYPE:
+        raise HTTPException(status_code=415, detail=f"Send the file as {UPLOAD_CONTENT_TYPE}.")
+    file_name = urllib.parse.unquote(request.headers.get("x-upload-filename") or "").strip()
+    if not file_name.lower().endswith(".docx"):
+        raise HTTPException(status_code=400, detail="Upload a Word document (.docx).")
+    too_large = HTTPException(status_code=413, detail=f"The file is larger than {MAX_TEMPLATE_BYTES // (1024 * 1024)} MB.")
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_TEMPLATE_BYTES:
+        raise too_large
+    data = bytearray()
+    async for chunk in request.stream():
+        data.extend(chunk)
+        if len(data) > MAX_TEMPLATE_BYTES:
+            raise too_large
+    return file_name, bytes(data)
+
+
+@router.get("/jurisdictions/{code}/templates", response_model=list[TemplateAdminRecord])
+def admin_list_templates(
+    code: str,
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),  # noqa: B008
+) -> list[TemplateAdminRecord]:
+    """A jurisdiction's templates, each with its boxes, fields and what is missing."""
+    rows = _admin_session_run(
+        lambda s: [jurisdiction_templates.template_record(r) for r in jurisdiction_templates.templates_of(s, code)]
+    )
+    return [TemplateAdminRecord(**row) for row in rows]
+
+
+@router.post("/jurisdictions/{code}/templates", response_model=TemplateAdminRecord)
+async def admin_upload_template(
+    code: str,
+    request: Request,
+    response: Response,
+    replace: UUID | None = Query(default=None),  # noqa: B008
+    version: str | None = Query(default=None, max_length=64),
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),  # noqa: B008
+) -> TemplateAdminRecord:
+    """Upload a Word template: a new one (201), with a field proposed for each box, or
+    with ``replace`` and its ``version`` a new file for an existing one, keeping the
+    fields of the boxes it still has. A file BenchNotes cannot use is refused (400)."""
+    file_name, data = await _read_template_upload(request)
+
+    def upload(session: Session) -> dict:
+        if replace is None:
+            row = jurisdiction_templates.add_template(session, code, file_name, data)
+        else:
+            row = jurisdiction_templates.replace_file(session, code, replace, file_name, data, version or "")
+        return jurisdiction_templates.template_record(row)
+
+    record = await asyncio.to_thread(_admin_session_run, upload)
+    if replace is None:
+        response.status_code = 201
+    _audit_template_change(
+        "template.add" if replace is None else "template.edit",
+        admin_user,
+        code,
+        record["id"],
+        {"change": "uploaded" if replace is None else "file_replaced", "boxes": len(record["boxes"])},
+    )
+    return TemplateAdminRecord(**record)
+
+
+@router.put("/jurisdictions/{code}/templates/{template_id}", response_model=TemplateAdminRecord)
+def admin_update_template(
+    code: str,
+    template_id: UUID,
+    body: TemplateWrite,
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),  # noqa: B008
+) -> TemplateAdminRecord:
+    """Save a template's name, fields and whether judges can choose it. Refused (400,
+    ``template_not_ready``, with ``problems`` naming each box) unless every box has a
+    complete field; 409 if it changed since ``version``."""
+    record = _admin_session_run(
+        lambda s: jurisdiction_templates.template_record(
+            jurisdiction_templates.update_template(
+                s,
+                code,
+                template_id,
+                name=body.name,
+                service=body.service,
+                fields=body.fields,
+                enabled=body.enabled,
+                expected_version=body.version,
+            )
+        )
+    )
+    _audit_template_change(
+        "template.edit", admin_user, code, record["id"], {"change": "fields", "enabled": record["enabled"]}
+    )
+    return TemplateAdminRecord(**record)
+
+
+@router.delete("/jurisdictions/{code}/templates/{template_id}", status_code=204)
+def admin_delete_template(
+    code: str,
+    template_id: UUID,
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),  # noqa: B008
+) -> None:
+    """Delete a template. Documents already made from it are kept."""
+    _admin_session_run(lambda s: jurisdiction_templates.delete_template(s, code, template_id))
+    _audit_template_change("template.delete", admin_user, code, str(template_id), {})

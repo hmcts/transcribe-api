@@ -314,8 +314,9 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
         # The headers the web app sends, for local development, which calls the API
-        # cross-origin: X-Jurisdiction (the tab's, DIAAT-322), X-Dictation-Session-Id.
-        allow_headers=["Authorization", "Content-Type", "X-Jurisdiction", "X-Dictation-Session-Id"],
+        # cross-origin: X-Jurisdiction (the tab's, DIAAT-322), X-Dictation-Session-Id,
+        # X-Upload-Filename (a template's, DIAAT-344).
+        allow_headers=["Authorization", "Content-Type", "X-Jurisdiction", "X-Dictation-Session-Id", "X-Upload-Filename"],
     )
 
     # hmcts.area from the path, before routing and body parsing (AreaMiddleware).

@@ -55,6 +55,10 @@ AUDIT_ACTIONS_APP = (
     "jurisdiction.edit",
     "membership.add",
     "membership.remove",
+    # DIAAT-344: a jurisdiction's uploaded Word templates.
+    "template.add",
+    "template.edit",
+    "template.delete",
 )
 AUDIT_ACTIONS = AUDIT_ACTIONS_AUTH_LIBRARY + AUDIT_ACTIONS_APP
 
@@ -197,7 +201,11 @@ def _dictation_attributes(schema: TelemetrySchema) -> None:
     )
     schema.attribute("dictation.user_initiated", bool, description="The user asked the session to end.")
     schema.attribute("dictation.window_seconds", int, description="Health window length.")
-    schema.attribute("document.template", allowed_values=("decision",), description="Document template.")
+    schema.attribute(
+        "document.template",
+        allowed_values=("decision", "uploaded"),
+        description="Document template: the IAC decision, or a jurisdiction's uploaded Word template (DIAAT-344).",
+    )
     schema.attribute(
         "document.template_version",
         pattern="[0-9a-f]{12}|unknown",

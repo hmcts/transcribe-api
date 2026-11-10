@@ -3,7 +3,7 @@ from enum import StrEnum
 from typing import Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import CheckConstraint, Column, DateTime, Index, UniqueConstraint, select, text
+from sqlalchemy import CheckConstraint, Column, DateTime, Index, LargeBinary, UniqueConstraint, select, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import Field, Relationship, SQLModel
@@ -197,6 +197,38 @@ class Transcription(BaseTable, table=True):
         back_populates="transcriptions",
         link_model=TranscriptionTagAssociation,
     )
+
+
+class JurisdictionTemplate(SQLModel, table=True):
+    """A Word template uploaded for a jurisdiction (DIAAT-344, 0008).
+
+    Its file, the boxes found in it and the field linked to each box
+    (documents/uploaded_templates.py). Judges of the jurisdiction choose it on the
+    recording page once it is available to them; it is only made available with every
+    box linked.
+    """
+
+    __tablename__ = "jurisdiction_template"
+    __table_args__ = (UniqueConstraint("jurisdiction_id", "name", name="uq_jurisdiction_template_name"),)
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True, nullable=False)
+    jurisdiction_id: UUID = Field(foreign_key="jurisdiction.id", index=True, nullable=False)
+    # What judges choose it by, e.g. "Judgment"; unique in its jurisdiction.
+    name: str = Field(max_length=200)
+    # The service it is for, where that applies (shown beside its name).
+    service: str | None = Field(default=None, max_length=200)
+    # The uploaded file's name, for the admin area only.
+    file_name: str = Field(max_length=255)
+    content: bytes = Field(sa_column=Column(LargeBinary, nullable=False))
+    sha256: str = Field(max_length=64)
+    # [{key, label, kind, options, count}]: what the file has (uploaded_templates.Box).
+    boxes: list = Field(sa_column=Column(JSONB, nullable=False))
+    # [{tag, label, type, required, options, source}], in form order (TemplateField).
+    fields: list = Field(sa_column=Column(JSONB, nullable=False))
+    # Judges can choose it. Never with a box unlinked.
+    enabled: bool = Field(default=False)
+    created_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
+    updated_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
 
 
 class DocumentContent(SQLModel, table=True):

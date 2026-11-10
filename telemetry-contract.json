@@ -41,6 +41,9 @@
         "jurisdiction.edit",
         "membership.add",
         "membership.remove",
+        "template.add",
+        "template.delete",
+        "template.edit",
         "transcript.delete",
         "transcript.edit",
         "transcript.export",
@@ -188,9 +191,10 @@
     },
     "document.template": {
       "allowed_values": [
-        "decision"
+        "decision",
+        "uploaded"
       ],
-      "description": "Document template.",
+      "description": "Document template: the IAC decision, or a jurisdiction's uploaded Word template (DIAAT-344).",
       "max_length": 128,
       "pattern": null,
       "type": "str"

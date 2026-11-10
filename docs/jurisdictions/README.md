@@ -87,7 +87,7 @@ enabled, as a draft, without auto-enrol.
     uses the web app's neutral default.
   - `template`: `iac_decision` (the IAC hearing form and decision document) or `null`.
     A jurisdiction with no template dictates into a general section and copies its
-    text out.
+    text out, unless it has uploaded templates (below).
   - `features.hearing_recordings`: whether the jurisdiction uses the hearing
     recordings area.
 - **[`et.example.json`](et.example.json)** is a starting point for the ET. Its wording
@@ -96,3 +96,44 @@ enabled, as a draft, without auto-enrol.
 A request works in the jurisdiction named by its `X-Jurisdiction` header (the web app
 sends the one its tab is in). Without the header it uses the user's last choice, or
 their only jurisdiction.
+
+## Uploaded Word templates (DIAAT-344)
+
+A jurisdiction can have any number of Word templates, uploaded in the admin area on the
+**Jurisdictions** tab (SystemAdministrator only), with no code change or release.
+Judges of the jurisdiction choose one on the recording page and fill its Hearing
+Details form; their document is the template with its boxes filled.
+
+- **The boxes** are the template's content controls (Word: Developer > Controls). Each
+  needs a tag (Properties > Tag), else its title is used. Boxes with the same tag are one
+  field and all get its value. A Word dropdown's items become the field's options
+  ("Choose an item." prompts are left out); a date picker becomes a date field.
+- **The field list.** An upload proposes a field for each box: its title as the label,
+  its type, required. The admin changes the label, type, required/optional, options and
+  order, but cannot add a field: every field is one of the template's boxes. Types:
+  text, date, dropdown, multi-select, yes/no, number, legal issues (the jurisdiction's
+  legal frameworks, kept by its Legal Text Manager), filled by BenchNotes (the
+  jurisdiction's name, or the year) and dictated text (the judgment: what was dictated,
+  then the judge's own text). Exactly one box takes the dictated text.
+- **Saving** is refused (400 `template_not_ready`) until every box has a complete field;
+  `problems` names each box or field. Only then can it be enabled for judges.
+- **A new file** for a template (`?replace=<id>&version=<version>`) keeps the fields of
+  the boxes it still has. A new box has no field yet, so the template is switched off
+  for judges until the admin links it.
+- **Empty optional boxes** are removed, with their paragraph when every box in it is
+  empty (an unused party or panel member leaves no line). Text outside the boxes stays,
+  so an "and" between parties in a paragraph of its own is left behind until template
+  owners group each party block in one content control.
+
+The upload is the raw request body, `POST /api/admin/jurisdictions/{code}/templates`
+with `Content-Type: application/octet-stream` and the file's name in
+`X-Upload-Filename` (URL-encoded), as the browser's other uploads: Front Door's WAF
+blocks multipart bodies and lets this path through by a custom Allow rule
+(`BenchNotesUploadAllow`, azure-platform-terraform). Until that rule is deployed in an
+environment, uploads there are blocked at Front Door.
+
+The file is checked before it is read: at most 2 MB (30 MB unpacked), a Word document
+(.docx, not macro-enabled or .dotx), and no macros, ActiveX, embedded objects or external
+links Word would fetch (an image pasted from an email, `cid:`, is fine). It is stored in
+the database (`jurisdiction_template`, migration `0008`) with its SHA-256, which is the
+document's template version in its provenance.

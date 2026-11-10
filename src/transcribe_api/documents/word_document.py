@@ -142,6 +142,18 @@ class WordDocument:
     # Content Control Operations
     # ========================================================================
 
+    def iter_content_control_elements(self) -> list[_Element]:
+        """Every content control (``w:sdt``) in the body, headers and footers, in
+        document order. Not the glossary (Word's store of placeholder text)."""
+        elements = list(self._document.element.xpath(".//*[local-name()='sdt']"))
+        for hf_element in self._iter_header_footer_elements():
+            elements.extend(hf_element.xpath(".//*[local-name()='sdt']"))
+        return elements
+
+    def set_content_control_text(self, sdt: _Element, value: str) -> None:
+        """Fill one content control (``\\n\\n`` separates paragraphs); see _set_control_text."""
+        self._set_control_text(sdt, value)
+
     def get_content_controls(self) -> list[ContentControl]:
         """Get all content controls in the document.
 
