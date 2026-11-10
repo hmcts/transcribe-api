@@ -67,6 +67,7 @@ The same operations run from a command line, for local development:
 
 ```sh
 python -m transcribe_api.jurisdictions_admin put ET --name "Employment Tribunal" < et.json
+python -m transcribe_api.jurisdictions_admin add-member ET lead.admin@ejudiciary.net --role admin
 python -m transcribe_api.jurisdictions_admin add-member ET first.last@ejudiciary.net --role judge --tester
 python -m transcribe_api.jurisdictions_admin put ET --name "Employment Tribunal" --stage test < et.json
 python -m transcribe_api.jurisdictions_admin list
