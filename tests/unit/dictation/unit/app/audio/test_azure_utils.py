@@ -23,6 +23,7 @@ class TestAsyncAzureBlobManager:
         with patch("transcribe_api.runtime.blob_dictation.get_settings") as mock_get_settings:
             mock_settings = MagicMock()
             mock_settings.AZURE_STORAGE_ACCOUNT_NAME = "test_account"
+            mock_settings.AZURE_STORAGE_CONNECTION_STRING = None
             mock_settings.AZURE_STORAGE_CONTAINER_NAME = "test_container"
             mock_get_settings.return_value = mock_settings
             yield mock_settings

@@ -156,6 +156,7 @@ def blob_manager(blob_client: MagicMock):
         patch("transcribe_api.runtime.blob_dictation.AsyncBlobServiceClient", return_value=_AsyncContext(service)),
     ):
         settings.return_value.AZURE_STORAGE_ACCOUNT_NAME = "account"
+        settings.return_value.AZURE_STORAGE_CONNECTION_STRING = None
         settings.return_value.AZURE_STORAGE_CONTAINER_NAME = "container"
         yield AsyncAzureBlobManager()
 

@@ -51,6 +51,22 @@ def _loggable_azure_code(code: object) -> str:
 
 NO_SPEECH_DETECTED = "speech.no_speech_detected"
 
+# The transcript of every upload under SPEECH_BACKEND=mock (settings_dictation.py).
+_MOCK_DIALOGUE_ENTRIES = (
+    DialogueEntry(
+        speaker="1",
+        text="Good morning, this is a mock transcript of the uploaded audio.",
+        start_time=0.0,
+        end_time=3.5,
+    ),
+    DialogueEntry(
+        speaker="2",
+        text="No audio was sent to Azure Speech for this upload.",
+        start_time=3.8,
+        end_time=6.6,
+    ),
+)
+
 
 class NoSpeechDetectedError(HTTPException):
     """Azure transcribed the audio but found no speech in it (silent or speech-free
@@ -274,6 +290,8 @@ async def transcribe_audio_with_azure(audio_file_path: Path):
     """
 
     settings = get_settings()
+    if settings.SPEECH_BACKEND == "mock":
+        return [entry.model_copy() for entry in _MOCK_DIALOGUE_ENTRIES]
     if not settings.AZURE_SPEECH_ENDPOINT:
         raise HTTPException(status_code=500, detail="AZURE_SPEECH_ENDPOINT not set")
 
