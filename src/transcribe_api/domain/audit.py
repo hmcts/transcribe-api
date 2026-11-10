@@ -100,11 +100,11 @@ from typing import TYPE_CHECKING, Any
 import anyio
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
-from starlette.requests import ClientDisconnect
 from hmcts_azure_auth.audit import AuditEvent, AuditEventType
 from hmcts_otel import conventions as c
 from hmcts_otel import get_request_id, record_event
 from sqlmodel import Session
+from starlette.requests import ClientDisconnect
 
 import transcribe_api.runtime.telemetry  # noqa: F401  (registers the merged schema)
 from transcribe_api.domain.models_dictation import AuditLog
