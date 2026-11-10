@@ -19,6 +19,37 @@ or admin. Behind it is `/api/admin/jurisdictions`. Every change is audited. A sa
 made from a form opened before someone else's change is refused (409), not applied
 over it.
 
+## Setting up a new jurisdiction (DIAAT-345)
+
+A new jurisdiction goes through three **stages**, without a release:
+
+| Stage | Who of its members sees it |
+|---|---|
+| **Draft** (every new jurisdiction) | its admins only, to set it up |
+| **Test** | its admins, and the members marked **tester** (the test group) |
+| **Live** | every member |
+
+**Enabled** still switches a jurisdiction off for everyone, whatever its stage. Every
+jurisdiction from before stages is live (migration `0007`), so nothing changes for it.
+
+**Deploying the release that adds stages:** wait for its rollout to finish before you
+create a jurisdiction or change one's stage. Until then, pods still running the
+previous release keep serving. They do not know about stages, so they would show an
+enabled draft or test jurisdiction to every member (or keep showing a jurisdiction
+moved from live to test to members who are not testers). This applies only to the first
+deployment of this release in each environment; after it, every pod enforces stages.
+
+A jurisdiction leaves draft only when it is ready. The admin area lists what is
+missing, and moving it to test or live is refused (400 `jurisdiction_not_ready`) until:
+
+- its required screen wording is set (`REQUIRED_WORDING_KEYS` in
+  `domain/jurisdictions.py`, plus the navigation wording when it uses hearing
+  recordings): the other keys have a neutral default that suits any jurisdiction;
+- it has at least one admin.
+
+A jurisdiction also has an optional **display name**, which is what users see (for
+example "Employment Tribunals (ET)"), and an optional **service**, where it applies.
+
 A member who is an **admin** of a jurisdiction changes that jurisdiction's wording,
 and nothing else, from the **Wording** link in the header (`/jurisdiction-wording`,
 behind it `/api/jurisdictions/wording`). Being an admin in one jurisdiction gives
@@ -36,12 +67,15 @@ The same operations run from a command line, for local development:
 
 ```sh
 python -m transcribe_api.jurisdictions_admin put ET --name "Employment Tribunal" < et.json
-python -m transcribe_api.jurisdictions_admin add-member ET first.last@ejudiciary.net --role judge
+python -m transcribe_api.jurisdictions_admin add-member ET lead.admin@ejudiciary.net --role admin
+python -m transcribe_api.jurisdictions_admin add-member ET first.last@ejudiciary.net --role judge --tester
+python -m transcribe_api.jurisdictions_admin put ET --name "Employment Tribunal" --stage test < et.json
 python -m transcribe_api.jurisdictions_admin list
 ```
 
-`put` changes `--auto-enrol` and `--enabled` (and their `--no-` forms) only when you
-give them. A new jurisdiction starts enabled, without auto-enrol.
+`put` changes `--auto-enrol`, `--enabled` (and their `--no-` forms), `--stage`,
+`--display-name` and `--service` only when you give them. A new jurisdiction starts
+enabled, as a draft, without auto-enrol.
 
 - **Add judges before they first sign in.** A new user claims any memberships added
   for their email. A new user with none is made a judge in every `auto_enrol`

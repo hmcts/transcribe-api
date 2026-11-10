@@ -159,7 +159,7 @@ def test_two_user_rows_with_one_email_are_one_person(session):
     _user(session, "TWIN@example.test")
 
     admin.add_member(session, "ET", "twin@example.test")
-    assert admin.members_of(session, "ET") == [{"email": "twin@example.test", "role": "judge", "pending": False}]
+    assert admin.members_of(session, "ET") == [{"email": "twin@example.test", "role": "judge", "tester": False, "pending": False}]
     assert admin.remove_member(session, "ET", "Twin@example.test") == "Removed from ET"
     assert admin.members_of(session, "ET") == []
 
@@ -169,8 +169,8 @@ def test_list_shows_each_jurisdiction(session):
     admin.put_jurisdiction(session, "ET", "Employment Tribunal", {}, enabled=False)
     admin.add_member(session, "IAC", "a@example.test")
     assert admin.run(["list"], session).splitlines() == [
-        "ET\tEmployment Tribunal\t0 member(s)\tdisabled",
-        "IAC\tImmigration and Asylum Chamber\t1 member(s)\tenabled, auto-enrol",
+        "ET\tEmployment Tribunal\tdraft\t0 member(s)\tdisabled",
+        "IAC\tImmigration and Asylum Chamber\tdraft\t1 member(s)\tenabled, auto-enrol",
     ]
 
 

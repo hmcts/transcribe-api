@@ -65,8 +65,11 @@ def iac(jurisdiction_db) -> Jurisdiction:
 
 def _add_the_et(engine) -> None:
     with Session(engine) as session:
-        admin.put_jurisdiction(session, "ET", "Employment Tribunal", json.loads(ET_EXAMPLE.read_text()))
+        settings = json.loads(ET_EXAMPLE.read_text())
+        admin.put_jurisdiction(session, "ET", "Employment Tribunal", settings)
         admin.add_member(session, "ET", "et.judge@example.test")
+        admin.add_member(session, "ET", "et.admin@example.test", "admin")
+        admin.put_jurisdiction(session, "ET", "Employment Tribunal", settings, stage="live")  # DIAAT-345
 
 
 def test_the_iacs_wording_is_the_text_its_judges_saw_before():

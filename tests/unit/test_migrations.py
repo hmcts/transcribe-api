@@ -90,7 +90,7 @@ def _alter_type_sql(table: str, column: str, type_sql: str) -> re.Pattern[str]:
 def test_there_is_one_history_with_one_head():
     script = ScriptDirectory.from_config(migrations.alembic_config())
     assert script.get_bases() == ["0001"]
-    assert script.get_heads() == ["0006"]
+    assert script.get_heads() == ["0007"]
 
 
 def test_baseline_creates_every_table(monkeypatch):
