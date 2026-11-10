@@ -153,6 +153,17 @@ def test_submission_does_not_log_pii(client, as_user, mocker, caplog):
     _assert_no_pii_in_logs(caplog)
 
 
+def test_the_submissions_new_job_is_saved_without_an_ownership_lookup(client, as_user, mocker):
+    """Its ID is the server's (a new job of the transcription just made), so the SEC-1
+    owner check, a locking read, has nothing to guard."""
+    as_user(_make_user(roles=["Judge"]))
+    _patch_submission_deps(mocker)
+    save = mocker.patch("transcribe_api.api.routes_dictation.save_transcription_job")
+
+    assert client.post("/api/live-transcription/submission", json=_MINIMAL_BODY).status_code == 200
+    assert save.call_args.kwargs == {"check_owner": False}
+
+
 def test_submission_does_not_log_pii_sdk_branch(client, as_user, mocker, caplog):
     """PII must not appear in logs when DIRECT_SDK_ACCESS=True (the SDK download-URL branch)."""
     user = _make_user(roles=["Judge"])
