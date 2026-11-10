@@ -6,8 +6,10 @@ import tempfile
 import threading
 import urllib.parse
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import httpx
@@ -15,9 +17,11 @@ import pytz
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from hmcts_otel import StageHandle, background_span, journey, record_event, stage
 from hmcts_otel import conventions as c
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from sqlmodel import Session
 from starlette.responses import JSONResponse, StreamingResponse
 
+from transcribe_api import jurisdiction_templates
 from transcribe_api.api.document_content_models import DocumentContentResponse
 from transcribe_api.documents.content_loader import get_document_content, has_legal_wording
 from transcribe_api.documents.llm.langfuse_models import (
@@ -45,6 +49,13 @@ from transcribe_api.documents.minutes.types import (
 )
 from transcribe_api.documents.models import DEFAULT_JURISDICTION
 from transcribe_api.documents.template_renderer import render_hearing_document
+from transcribe_api.documents.uploaded_templates import (
+    FillContext,
+    box_text,
+    check_values,
+    dictated_text,
+    fill_template,
+)
 from transcribe_api.documents.versioning import DECISION_TEMPLATE, track_render
 from transcribe_api.domain.audit import (
     SECTIONED_TRANSCRIPT,
@@ -106,6 +117,7 @@ from transcribe_api.domain.models_dictation import (
 from transcribe_api.domain.provenance_dictation import decision_document_provenance
 from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager, _redact_blob_path, _sanitize_for_log
 from transcribe_api.runtime.browser_telemetry import telemetry_relay_router
+from transcribe_api.runtime.db_connection import get_engine
 from transcribe_api.runtime.dependency_health import get_dependency_checker, health_response
 from transcribe_api.runtime.logger import logger
 from transcribe_api.runtime.security_events import (
@@ -1254,13 +1266,29 @@ class LiveTranscriptionFormRequest(BaseModel):
 
 
 class LiveTranscriptionSubmissionRequest(BaseModel):
-    """Request model that accepts either sectioned or flat message formats."""
+    """Request model that accepts either sectioned or flat message formats.
+
+    Either the IAC decision's ``form_data``, or (DIAAT-344) an uploaded template's
+    ``template_id`` and the judge's ``values`` for its fields, by box tag.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    form_data: LiveTranscriptionFormRequest
+    form_data: LiveTranscriptionFormRequest | None = None
+    template_id: uuid.UUID | None = None
+    values: dict[str, str | bool | list[str] | None] | None = Field(default=None, max_length=500)
     messages: SectionedMessages | list[LiveTranscriptMessage]
     notes: str | None = Field(default=None, max_length=200_000)
+
+    @model_validator(mode="after")
+    def _one_form(self) -> "LiveTranscriptionSubmissionRequest":
+        if (self.form_data is None) == (self.template_id is None):
+            msg = "Send either form_data, or template_id with values."
+            raise ValueError(msg)
+        if (self.template_id is None) != (self.values is None):
+            msg = "Send template_id and values together."
+            raise ValueError(msg)
+        return self
 
     @field_validator("notes")
     @classmethod
@@ -1380,8 +1408,8 @@ class _RenderHandoff:
         self.abandoned = False
         self.path: Path | None = None
 
-    def render(self, **kwargs) -> Path:
-        path = render_hearing_document(**kwargs)
+    def render(self, renderer=None, **kwargs) -> Path:
+        path = (renderer or render_hearing_document)(**kwargs)
         with self.lock:
             if self.abandoned:
                 path.unlink(missing_ok=True)
@@ -1419,8 +1447,15 @@ async def save_live_transcription_submission(
     jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
     dictation_session_id: str | None = Header(default=None, alias="X-Dictation-Session-Id"),
 ) -> LiveTranscriptionSubmissionResponse:
-    """Persist live transcription form and transcript data as JSON in the audio uploads bucket."""
-    _require_decision_template(jurisdiction)
+    """Persist live transcription form and transcript data as JSON in the audio uploads bucket.
+
+    The document is the IAC decision (``form_data``) or, DIAAT-344, one of the
+    jurisdiction's uploaded templates filled with the judge's ``values``."""
+    if request.template_id is None:
+        _require_decision_template(jurisdiction)
+        plan = None
+    else:
+        plan = await asyncio.to_thread(_uploaded_template_plan, request, jurisdiction)
     # DIAAT-276: the submission is a journey; the transcription it creates is related
     # on the transcript.available event.
     submission_id = uuid.uuid4()
@@ -1438,7 +1473,7 @@ async def save_live_transcription_submission(
             # type as the code); it is turned into the client's generic 500 outside.
             with stage("submission") as submission_stage:
                 return await _save_live_transcription_submission(
-                    request, current_user, jurisdiction, submission_id, submission_stage
+                    request, current_user, jurisdiction, submission_id, submission_stage, plan
                 )
         except HTTPException:
             raise
@@ -1448,6 +1483,117 @@ async def save_live_transcription_submission(
                 _sanitize_for_log(current_user.id),
             )
             raise HTTPException(status_code=500, detail="Failed to save submission data") from None
+
+
+@dataclass
+class _DocumentPlan:
+    """How a submission's document is made and named: the IAC decision, or (DIAAT-344)
+    an uploaded template."""
+
+    template: str
+    render_kwargs: dict[str, Any]
+    # What the stored submission records of the form.
+    form_record: dict[str, Any]
+    title: str
+    download_filename: str
+    # An uploaded template's: its file's hash. The decision's comes from the render.
+    version: str | None = None
+
+
+def _filename_part(name: str) -> str:
+    """Characters safe in a file name only."""
+    return "".join(c if c.isalnum() or c in " -_" else "_" for c in name).strip()
+
+
+_HEARING_DOCUMENTS_DIR = Path(tempfile.gettempdir()) / "hearing_documents"
+
+
+def _decision_plan(
+    request: LiveTranscriptionSubmissionRequest, current_user: User, jurisdiction: ActiveJurisdiction
+) -> _DocumentPlan:
+    form = request.form_data
+    assert form is not None  # checked by the request model
+    # Format: "[{date}] {Appellant} v {Respondent}.docx"
+    return _DocumentPlan(
+        template=DECISION_TEMPLATE,
+        render_kwargs={
+            "request": request,
+            "output_dir": _HEARING_DOCUMENTS_DIR,
+            "user_email": current_user.email,
+            # DIAAT-342: the active jurisdiction's legal wording, not the form's
+            # free-text jurisdiction.
+            "jurisdiction_id": jurisdiction.id,
+        },
+        form_record=form.model_dump(by_alias=True, exclude_none=True),
+        title=f"{form.appellant_name} v {form.respondent}",
+        download_filename=f"[{form.hearing_date}] {_filename_part(form.appellant_name)} v {_filename_part(form.respondent)}.docx",
+    )
+
+
+def _render_uploaded_template(*, content: bytes, texts: dict[str, str], output_dir: Path) -> Path:
+    return fill_template(content, texts, output_dir / f"hearing-document-{uuid.uuid4()}.docx")
+
+
+def _uploaded_template_plan(
+    request: LiveTranscriptionSubmissionRequest, jurisdiction: ActiveJurisdiction
+) -> _DocumentPlan:
+    """The judge's chosen template, filled with their values: 404 when the jurisdiction's
+    judges cannot choose it, 400 (``template_values_invalid``, ``problems``) for values
+    that do not fit its fields."""
+    assert request.template_id is not None
+    with Session(get_engine()) as session:
+        row = jurisdiction_templates.available_template(session, jurisdiction.id, request.template_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="This template is not available in this jurisdiction.")
+        fields = jurisdiction_templates.fields_of(row)
+        content, sha256, name = row.content, row.sha256, row.name
+    legal_issue_titles: dict[str, str] = {}
+    if any(f.type == "legal_issues" for f in fields):
+        frameworks = get_document_content(jurisdiction.id).get("legal_frameworks") or []
+        legal_issue_titles = {
+            str(f["id"]): str(f.get("title") or f["id"])
+            for f in sorted(frameworks, key=lambda f: f.get("rank", 0))
+            if f.get("id")
+        }
+    values, problems = check_values(fields, request.values or {}, list(legal_issue_titles))
+    if problems:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "template_values_invalid",
+                "message": "The hearing details do not fit the template. " + " ".join(problems),
+                "problems": problems,
+            },
+        )
+    transcript = [m.text for m in request.get_sectioned_messages().get_all_messages()]
+    texts = box_text(
+        fields,
+        values,
+        FillContext(
+            jurisdiction_name=jurisdiction.current.shown_name,
+            year=datetime.now(UTC).year,
+            dictated_text=dictated_text(transcript, request.notes),
+            legal_issue_titles=legal_issue_titles,
+        ),
+    )
+    # The first text the judge gave (a case reference, say) tells their hearings apart.
+    first_text = next(
+        (str(values[f.tag]) for f in fields if f.type == "text" and isinstance(values.get(f.tag), str)), None
+    )
+    today = datetime.now(UTC).date().isoformat()
+    return _DocumentPlan(
+        template="uploaded",
+        render_kwargs={
+            "renderer": _render_uploaded_template,
+            "content": content,
+            "texts": texts,
+            "output_dir": _HEARING_DOCUMENTS_DIR,
+        },
+        form_record={"template_id": str(request.template_id), "template_name": name, "values": values},
+        title=f"{name}: {first_text}" if first_text else name,
+        download_filename=f"[{today}] {_filename_part(name) or 'Document'}.docx",
+        version=sha256[:12],
+    )
 
 
 def _dictation_session_id(value: str | None) -> str | None:
@@ -1466,11 +1612,13 @@ async def _save_live_transcription_submission(  # NOSONAR
     jurisdiction: ActiveJurisdiction,
     submission_id: uuid.UUID,
     submission_stage: StageHandle,
+    plan: _DocumentPlan | None = None,
 ) -> LiveTranscriptionSubmissionResponse:
+    plan = plan or _decision_plan(request, current_user, jurisdiction)
     # DIAAT-279: on the document events; the version is added once rendering has
     # loaded the document content: the content of this render only (DIAAT-286, see
     # documents/versioning.py), also stored as the document's provenance.
-    document_attributes: dict[str, str] = {"document.template": DECISION_TEMPLATE}
+    document_attributes: dict[str, str] = {"document.template": plan.template}
     blob_filename = f"live-transcription-submission-{submission_id}.json"
     blob_path = get_file_blob_path(str(current_user.azure_user_id), blob_filename)
 
@@ -1480,7 +1628,7 @@ async def _save_live_transcription_submission(  # NOSONAR
     # Session data payload on "Submit hearing" button click
     # Store messages in sectioned format for document generation
     payload = {
-        "form_data": request.form_data.model_dump(by_alias=True, exclude_none=True),
+        "form_data": plan.form_record,
         "messages": {
             "background": [msg.model_dump(by_alias=True, exclude_none=True) for msg in sectioned_messages.background],
             "evidence": [msg.model_dump(by_alias=True, exclude_none=True) for msg in sectioned_messages.evidence],
@@ -1523,31 +1671,25 @@ async def _save_live_transcription_submission(  # NOSONAR
             # Generate the Word document and store it. DIAAT-279: one stage for both,
             # so a document that cannot be stored is a failed generation, with the
             # template, its version and a code saying where it failed.
-            temp_output_dir = Path(tempfile.gettempdir()) / "hearing_documents"
             with stage("document_generation", attributes=document_attributes) as document_stage:
                 with track_render() as render:
                     try:
                         # Off the event loop; no file left behind on cancellation.
-                        temp_doc_path = await _render_hearing_document_off_loop(
-                            request=request,
-                            output_dir=temp_output_dir,
-                            user_email=current_user.email,
-                            # DIAAT-342: the active jurisdiction's legal wording, not
-                            # the form's free-text jurisdiction.
-                            jurisdiction_id=jurisdiction.id,
-                        )
+                        temp_doc_path = await _render_hearing_document_off_loop(**plan.render_kwargs)
                     except Exception:
-                        document_stage.set_attribute("document.template_version", render.version)
+                        document_stage.set_attribute("document.template_version", plan.version or render.version)
                         document_stage.error("document.render_failed")
                         raise
                 generated_at = datetime.now(UTC)
-                document_attributes["document.template_version"] = render.version
+                document_attributes["document.template_version"] = plan.version or render.version
                 document_stage.set_attribute(
                     "document.template_version", document_attributes["document.template_version"]
                 )
                 # DIAAT-286: stored with the document's job record, in the same insert.
                 provenance = decision_document_provenance(
-                    template=DECISION_TEMPLATE, template_version=render.version, generated_at=generated_at
+                    template=plan.template,
+                    template_version=document_attributes["document.template_version"],
+                    generated_at=generated_at,
                 ).to_record()
 
                 logger.info(
@@ -1578,23 +1720,11 @@ async def _save_live_transcription_submission(  # NOSONAR
                     _sanitize_for_log(current_user.id),
                 )
 
-        # Generate a user-friendly download filename
-        # Format: "[{date}] {Appellant} v {Respondent}.docx"
-        hearing_date = request.form_data.hearing_date  # YYYY-MM-DD format
-        appellant_name = request.form_data.appellant_name
-        respondent_name = request.form_data.respondent
-
-        # Sanitize names for filename (remove characters not allowed in filenames)
-        def sanitize_filename_part(name: str) -> str:
-            # Remove or replace characters not safe for filenames
-            return "".join(c if c.isalnum() or c in " -_" else "_" for c in name).strip()
-
-        safe_appellant = sanitize_filename_part(appellant_name)
-        safe_respondent = sanitize_filename_part(respondent_name)
-        download_filename = f"[{hearing_date}] {safe_appellant} v {safe_respondent}.docx"
+        # A user-friendly download filename (see _DocumentPlan)
+        download_filename = plan.download_filename
 
         # Create transcription record for the hearing
-        transcription_title = f"{request.form_data.appellant_name} v {request.form_data.respondent}"
+        transcription_title = plan.title
         transcription = Transcription(
             user_id=current_user.id,
             title=transcription_title,

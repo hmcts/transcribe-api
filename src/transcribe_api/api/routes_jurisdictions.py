@@ -19,7 +19,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, StringConstraints
 from sqlmodel import Session
 
-from transcribe_api import jurisdictions_admin
+from transcribe_api import jurisdiction_templates, jurisdictions_admin
+from transcribe_api.documents.content_loader import get_document_content
 from transcribe_api.domain.audit import record_audit
 from transcribe_api.domain.auth.approles_dictation import get_role
 from transcribe_api.domain.auth.dependencies_dictation import (
@@ -233,3 +234,63 @@ def update_jurisdiction_wording(
         detail={"code": active.code, "fields": ["wording"], "wording_keys_changed": changed},
     )
     return _wording(active, wording, saved.version)
+
+
+# DIAAT-344: the uploaded templates a judge can choose ---------------------------------
+
+
+class TemplateOption(BaseModel):
+    value: str
+    label: str
+
+
+class TemplateFormField(BaseModel):
+    """One field of the Hearing Details form, as the template's admin set it up."""
+
+    tag: str
+    label: str
+    type: str
+    required: bool
+    options: list[TemplateOption]
+
+
+class AvailableTemplate(BaseModel):
+    id: str
+    name: str
+    service: str | None
+    fields: list[TemplateFormField]
+
+
+def legal_issue_options(jurisdiction_id) -> list[TemplateOption]:
+    """The jurisdiction's legal frameworks, as its Legal Text Manager keeps them."""
+    frameworks = get_document_content(jurisdiction_id).get("legal_frameworks") or []
+    ranked = sorted(frameworks, key=lambda f: f.get("rank", 0))
+    return [TemplateOption(value=str(f["id"]), label=str(f.get("title") or f["id"])) for f in ranked if f.get("id")]
+
+
+@router.get("/jurisdictions/templates", response_model=list[AvailableTemplate])
+def available_templates(
+    _user: User = Depends(_ANY_APP_ROLE),
+    active: ActiveJurisdiction = Depends(get_active_jurisdiction),
+) -> list[AvailableTemplate]:
+    """The templates the jurisdiction's judges can choose, with the fields each asks for
+    (not those BenchNotes fills)."""
+    with Session(get_engine()) as session:
+        rows = jurisdiction_templates.available_templates(session, active.id)
+        templates = [(row, jurisdiction_templates.judge_fields(row)) for row in rows]
+    legal_issues: list[TemplateOption] | None = None
+    result = []
+    for row, fields in templates:
+        form_fields = []
+        for f in fields:
+            if f.type == "legal_issues":
+                if legal_issues is None:
+                    legal_issues = legal_issue_options(active.id)
+                options = legal_issues
+            else:
+                options = [TemplateOption(value=o, label=o) for o in f.options]
+            form_fields.append(
+                TemplateFormField(tag=f.tag, label=f.label, type=f.type, required=f.required, options=options)
+            )
+        result.append(AvailableTemplate(id=str(row.id), name=row.name, service=row.service, fields=form_fields))
+    return result
