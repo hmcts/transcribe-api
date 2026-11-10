@@ -32,6 +32,13 @@ A new jurisdiction goes through three **stages**, without a release:
 **Enabled** still switches a jurisdiction off for everyone, whatever its stage. Every
 jurisdiction from before stages is live (migration `0007`), so nothing changes for it.
 
+**Deploying the release that adds stages:** wait for its rollout to finish before you
+create a jurisdiction or change one's stage. Until then, pods still running the
+previous release keep serving. They do not know about stages, so they would show an
+enabled draft or test jurisdiction to every member (or keep showing a jurisdiction
+moved from live to test to members who are not testers). This applies only to the first
+deployment of this release in each environment; after it, every pod enforces stages.
+
 A jurisdiction leaves draft only when it is ready. The admin area lists what is
 missing, and moving it to test or live is refused (400 `jurisdiction_not_ready`) until:
 
