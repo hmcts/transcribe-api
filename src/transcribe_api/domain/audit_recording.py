@@ -232,7 +232,7 @@ class AuditScope:
 
         Returned from the ``audited`` block: ``success`` once the last chunk is sent,
         else ``failed`` with ``detail.reason`` ``stream_error`` (the storage stream
-        raised), ``client_disconnected`` or ``cancelled``. A block that raises is
+        raised), ``client_disconnected``, ``response_error`` or ``cancelled``. A block that raises is
         recorded as failed when it exits, as before. One row either way.
         """
         self._streams = True

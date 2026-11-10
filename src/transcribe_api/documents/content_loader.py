@@ -144,7 +144,6 @@ _cache: dict[UUID, tuple[datetime, dict[str, Any]]] = {}
 _defaults: dict[str, Any] | None = None
 # The jurisdiction whose legal wording the accessors read (legal_wording_of).
 _wording_of: ContextVar[UUID | None] = ContextVar("legal_wording_jurisdiction", default=None)
-_last_used_digest: str | None = None
 # The content object last digested, with its digest: the cached copy is handed out on
 # every call, so it is hashed once per load, not on every cache hit.
 _digested: tuple[dict[str, Any], str | None] | None = None
@@ -153,9 +152,9 @@ _content_used: ContextVar[set[str] | None] = ContextVar("document_content_used",
 
 
 def _used(content: dict[str, Any]) -> dict[str, Any]:
-    """Remember a fingerprint of the content handed to the renderer (DIAAT-279): for
-    the render in progress (track_content_used) and, process-wide, as the last used."""
-    global _last_used_digest, _digested
+    """Remember a fingerprint of the content handed to the renderer (DIAAT-279), for
+    the render in progress (track_content_used)."""
+    global _digested
     if _digested is not None and _digested[0] is content:
         digest = _digested[1]
     else:
@@ -164,20 +163,10 @@ def _used(content: dict[str, Any]) -> dict[str, Any]:
         except (TypeError, ValueError):
             digest = None
         _digested = (content, digest)
-    _last_used_digest = digest
     used = _content_used.get()
     if used is not None:
         used.add(digest or "-")
     return content
-
-
-def last_used_content_digest() -> str | None:
-    """SHA-256 of the document content most recently used by any request, or None.
-
-    Process-wide: a concurrent request can change it between a render and this call.
-    For the content of one render, use track_content_used.
-    """
-    return _last_used_digest
 
 
 @contextlib.contextmanager
