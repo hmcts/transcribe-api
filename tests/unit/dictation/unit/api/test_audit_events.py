@@ -994,6 +994,33 @@ async def test_audio_the_browser_stops_part_way_on_asgi_2_4_is_a_success(audit_l
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("spec_version", ["2.3", "2.4"])
+async def test_audio_whose_response_fails_to_send_is_failed_not_a_disconnect(audit_log, spec_version):
+    """Only a genuine disconnect counts as the browser stopping: another error sending
+    the response (here Starlette's RuntimeError for a body longer than its
+    Content-Length) is a failed export."""
+    response = await _streamed(audit_log, [b"a", b"b"], client_may_stop=True)
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message["body"]:
+            message = "Response content longer than Content-Length"
+            raise RuntimeError(message)
+
+    with pytest.raises(RuntimeError):
+        await response(_http_scope(spec_version), asyncio_sleep_forever, send)
+    row = _row(audit_log)
+    assert (row.outcome, row.detail) == ("failed", {"via": "stream", "reason": "response_error"})
+
+
+def test_an_oversized_range_header_is_not_a_playback_and_does_not_raise():
+    from transcribe_api.api.routes_dictation import _starts_playback
+
+    assert _starts_playback("bytes=0-" + "0" * 5000 + "1") is False
+    assert _starts_playback("bytes=" + "0" * 5000 + "-") is False
+    assert _starts_playback("bytes=0-9999999999999999999") is True
+
+
+@pytest.mark.asyncio
 async def test_audio_whose_storage_stream_breaks_is_still_failed(audit_log):
     response = await _streamed(audit_log, [b"a", b"b"], fail_after=1, client_may_stop=True)
 

@@ -48,7 +48,7 @@ stalls the event loop and no row is lost to fire-and-forget.
 A streamed export (``TRANSCRIPT_EXPORTED`` for ``/download`` and audio playback) is
 recorded when the response body ends, not when the response object is returned:
 ``success`` once the last chunk is sent, ``failed`` with ``detail.reason``
-``stream_error``, ``client_disconnected`` or ``cancelled`` otherwise
+``stream_error``, ``client_disconnected``, ``response_error`` or ``cancelled`` otherwise
 (``AuditedAction.streaming_response``). Audio playback is the exception to
 ``client_disconnected``: a browser ends the request itself on a pause or a seek, once
 it has played what it needed, so for audio that is still a ``success``. The insert
@@ -100,6 +100,7 @@ from typing import TYPE_CHECKING, Any
 import anyio
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
+from starlette.requests import ClientDisconnect
 from hmcts_azure_auth.audit import AuditEvent, AuditEventType
 from hmcts_otel import conventions as c
 from hmcts_otel import get_request_id, record_event
@@ -141,6 +142,7 @@ _NOT_FOUND_OR_REFUSED = frozenset({403, 404})
 # Why a streamed export failed after its response started (detail.reason)
 STREAM_ERROR = "stream_error"  # the upstream (storage) stream raised
 CLIENT_DISCONNECTED = "client_disconnected"  # the client went away before the end
+RESPONSE_ERROR = "response_error"  # sending the response failed (e.g. a length mismatch)
 STREAM_CANCELLED = "cancelled"  # the server cancelled the response (e.g. shutdown)
 
 EVENT_WRITE_FAILED = "audit.write_failed"
@@ -369,12 +371,13 @@ class AuditedAction:
         Returned from the audited block: if the block ends without a refusal or
         failure, its row is not written then but when the response ends: ``success``
         after the last chunk is sent, else ``failed`` with ``detail.reason``
-        ``stream_error`` (the upstream stream raised), ``client_disconnected`` or
-        ``cancelled``. A block that ends refused or failed (e.g. ``fail()`` for a
+        ``stream_error`` (the upstream stream raised), ``client_disconnected``,
+        ``response_error`` (sending failed for another reason) or ``cancelled``. A block that ends refused or failed (e.g. ``fail()`` for a
         storage error status) is written when it exits, as before. One row either way.
 
         ``client_may_stop``: the client ending the response early is still a
         ``success`` (audio playback, which the browser stops on a pause or a seek).
+        Only a genuine disconnect: any other error sending the response is failed.
         """
         self._streams = True
         self._client_may_stop = client_may_stop
@@ -434,8 +437,8 @@ def audited_streaming_response(
     media_type: str | None = None,
 ) -> StreamingResponse:
     """A StreamingResponse that calls ``conclude`` once, when its body ends: with None
-    once the last chunk is sent, else with ``STREAM_ERROR``, ``CLIENT_DISCONNECTED`` or
-    ``STREAM_CANCELLED``. It closes ``content`` either way. For an audit interface of
+    once the last chunk is sent, else with ``STREAM_ERROR``, ``CLIENT_DISCONNECTED``,
+    ``RESPONSE_ERROR`` or ``STREAM_CANCELLED``. It closes ``content`` either way. For an audit interface of
     its own (the recording area's ``AuditScope.streaming_response``)."""
     return _AuditedStreamingResponse(conclude, content, status_code=status_code, headers=headers, media_type=media_type)
 
@@ -447,7 +450,9 @@ class _AuditedStreamingResponse(StreamingResponse):
     call returns, the iterator exhausted); the iterator raises (the call raises); or
     the client disconnects. On a disconnect, ASGI spec 2.3 servers (uvicorn) cancel
     the sending task and the call returns with the iterator not exhausted; spec 2.4
-    servers make ``send`` raise OSError (``ClientDisconnect``).
+    servers make ``send`` raise OSError (``ClientDisconnect``). Any other error from
+    sending (e.g. Starlette's RuntimeError for a body longer than its Content-Length)
+    is not a disconnect.
     """
 
     def __init__(
@@ -481,8 +486,11 @@ class _AuditedStreamingResponse(StreamingResponse):
         except asyncio.CancelledError:
             reason = STREAM_CANCELLED
             raise
-        except Exception:
+        except (ClientDisconnect, OSError):
             reason = STREAM_ERROR if self._iterator_failed else CLIENT_DISCONNECTED
+            raise
+        except Exception:
+            reason = STREAM_ERROR if self._iterator_failed else RESPONSE_ERROR
             raise
         else:
             if not self._exhausted:

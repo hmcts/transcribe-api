@@ -1127,7 +1127,9 @@ def _starts_playback(range_header: str | None) -> bool:
     that is not a probe of the first bytes."""
     if not range_header:
         return True
-    match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header.replace(" ", "").split(",")[0])
+    # Bounded: int() refuses very long digit strings (Python's conversion limit), and
+    # no real offset has more than 19 digits. Anything longer is not a playback start.
+    match = re.fullmatch(r"bytes=(\d{1,19})-(\d{0,19})", range_header.replace(" ", "").split(",")[0])
     if match is None or int(match.group(1)) != 0:
         return False
     return not match.group(2) or int(match.group(2)) > _PLAYBACK_PROBE_MAX_END
