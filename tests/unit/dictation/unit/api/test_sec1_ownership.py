@@ -158,6 +158,25 @@ async def test_poller_never_retries_an_upload_naming_another_users_transcription
     service._mark_blob_with_error.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_poller_keeps_the_attempts_so_far_when_it_gives_up_on_such_an_upload(service, mocker):
+    blob = f"user-uploads/{TEST_OID}/{VICTIM_TRANSCRIPTION}.mp3"
+    service._mark_blob_in_progress = AsyncMock(return_value=True)
+    service.azure_blob_manager = AsyncMock()
+    service.azure_blob_manager.get_blob_metadata = AsyncMock(return_value={"retry_count": "2", "status": "retrying"})
+    service.resolve_blob_owner_from_path = MagicMock(return_value=MagicMock(id=uuid.uuid4(), azure_user_id=TEST_OID))
+    mocker.patch(
+        "transcribe_api.stt.work_poller.transcribe_and_generate_llm_output",
+        AsyncMock(side_effect=OwnershipConflictError("Transcription")),
+    )
+
+    assert await service.process_discovered_audio({"name": blob}) is False
+    (_, kwargs) = service.azure_blob_manager.set_blob_metadata.call_args
+    assert kwargs["metadata"]["status"] == "permanently_failed"
+    assert kwargs["metadata"]["retry_count"] == "2"  # not reset to 0
+    assert kwargs["metadata"]["last_error"] == "OwnershipConflictError"
+
+
 def test_manual_minutes_edit_sends_no_content_to_langfuse(client, as_user, mocker):
     """Draft minutes are not exported to Langfuse on a manual edit (as on main)."""
     as_user(_user())

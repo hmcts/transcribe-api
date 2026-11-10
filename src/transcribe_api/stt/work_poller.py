@@ -298,12 +298,22 @@ class TranscriptionPollingService:
                 "UNAUTHORISED_ACCESS_ATTEMPT reason=upload_names_other_users_transcription blob=%s",
                 _redact_blob_path(blob_path),
             )
-            await self._mark_blob_permanently_failed(blob_path, {"last_error": "OwnershipConflictError"})
+            await self._mark_blob_permanently_failed(
+                blob_path, {**await self._current_metadata(blob_path), "last_error": "OwnershipConflictError"}
+            )
             return False
         except Exception as e:
             return await self._handle_failure(blob_path, e)
         else:
             return True
+
+    async def _current_metadata(self, blob_path: str) -> dict:
+        """The blob's metadata now ({} if it cannot be read): marking it failed keeps
+        the attempts so far (retry_count)."""
+        try:
+            return await self.azure_blob_manager.get_blob_metadata(blob_path) or {}
+        except Exception:
+            return {}
 
     async def _handle_failure(self, blob_path: str, e: Exception) -> bool:
         """Mark the blob after a failed attempt. Always False (not processed).
@@ -322,12 +332,10 @@ class TranscriptionPollingService:
                 _redact_blob_path(blob_path),
                 e.status_code,
             )
-            try:  # keep the attempts so far (retry_count) in the blob's metadata
-                current = await self.azure_blob_manager.get_blob_metadata(blob_path) or {}
-            except Exception:
-                current = {}
             await self._mark_blob_permanently_failed(
-                blob_path, {**current, "last_error": type(e).__name__}, client_failure=True
+                blob_path,
+                {**await self._current_metadata(blob_path), "last_error": type(e).__name__},
+                client_failure=True,
             )
             return False
         # Type only, no exc_info: a traceback ends with the exception's text, which

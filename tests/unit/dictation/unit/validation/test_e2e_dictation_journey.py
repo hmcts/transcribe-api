@@ -192,7 +192,9 @@ class Services:
         self.transcriptions[transcription.id] = transcription
         return transcription
 
-    def _save_job(self, job):
+    def _save_job(self, job, *, check_owner=True):
+        # The submission's job is new, with the server's ID (check_owner=False).
+        assert check_owner is False
         self.transcriptions[job.transcription_id].__dict__["transcription_jobs"].append(job)
         return job
 

@@ -1643,7 +1643,9 @@ async def _save_live_transcription_submission(  # NOSONAR
             s3_audio_url=doc_blob_path,
             provenance=provenance,
         )
-        save_transcription_job(transcription_job)
+        # A new job under the transcription just made: its ID is the server's, so the
+        # owner check (a locking read, SEC-1) has nothing to guard.
+        save_transcription_job(transcription_job, check_owner=False)
 
         async with AsyncAzureBlobManager() as blob_manager:
             metadata_success = await blob_manager.set_blob_metadata(
