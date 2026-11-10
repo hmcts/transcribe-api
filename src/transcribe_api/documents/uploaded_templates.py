@@ -356,7 +356,7 @@ def check_values(
     return kept, problems
 
 
-def _value_problem(f: TemplateField, value: Value, legal_issue_ids: list[str]) -> str | None:  # noqa: PLR0911
+def _value_problem(f: TemplateField, value: Value, legal_issue_ids: list[str]) -> str | None:
     label = f"“{f.label}”"
     if f.type in ("multi_select", "legal_issues"):
         allowed = f.options if f.type == "multi_select" else legal_issue_ids

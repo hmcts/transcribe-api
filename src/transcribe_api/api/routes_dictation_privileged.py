@@ -1063,7 +1063,7 @@ async def _read_template_upload(request: Request) -> tuple[str, bytes]:
 @router.get("/jurisdictions/{code}/templates", response_model=list[TemplateAdminRecord])
 def admin_list_templates(
     code: str,
-    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),  # noqa: B008
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),
 ) -> list[TemplateAdminRecord]:
     """A jurisdiction's templates, each with its boxes, fields and what is missing."""
     rows = _admin_session_run(
@@ -1077,9 +1077,9 @@ async def admin_upload_template(
     code: str,
     request: Request,
     response: Response,
-    replace: UUID | None = Query(default=None),  # noqa: B008
+    replace: UUID | None = Query(default=None),
     version: str | None = Query(default=None, max_length=64),
-    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),  # noqa: B008
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),
 ) -> TemplateAdminRecord:
     """Upload a Word template: a new one (201), with a field proposed for each box, or
     with ``replace`` and its ``version`` a new file for an existing one, keeping the
@@ -1111,7 +1111,7 @@ def admin_update_template(
     code: str,
     template_id: UUID,
     body: TemplateWrite,
-    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),  # noqa: B008
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),
 ) -> TemplateAdminRecord:
     """Save a template's name, fields and whether judges can choose it. Refused (400,
     ``template_not_ready``, with ``problems`` naming each box) unless every box has a
@@ -1140,7 +1140,7 @@ def admin_update_template(
 def admin_delete_template(
     code: str,
     template_id: UUID,
-    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),  # noqa: B008
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),
 ) -> None:
     """Delete a template. Documents already made from it are kept."""
     _admin_session_run(lambda s: jurisdiction_templates.delete_template(s, code, template_id))

@@ -219,6 +219,14 @@ def test_a_new_file_keeps_the_linked_fields_and_waits_for_its_new_boxes(as_admin
     assert len(as_admin.get("/api/admin/jurisdictions/ET/templates").json()) == 1
 
 
+def test_a_long_names_copy_keeps_its_number_within_the_limit(as_admin):
+    name = "J" * 210 + ".docx"
+    first = upload(as_admin, name=name).json()["name"]
+    second = upload(as_admin, name=name).json()["name"]
+    assert len(first) == len(second) == 200
+    assert second.endswith(" (2)")
+
+
 def test_a_template_is_deleted(jurisdiction_db, as_admin):
     template = upload(as_admin).json()
     assert as_admin.delete(f"/api/admin/jurisdictions/ET/templates/{template['id']}").status_code == 204
@@ -415,6 +423,8 @@ def test_a_submission_is_either_the_decision_form_or_a_template(as_admin, as_et_
     assert as_et_judge.post("/api/live-transcription/submission", json=body).status_code == 422
     neither = {"messages": {"background": [], "evidence": [], "facts": []}}
     assert as_et_judge.post("/api/live-transcription/submission", json=neither).status_code == 422
+    no_values = {k: v for k, v in _submission(template["id"], VALUES).items() if k != "values"}
+    assert as_et_judge.post("/api/live-transcription/submission", json=no_values).status_code == 422
 
 
 def test_a_local_web_app_may_send_the_files_name(monkeypatch):

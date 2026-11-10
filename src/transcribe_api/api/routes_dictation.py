@@ -21,8 +21,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from sqlmodel import Session
 from starlette.responses import JSONResponse, StreamingResponse
 
-from transcribe_api.api.document_content_models import DocumentContentResponse
 from transcribe_api import jurisdiction_templates
+from transcribe_api.api.document_content_models import DocumentContentResponse
 from transcribe_api.documents.content_loader import get_document_content, has_legal_wording
 from transcribe_api.documents.llm.langfuse_models import (
     LangfuseScoreRequest,
@@ -49,7 +49,13 @@ from transcribe_api.documents.minutes.types import (
 )
 from transcribe_api.documents.models import DEFAULT_JURISDICTION
 from transcribe_api.documents.template_renderer import render_hearing_document
-from transcribe_api.documents.uploaded_templates import FillContext, box_text, check_values, dictated_text, fill_template
+from transcribe_api.documents.uploaded_templates import (
+    FillContext,
+    box_text,
+    check_values,
+    dictated_text,
+    fill_template,
+)
 from transcribe_api.documents.versioning import DECISION_TEMPLATE, track_render
 from transcribe_api.domain.audit import (
     SECTIONED_TRANSCRIPT,
@@ -109,9 +115,9 @@ from transcribe_api.domain.models_dictation import (
     User,
 )
 from transcribe_api.domain.provenance_dictation import decision_document_provenance
-from transcribe_api.runtime.db_connection import get_engine
 from transcribe_api.runtime.blob_dictation import AsyncAzureBlobManager, _redact_blob_path, _sanitize_for_log
 from transcribe_api.runtime.browser_telemetry import telemetry_relay_router
+from transcribe_api.runtime.db_connection import get_engine
 from transcribe_api.runtime.dependency_health import get_dependency_checker, health_response
 from transcribe_api.runtime.logger import logger
 from transcribe_api.runtime.security_events import (
@@ -1506,7 +1512,7 @@ def _decision_plan(
     request: LiveTranscriptionSubmissionRequest, current_user: User, jurisdiction: ActiveJurisdiction
 ) -> _DocumentPlan:
     form = request.form_data
-    assert form is not None  # checked by the request model  # noqa: S101
+    assert form is not None  # checked by the request model
     # Format: "[{date}] {Appellant} v {Respondent}.docx"
     return _DocumentPlan(
         template=DECISION_TEMPLATE,
@@ -1534,7 +1540,7 @@ def _uploaded_template_plan(
     """The judge's chosen template, filled with their values: 404 when the jurisdiction's
     judges cannot choose it, 400 (``template_values_invalid``, ``problems``) for values
     that do not fit its fields."""
-    assert request.template_id is not None  # noqa: S101
+    assert request.template_id is not None
     with Session(get_engine()) as session:
         row = jurisdiction_templates.available_template(session, jurisdiction.id, request.template_id)
         if row is None:

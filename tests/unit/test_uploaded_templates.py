@@ -302,3 +302,51 @@ def test_choices_must_be_the_fields_options():
 def test_the_dictated_text_is_the_transcript_then_the_judges_own_text():
     html = "<h2>Reasons</h2><p>First.<br>Same paragraph.</p><ul><li>One</li><li>Two</li></ul><p></p>"
     assert t.dictated_text([" Spoken. ", ""], html) == "Spoken.\n\nReasons\n\nFirst.\nSame paragraph.\n\n• One\n\n• Two"
+
+
+def test_a_damaged_part_of_the_file_is_reported_as_damaged():
+    """A zip entry whose data does not match its checksum."""
+    import io
+    import zipfile
+
+    stored = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(make_template(JUDGMENT))) as source, zipfile.ZipFile(stored, "w") as target:
+        for item in source.infolist():
+            target.writestr(item.filename, source.read(item.filename), compress_type=zipfile.ZIP_STORED)
+    data = bytearray(stored.getvalue())
+    at = data.index(b"<Relationships")  # the first .rels part, stored as it is
+    data[at + 1] ^= 0x20
+    with pytest.raises(t.TemplateFileError, match="damaged"):
+        t.check_template_file(bytes(data))
+
+
+def test_a_table_cell_whose_only_box_is_empty_keeps_an_empty_paragraph(tmp_path):
+    """Word needs a paragraph in every cell: the cell is emptied, not removed."""
+    import io
+
+    from docx import Document
+    from docx.oxml import parse_xml
+
+    from tests.unit.template_docx import _sdt_xml
+
+    document = Document()
+    document.add_paragraph().add_run("Judgment: ")
+    document.paragraphs[-1]._p.append(parse_xml(_sdt_xml(Sdt("JudgmentText"))))
+    cell = document.add_table(rows=1, cols=1).cell(0, 0)
+    cell.paragraphs[0].add_run("For the claimant: ")
+    cell.paragraphs[0]._p.append(parse_xml(_sdt_xml(Sdt("Rep"))))
+    out = io.BytesIO()
+    document.save(out)
+    data = out.getvalue()
+    fields = [
+        t.TemplateField(tag="JudgmentText", label="Judgment", type="dictated"),
+        t.TemplateField(tag="Rep", label="Representative", required=False),
+    ]
+    assert t.field_problems(t.find_boxes(data), fields) == []
+
+    output = t.fill_template(data, {"JudgmentText": "Granted."}, tmp_path / "out.docx")
+
+    filled = Document(str(output))
+    (cell_paragraph,) = filled.tables[0].cell(0, 0).paragraphs
+    assert cell_paragraph.text == ""  # neither the label nor the box is left
+    assert document_text(output.read_bytes()) == ["Judgment: Granted."]
