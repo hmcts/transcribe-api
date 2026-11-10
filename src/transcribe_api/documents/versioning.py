@@ -15,8 +15,8 @@ does. It may also change on an edit that does not alter the output, which is the
 safe direction.
 
 Use ``track_render()`` around a render: it versions the content used by that render
-only (DIAAT-286, stored as provenance with the document). ``template_version()``
-reads the content last used by any request, which a concurrent request can change.
+only (DIAAT-286, stored as provenance with the document). There is deliberately no
+process-wide "last used" version: a concurrent request could change it mid-render.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from transcribe_api.documents.content_loader import last_used_content_digest, track_content_used
+from transcribe_api.documents.content_loader import track_content_used
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterator
@@ -78,12 +78,6 @@ def template_version_for(content_digests: Collection[str]) -> str:
         return "unknown"
     content = "+".join(sorted(content_digests)) or "-"
     return hashlib.sha256(f"{_renderer_digest}:{content}".encode()).hexdigest()[:12]
-
-
-def template_version() -> str:
-    """The version for the content last used by any request (see track_render)."""
-    last = last_used_content_digest()
-    return template_version_for([last] if last else [])
 
 
 class RenderVersion:

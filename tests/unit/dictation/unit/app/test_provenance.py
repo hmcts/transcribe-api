@@ -61,15 +61,6 @@ async def test_concurrent_renders_each_get_the_version_of_their_own_content():
     assert version_a == alone_a.version
     assert version_b == alone_b.version
     assert version_a != version_b
-    # The process-wide value (template_version) is B's: what A used to get.
-    assert versioning.template_version() == version_b
-
-
-def test_template_version_still_reports_the_last_content_used():
-    content_loader._used({"intro": "x"})
-    with versioning.track_render() as render:
-        content_loader._used({"intro": "x"})
-    assert versioning.template_version() == render.version
 
 
 def test_content_changed_during_a_render_gives_a_version_of_its_own():
@@ -177,13 +168,11 @@ def test_a_decision_document_records_its_template_version_release_and_time(clien
 
     job = submission.call_args.args[0]
     provenance = Provenance.model_validate(job.provenance)
-    other_requests = versioning.template_version()  # the process-wide "last used"
     with versioning.track_render() as expected:
         content_loader._used(this_content)
     assert provenance.output == "decision_document"
     assert provenance.template == "decision"
     assert provenance.template_version == expected.version == completed["document.template_version"]
-    assert provenance.template_version != other_requests
     assert provenance.application_release == "9.9.9-release"
     assert isinstance(provenance.generated_at, datetime)
     assert provenance.speech is None  # dictation: the browser's Speech session, not ours

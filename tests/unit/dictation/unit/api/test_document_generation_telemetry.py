@@ -51,21 +51,21 @@ def _failing_document_store(mocker, failure=False):
 # The template version ---------------------------------------------------------------
 
 
+def _version_of(content):
+    with versioning.track_render() as render:
+        content_loader._used(content)
+    return render.version
+
+
 def test_template_version_tracks_the_renderer_and_the_content_used(monkeypatch):
-    # Restored afterwards: the digest is process-wide.
-    monkeypatch.setattr(content_loader, "_last_used_digest", None)
     monkeypatch.setattr(content_loader, "_digested", None)
-    content_loader._used({"intro": "one"})
-    first = versioning.template_version()
+    first = _version_of({"intro": "one"})
     assert re.fullmatch(r"[0-9a-f]{12}", first)
 
-    content_loader._used({"intro": "two"})  # an admin edits the document content
-    assert versioning.template_version() != first
-
-    content_loader._used({"intro": "one"})
-    assert versioning.template_version() == first
+    assert _version_of({"intro": "two"}) != first  # an admin edits the document content
+    assert _version_of({"intro": "one"}) == first
     monkeypatch.setattr(versioning, "_renderer_digest", "a-different-renderer")  # renderer code changed
-    assert versioning.template_version() != first
+    assert _version_of({"intro": "one"}) != first
 
 
 def test_the_renderer_fingerprint_covers_the_structured_renderer():
@@ -93,7 +93,6 @@ def test_no_source_files_means_an_unknown_version(monkeypatch, tmp_path):
 
 
 def test_the_cached_content_is_hashed_once_per_load(monkeypatch):
-    monkeypatch.setattr(content_loader, "_last_used_digest", None)
     monkeypatch.setattr(content_loader, "_digested", None)
     dumps = MagicMock(wraps=content_loader.json.dumps)
     monkeypatch.setattr(content_loader.json, "dumps", dumps)
@@ -109,8 +108,8 @@ def test_a_failed_fingerprint_is_retried_not_cached(monkeypatch):
     monkeypatch.setattr(versioning, "_renderer_digest", None)
     calls = iter([None, "renderer"])
     monkeypatch.setattr(versioning, "_compute_renderer_digest", lambda: next(calls))
-    assert versioning.template_version() == "unknown"
-    assert versioning.template_version() != "unknown"  # recovered on the next call
+    assert versioning.template_version_for([]) == "unknown"
+    assert versioning.template_version_for([]) != "unknown"  # recovered on the next call
 
 
 # The submission ------------------------------------------------------------------------

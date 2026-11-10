@@ -720,7 +720,8 @@ async def admin_update_user_role_route(
         sanitize_for_log(payload.role),
     )
     app_roles: list[str] = admin_user.app_roles
-    write_audit_event(AuditEvent(
+    # In a worker thread: the insert must not stall the event loop.
+    await asyncio.to_thread(write_audit_event, AuditEvent(
         event_type=AuditEventType.ROLE_CHANGE,
         user_id=str(admin_user.id),
         email=admin_user.email,
@@ -759,7 +760,8 @@ async def admin_delete_user_route(
         sanitize_for_log(str(user_id)),
     )
     app_roles: list[str] = admin_user.app_roles
-    write_audit_event(AuditEvent(
+    # In a worker thread: the insert must not stall the event loop.
+    await asyncio.to_thread(write_audit_event, AuditEvent(
         event_type=USER_DELETED,
         user_id=str(admin_user.id),
         email=admin_user.email,
