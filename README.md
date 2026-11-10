@@ -50,12 +50,11 @@ Both upstream surfaces are preserved unchanged, and they do not collide:
 
 ## Branches and environments
 
-- Feature branches start from `develop`, and their PRs go into `develop`. Each PR gets its own preview.
-- `develop` deploys to demo (`benchnotes.demo.platform.hmcts.net`). The permanent draft PR #45 (`develop` → `master`) rebuilds on every push to `develop`, and Flux deploys its `pr-45-*` image. Never merge, close or mark #45 ready.
-- To release, open a PR into `master` from a branch cut from `develop`. `master` deploys to AAT, then prod.
-- Merge `master` into `develop` at least every 2 weeks, by a PR from a branch cut from `master` (not from `master` itself: Jenkins stops building a branch that is the head of an open PR), with a merge commit. Old `pr-*` images expire after about 3 weeks, and demo pods then fail to pull. If there is nothing to merge, re-run the latest Jenkins build of `PR-45` instead, which pushes a fresh tag.
-- Migrations go only through `master`. A feature that needs schema first lands an additive migration on `master` by its own PR; then `master` is merged into `develop`, then the feature. Otherwise a revision on `develop` and a different one on `master` from the same parent give Alembic two heads at the next merge.
-- `demo` is the CNP branch for the demo Terraform only, and every `master` build overwrites it. Demo uses `master`'s Helm chart, so demo-only settings go in cnp-flux-config `apps/transcribe/transcribe-api/demo.yaml`.
+`master` is the only long-lived branch (trunk-based).
+
+- Branch from `master` and open the PR into `master`. Each PR gets its own preview at `transcribe-api-pr-<n>.preview.platform.hmcts.net` (HMCTS VPN needed), backed by a throwaway in-cluster Postgres. Add the `enable_keep_helm` label to keep the preview alive after the build.
+- Merging to `master` deploys to AAT, then prod.
+- Demo runs the images promoted to prod, via cnp-flux-config image policies (hmcts/cnp-flux-config#48971). The `demo` branch is the CNP branch for the demo Terraform only, and every `master` build overwrites it. Demo-only settings go in cnp-flux-config `apps/transcribe/transcribe-api/demo.yaml`.
 
 ## Local development
 

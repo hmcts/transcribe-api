@@ -48,6 +48,7 @@ from tests.unit.dictation.unit.validation.pii_scan import (
     SAS_URL,
     TRANSCRIPT_TEXT,
 )
+from tests.unit.jurisdiction_fixtures import IAC_JURISDICTION_ID
 from transcribe_api.domain.models_dictation import User
 from transcribe_api.runtime.browser_telemetry import JOURNEY_DICTATION_SESSION
 from transcribe_api.runtime.telemetry import JOURNEY_SUBMISSION
@@ -134,6 +135,7 @@ class Services:
         self.speech_up = True
         self.document_renders = True
         self.draft_store_up = True
+        self.rendered_in: list[Any] = []  # the jurisdiction of each document rendered (DIAAT-342)
 
         settings = MagicMock(
             DIRECT_SDK_ACCESS=False,
@@ -171,7 +173,8 @@ class Services:
         context.__aexit__ = AsyncMock(return_value=False)
         return context
 
-    def _render(self, request, output_dir, user_email):
+    def _render(self, request, output_dir, user_email, jurisdiction_id=None):
+        self.rendered_in.append(jurisdiction_id)
         if not self.document_renders:
             # Exception text can quote content: it must never be exported.
             message = f"template field missing for {request.form_data.appellant_name}"
@@ -546,6 +549,8 @@ def test_successful_dictation_submission_and_download_is_one_traceable_journey(
     submitted = browser.submit()
     assert submitted.status_code == 200, submitted.text
     browser.end("success", None, "submitted", segments=7, speech_sessions=2)
+    # The document is made with the active jurisdiction's legal wording (the IAC here).
+    assert services.rendered_in == [IAC_JURISDICTION_ID]
 
     # The download: the link (an export, DIAAT-286), then the document itself.
     transcription_id = submitted.json()["transcription_id"]

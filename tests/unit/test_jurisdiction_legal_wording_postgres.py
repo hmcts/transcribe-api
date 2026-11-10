@@ -1,6 +1,6 @@
-"""DIAAT-342 migration 0006 on a real PostgreSQL (TEST_POSTGRES_URL, a throwaway one): the
-existing legal wording becomes the IAC's, id 1 stays the IAC's, one row per jurisdiction,
-and the code of the previous release keeps working on the migrated schema.
+"""DIAAT-342 on a real PostgreSQL (TEST_POSTGRES_URL, a throwaway one): migration 0006
+keeps the IAC's row as it was, id 1 stays the IAC's, and the first-read seed and the first
+saves of a new jurisdiction are race-safe.
 
 Skipped without TEST_POSTGRES_URL: run it (see tests/unit/test_migrations.py) before
 changing 0006.
@@ -9,7 +9,9 @@ changing 0006.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import threading
 from uuid import UUID, uuid4
 
 import pytest
@@ -26,6 +28,7 @@ needs_postgres = pytest.mark.skipif(
     not os.getenv("TEST_POSTGRES_URL"), reason="needs TEST_POSTGRES_URL (a throwaway Postgres)"
 )
 pytestmark = needs_postgres
+
 
 @pytest.fixture
 def pg(fresh_postgres, monkeypatch):
@@ -59,8 +62,24 @@ def _rows(engine) -> list[tuple]:
 
 
 # ---------------------------------------------------------------------------
-# The schema
+# Id 1 is the IAC's
 # ---------------------------------------------------------------------------
+
+
+def test_a_fresh_database_numbers_other_jurisdictions_from_2_whichever_is_saved_first(pg):
+    et, sscs = _add_jurisdiction(pg, "ET"), _add_jurisdiction(pg, "SSCS")
+    # Other jurisdictions save before the IAC's row exists (nobody has read it yet).
+    content_loader.save_document_content(et, {"hearing_types": [], "legal_frameworks": [], "anonymity": {}})
+    content_loader.save_document_content(sscs, {"hearing_types": [], "legal_frameworks": [], "anonymity": {}})
+    # Then the IAC's is seeded by the first read, with id 1.
+    content_loader.get_document_content(IAC_ID)
+
+    rows = _rows(pg)
+    assert [(r[0], r[1]) for r in rows] == [(1, IAC_ID), (2, et), (3, sscs)]
+    bundled = json.loads(
+        (content_loader.CONTENT_FILE).read_text(encoding="utf-8")
+    )
+    assert json.loads(rows[0][2]) == bundled  # seeded from the bundled file
 
 
 def test_the_database_refuses_id_1_for_any_jurisdiction_but_the_iac(pg):
@@ -93,9 +112,71 @@ def test_a_pod_of_the_previous_release_seeding_id_1_without_a_jurisdiction_is_th
     assert [(r[0], r[1]) for r in _rows(pg)] == [(1, IAC_ID)]
 
 
-def test_the_iacs_wording_is_seeded_as_id_1_and_given_to_the_iac(pg):
-    content_loader.get_document_content()
-    assert [(r[0], r[1]) for r in _rows(pg)] == [(1, IAC_ID)]
+# ---------------------------------------------------------------------------
+# Races
+# ---------------------------------------------------------------------------
+
+
+def _in_threads(count: int, target) -> list[BaseException]:
+    barrier = threading.Barrier(count)
+    errors: list[BaseException] = []
+
+    def run(n: int) -> None:
+        try:
+            barrier.wait()
+            target(n)
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(n,)) for n in range(count)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return errors
+
+
+def test_instances_reading_the_iacs_wording_for_the_first_time_seed_it_once(pg, caplog):
+    """The first request after a deployment, on every pod at once: one row, the same
+    content for all, and no failed insert (ON CONFLICT DO NOTHING, not an error caught)."""
+    results: list[dict] = []
+    caplog.set_level(logging.WARNING, logger=content_loader.logger.name)
+    for _round in range(5):
+        with pg.begin() as connection:
+            connection.execute(text("DELETE FROM document_content"))
+        content_loader.clear_cache()
+        results.clear()
+        errors = _in_threads(8, lambda _n: results.append(content_loader.get_document_content(IAC_ID)))
+        assert errors == []
+        assert len(results) == 8
+        assert all(r == results[0] for r in results)
+        assert [(r[0], r[1]) for r in _rows(pg)] == [(1, IAC_ID)]
+    assert "Failed to seed" not in caplog.text
+
+
+def test_first_saves_of_a_new_jurisdiction_at_once_make_one_row(pg):
+    et = _add_jurisdiction(pg, "ET")
+    contents = [{"hearing_types": [], "legal_frameworks": [{"id": f"f{n}"}], "anonymity": {}} for n in range(8)]
+    errors = _in_threads(8, lambda n: content_loader.save_document_content(et, contents[n]))
+    assert errors == []
+    rows = _rows(pg)
+    assert len(rows) == 1 and rows[0][0] >= 2 and rows[0][1] == et
+    assert json.loads(rows[0][2]) in contents  # one save's, whole
+    assert content_loader.get_document_content(et) in contents
+
+
+def test_saves_of_two_jurisdictions_at_once_do_not_touch_each_other(pg):
+    et, sscs = _add_jurisdiction(pg, "ET"), _add_jurisdiction(pg, "SSCS")
+    errors = _in_threads(
+        8,
+        lambda n: content_loader.save_document_content(
+            [et, sscs][n % 2], {"hearing_types": [], "legal_frameworks": [{"id": ["et", "sscs"][n % 2]}], "anonymity": {}}
+        ),
+    )
+    assert errors == []
+    content_loader.clear_cache()
+    assert content_loader.get_document_content(et)["legal_frameworks"] == [{"id": "et"}]
+    assert content_loader.get_document_content(sscs)["legal_frameworks"] == [{"id": "sscs"}]
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +237,7 @@ def test_0006_keeps_the_iacs_row_unchanged_and_reverses():
         db_connection.get_engine = lambda: engine
         try:
             content_loader.clear_cache()
-            assert content_loader.get_document_content() == EDITED
+            assert content_loader.get_document_content(IAC_ID) == EDITED
         finally:
             db_connection.get_engine = original
             content_loader.clear_cache()
