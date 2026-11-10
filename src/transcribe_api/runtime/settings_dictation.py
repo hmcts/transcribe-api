@@ -1,7 +1,7 @@
 import os
 from functools import cache
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     FORCE_ONBOARDING_DEV: bool = False
     # Override the default app roles (JSON dictionary of role value strings)
     AUTH_APPROLES: str | None = None
+    # PR previews only: token-less requests authenticate as a fixed preview user
+    # (domain/auth/token_auth.py). Refused unless ENVIRONMENT is "preview".
+    AUTH_PREVIEW_USER_ENABLED: bool = False
+    AUTH_PREVIEW_USER_ROLES: str | None = None
     GOOGLE_APPLICATION_CREDENTIALS_JSON_OBJECT: str | None = None
     GOV_NOTIFY_API_KEY: str | None = None
     # JWT Verification Settings - Strict by default
@@ -68,6 +72,15 @@ class Settings(BaseSettings):
             )
             raise ValueError(error_msg)
         return v
+
+    @model_validator(mode="after")
+    def preview_user_only_in_preview(self):
+        if self.AUTH_PREVIEW_USER_ENABLED and self.ENVIRONMENT.strip().lower() != "preview":
+            raise ValueError(
+                f"AUTH_PREVIEW_USER_ENABLED is set but ENVIRONMENT is '{self.ENVIRONMENT}'. "
+                "The preview user bypasses sign-in and is only allowed when ENVIRONMENT=preview."
+            )
+        return self
 
 
 class LocalSettings(Settings):

@@ -275,6 +275,14 @@ def create_app() -> FastAPI:
     if not os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING"):
         log.warning("APPLICATIONINSIGHTS_CONNECTION_STRING not configured; telemetry goes to stdout only")
 
+    from transcribe_api.domain.auth.token_auth import preview_user_enabled
+
+    if preview_user_enabled():
+        log.warning(
+            "AUTH_PREVIEW_USER_ENABLED: requests without a token authenticate as the preview user. "
+            "Sign-in is bypassed; this must only ever run in a PR preview."
+        )
+
     from transcribe_api.runtime.version import APP_VERSION
 
     app = FastAPI(

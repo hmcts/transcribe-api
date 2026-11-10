@@ -48,6 +48,14 @@ withPipeline(type, product, component) {
     archiveArtifacts allowEmptyArchive: true, artifacts: 'test-results/telemetry-pii-scan.json'
   }
 
+  // Previews authenticate token-less requests as the preview user (values.preview.template.yaml).
+  before('functionalTest:preview') {
+    env.AUTH_EXPECTED = 'false'
+  }
+  before('fullFunctionalTest:preview') {
+    env.AUTH_EXPECTED = 'false'
+  }
+
   // Keep the long-lived environment branches in step with master so a deploy
   // to demo/ithc/perftest is never built from stale code.
   syncBranchesWithMaster(['demo', 'ithc', 'perftest'])

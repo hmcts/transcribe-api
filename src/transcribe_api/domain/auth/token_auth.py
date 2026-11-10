@@ -32,6 +32,16 @@ registration: if that were ever switched off, any user in the tenant could get
 a token. The check is the library's own role check, so the 403 and the
 UNAUTHORISED_ACCESS_ATTEMPT log line match every other role-gated route.
 Unset or blank: not checked.
+
+PR previews
+-----------
+PR previews run the web app with sign-in off (Entra cannot redirect to per-PR
+hosts), so the API is called without a token. With AUTH_PREVIEW_USER_ENABLED
+and ENVIRONMENT=preview, a request with no Authorization header authenticates
+as a fixed preview user holding AUTH_PREVIEW_USER_ROLES (default: every app
+role). Those roles still go through the AUTH_ACCESS_ROLES check, and a request
+that does send a token is verified as usual. Settings refuse to load with the
+flag on in any other environment, and the check here repeats that condition.
 """
 
 from __future__ import annotations
@@ -57,6 +67,10 @@ LOCAL_DEV_USER_ID = "local-dev-user-123"
 LOCAL_DEV_NAME = "Local Developer"
 LOCAL_DEV_EMAIL = "developer@localhost.com"
 
+PREVIEW_USER_ID = "preview-user"
+PREVIEW_USER_NAME = "Preview User"
+PREVIEW_USER_EMAIL = "preview-user@preview.platform.hmcts.net"
+
 _UNAUTHORISED_HEADERS = {"WWW-Authenticate": "Bearer"}
 
 
@@ -64,8 +78,26 @@ def _is_local_dev() -> bool:
     return os.getenv("ENVIRONMENT", "production").lower() == "local"
 
 
+def preview_user_enabled() -> bool:
+    flag = os.getenv("AUTH_PREVIEW_USER_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+    return flag and os.getenv("ENVIRONMENT", "").strip().lower() == "preview"
+
+
+def _roles_from_env(name: str) -> list[str]:
+    return [r.strip() for r in os.getenv(name, "").split(",") if r.strip()]
+
+
 def _access_roles() -> list[str]:
-    return [r.strip() for r in os.getenv("AUTH_ACCESS_ROLES", "").split(",") if r.strip()]
+    return _roles_from_env("AUTH_ACCESS_ROLES")
+
+
+def _preview_user() -> AuthUser:
+    return AuthUser(
+        user_id=PREVIEW_USER_ID,
+        name=PREVIEW_USER_NAME,
+        email=PREVIEW_USER_EMAIL,
+        roles=_roles_from_env("AUTH_PREVIEW_USER_ROLES") or list(get_valid_roles().values()),
+    )
 
 
 def _unauthorised(detail: str) -> HTTPException:
@@ -85,6 +117,18 @@ async def get_token_auth_user(
             roles=list(get_valid_roles().values()),
         )
 
+    if authorization is None and preview_user_enabled():
+        user = _preview_user()
+    else:
+        user = await _verified_token_user(authorization)
+
+    access_roles = _access_roles()
+    if access_roles:
+        await get_allowlisted_user(required_roles_any=access_roles)(request, user)
+    return user
+
+
+async def _verified_token_user(authorization: str | None) -> AuthUser:
     if not authorization or not authorization.startswith("Bearer "):
         raise _unauthorised("Bearer token required")
     token = authorization[len("Bearer ") :].strip()
@@ -104,17 +148,12 @@ async def get_token_auth_user(
     if not user_id:
         raise _unauthorised("Bearer token has no oid claim")
 
-    user = AuthUser(
+    return AuthUser(
         user_id=user_id,
         name=claims.get("name") or "",
         email=claims.get("email") or "",
         roles=claims.get("roles") or [],
     )
-
-    access_roles = _access_roles()
-    if access_roles:
-        await get_allowlisted_user(required_roles_any=access_roles)(request, user)
-    return user
 
 
 def build_token_user_dep(user_resolver: Callable[[str, str, list[str]], Any]) -> Callable:
