@@ -1279,8 +1279,8 @@ class LiveTranscriptionSubmissionRequest(BaseModel):
         if (self.form_data is None) == (self.template_id is None):
             msg = "Send either form_data, or template_id with values."
             raise ValueError(msg)
-        if self.template_id is None and self.values is not None:
-            msg = "values are only sent with a template_id."
+        if (self.template_id is None) != (self.values is None):
+            msg = "Send template_id and values together."
             raise ValueError(msg)
         return self
 
