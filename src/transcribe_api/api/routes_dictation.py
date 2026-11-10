@@ -1449,7 +1449,7 @@ async def save_live_transcription_submission(
         _require_decision_template(jurisdiction)
         plan = None
     else:
-        plan = _uploaded_template_plan(request, jurisdiction)
+        plan = await asyncio.to_thread(_uploaded_template_plan, request, jurisdiction)
     # DIAAT-276: the submission is a journey; the transcription it creates is related
     # on the transcript.available event.
     submission_id = uuid.uuid4()
