@@ -238,7 +238,14 @@ def available_templates(session: Session, jurisdiction_id: UUID) -> list[Jurisdi
 
 
 def available_template(session: Session, jurisdiction_id: UUID, template_id: UUID) -> JurisdictionTemplate | None:
-    return next((row for row in available_templates(session, jurisdiction_id) if row.id == template_id), None)
+    row = session.exec(
+        select(JurisdictionTemplate).where(
+            JurisdictionTemplate.id == template_id,
+            JurisdictionTemplate.jurisdiction_id == jurisdiction_id,
+            JurisdictionTemplate.enabled.is_(True),  # type: ignore[union-attr,attr-defined]
+        )
+    ).first()
+    return row if row is not None and not problems_of(row) else None
 
 
 def judge_fields(row: JurisdictionTemplate) -> list[TemplateField]:
