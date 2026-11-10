@@ -49,8 +49,11 @@ router = APIRouter(tags=["jurisdictions"])
 
 class JurisdictionSummary(BaseModel):
     code: str
+    # What users see: the display name, else the name (DIAAT-345).
     name: str
     role: str
+    # draft or test: seen only by its admins (and, in test, its testers) (DIAAT-345).
+    stage: str
 
 
 class CurrentJurisdiction(JurisdictionSummary):
@@ -73,7 +76,9 @@ class ChooseJurisdictionRequest(BaseModel):
 
 
 def _summary(membership: Membership) -> JurisdictionSummary:
-    return JurisdictionSummary(code=membership.code, name=membership.name, role=membership.role)
+    return JurisdictionSummary(
+        code=membership.code, name=membership.shown_name, role=membership.role, stage=membership.stage
+    )
 
 
 def _current(membership: Membership) -> CurrentJurisdiction:
@@ -186,7 +191,7 @@ def _as_its_admin(
 
 def _wording(active: ActiveJurisdiction, wording: dict[str, str], version: str) -> JurisdictionWording:
     return JurisdictionWording(
-        code=active.code, name=active.current.name, keys=WORDING_KEYS, wording=wording, version=version
+        code=active.code, name=active.current.shown_name, keys=WORDING_KEYS, wording=wording, version=version
     )
 
 

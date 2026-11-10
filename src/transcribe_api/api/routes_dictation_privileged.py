@@ -13,7 +13,7 @@ import urllib.parse
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -787,10 +787,16 @@ _SYSTEM_ADMINISTRATOR = get_allowlisted_user(
 class JurisdictionAdminRecord(BaseModel):
     code: str
     name: str
+    display_name: str | None
+    service: str | None
+    # DIAAT-345: draft (its admins see it), test (its testers too) or live (everyone).
+    stage: Literal["draft", "test", "live"]
     enabled: bool
     auto_enrol: bool
     settings: dict[str, Any]
     member_count: int
+    # What stops it being switched on, in plain words; empty when it is ready.
+    problems: list[str]
     # Sent back with a save, so a change made meanwhile is not undone (409).
     version: str
 
@@ -798,9 +804,13 @@ class JurisdictionAdminRecord(BaseModel):
 class JurisdictionWrite(BaseModel):
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
     settings: dict[str, Any]
-    # Left out: unchanged (a new jurisdiction is enabled, without auto-enrol).
+    # Left out: unchanged (a new jurisdiction is enabled, without auto-enrol, a draft).
     enabled: bool | None = None
     auto_enrol: bool | None = None
+    stage: Literal["draft", "test", "live"] | None = None
+    # Left out: unchanged; blank: none (the name is shown).
+    display_name: Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)] | None = None
+    service: Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)] | None = None
     # The version edited ("" when adding one); left out, no check (the command line).
     version: str | None = None
 
@@ -808,16 +818,23 @@ class JurisdictionWrite(BaseModel):
 class JurisdictionMemberRecord(BaseModel):
     email: str
     role: str
+    # In the jurisdiction's test group (DIAAT-345).
+    tester: bool
     pending: bool
 
 
 class JurisdictionMemberWrite(BaseModel):
     email: str = PydanticField(min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+$")
     role: str = "judge"
+    # Left out: unchanged (a new member is not a tester).
+    tester: bool | None = None
 
 
 class WordingKeysResponse(BaseModel):
     keys: dict[str, str]
+
+
+JURISDICTION_NOT_READY = "jurisdiction_not_ready"
 
 
 def _admin_session_run(operation):
@@ -826,6 +843,11 @@ def _admin_session_run(operation):
     with Session(get_engine()) as session:
         try:
             return operation(session)
+        except jurisdictions_admin.NotReadyError as exc:  # DIAAT-345: what is missing
+            raise HTTPException(
+                status_code=400,
+                detail={"code": JURISDICTION_NOT_READY, "message": str(exc), "problems": exc.problems},
+            ) from None
         except jurisdictions_admin.NotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         except jurisdictions_admin.ConflictError as exc:
@@ -885,6 +907,9 @@ def admin_put_jurisdiction(
             auto_enrol=body.auto_enrol,
             enabled=body.enabled,
             expected_version=body.version,
+            stage=body.stage,
+            display_name=body.display_name,
+            service=body.service,
         )
         created = outcome.startswith("Created")
         return next(r for r in jurisdictions_admin.jurisdictions_overview(session) if r["code"] == code.strip().upper())
@@ -898,6 +923,9 @@ def admin_put_jurisdiction(
             "code": record["code"],
             "created": created,
             "name": record["name"],
+            "display_name": record["display_name"],
+            "service": record["service"],
+            "stage": record["stage"],
             "enabled": record["enabled"],
             "auto_enrol": record["auto_enrol"],
             "template": settings.get("template"),
@@ -925,19 +953,25 @@ def admin_add_jurisdiction_member(
     body: JurisdictionMemberWrite,
     admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),  # noqa: B008
 ) -> JurisdictionMemberRecord:
-    """Add someone by their sign-in email, or change their role. Someone who has not
-    signed in yet joins when they first do (pending)."""
+    """Add someone by their sign-in email, or change their role or whether they are a
+    tester. Someone who has not signed in yet joins when they first do (pending)."""
     email = body.email.strip().lower()
 
     def add(session: Session) -> dict:
-        jurisdictions_admin.add_member(session, code, email, body.role)
+        jurisdictions_admin.add_member(session, code, email, body.role, tester=body.tester)
         return next(m for m in jurisdictions_admin.members_of(session, code) if m["email"] == email)
 
     member = _admin_session_run(add)
     _audit_jurisdiction_change(
         "membership.add",
         admin_user,
-        {"code": code.strip().upper(), **_member_target(email), "role": member["role"], "pending": member["pending"]},
+        {
+            "code": code.strip().upper(),
+            **_member_target(email),
+            "role": member["role"],
+            "tester": member["tester"],
+            "pending": member["pending"],
+        },
     )
     return JurisdictionMemberRecord(**member)
 

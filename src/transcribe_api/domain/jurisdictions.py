@@ -9,7 +9,9 @@ jurisdiction, chosen in this order:
 2. the user's remembered choice (``user.active_jurisdiction_id``);
 3. their only jurisdiction.
 
-It must be one the user belongs to and that is enabled. A user with none gets 403
+It must be one the user belongs to, that is enabled, and whose stage lets them see it
+(DIAAT-345: a draft only its admins, one in test its testers and admins, a live one
+every member). A user with none gets 403
 ``no_jurisdiction``; a user with several and no choice gets 409
 ``jurisdiction_choice_required``; a header naming a jurisdiction they do not belong to
 gets 403 ``jurisdiction_not_available`` (it names a code, not material).
@@ -52,6 +54,13 @@ ROLE_JUDGE = "judge"
 ROLE_ADMIN = "admin"
 ROLES = (ROLE_JUDGE, ROLE_ADMIN)
 
+# DIAAT-345: a new jurisdiction is set up as a draft, tried by its test group, then
+# switched on for every member (models_dictation.Jurisdiction.stage).
+STAGE_DRAFT = "draft"
+STAGE_TEST = "test"
+STAGE_LIVE = "live"
+STAGES = (STAGE_DRAFT, STAGE_TEST, STAGE_LIVE)
+
 NO_JURISDICTION = "no_jurisdiction"
 CHOICE_REQUIRED = "jurisdiction_choice_required"
 NOT_AVAILABLE = "jurisdiction_not_available"
@@ -82,6 +91,18 @@ WORDING_KEYS: dict[str, str] = {
     "autosave.record_name": "What dictation is saved to, e.g. 'case record'",
     "alerts.speech_lost_guidance": "Guidance when the speech service connection is lost",
 }
+
+# The screen wording a jurisdiction must set itself before it is switched on (out of
+# draft): the rest has a neutral default that suits any jurisdiction (DIAAT-345).
+REQUIRED_WORDING_KEYS = (
+    "home.intro",
+    "help.subtitle",
+    "records.column_title",
+    "records.column_type",
+    "autosave.record_name",
+)
+# Required too, but only where the jurisdiction uses hearing recordings.
+RECORDINGS_WORDING_KEY = "nav.recordings"
 
 _MAX_WORDING_LENGTH = 500
 
@@ -146,6 +167,36 @@ def parse_settings(raw: dict | None, code: str = "") -> JurisdictionSettings:
     )
 
 
+def missing_wording(settings: JurisdictionSettings) -> list[str]:
+    """The required screen wording ``settings`` leaves blank, as WORDING_KEYS keys."""
+    required = [*REQUIRED_WORDING_KEYS]
+    if settings.features.hearing_recordings:
+        required.append(RECORDINGS_WORDING_KEY)
+    return [key for key in WORDING_KEYS if key in required and not settings.wording.get(key, "").strip()]
+
+
+def readiness_problems(settings: JurisdictionSettings, *, admin_count: int) -> list[str]:
+    """What stops a jurisdiction being switched on for its test group or everyone
+    (DIAAT-345), in plain words; empty when it is ready."""
+    problems = []
+    missing = missing_wording(settings)
+    if missing:
+        problems.append(f"Add the screen wording for: {'; '.join(WORDING_KEYS[key] for key in missing)}.")
+    if admin_count == 0:
+        problems.append("Assign at least one jurisdiction admin.")
+    return problems
+
+
+def sees(stage: str, role: str, tester: bool) -> bool:
+    """Whether a member with ``role`` (and in the test group or not) sees a jurisdiction
+    at ``stage`` (DIAAT-345). Its admins see it from the start, to set it up."""
+    if stage == STAGE_LIVE:
+        return True
+    if stage == STAGE_TEST:
+        return tester or role == ROLE_ADMIN
+    return stage == STAGE_DRAFT and role == ROLE_ADMIN
+
+
 @dataclass(frozen=True)
 class Membership:
     """One of the user's enabled jurisdictions, with their role in it."""
@@ -155,6 +206,13 @@ class Membership:
     name: str
     role: str
     settings: JurisdictionSettings
+    # DIAAT-345: what users see (the name, unless set), and the stage it is at.
+    display_name: str = ""
+    stage: str = STAGE_LIVE
+
+    @property
+    def shown_name(self) -> str:
+        return self.display_name or self.name
 
 
 @dataclass(frozen=True)
@@ -178,10 +236,10 @@ class ActiveJurisdiction:
 
 
 def _load_memberships(user_id: UUID) -> list[Membership]:
-    """The user's enabled jurisdictions, by name."""
+    """The user's enabled jurisdictions that their stage lets them see, by name."""
     with Session(get_engine()) as session:
         rows = session.exec(
-            select(Jurisdiction, JurisdictionMembership.role)
+            select(Jurisdiction, JurisdictionMembership.role, JurisdictionMembership.tester)
             .join(JurisdictionMembership, JurisdictionMembership.jurisdiction_id == Jurisdiction.id)
             .where(JurisdictionMembership.user_id == user_id, Jurisdiction.enabled)
             .order_by(Jurisdiction.name)
@@ -193,8 +251,11 @@ def _load_memberships(user_id: UUID) -> list[Membership]:
             name=jurisdiction.name,
             role=role,
             settings=parse_settings(jurisdiction.settings, jurisdiction.code),
+            display_name=jurisdiction.display_name or "",
+            stage=jurisdiction.stage,
         )
-        for jurisdiction, role in rows
+        for jurisdiction, role, tester in rows
+        if sees(jurisdiction.stage, role, tester)
     ]
 
 
@@ -209,7 +270,7 @@ def enrol_new_user(session: Session, user: User) -> None:
     (the user row is flushed, not committed).
 
     Memberships added by email before they signed in are claimed. With none, they are
-    made a judge in every enabled ``auto_enrol`` jurisdiction (the IAC), as anyone with
+    made a judge in every enabled, live ``auto_enrol`` jurisdiction (the IAC), as anyone with
     an app role could use BenchNotes before jurisdictions. Runs once: a user later
     removed from every jurisdiction is not enrolled again.
     """
@@ -224,7 +285,9 @@ def enrol_new_user(session: Session, user: User) -> None:
     if claimed:
         logger.info("Claimed pending jurisdiction memberships for user id=%s", user.id)
         return
-    auto = session.exec(select(Jurisdiction.id).where(Jurisdiction.auto_enrol, Jurisdiction.enabled)).all()
+    auto = session.exec(
+        select(Jurisdiction.id).where(Jurisdiction.auto_enrol, Jurisdiction.enabled, Jurisdiction.stage == STAGE_LIVE)
+    ).all()
     for jurisdiction_id in auto:
         session.add(JurisdictionMembership(jurisdiction_id=jurisdiction_id, user_id=user.id, role=ROLE_JUDGE))
     logger.info("Enrolled user id=%s in %d auto-enrol jurisdiction(s)", user.id, len(auto))

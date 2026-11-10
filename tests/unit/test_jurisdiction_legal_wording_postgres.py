@@ -224,7 +224,7 @@ def test_0006_keeps_the_iacs_row_unchanged_and_reverses():
             before = connection.execute(text(snapshot)).all()
         assert len(before) == 1
 
-        _migrate(engine, "head")
+        _migrate(engine, "0006")
         assert _version(engine) == "0006"  # it ran
         with engine.connect() as connection:
             assert connection.execute(text(snapshot)).all() == before
