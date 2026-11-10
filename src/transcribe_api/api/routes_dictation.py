@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import tempfile
 import threading
 import urllib.parse
@@ -225,6 +226,17 @@ def _in_jurisdiction(resource_type: str):
         )
 
     return Depends(check)
+
+
+def _owned_transcription(transcription_id: UUID, current_user: User, resource_type: str, tz=None) -> Transcription:
+    """The caller's transcription, with the post-authorisation assertion (DIAAT-285)
+    in the one lookup the reading routes share, so none can miss it. 404 for an
+    unknown ID or another user's."""
+    transcription = get_transcription_by_id(transcription_id, current_user.id, tz or UK_TIMEZONE)
+    if not transcription:
+        raise HTTPException(status_code=404, detail="Transcription not found")
+    _assert_owned(transcription, current_user, resource_type)
+    return transcription
 
 
 def _assert_owned(transcription: Transcription, current_user: User, resource_type: str) -> None:
@@ -775,9 +787,8 @@ async def get_transcription(
     async with audited(
         TRANSCRIPT_VIEWED, actor_id=current_user.id, object_type=TRANSCRIPTION, object_id=transcription_id
     ) as audit:
-        transcription = get_transcription_by_id(transcription_id, current_user.id, tz)
+        transcription = _owned_transcription(transcription_id, current_user, TRANSCRIPTION, tz)
         audit.authorised()
-        _assert_owned(transcription, current_user, TRANSCRIPTION)
     return transcription
 
 
@@ -991,9 +1002,7 @@ async def get_minute_version_by_id_route(
 ):
     """Get a specific minute version by its ID for a given transcription."""
     # Verify user has access to the associated transcription
-    transcription = get_transcription_by_id(transcription_id, current_user.id, UK_TIMEZONE)
-    if not transcription:
-        raise HTTPException(status_code=404, detail="Transcription not found")
+    _owned_transcription(transcription_id, current_user, MINUTE_VERSION)
 
     # Get the specific minute version, ensuring it belongs to the transcription
     minute_version = get_minute_version_by_id(minute_version_id, transcription_id)
@@ -1010,9 +1019,7 @@ async def get_minute_versions_route(
 ):
     """Get all minute versions for a specific transcription."""
     # Verify user has access to this transcription
-    transcription = get_transcription_by_id(transcription_id, current_user.id, UK_TIMEZONE)
-    if not transcription:
-        raise HTTPException(status_code=404, detail="Transcription not found")
+    _owned_transcription(transcription_id, current_user, MINUTE_VERSION)
 
     return get_minute_versions(transcription_id)
 
@@ -1080,9 +1087,7 @@ async def get_transcription_jobs_route(
     so audited as a view of the transcript (DIAAT-286)."""
     async with audited(TRANSCRIPT_VIEWED, actor_id=current_user.id, object_type=TRANSCRIPT, object_id=transcription_id) as audit:
         # Verify user has access to this transcription
-        transcription = get_transcription_by_id(transcription_id, current_user.id, UK_TIMEZONE)
-        if not transcription:
-            raise HTTPException(status_code=404, detail="Transcription not found")
+        _owned_transcription(transcription_id, current_user, TRANSCRIPTION_JOB)
         audit.authorised()
         return get_transcription_jobs(transcription_id)
 
@@ -1097,9 +1102,10 @@ async def stream_audio(
     """Stream audio from blob storage with HTTP Range support for seekable playback.
 
     Audited as an export (DIAAT-286) once per playback: a request for the start of the
-    file (no Range, or one from byte 0). Seeks are not recorded unless refused or failed.
+    file (no Range, or one from byte 0), recorded as a success even when the browser
+    ends it early, as it does on a pause or a seek. Seeks, and a browser's probe of the
+    first bytes (Safari asks for ``bytes=0-1``), are not recorded unless refused or failed.
     """
-    range_header = request.headers.get("range")
     async with audited(
         TRANSCRIPT_EXPORTED,
         actor_id=current_user.id,
@@ -1107,19 +1113,34 @@ async def stream_audio(
         object_id=transcription_id,
         detail={"via": "stream", "job_id": str(job_id)},
     ) as audit:
-        if range_header and not range_header.replace(" ", "").startswith("bytes=0-"):
+        if not _starts_playback(request.headers.get("range")):
             audit.skip_if_successful()
         return await _stream_audio(transcription_id, job_id, request, current_user, audit)
+
+
+# A request from byte 0 that ends before this asks only for the file's size or type.
+_PLAYBACK_PROBE_MAX_END = 1023
+
+
+def _starts_playback(range_header: str | None) -> bool:
+    """Whether a request is the start of a playback: no Range, or one from byte 0
+    that is not a probe of the first bytes."""
+    if not range_header:
+        return True
+    match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header.replace(" ", "").split(",")[0])
+    if match is None or int(match.group(1)) != 0:
+        return False
+    return not match.group(2) or int(match.group(2)) > _PLAYBACK_PROBE_MAX_END
 
 
 async def _stream_audio(
     transcription_id: UUID, job_id: UUID, request: Request, current_user: User, audit: AuditedAction
 ) -> StreamingResponse:
-    get_transcription_by_id(transcription_id, current_user.id, UK_TIMEZONE)
-    audit.authorised()
+    _owned_transcription(transcription_id, current_user, AUDIO)
 
     jobs = get_transcription_jobs(transcription_id)
     job = next((j for j in jobs if j.id == job_id), None)
+    # Refused, not failed: another transcription's job, or none, is not found here.
     if not job:
         raise HTTPException(status_code=404, detail="Transcription job not found")
     if not job.s3_audio_url:
@@ -1136,6 +1157,7 @@ async def _stream_audio(
         blob_path = stored_url
 
     _validate_blob_ownership(blob_path, current_user, request, resource_type=AUDIO, object_id=transcription_id)
+    audit.authorised()  # from here on, an error is a failure, not a refusal
 
     _audio_settings = get_settings()
     playback_url = await generate_blob_download_url(
@@ -1172,7 +1194,9 @@ async def _stream_audio(
             await client.aclose()
 
     # The export is recorded when the body has been sent (or failed), not now.
-    return audit.streaming_response(generate(), status_code=blob_response.status_code, headers=response_headers)
+    return audit.streaming_response(
+        generate(), status_code=blob_response.status_code, headers=response_headers, client_may_stop=True
+    )
 
 
 class LiveTranscriptMessage(BaseModel):
@@ -1301,11 +1325,8 @@ async def get_sectioned_transcript_route(
 async def _sectioned_transcript(
     transcription_id: UUID, current_user: User, audit: AuditedAction
 ) -> TranscriptViewerResponse:
-    transcription = get_transcription_by_id(transcription_id, current_user.id, UK_TIMEZONE)
-    if not transcription:
-        raise HTTPException(status_code=404, detail="Transcription not found")
+    _owned_transcription(transcription_id, current_user, TRANSCRIPTION)
     audit.authorised()
-    _assert_owned(transcription, current_user, TRANSCRIPTION)
 
     oid_prefix = get_file_blob_path(str(current_user.azure_user_id), "live-transcription-submission-")
     email_prefix = get_file_blob_path(current_user.email, "live-transcription-submission-")

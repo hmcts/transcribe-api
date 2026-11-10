@@ -119,6 +119,27 @@ def test_the_auth_librarys_denials_carry_the_request_id_and_outcome(audit_log):
     assert (row.outcome, row.request_id, row.email) == ("denied", REQUEST_ID, "x@justice.gov.uk")
 
 
+async def test_the_auth_writer_called_on_the_event_loop_does_not_insert_there(audit_log, monkeypatch):
+    """write_audit_event is meant for a worker thread (the auth library calls it so);
+    called on the event loop, the insert is handed to one, as for record_audit."""
+    import threading
+
+    persist = audit._persist
+    threads = []
+
+    def writer(row):
+        threads.append(threading.current_thread())
+        return persist(row)
+
+    monkeypatch.setattr(audit, "_persist", writer)
+    event = AuditEvent(event_type="ROLE_CHANGE", user_id="admin", email="a@justice.gov.uk", resource="user:x")
+    with request_id_context(REQUEST_ID):
+        audit.write_audit_event(event)
+    await audit.drain_pending_writes()
+    assert threads[0] is not threading.current_thread()
+    assert _row(audit_log).request_id == REQUEST_ID
+
+
 def test_a_failed_write_never_raises_logs_types_only_and_records_an_identifier_free_event(
     audit_log, monkeypatch, caplog
 ):
@@ -438,8 +459,8 @@ def test_a_download_of_another_users_blob_is_one_denied_record(client, as_user, 
 
 @pytest.mark.parametrize(
     ("range_header", "recorded"),
-    [(None, True), ("bytes=0-", True), ("bytes=1048576-", False)],
-    ids=["whole-file", "playback-start", "seek"],
+    [(None, True), ("bytes=0-", True), ("bytes=0-65535", True), ("bytes=1048576-", False), ("bytes=0-1", False)],
+    ids=["whole-file", "playback-start", "playback-start-closed-range", "seek", "size-probe"],
 )
 def test_audio_playback_is_recorded_once_not_per_seek(client, as_user, mocker, audit_log, range_header, recorded):
     user = _make_user_with_oid()
@@ -459,6 +480,42 @@ def test_audio_playback_is_recorded_once_not_per_seek(client, as_user, mocker, a
             "audio",
             {"via": "stream", "job_id": str(job.id)},
         )
+
+
+def test_audio_of_a_job_not_in_the_transcription_is_denied_not_failed(client, as_user, mocker, audit_log):
+    """Probing other job IDs under one's own transcription is a refusal, not a
+    service failure."""
+    user = _make_user_with_oid()
+    as_user(user)
+    transcription, _ = _transcription_with_document(user.id, blob_path=f"user-uploads/{TEST_OID}/a.wav")
+    mocker.patch("transcribe_api.api.routes_dictation.get_transcription_by_id", return_value=transcription)
+    mocker.patch("transcribe_api.api.routes_dictation.get_transcription_jobs", return_value=[])
+    http = _storage(mocker)
+    url = f"/api/transcriptions/{transcription.id}/jobs/{uuid.uuid4()}/audio"
+    assert client.get(url).status_code == 404
+    http.send.assert_not_called()
+    assert _row(audit_log).outcome == "denied"
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/jobs", "/jobs/{job}/audio", "/minute-versions", "/minute-versions/{job}"],
+    ids=["transcript-text", "audio", "minute-versions", "minute-version"],
+)
+def test_every_reading_route_asserts_the_record_is_the_callers(client, as_user, mocker, audit_log, path):
+    """DIAAT-285: the assertion is in the lookup the reading routes share, so a broken
+    owner filter is detected on each of them, not only on GET /transcriptions/{id}."""
+    as_user(_make_user_with_oid())
+    transcription, job = _transcription_with_document(uuid.uuid4())  # another user's
+    mocker.patch("transcribe_api.api.routes_dictation.get_transcription_by_id", return_value=transcription)
+    jobs = mocker.patch("transcribe_api.api.routes_dictation.get_transcription_jobs", return_value=[job])
+    url = f"/api/transcriptions/{transcription.id}" + path.format(job=job.id)
+    with capture_telemetry() as telemetry:
+        response = client.get(url)
+        (event,) = telemetry.events(sec.EVENT_OWNERSHIP_VIOLATION)
+    assert response.status_code == 404
+    assert event[sec.ATTR_OUTCOME] == "detected"
+    jobs.assert_not_called()
 
 
 def test_a_refused_seek_is_still_recorded(client, as_user, mocker, audit_log):
@@ -787,7 +844,7 @@ def _http_scope(spec_version="2.3"):
     return {"type": "http", "asgi": {"version": "3.0", "spec_version": spec_version}, "method": "GET", "headers": []}
 
 
-async def _streamed(audit_log, chunks, *, skip=False, fail_after=None):
+async def _streamed(audit_log, chunks, *, skip=False, fail_after=None, client_may_stop=False):
     """An audited block returning a streamed response, as the routes do."""
 
     async def body():
@@ -808,7 +865,7 @@ async def _streamed(audit_log, chunks, *, skip=False, fail_after=None):
             action.authorised()
             if skip:
                 action.skip_if_successful()
-            response = action.streaming_response(body())
+            response = action.streaming_response(body(), client_may_stop=client_may_stop)
     assert audit_log.rows() == []  # nothing is exported yet
     return response
 
@@ -892,6 +949,60 @@ async def test_a_client_disconnect_is_failed_with_its_reason(audit_log):
         {"via": "stream", "reason": "client_disconnected"},
         REQUEST_ID,
     )
+
+
+@pytest.mark.asyncio
+async def test_audio_the_browser_stops_part_way_is_a_success(audit_log):
+    """A browser ends an audio request itself on a pause or a seek, once it has
+    buffered what it needs: the audio was heard, so it is not a failed export.
+    ASGI 2.3 (uvicorn): the sending task is cancelled and the call returns."""
+    import asyncio
+
+    response = await _streamed(audit_log, [b"a", b"b", b"c"], client_may_stop=True)
+    first_sent = asyncio.Event()
+
+    async def receive():
+        await first_sent.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if message["type"] == "http.response.body":
+            first_sent.set()
+            await asyncio.sleep(1)  # the client has gone: this send never completes
+
+    await response(_http_scope("2.3"), receive, send)
+    row = _row(audit_log)
+    assert (row.outcome, row.detail) == ("success", {"via": "stream"})
+
+
+@pytest.mark.asyncio
+async def test_audio_the_browser_stops_part_way_on_asgi_2_4_is_a_success(audit_log):
+    from starlette.requests import ClientDisconnect
+
+    response = await _streamed(audit_log, [b"a", b"b", b"c"], client_may_stop=True)
+    sends = 0
+
+    async def send(message):
+        nonlocal sends
+        sends += 1
+        if sends > 2:
+            raise OSError
+
+    with pytest.raises(ClientDisconnect):
+        await response(_http_scope("2.4"), asyncio_sleep_forever, send)
+    assert (_row(audit_log).outcome, _row(audit_log).detail) == ("success", {"via": "stream"})
+
+
+@pytest.mark.asyncio
+async def test_audio_whose_storage_stream_breaks_is_still_failed(audit_log):
+    response = await _streamed(audit_log, [b"a", b"b"], fail_after=1, client_may_stop=True)
+
+    async def send(message):
+        pass
+
+    with pytest.raises(RuntimeError):
+        await response(_http_scope("2.4"), asyncio_sleep_forever, send)
+    assert _row(audit_log).detail == {"via": "stream", "reason": "stream_error"}
 
 
 @pytest.mark.asyncio

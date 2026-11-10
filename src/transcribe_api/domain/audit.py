@@ -49,7 +49,10 @@ A streamed export (``TRANSCRIPT_EXPORTED`` for ``/download`` and audio playback)
 recorded when the response body ends, not when the response object is returned:
 ``success`` once the last chunk is sent, ``failed`` with ``detail.reason``
 ``stream_error``, ``client_disconnected`` or ``cancelled`` otherwise
-(``AuditedAction.streaming_response``). The insert runs in a worker thread.
+(``AuditedAction.streaming_response``). Audio playback is the exception to
+``client_disconnected``: a browser ends the request itself on a pause or a seek, once
+it has played what it needed, so for audio that is still a ``success``. The insert
+runs in a worker thread.
 
 An ``ACCESS_DENIED`` row from an ownership check outside an audited action is never
 inserted on the event loop either (``record_audit``). Inside ``async with
@@ -165,8 +168,11 @@ def _persist(row: AuditLog) -> bool:
 def write_audit_event(event: AuditEvent) -> None:
     """Write an AuditEvent from the auth library or an admin route.
 
-    Called synchronously by get_allowlisted_user on every 403. Failures are logged but
-    do not propagate: a logging failure must never block a response.
+    get_allowlisted_user calls it in a worker thread on every 403; an async route calls
+    it the same way (``await asyncio.to_thread(write_audit_event, ...)``). Called on the
+    event loop by mistake, it is not inserted there but handed to a worker thread, as
+    for record_audit. Failures are logged but do not propagate: a logging failure must
+    never block a response.
     """
     try:  # building the row is part of the write: fail-open too
         row = AuditLog(
@@ -185,7 +191,7 @@ def write_audit_event(event: AuditEvent) -> None:
     except Exception as exc:
         _write_failed(str(event.event_type), exc)
         return
-    _persist(row)
+    _submit(row)
 
 
 def record_audit(
@@ -327,6 +333,7 @@ class AuditedAction:
         # Built in the request's context: a streamed body may be sent outside it.
         self._request_id = get_request_id()
         self._streams = False  # the outcome is settled when the response body ends
+        self._client_may_stop = False  # a client ending the stream early still received it
         self._stream_pending = False  # the row is still to be written by the stream
 
     def authorised(self) -> None:
@@ -355,6 +362,7 @@ class AuditedAction:
         *,
         status_code: int = 200,
         headers: Mapping[str, str] | None = None,
+        client_may_stop: bool = False,
     ) -> StreamingResponse:
         """A response whose success is recorded when its body has been sent.
 
@@ -364,8 +372,12 @@ class AuditedAction:
         ``stream_error`` (the upstream stream raised), ``client_disconnected`` or
         ``cancelled``. A block that ends refused or failed (e.g. ``fail()`` for a
         storage error status) is written when it exits, as before. One row either way.
+
+        ``client_may_stop``: the client ending the response early is still a
+        ``success`` (audio playback, which the browser stops on a pause or a seek).
         """
         self._streams = True
+        self._client_may_stop = client_may_stop
 
         async def conclude(reason: str | None) -> None:
             row = self._conclude_stream(reason)
@@ -395,7 +407,7 @@ class AuditedAction:
         if not self._stream_pending:
             return None  # recorded when the block exited (or never streamed)
         self._stream_pending = False
-        if reason is None:
+        if reason is None or (reason == CLIENT_DISCONNECTED and self._client_may_stop):
             return None if self._skip_success else self._row()
         self.outcome = FAILED
         self.detail["reason"] = reason
