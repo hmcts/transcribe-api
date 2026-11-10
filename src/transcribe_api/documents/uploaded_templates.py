@@ -95,7 +95,7 @@ def check_template_file(data: bytes) -> None:
                 target = rel.get("Target", "")
                 if rel.get("TargetMode") == "External" and kind != _HYPERLINK and not target.startswith("cid:"):
                     raise TemplateFileError("The document links to an external file.")
-    except ElementTree.ParseError:
+    except (ElementTree.ParseError, zipfile.BadZipFile):
         raise TemplateFileError("The document is damaged.") from None
 
 
