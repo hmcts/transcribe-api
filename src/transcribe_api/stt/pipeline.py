@@ -44,14 +44,6 @@ from transcribe_api.stt.utils import (
 )
 
 
-async def generate_and_save_meeting_title(
-    dialogue_entries: list, transcription: Transcription, user_id: UUID
-) -> Transcription:
-    """Generate and save the title; on failure the transcription is returned as stored."""
-    await _generate_and_save_title(dialogue_entries, transcription, user_id)
-    return transcription
-
-
 async def _generate_and_save_title(dialogue_entries: list, transcription: Transcription, user_id: UUID) -> bool:
     """True when a title was generated and saved. The job's outcome uses this, so it
     always agrees with the title_generation stage."""

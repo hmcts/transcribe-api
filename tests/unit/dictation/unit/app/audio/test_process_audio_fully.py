@@ -27,7 +27,7 @@ import pytest  # noqa: E402
 # instances without getting our dummy-values cached result.
 from transcribe_api.runtime.settings_dictation import get_settings as _gs  # noqa: E402
 from transcribe_api.stt.pipeline import (  # noqa: E402
-    generate_and_save_meeting_title,
+    _generate_and_save_title,
     transcribe_and_generate_llm_output,
 )
 
@@ -78,8 +78,8 @@ class TestGenerateAndSaveMeetingTitle:
         monkeypatch.setattr("transcribe_api.stt.pipeline.load_or_create_transcription", mock_save)
 
         t = Transcription(id=uuid4())
-        result = await generate_and_save_meeting_title([], t, uuid4())
-        assert result.title == "Generated Title"
+        assert await _generate_and_save_title([], t, uuid4()) is True
+        assert t.title == "Generated Title"
 
     async def test_returns_original_transcription_on_error(self, monkeypatch):
         from transcribe_api.domain.models_dictation import Transcription
@@ -89,9 +89,9 @@ class TestGenerateAndSaveMeetingTitle:
             AsyncMock(side_effect=RuntimeError("LLM failed")),
         )
 
-        t = Transcription(id=uuid4())
-        result = await generate_and_save_meeting_title([], t, uuid4())
-        assert result is t
+        t = Transcription(id=uuid4(), title="As stored")
+        assert await _generate_and_save_title([], t, uuid4()) is False
+        assert t.title == "As stored"
 
 
 @pytest.mark.asyncio
