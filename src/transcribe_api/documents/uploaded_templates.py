@@ -441,7 +441,10 @@ def fill_template(data: bytes, texts: dict[str, str], output_path: Path) -> Path
     for sdt in empty:
         paragraph = next((a for a in sdt.iterancestors() if a.tag == qn("w:p")), None)
         if paragraph is None or paragraph.getparent() is None:
+            parent = sdt.getparent()
             _remove(sdt)
+            if parent is not None and parent.tag == qn("w:tc") and not parent.findall(qn("w:p")):
+                parent.append(parent.makeelement(qn("w:p")))
             continue
         in_paragraph = [
             s
