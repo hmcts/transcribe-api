@@ -7,7 +7,7 @@ from uuid import UUID
 
 import ffmpeg
 import httpx
-from azure.storage.blob import BlobSasPermissions, generate_blob_sas
+from azure.storage.blob import BlobClient, BlobSasPermissions, generate_blob_sas
 
 from transcribe_api.domain.models_dictation import DialogueEntry
 from transcribe_api.runtime.blob_dictation import _redact_blob_path
@@ -73,11 +73,30 @@ def extract_transcription_id_from_blob_path(blob_path: str, user_id: str) -> str
     return transcription_id
 
 
+def _account_key_sas_url(connection_string: str, container_name: str, blob_name: str, **sas_params) -> str:
+    """A SAS URL signed with the connection string's account key, on its blob endpoint.
+
+    For Azurite, which has no user delegation keys and is not at *.blob.core.windows.net.
+    """
+    with BlobClient.from_connection_string(
+        connection_string, container_name=container_name, blob_name=blob_name
+    ) as blob_client:
+        sas_token = generate_blob_sas(
+            account_name=blob_client.credential.account_name,
+            container_name=container_name,
+            blob_name=blob_name,
+            account_key=blob_client.credential.account_key,
+            **sas_params,
+        )
+        return f"{blob_client.url}?{sas_token}"
+
+
 async def generate_blob_upload_url(container_name: str, blob_name: str, expiry_hours: int = 1) -> str:
     """
     Generate a time-limited SAS URL for uploading to Azure Blob Storage using Managed Identity.
 
-    Uses User Delegation Key instead of account keys for enhanced security.
+    Uses User Delegation Key instead of account keys for enhanced security, except
+    with AZURE_STORAGE_CONNECTION_STRING set (Azurite), which signs with its account key.
     Works in both local (via az login) and production (via managed identity) environments.
     The generated SAS token has write and create permissions only.
 
@@ -96,6 +115,14 @@ async def generate_blob_upload_url(container_name: str, blob_name: str, expiry_h
     from azure.storage.blob.aio import BlobServiceClient
 
     settings = get_settings()
+    if settings.AZURE_STORAGE_CONNECTION_STRING:
+        return _account_key_sas_url(
+            settings.AZURE_STORAGE_CONNECTION_STRING,
+            container_name,
+            blob_name,
+            permission=BlobSasPermissions(write=True, create=True),
+            expiry=datetime.now(UTC) + timedelta(hours=expiry_hours),
+        )
     account_url = f"https://{settings.AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net"
 
     # Authenticate using DefaultAzureCredential (no secrets needed)
@@ -138,7 +165,8 @@ async def generate_blob_download_url(
     """
     Generate a time-limited SAS URL for downloading from Azure Blob Storage using Managed Identity.
 
-    Uses User Delegation Key instead of account keys for enhanced security.
+    Uses User Delegation Key instead of account keys for enhanced security, except
+    with AZURE_STORAGE_CONNECTION_STRING set (Azurite), which signs with its account key.
     Works in both local (via az login) and production (via managed identity) environments.
     The generated SAS token has read permission only.
 
@@ -159,6 +187,18 @@ async def generate_blob_download_url(
     from azure.storage.blob.aio import BlobServiceClient
 
     settings = get_settings()
+    if settings.AZURE_STORAGE_CONNECTION_STRING:
+        disposition = (
+            {"content_disposition": f'attachment; filename="{download_filename}"'} if download_filename else {}
+        )
+        return _account_key_sas_url(
+            settings.AZURE_STORAGE_CONNECTION_STRING,
+            container_name,
+            blob_name,
+            permission=BlobSasPermissions(read=True),
+            expiry=datetime.now(UTC) + timedelta(hours=expiry_hours),
+            **disposition,
+        )
     account_url = f"https://{settings.AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net"
 
     # Authenticate using DefaultAzureCredential (no secrets needed)

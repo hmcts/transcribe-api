@@ -125,7 +125,9 @@ def transcribe():
 @pytest.fixture
 def make_poller(store, transcribe):
     """Build pollers that share one fake storage account (one per simulated worker pod)."""
-    blob_settings = MagicMock(AZURE_STORAGE_ACCOUNT_NAME="acct", AZURE_STORAGE_CONTAINER_NAME="audio")
+    blob_settings = MagicMock(
+        AZURE_STORAGE_ACCOUNT_NAME="acct", AZURE_STORAGE_CONTAINER_NAME="audio", AZURE_STORAGE_CONNECTION_STRING=None
+    )
     credential = MagicMock(close=AsyncMock())
     owner = SimpleNamespace(id=uuid4(), email="judge@justice.gov.uk", azure_user_id=OWNER)
     with (

@@ -32,6 +32,7 @@ class TestGenerateBlobUploadUrl:
         with patch("transcribe_api.stt.utils.get_settings") as mock_get_settings:
             mock_settings = MagicMock()
             mock_settings.AZURE_STORAGE_ACCOUNT_NAME = "teststorage"
+            mock_settings.AZURE_STORAGE_CONNECTION_STRING = None
             mock_get_settings.return_value = mock_settings
             yield mock_settings
 
@@ -174,6 +175,7 @@ class TestGenerateBlobDownloadUrl:
         with patch("transcribe_api.stt.utils.get_settings") as mock_get_settings:
             mock_settings = MagicMock()
             mock_settings.AZURE_STORAGE_ACCOUNT_NAME = "teststorage"
+            mock_settings.AZURE_STORAGE_CONNECTION_STRING = None
             mock_get_settings.return_value = mock_settings
             yield mock_settings
 
@@ -412,6 +414,7 @@ class TestGenerateBlobDownloadUrlWithFilename:
         with patch("transcribe_api.stt.utils.get_settings") as mock_get:
             settings = MagicMock()
             settings.AZURE_STORAGE_ACCOUNT_NAME = "teststorage"
+            settings.AZURE_STORAGE_CONNECTION_STRING = None
             mock_get.return_value = settings
 
             with patch("azure.identity.aio.DefaultAzureCredential") as mock_cred_class:

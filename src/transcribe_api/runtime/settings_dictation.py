@@ -1,5 +1,6 @@
 import os
 from functools import cache
+from typing import Literal
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,8 +21,15 @@ class Settings(BaseSettings):
     # access is disabled and Managed Identity auth must be used instead of API keys.
     # Format: /subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/<name>
     AZURE_SPEECH_RESOURCE_ID: str | None = None
+    # "mock" (local dev and PR previews only): uploaded audio gets a fixed transcript
+    # and Azure Speech is never called. As SPEECH_BACKEND in settings_recording.py.
+    SPEECH_BACKEND: Literal["azure", "mock"] = "azure"
     # Azure Storage Configuration (uses Managed Identity)
     AZURE_STORAGE_ACCOUNT_NAME: str
+    # Azurite only (local dev and PR previews): when set, storage is reached with this
+    # instead of Managed Identity, and SAS URLs are signed with its account key. Never
+    # set in deployed environments.
+    AZURE_STORAGE_CONNECTION_STRING: str | None = None
     AZURE_STORAGE_CONTAINER_NAME: str
     AZURE_STORAGE_TRANSCRIPTION_CONTAINER: str
     DATABASE_CONNECTION_STRING: str

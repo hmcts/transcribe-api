@@ -44,6 +44,7 @@ TEST_ENV: dict[str, str] = {
     "AZURE_STORAGE_ACCOUNT_NAME": "teststorage",
     "AZURE_STORAGE_CONTAINER_NAME": "test-container",
     "AZURE_STORAGE_TRANSCRIPTION_CONTAINER": "test-transcription-container",
+    "AZURE_STORAGE_CONNECTION_STRING": "",
     # Pinned so a developer's local .env (AUDIO_STORAGE_BACKEND=local,
     # SPEECH_BACKEND=mock — see runtime/settings_recording.py) can never
     # change what these tests actually exercise: real env vars outrank
