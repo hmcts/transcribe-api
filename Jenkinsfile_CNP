@@ -52,6 +52,9 @@ withPipeline(type, product, component) {
   before('functionalTest:preview') {
     env.AUTH_EXPECTED = 'false'
   }
+  before('fullFunctionalTest:preview') {
+    env.AUTH_EXPECTED = 'false'
+  }
 
   // Keep the long-lived environment branches in step with master so a deploy
   // to demo/ithc/perftest is never built from stale code.
