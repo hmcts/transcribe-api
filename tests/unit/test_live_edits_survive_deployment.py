@@ -76,6 +76,21 @@ def _edit_the_live_iac(engine) -> None:
         )
 
 
+def _edit_the_live_iac_at_0004(engine) -> None:
+    """_edit_the_live_iac in SQL: this release's model has columns 0004 has not (0007)."""
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE jurisdiction SET updated_datetime = now(), settings = jsonb_set(jsonb_set(jsonb_set(jsonb_set("
+                "settings, '{wording,home.intro}', to_jsonb(CAST(:text AS text))),"
+                " '{wording,nav.recordings}', '\"Recordings\"'),"
+                " '{features,hearing_recordings}', 'false'), '{wording,added.by.hand}', to_jsonb(CAST(:text AS text)))"
+                " WHERE code = 'IAC'"
+            ),
+            {"text": WORDING},
+        )
+
+
 def _edit_the_live_content(engine) -> dict:
     content = copy.deepcopy(_load_from_file())
     content["hearing_types"][0]["hearing_title"] = WORDING
@@ -154,7 +169,7 @@ def test_the_migrations_a_release_brings_keep_edits_made_before_it(live_db):
         config = migrations.alembic_config()
         config.attributes["connection"] = connection
         command.upgrade(config, "0004")
-    _edit_the_live_iac(live_db)
+    _edit_the_live_iac_at_0004(live_db)
     _edit_the_live_content(live_db)
     jurisdictions_before, content_before = _jurisdiction_rows(live_db), _content_rows(live_db)
 

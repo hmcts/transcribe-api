@@ -53,7 +53,7 @@ def test_an_administrator_adds_the_et_and_its_test_judges(jurisdiction_db, as_ad
     for email in ("saad.shaukat@hmcts.net", "Hamza.Ahmed@justice.gov.uk", "christopher.john@Justice.gov.uk"):
         added = as_admin.post("/api/admin/jurisdictions/ET/members", json={"email": email, "role": "judge"})
         assert added.status_code == 201
-        assert added.json() == {"email": email.lower(), "role": "judge", "pending": True}
+        assert added.json() == {"email": email.lower(), "role": "judge", "tester": False, "pending": True}
 
     members = as_admin.get("/api/admin/jurisdictions/ET/members").json()
     assert [m["email"] for m in members] == [
@@ -69,13 +69,17 @@ def test_an_administrator_adds_the_et_and_its_test_judges(jurisdiction_db, as_ad
 
 def test_a_test_judge_added_in_advance_works_in_the_et_only(jurisdiction_db, as_admin):
     as_admin.put("/api/admin/jurisdictions/ET", json={"name": "Employment Tribunal", "settings": ET_SETTINGS})
-    as_admin.post("/api/admin/jurisdictions/ET/members", json={"email": "hamza.ahmed@justice.gov.uk"})
+    as_admin.post("/api/admin/jurisdictions/ET/members", json={"email": "hamza.ahmed@justice.gov.uk", "tester": True})
+    as_admin.post("/api/admin/jurisdictions/ET/members", json={"email": "et.admin@example.test", "role": "admin"})
+    as_admin.put(
+        "/api/admin/jurisdictions/ET", json={"name": "Employment Tribunal", "settings": ET_SETTINGS, "stage": "test"}
+    )
 
     judge = sign_up(jurisdiction_db, "Hamza.Ahmed@justice.gov.uk")
 
     assert [m.code for m in jurisdictions.load_memberships(judge.id)] == ["ET"]
-    [member] = as_admin.get("/api/admin/jurisdictions/ET/members").json()
-    assert member["pending"] is False
+    [member] = [m for m in as_admin.get("/api/admin/jurisdictions/ET/members").json() if m["email"] == "hamza.ahmed@justice.gov.uk"]
+    assert (member["pending"], member["tester"]) == (False, True)
 
 
 def test_an_administrator_removes_a_member_and_edits_a_jurisdiction(jurisdiction_db, as_admin):
@@ -141,6 +145,7 @@ def test_the_audit_says_who_was_added_or_removed_without_contact_details(jurisdi
             "code": "ET",
             "target_email_sha256": hashlib.sha256(b"a@example.test").hexdigest(),
             "role": "admin",
+            "tester": False,
             "pending": True,
         }
     ]
@@ -159,7 +164,7 @@ def test_a_pending_email_stored_in_another_case_is_still_one_member(jurisdiction
     as_admin.post("/api/admin/jurisdictions/IAC/members", json={"email": "mixed@example.test", "role": "admin"})
 
     members = [m for m in as_admin.get("/api/admin/jurisdictions/IAC/members").json() if m["pending"]]
-    assert members == [{"email": "mixed@example.test", "role": "admin", "pending": True}]
+    assert members == [{"email": "mixed@example.test", "role": "admin", "tester": False, "pending": True}]
     judge = sign_up(jurisdiction_db, "mixed@example.test")
     assert [(m.code, m.role) for m in jurisdictions.load_memberships(judge.id)] == [("IAC", "admin")]
 
@@ -204,6 +209,10 @@ def test_a_judge_made_admin_here_edits_the_wording_and_loses_it_when_removed(jur
 
     monkeypatch.setattr(routes_jurisdictions, "get_engine", lambda: jurisdiction_db)
     as_admin.put("/api/admin/jurisdictions/ET", json={"name": "Employment Tribunal", "settings": ET_SETTINGS})
+    as_admin.post("/api/admin/jurisdictions/ET/members", json={"email": "et.lead@example.test", "role": "admin"})
+    as_admin.put(
+        "/api/admin/jurisdictions/ET", json={"name": "Employment Tribunal", "settings": ET_SETTINGS, "stage": "live"}
+    )
     judge = sign_up(jurisdiction_db, "et.judge@example.test")
     as_admin.post("/api/admin/jurisdictions/ET/members", json={"email": "et.judge@example.test"})
 
@@ -216,7 +225,7 @@ def test_a_judge_made_admin_here_edits_the_wording_and_loses_it_when_removed(jur
     made_admin = as_admin.post(
         "/api/admin/jurisdictions/ET/members", json={"email": "et.judge@example.test", "role": "admin"}
     )
-    assert made_admin.json() == {"email": "et.judge@example.test", "role": "admin", "pending": False}
+    assert made_admin.json() == {"email": "et.judge@example.test", "role": "admin", "tester": False, "pending": False}
     saved = judge_client.put("/api/jurisdictions/wording", headers=headers, json={"wording": {"home.intro": "Hello"}})
     assert saved.status_code == 200
     # The IAC, where they were enrolled as a judge on sign-up, stays out of reach.

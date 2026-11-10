@@ -81,9 +81,13 @@ def load_migration(file_name: str) -> ModuleType:
     return module
 
 
-def add_jurisdiction(engine, code: str, *, enabled=True, auto_enrol=False, settings=None) -> Jurisdiction:
+def add_jurisdiction(
+    engine, code: str, *, enabled=True, auto_enrol=False, settings=None, stage="live"
+) -> Jurisdiction:
     with Session(engine) as session:
-        row = Jurisdiction(code=code, name=f"{code} name", enabled=enabled, auto_enrol=auto_enrol, settings=settings or {})
+        row = Jurisdiction(
+            code=code, name=f"{code} name", enabled=enabled, auto_enrol=auto_enrol, settings=settings or {}, stage=stage
+        )
         session.add(row)
         session.commit()
         session.refresh(row)
@@ -128,11 +132,13 @@ def sign_up(engine, email: str) -> User:
     return user
 
 
-def add_member(engine, user: User | None, jurisdiction: Jurisdiction, role="judge", email=None) -> None:
+def add_member(
+    engine, user: User | None, jurisdiction: Jurisdiction, role="judge", email=None, *, tester=False
+) -> None:
     with Session(engine) as session:
         session.add(
             JurisdictionMembership(
-                jurisdiction_id=jurisdiction.id, user_id=user.id if user else None, email=email, role=role
+                jurisdiction_id=jurisdiction.id, user_id=user.id if user else None, email=email, role=role, tester=tester
             )
         )
         session.commit()
