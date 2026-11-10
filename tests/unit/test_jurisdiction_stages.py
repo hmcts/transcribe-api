@@ -158,8 +158,10 @@ def test_missing_screen_wording_blocks_switching_on_and_says_what_is_missing(as_
     detail = refused.json()["detail"]
     assert detail["code"] == "jurisdiction_not_ready"
     assert detail["problems"] == [
-        "Add the screen wording for: Subtitle of the help page; Title column of the documents list; "
-        "Type column of the documents list, and its filter; What dictation is saved to, e.g. 'case record'."
+        (
+            "Add the screen wording for: Subtitle of the help page; Title column of the documents list; "
+            "Type column of the documents list, and its filter; What dictation is saved to, e.g. 'case record'."
+        )
     ]
     assert detail["message"].startswith("ET is not ready to be switched on.")
     # Nothing was saved: still a draft, without the wording sent.
@@ -319,9 +321,9 @@ def test_0007_downgrade_switches_off_what_was_not_live(monkeypatch):
 def test_0007_on_postgres_keeps_every_jurisdiction_as_it_was_and_reverses():
     """Existing jurisdictions and members come out live and not in a test group, their
     rows otherwise untouched; a downgrade switches off whatever was not live."""
-    from alembic import command
     from sqlalchemy import create_engine, text
 
+    from alembic import command
     from transcribe_api.runtime import migrations
 
     def migrate(revision: str, *, down: bool = False) -> None:
