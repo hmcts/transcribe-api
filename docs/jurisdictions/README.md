@@ -134,6 +134,8 @@ environment, uploads there are blocked at Front Door.
 
 The file is checked before it is read: at most 2 MB (30 MB unpacked), a Word document
 (.docx, not macro-enabled or .dotx), and no macros, ActiveX, embedded objects or external
-links Word would fetch (an image pasted from an email, `cid:`, is fine). It is stored in
+links Word would fetch (an image pasted from an email, `cid:`, is fine), whether a
+relationship or a field that fetches content when Word updates fields (INCLUDEPICTURE,
+INCLUDETEXT, LINK, DDE, DDEAUTO, IMPORT; simple or complex, in any part). It is stored in
 the database (`jurisdiction_template`, migration `0008`) with its SHA-256, which is the
 document's template version in its provenance.

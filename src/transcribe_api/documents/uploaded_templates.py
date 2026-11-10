@@ -16,7 +16,7 @@ fields on the Hearing Details form. No code change or release is needed.
 
 An upload is checked before anything reads it: a size cap, a zip within limits, and no
 macros, ActiveX, embedded objects, imported chunks or external links other than
-hyperlinks.
+hyperlinks, whether a relationship or a field that fetches content (INCLUDEPICTURE...).
 """
 
 from __future__ import annotations
@@ -49,6 +49,12 @@ _HYPERLINK = "http://schemas.openxmlformats.org/officeDocument/2006/relationship
 _REJECTED_PARTS = re.compile(r"(vbaProject\.bin|vbaData\.xml|/activeX/|/embeddings/)", re.IGNORECASE)
 _REL_TYPE_REJECTED = re.compile(r"/(aFChunk|oleObject|package|control|attachedTemplate)$")
 _RELS_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+_W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_WORD_XML = re.compile(r"^word/.+\.xml$")
+# Fields Word fills by fetching a file or address when it updates fields: the
+# address is in the field's instruction, with no relationship to check.
+_FETCHING_FIELDS = frozenset({"INCLUDEPICTURE", "INCLUDETEXT", "LINK", "DDE", "DDEAUTO", "IMPORT"})
+_FIELD_NAME = re.compile(r"\s*([A-Za-z]+)")
 _CT_NS = "{http://schemas.openxmlformats.org/package/2006/content-types}"
 
 
@@ -95,8 +101,37 @@ def check_template_file(data: bytes) -> None:
                 target = rel.get("Target", "")
                 if rel.get("TargetMode") == "External" and kind != _HYPERLINK and not target.startswith("cid:"):
                     raise TemplateFileError("The document links to an external file.")
+        for name in sorted(n for n in names if _WORD_XML.match(n)):
+            for code in _field_codes(ElementTree.fromstring(archive.read(name))):
+                field_name = _FIELD_NAME.match(code)
+                if field_name and field_name.group(1).upper() in _FETCHING_FIELDS:
+                    raise TemplateFileError(
+                        f"The document has a {field_name.group(1).upper()} field, which fetches content from"
+                        " elsewhere. Remove the field in Word (Alt+F9 shows field codes)."
+                    )
     except (ElementTree.ParseError, zipfile.BadZipFile):
         raise TemplateFileError("The document is damaged.") from None
+
+
+def _field_codes(root: ElementTree.Element) -> list[str]:
+    """Every field's instruction in a part: a simple field's (w:fldSimple), and a complex
+    field's, whose text can be split over many w:instrText runs between its begin and
+    end (nested fields each have their own)."""
+    codes: list[str] = []
+    open_fields: list[list[str]] = []
+    for element in root.iter():
+        if element.tag == f"{_W_NS}fldSimple":
+            codes.append(element.get(f"{_W_NS}instr", ""))
+        elif element.tag == f"{_W_NS}fldChar":
+            kind = element.get(f"{_W_NS}fldCharType")
+            if kind == "begin":
+                open_fields.append([])
+            elif kind == "end" and open_fields:
+                codes.append("".join(open_fields.pop()))
+        elif element.tag == f"{_W_NS}instrText" and open_fields:
+            open_fields[-1].append(element.text or "")
+    codes.extend("".join(parts) for parts in open_fields)  # a field never ended
+    return codes
 
 
 # The boxes -------------------------------------------------------------------------

@@ -72,6 +72,70 @@ def test_an_external_link_word_would_fetch_is_refused(target, refused):
         t.check_template_file(linked)
 
 
+def _simple(instr: str) -> str:
+    quoted = instr.replace('"', "&quot;")
+    return f'<w:p><w:fldSimple w:instr="{quoted}"><w:r><w:t>x</w:t></w:r></w:fldSimple></w:p>'
+
+
+def _complex(*parts: str, inner: str = "") -> str:
+    """A field whose instruction is split over runs; ``inner`` a nested field's runs."""
+    runs = "".join(f'<w:r><w:instrText xml:space="preserve">{p}</w:instrText></w:r>' for p in parts)
+    return (
+        '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+        f"{runs}{inner}"
+        '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>x</w:t></w:r>'
+        '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+    )
+
+
+def _with_body_xml(xml: str, data: bytes | None = None) -> bytes:
+    return replace_part(
+        data or make_template(JUDGMENT),
+        "word/document.xml",
+        lambda doc: doc.replace(b"<w:sectPr", xml.encode() + b"<w:sectPr", 1),
+    )
+
+
+@pytest.mark.parametrize(
+    ("xml", "field"),
+    [
+        (_simple(' INCLUDEPICTURE "https://example.test/x.png" \\d '), "INCLUDEPICTURE"),
+        (f"<w:p>{_complex(' INCLUDE', 'TEXT &quot;\\\\server\\share\\a.docx&quot; ')}</w:p>", "INCLUDETEXT"),
+        (_simple(' includepicture "https://example.test/x.png" '), "INCLUDEPICTURE"),
+        (
+            f"<w:p>{_complex(' IF 1 = 1 ', inner=_complex(' LINK Excel.Sheet.12 &quot;https://x/y.xlsx&quot; '))}</w:p>",
+            "LINK",
+        ),
+        (_simple(' DDEAUTO cmd "/c calc" '), "DDEAUTO"),
+    ],
+    ids=["simple", "split-complex", "lower-case", "nested", "dde"],
+)
+def test_a_field_that_fetches_content_is_refused(xml, field):
+    with pytest.raises(t.TemplateFileError, match=f"has a {field} field"):
+        t.check_template_file(_with_body_xml(xml))
+
+
+def test_a_fetching_field_in_the_header_is_refused_too():
+    data = make_template(JUDGMENT, header=["Case Number: ", Sdt("Reference")])
+    part = header_part(data)
+    data = replace_part(
+        data,
+        part,
+        lambda xml: xml.replace(b"</w:hdr>", _simple(" INCLUDEPICTURE https://x/y.png ").encode() + b"</w:hdr>"),
+    )
+    with pytest.raises(t.TemplateFileError, match="INCLUDEPICTURE"):
+        t.check_template_file(data)
+
+
+def test_fields_that_fetch_nothing_are_fine():
+    xml = (
+        _simple(" PAGE ")
+        + f"<w:p>{_complex(' MERGEFIELD ', 'Name ')}</w:p>"
+        + _simple(' HYPERLINK "https://www.gov.uk" ')
+    )
+    t.check_template_file(_with_body_xml(xml))
+
+
 # The boxes ------------------------------------------------------------------------
 
 
