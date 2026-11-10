@@ -116,7 +116,8 @@ def add_template(session: Session, code: str, file_name: str, data: bytes) -> Ju
     )
     unique, n = name, 2
     while unique in taken:
-        unique = f"{name} ({n})"[:MAX_NAME_LENGTH]
+        suffix = f" ({n})"
+        unique = f"{name[: MAX_NAME_LENGTH - len(suffix)]}{suffix}"
         n += 1
     row = JurisdictionTemplate(
         jurisdiction_id=jurisdiction.id,
