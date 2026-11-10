@@ -453,8 +453,13 @@ def fill_template(data: bytes, texts: dict[str, str], output_path: Path) -> Path
         ]
         container = paragraph.getparent()
         last_in_cell = container.tag == qn("w:tc") and len(container.findall(qn("w:p"))) == 1
-        if all(id(s) in empty_ids for s in in_paragraph) and not last_in_cell:
-            container.remove(paragraph)
+        if all(id(s) in empty_ids for s in in_paragraph):
+            if last_in_cell:
+                for child in list(paragraph):
+                    if child.tag != qn("w:pPr"):
+                        paragraph.remove(child)
+            else:
+                container.remove(paragraph)
         else:
             _remove(sdt)
     output_path.parent.mkdir(parents=True, exist_ok=True)
