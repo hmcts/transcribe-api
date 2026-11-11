@@ -1304,7 +1304,7 @@ def test_0009_keeps_every_existing_value_unchanged():
     engine = create_engine(os.environ["TEST_POSTGRES_URL"])
     try:
         _reset(engine)
-        _migrate(engine, command.upgrade, "0006")
+        _migrate(engine, command.upgrade, "0008")  # master's head: stages (0007) and templates (0008) are its own
         with engine.begin() as connection:
             connection.execute(
                 text(

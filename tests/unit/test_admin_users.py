@@ -58,7 +58,7 @@ def test_the_list_has_the_contracts_shape(world, cast):
     for item in page["items"]:
         assert set(item) == {"id", "email", "name", "is_active", "assignments", "pending"}
         for assignment in item["assignments"]:
-            assert set(assignment) == {"id", "jurisdiction", "role"}
+            assert set(assignment) == {"id", "jurisdiction", "role", "tester"}
     ivy = next(i for i in page["items"] if i["email"] == cast.judge_iac.email)
     assert ivy["id"] == str(cast.judge_iac.user_id) and ivy["name"] == "Ivy Judge"
     assert ivy["is_active"] is True and ivy["pending"] is False
