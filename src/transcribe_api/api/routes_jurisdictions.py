@@ -14,13 +14,13 @@ wording of the jurisdiction they are working in, and only that one.
 from __future__ import annotations
 
 from typing import Annotated, Literal
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, StringConstraints
 from sqlmodel import Session
 
 from transcribe_api import jurisdiction_templates, jurisdictions_admin
-from transcribe_api.documents.content_loader import get_document_content
 from transcribe_api.domain.audit import record_audit
 from transcribe_api.domain.auth.approles_dictation import get_role
 from transcribe_api.domain.auth.dependencies_dictation import (
@@ -42,7 +42,7 @@ from transcribe_api.domain.jurisdictions import (
     remember_choice,
     resolve,
 )
-from transcribe_api.domain.models_dictation import User
+from transcribe_api.domain.models_dictation import JurisdictionTemplate, User
 from transcribe_api.runtime.db_connection import get_engine
 
 router = APIRouter(tags=["jurisdictions"])
@@ -261,31 +261,19 @@ class AvailableTemplate(BaseModel):
     fields: list[TemplateFormField]
 
 
-def legal_issue_options(jurisdiction_id) -> list[TemplateOption]:
-    """The jurisdiction's legal frameworks, as its Legal Text Manager keeps them."""
-    frameworks = get_document_content(jurisdiction_id).get("legal_frameworks") or []
-    ranked = sorted(frameworks, key=lambda f: f.get("rank", 0))
-    return [TemplateOption(value=str(f["id"]), label=str(f.get("title") or f["id"])) for f in ranked if f.get("id")]
-
-
-@router.get("/jurisdictions/templates", response_model=list[AvailableTemplate])
-def available_templates(
-    _user: User = Depends(_ANY_APP_ROLE),
-    active: ActiveJurisdiction = Depends(get_active_jurisdiction),
-) -> list[AvailableTemplate]:
-    """The templates the jurisdiction's judges can choose, with the fields each asks for
-    (not those BenchNotes fills)."""
-    with Session(get_engine()) as session:
-        rows = jurisdiction_templates.available_templates(session, active.id)
-        templates = [(row, jurisdiction_templates.judge_fields(row)) for row in rows]
+def template_forms(rows: list[JurisdictionTemplate], jurisdiction_id: UUID) -> list[AvailableTemplate]:
+    """Each template's Hearing Details form: the fields a judge fills (not those
+    BenchNotes fills), in the admin's order. A legal issues field offers the
+    jurisdiction's legal frameworks, as its Legal Text Manager keeps them."""
     legal_issues: list[TemplateOption] | None = None
     result = []
-    for row, fields in templates:
+    for row in rows:
         form_fields = []
-        for f in fields:
+        for f in jurisdiction_templates.judge_fields(row):
             if f.type == "legal_issues":
                 if legal_issues is None:
-                    legal_issues = legal_issue_options(active.id)
+                    frameworks = jurisdiction_templates.legal_frameworks(jurisdiction_id)
+                    legal_issues = [TemplateOption(value=i, label=t) for i, t in frameworks.items()]
                 options = legal_issues
             else:
                 options = [TemplateOption(value=o, label=o) for o in f.options]
@@ -294,3 +282,15 @@ def available_templates(
             )
         result.append(AvailableTemplate(id=str(row.id), name=row.name, service=row.service, fields=form_fields))
     return result
+
+
+@router.get("/jurisdictions/templates", response_model=list[AvailableTemplate])
+def available_templates(
+    _user: User = Depends(_ANY_APP_ROLE),
+    active: ActiveJurisdiction = Depends(get_active_jurisdiction),
+) -> list[AvailableTemplate]:
+    """The templates the jurisdiction's judges can choose, with the fields each asks for."""
+    with Session(get_engine()) as session:
+        rows = jurisdiction_templates.available_templates(session, active.id)
+    # Outside the session: the legal frameworks are read in their own.
+    return template_forms(rows, active.id)

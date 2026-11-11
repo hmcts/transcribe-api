@@ -1,35 +1,44 @@
 """A jurisdiction's uploaded Word templates (DIAAT-344): what the admin area does.
 
 The file and its fields are checked here (documents/uploaded_templates.py); the routes
-are in api/routes_dictation_privileged.py (SystemAdministrator) and
-api/routes_jurisdictions.py (the judges' list). Errors are jurisdictions_admin's, so
-the admin routes map them the same way: a refusal 400, an unknown template 404, a
-change made meanwhile 409.
+are in api/routes_dictation_privileged.py (SystemAdministrator: managing them and,
+DIAAT-346, previewing them) and api/routes_jurisdictions.py (the judges' list). Errors
+are jurisdictions_admin's, so the admin routes map them the same way: a refusal 400,
+an unknown template 404, a change made meanwhile 409.
 """
 
 from __future__ import annotations
 
 import hashlib
+import tempfile
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
+from transcribe_api.documents.content_loader import get_document_content
 from transcribe_api.documents.uploaded_templates import (
     NOT_ASKED,
     Box,
+    FillContext,
     TemplateField,
+    Value,
+    box_text,
     check_template_file,
+    check_values,
     field_problems,
+    fill_template,
     find_boxes,
     merge_fields,
     normalise_fields,
     propose_field,
 )
-from transcribe_api.domain.models_dictation import JurisdictionTemplate
+from transcribe_api.domain.models_dictation import Jurisdiction, JurisdictionTemplate
 from transcribe_api.jurisdictions_admin import AdminError, ConflictError, NotFoundError, _jurisdiction, version
+from transcribe_api.runtime.logger import logger
 
 MAX_NAME_LENGTH = 200
 
@@ -37,9 +46,17 @@ MAX_NAME_LENGTH = 200
 class TemplateProblemsError(AdminError):
     """The fields cannot be saved yet; ``problems`` names each box or field."""
 
+    def __init__(self, problems: list[str], *, action: str = "saved") -> None:
+        self.problems = problems
+        super().__init__(f"The template cannot be {action} yet. " + " ".join(problems))
+
+
+class TemplateValuesError(AdminError):
+    """The values do not fit the template's fields; ``problems`` names each."""
+
     def __init__(self, problems: list[str]) -> None:
         self.problems = problems
-        super().__init__("The template cannot be saved yet. " + " ".join(problems))
+        super().__init__("The hearing details do not fit the template. " + " ".join(problems))
 
 
 def boxes_of(row: JurisdictionTemplate) -> list[Box]:
@@ -251,3 +268,101 @@ def available_template(session: Session, jurisdiction_id: UUID, template_id: UUI
 def judge_fields(row: JurisdictionTemplate) -> list[TemplateField]:
     """The fields a judge fills, in the admin's order."""
     return [f for f in fields_of(row) if f.type not in NOT_ASKED]
+
+
+# Filling a template: a judge's submission and the admin's preview (DIAAT-346) -----------
+
+
+def legal_frameworks(jurisdiction_id: UUID) -> dict[str, str]:
+    """The jurisdiction's legal frameworks, as its Legal Text Manager keeps them: id ->
+    title, in their order. What a legal issues field offers."""
+    frameworks = get_document_content(jurisdiction_id).get("legal_frameworks") or []
+    return {
+        str(f["id"]): str(f.get("title") or f["id"])
+        for f in sorted(frameworks, key=lambda f: f.get("rank", 0))
+        if f.get("id")
+    }
+
+
+def legal_issue_titles(jurisdiction_id: UUID, fields: list[TemplateField]) -> dict[str, str]:
+    """legal_frameworks, looked up only when a field asks for legal issues."""
+    return legal_frameworks(jurisdiction_id) if any(f.type == "legal_issues" for f in fields) else {}
+
+
+def template_texts(
+    fields: list[TemplateField],
+    values: dict[str, Value],
+    *,
+    jurisdiction_id: UUID,
+    jurisdiction_name: str,
+    dictated: str,
+) -> tuple[dict[str, Value], dict[str, str]]:
+    """The values kept, and the text for each box. TemplateValuesError names each value
+    that does not fit its field."""
+    titles = legal_issue_titles(jurisdiction_id, fields)
+    kept, problems = check_values(fields, values, list(titles))
+    if problems:
+        raise TemplateValuesError(problems)
+    texts = box_text(
+        fields,
+        kept,
+        FillContext(
+            jurisdiction_name=jurisdiction_name,
+            year=datetime.now(UTC).year,
+            dictated_text=dictated,
+            legal_issue_titles=titles,
+        ),
+    )
+    return kept, texts
+
+
+# What the preview puts where the judge's dictation goes.
+PREVIEW_DICTATED_TEXT = (
+    "This is where the judge's dictated text goes.\n\n"
+    "Each paragraph the judge dictates or types appears here, in this box's style."
+)
+
+
+def template_of(session: Session, code: str, template_id: UUID) -> JurisdictionTemplate:
+    """One of the jurisdiction's templates, whether or not judges can choose it."""
+    return _template(session, code, template_id)
+
+
+def preview_source(
+    session: Session, code: str, template_id: UUID, expected_version: str
+) -> tuple[JurisdictionTemplate, Jurisdiction]:
+    """The template to preview and its jurisdiction, whether or not judges can choose
+    it yet. TemplateProblemsError while a box has no complete field."""
+    row = _template(session, code, template_id)
+    _check_version(row, expected_version)
+    problems = field_problems(boxes_of(row), fields_of(row))
+    if problems:
+        raise TemplateProblemsError(problems, action="previewed")
+    return row, _jurisdiction(session, code)
+
+
+def preview_template(
+    row: JurisdictionTemplate, jurisdiction: Jurisdiction, values: dict[str, Value]
+) -> tuple[str, bytes]:
+    """The template filled with the admin's sample values as a judge's submission fills
+    it (its name, the .docx), outside the session that read it, as the submission does.
+    Refused in plain words: TemplateValuesError for values that do not fit, AdminError
+    when the file cannot be filled."""
+    _, texts = template_texts(
+        fields_of(row),
+        values,
+        jurisdiction_id=jurisdiction.id,
+        jurisdiction_name=jurisdiction.display_name or jurisdiction.name,
+        dictated=PREVIEW_DICTATED_TEXT,
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        try:
+            path = fill_template(row.content, texts, Path(directory) / "preview.docx")
+        except Exception:
+            logger.exception("Template preview could not be filled")
+            msg = (
+                "BenchNotes could not fill this Word file, so judges would not get a document "
+                "from it either. Check that it opens in Word, then upload it again."
+            )
+            raise AdminError(msg) from None
+        return row.name, path.read_bytes()
