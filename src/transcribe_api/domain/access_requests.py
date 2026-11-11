@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import func
@@ -53,6 +53,11 @@ ACCESS_REQUEST_STATUSES = ("pending", "approved", "rejected", "withdrawn")
 # How many requests one user may have waiting at once (409 ``too_many_pending_requests``): each one
 # emails every approver of the jurisdiction.
 MAX_PENDING_REQUESTS = 5
+# How many requests one user may make in a day, whatever became of them (429 ``too_many_requests``). The cap
+# on waiting ones alone is no limit on emails: ask, withdraw, ask again would send every approver a message
+# each time and use up the Notify allowance.
+MAX_REQUESTS_PER_DAY = 10
+REQUEST_WINDOW = timedelta(hours=24)
 
 
 def _roles_of(session: Session, request_ids: list[UUID]) -> dict[UUID, list[str]]:
@@ -152,6 +157,19 @@ def create_request(session: Session, user: User, *, jurisdiction_code: str, role
             409,
             "too_many_pending_requests",
             f"You already have {MAX_PENDING_REQUESTS} requests waiting to be decided: withdraw one first.",
+        )
+
+    recent = session.exec(
+        select(func.count(AccessRequest.id)).where(  # type: ignore[arg-type]
+            AccessRequest.user_id == user.id, AccessRequest.created_at >= datetime.now(UTC) - REQUEST_WINDOW
+        )
+    ).one()
+    if recent >= MAX_REQUESTS_PER_DAY:
+        raise error(
+            429,
+            "too_many_requests",
+            f"You have already asked {MAX_REQUESTS_PER_DAY} times in the last day: try again tomorrow, "
+            "or ask an administrator directly.",
         )
 
     request = AccessRequest(user_id=user.id, jurisdiction_id=jurisdiction.id)

@@ -447,7 +447,9 @@ def test_an_assignment_by_email_is_pending_and_claimed_at_the_first_sign_in(worl
     signed_in = newcomer.sign_in()
     me = signed_in.json()["me"]
     assert me["status"] == "ready"
-    assert me["assignments"] == [{"jurisdiction": {"code": "IAC", "name": "Immigration and Asylum Chamber"}, "role": JUDGE}]
+    assert me["assignments"] == [
+        {"jurisdiction": {"code": "IAC", "name": "Immigration and Asylum Chamber", "stage": "live"}, "role": JUDGE}
+    ]
     assert world.pending_for(email) == set()
     assert world.assignments_of(newcomer) == {("IAC", JUDGE)}
 

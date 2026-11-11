@@ -247,6 +247,46 @@ def test_the_cap_counts_pending_requests_only_and_only_the_requesters_own(world,
     assert other.post("/api/access-requests", json={"jurisdiction": "ET", "roles": [JUDGE, LTM]}).status_code == 201
 
 
+# --- the cap on waiting requests is no limit on emails: ask, withdraw, ask again --------------------------------------
+
+
+def test_asking_and_withdrawing_over_and_over_is_stopped_after_ten_requests_a_day(world, cast):
+    sent = []
+    from transcribe_api.domain import access_requests
+
+    for _ in range(access_requests.MAX_REQUESTS_PER_DAY):
+        made = cast.nobody.post("/api/access-requests", json={"jurisdiction": "IAC", "roles": [JUDGE]})
+        assert made.status_code == 201, made.text
+        sent.append(made.json()["id"])
+        assert cast.nobody.post(f"/api/access-requests/{made.json()['id']}/withdraw").status_code == 200
+
+    eleventh = cast.nobody.post("/api/access-requests", json={"jurisdiction": "IAC", "roles": [JUDGE]})
+
+    assert eleventh.status_code == 429 and code(eleventh) == "too_many_requests"
+    assert len(cast.nobody.get("/api/access-requests/mine").json()) == access_requests.MAX_REQUESTS_PER_DAY
+    # Somebody else is not held to it.
+    other = world.person("Other Nobody")
+    assert other.post("/api/access-requests", json={"jurisdiction": "IAC", "roles": [JUDGE]}).status_code == 201
+
+
+def test_requests_older_than_a_day_do_not_count_towards_the_daily_cap(world, cast):
+    from datetime import UTC, datetime, timedelta
+
+    from transcribe_api.domain import access_requests
+    from transcribe_api.domain.models_dictation import AccessRequest
+
+    for _ in range(access_requests.MAX_REQUESTS_PER_DAY):
+        made = cast.nobody.post("/api/access-requests", json={"jurisdiction": "IAC", "roles": [JUDGE]})
+        assert cast.nobody.post(f"/api/access-requests/{made.json()['id']}/withdraw").status_code == 200
+    with Session(world.engine) as session:  # yesterday's
+        for row in session.exec(select(AccessRequest)).all():
+            row.created_at = datetime.now(UTC) - timedelta(hours=25)
+            session.add(row)
+        session.commit()
+
+    assert cast.nobody.post("/api/access-requests", json={"jurisdiction": "IAC", "roles": [JUDGE]}).status_code == 201
+
+
 # --- integration: nothing is assigned into a disabled jurisdiction ---------------------------------------------------
 
 
@@ -309,7 +349,7 @@ def test_the_requested_context_is_matched_without_regard_to_case(world, header):
         assert response.json()["me"]["active"] is None  # not a role they hold (and not a role name): ignored
     else:
         assert response.json()["me"]["active"] == {
-            "jurisdiction": {"code": "IAC", "name": "Immigration and Asylum Chamber"},
+            "jurisdiction": {"code": "IAC", "name": "Immigration and Asylum Chamber", "stage": "live"},
             "role": JUDGE,
         }
 
