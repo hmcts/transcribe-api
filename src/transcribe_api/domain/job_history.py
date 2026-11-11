@@ -35,6 +35,10 @@ HISTORY_ACTIONS = (
     "job.delete",
 )
 
+# The audit object types the recording writers use (domain/audit_recording.py ``AuditObjectType``). Dictation's
+# heritage rows share some action names (``transcript.view``) but record a ``transcription``: not a recording.
+HISTORY_OBJECT_TYPES = ("job", "upload")
+
 ANOTHER_USER = "Another user"
 
 
@@ -52,7 +56,11 @@ def job_history(
     session: Session, job_id: UUID, owner_id: UUID, owner_label: str, *, page: int, page_size: int
 ) -> tuple[list[HistoryItem], int]:
     """The audit rows of the recording, newest first, and how many there are."""
-    wanted = (AuditLog.object_id == str(job_id)) & AuditLog.event_type.in_(HISTORY_ACTIONS)  # type: ignore[attr-defined]
+    wanted = (
+        (AuditLog.object_id == str(job_id))
+        & AuditLog.event_type.in_(HISTORY_ACTIONS)  # type: ignore[attr-defined]
+        & AuditLog.object_type.in_(HISTORY_OBJECT_TYPES)  # type: ignore[union-attr]
+    )
     total = session.exec(select(func.count(AuditLog.id)).where(wanted)).one()  # type: ignore[arg-type]
     rows = session.exec(
         select(AuditLog)

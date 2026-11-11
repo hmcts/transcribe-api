@@ -39,6 +39,7 @@ import hashlib
 import hmac
 import logging
 import secrets
+import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -120,6 +121,9 @@ class AppPrincipal:
 
 
 _ephemeral_key: str | None = None
+# The first requests of a preview arrive together: without the lock two threads could each make a key,
+# and a token signed with one would be refused by the other at once.
+_ephemeral_lock = threading.Lock()
 
 
 def signing_key_problem(environment: str, key: str | None) -> str | None:
@@ -145,10 +149,11 @@ def _signing_key() -> str:
     # Local runs without a key in .env, and a preview never has one: a key for this process, so
     # sign-in still works. Tokens do not survive a restart.
     global _ephemeral_key
-    if _ephemeral_key is None:
-        _ephemeral_key = secrets.token_urlsafe(48)
-        logger.warning("APP_JWT_SIGNING_KEY is not set: using a key for this process only (local or preview)")
-    return _ephemeral_key
+    with _ephemeral_lock:
+        if _ephemeral_key is None:
+            _ephemeral_key = secrets.token_urlsafe(48)
+            logger.warning("APP_JWT_SIGNING_KEY is not set: using a key for this process only (local or preview)")
+        return _ephemeral_key
 
 
 def derived_key(purpose: str) -> bytes:

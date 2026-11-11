@@ -120,6 +120,28 @@ def test_a_judges_own_actions_are_in_the_history_newest_first_with_who_and_when(
     assert stamps == sorted(stamps, reverse=True)
 
 
+def test_a_dictation_row_that_shares_an_action_name_is_not_in_a_recordings_history(world, cast, job):
+    """Dictation's heritage rows are ``transcript.view`` and the like on a ``transcription``: not on a recording,
+    whatever object id they carry (review finding)."""
+    assert cast.ivy.get(f"/api/v1/jobs/{job}", role=JUDGE, jurisdiction="IAC").status_code == 200
+    with Session(world.engine) as session:
+        session.add(
+            AuditLog(
+                event_type="transcript.view",
+                user_id=str(cast.ivy.user_id),
+                object_type="transcription",
+                object_id=str(job),
+                outcome="success",
+            )
+        )
+        session.commit()
+
+    body = history(cast.ivy, job).json()
+
+    assert body["total"] == len(body["items"]) == 1  # the recording's own view, not the dictation row
+    assert body["items"][0]["action"] == "transcript.view"
+
+
 def test_the_history_is_paged(world, cast, job):
     edit_everything(cast, job)
     first = history(cast.ivy, job, page=1, page_size=4).json()

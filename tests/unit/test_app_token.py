@@ -206,6 +206,38 @@ class TestTheSigningKey:
             app_token.verify(_forge())
 
 
+def test_requests_arriving_together_in_a_preview_share_one_process_key(monkeypatch):
+    """The first requests of a preview come at once. Two threads each making a key would sign with different
+    ones and refuse each other's tokens (review finding)."""
+    import threading
+    import uuid
+
+    monkeypatch.setenv("ENVIRONMENT", "preview")
+    monkeypatch.delenv("APP_JWT_SIGNING_KEY", raising=False)
+    get_settings.cache_clear()
+    monkeypatch.setattr(app_token, "_ephemeral_key", None)
+
+    def slow_unique_key(_nbytes):
+        time.sleep(0.05)  # widens the window a missing lock would leave
+        return uuid.uuid4().hex + uuid.uuid4().hex
+
+    monkeypatch.setattr(app_token.secrets, "token_urlsafe", slow_unique_key)
+    keys: list[str] = []
+    barrier = threading.Barrier(8)
+
+    def ask():
+        barrier.wait()
+        keys.append(app_token._signing_key())
+
+    threads = [threading.Thread(target=ask) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+
+    assert len(keys) == 8 and len(set(keys)) == 1
+
+
 class TestStartup:
     """The API refuses to start without a usable signing key outside local and test."""
 
