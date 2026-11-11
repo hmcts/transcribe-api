@@ -201,6 +201,7 @@ def reads(monkeypatch):
     clock = _Clock()
     monkeypatch.setattr(feature_flags.time, "monotonic", clock)
     monkeypatch.setattr(feature_flags, "CACHE_TTL_SECONDS", 5.0)
+    monkeypatch.setattr(feature_flags, "_last_known", {})  # what an earlier test read is not known here
     feature_flags.invalidate_cache()
     seen = {"count": 0, "value": None, "readable": True}
 
@@ -252,6 +253,17 @@ def test_an_unreadable_database_gives_the_default_and_is_not_cached(reads):
     reads["readable"] = True
     reads["value"] = False
     assert feature_flags.is_dictation_enabled() is False  # and picks the row up as soon as it can
+
+
+def test_an_unreadable_database_keeps_the_last_value_known_not_the_default(reads):
+    """The default is on. An administrator switched it off and it was read; then reads start failing."""
+    reads["value"] = False
+    assert feature_flags.is_dictation_enabled() is False
+    reads["clock"].now += 10  # the cache expires
+    reads["readable"] = False
+    assert feature_flags.is_dictation_enabled() is False  # not back to the default
+    assert feature_flags.is_dictation_enabled() is False
+    assert reads["count"] == 3  # tried again each time, and the failures were not cached
 
 
 def test_a_value_that_is_just_the_default_is_cached_too(reads):

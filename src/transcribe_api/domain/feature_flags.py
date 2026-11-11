@@ -14,8 +14,9 @@ reads ``dictation_enabled`` on every dictation request, and that is one database
 seconds per process instead of one per request. A change made through this process
 (``set_flag``, the admin PUT) clears the cache at once, so it takes effect immediately for the
 process that took it; another replica sees it within the TTL. If the database cannot be read
-the default applies, and that answer is not cached: a database outage must not switch a
-feature on or off, and the next request reads again.
+the last value this process knew applies (an administrator's off-switch must not come back on
+because a read failed), the default only if it never knew one; that answer is not cached, and
+the next request reads again.
 
 The admin endpoints that change a flag are DIAAT-392 (api/routes_admin_flags.py).
 ``GET /api/flags`` (api/routes_flags.py) tells the web app what is on.
@@ -55,6 +56,9 @@ CACHE_TTL_SECONDS = 5.0
 # defaulted because there is no row: never the fallback of an unreadable database.
 _cache: dict[str, tuple[bool, float]] = {}
 _cache_lock = threading.Lock()
+# name -> the last value read from the database, or stored here, however long ago: what applies when the
+# database cannot be read. Survives ``invalidate_cache`` (that forces a new read, it does not forget).
+_last_known: dict[str, bool] = {}
 # Bumped by every invalidation. A read that started before one must not be cached after it: it may
 # hold the value from before the change (it read, the change committed and cleared the cache, then
 # this read stored what it had), which would keep the old value for the rest of the TTL.
@@ -104,12 +108,17 @@ def flag_value(name: str) -> bool:
             return hit[0]
         generation = _cache_generation
     stored, readable = _stored_value(name)
-    value = default_value(name) if stored is None else stored
-    if readable:
+    if not readable:
+        # Unreadable is not the same as no row: keep the last value known (a stored 'off' stays off),
+        # and only fall back to the default for a flag never read. Not cached: the next request reads again.
         with _cache_lock:
-            # Not if a change cleared the cache while this was reading: the next request reads again.
-            if generation == _cache_generation:
-                _cache[name] = (value, now + CACHE_TTL_SECONDS)
+            return _last_known.get(name, default_value(name))
+    value = default_value(name) if stored is None else stored
+    with _cache_lock:
+        _last_known[name] = value
+        # Not cached if a change cleared the cache while this was reading: the next request reads again.
+        if generation == _cache_generation:
+            _cache[name] = (value, now + CACHE_TTL_SECONDS)
     return value
 
 
@@ -206,6 +215,8 @@ def set_flag(
             detail={"flag": name, "from": before, "to": value, "acted_as": acted_as or []},
         )
     session.commit()
+    with _cache_lock:
+        _last_known[name] = value
     invalidate_cache()
     return before
 

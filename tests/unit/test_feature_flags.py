@@ -156,6 +156,27 @@ def test_two_changes_to_one_flag_run_one_after_the_other_on_postgresql(fresh_pos
     worker.join(5)
 
 
+@pytest.mark.real_jurisdictions
+@pytest.mark.real_feature_flags
+def test_if_the_database_cannot_be_read_the_last_known_value_applies_so_an_off_switch_stays_off(flag_table, monkeypatch):
+    """An unreadable database is not an absent row: with the default on and the stored value off, a read that
+    fails after the cache expires must not switch dictation back on (review finding)."""
+    _set_default(monkeypatch, True)
+    monkeypatch.setattr(feature_flags, "_last_known", {})
+    feature_flags.invalidate_cache()
+    flag_table(False)
+    assert feature_flags.is_dictation_enabled() is False  # read, now known
+
+    def down():
+        msg = "database down"
+        raise RuntimeError(msg)
+
+    feature_flags.invalidate_cache()  # the cache is gone (expired): the next read goes to the database
+    monkeypatch.setattr(feature_flags, "get_engine", down)
+    assert feature_flags.is_dictation_enabled() is False  # not the default
+    assert feature_flags.is_dictation_enabled() is False  # and not cached as an answer either
+
+
 @pytest.mark.real_feature_flags
 @pytest.mark.parametrize("setting", [True, False])
 def test_if_the_database_cannot_be_read_the_default_applies(monkeypatch, setting):
@@ -164,6 +185,8 @@ def test_if_the_database_cannot_be_read_the_default_applies(monkeypatch, setting
         raise RuntimeError(msg)
 
     monkeypatch.setattr(feature_flags, "get_engine", down)
+    monkeypatch.setattr(feature_flags, "_last_known", {})  # a flag this process never read
+    feature_flags.invalidate_cache()
     _set_default(monkeypatch, setting)
     assert feature_flags.is_dictation_enabled() is setting
 
