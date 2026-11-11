@@ -15,12 +15,11 @@ python:
     # with none is a fixed preview user, given every role (domain/auth/token_auth.py,
     # domain/auth/sessions.py). Refused at startup unless ENVIRONMENT=preview.
     AUTH_PREVIEW_USER_ENABLED: 'true'
-    # Signs the BenchNotes access token (DIAAT-373); the API does not start without one.
-    # A preview's token proves nothing the preview user does not already have, and its
-    # database is thrown away: a fixed value, not a secret.
-    APP_JWT_SIGNING_KEY: preview-only-benchnotes-token-key-not-a-secret-0123456789
-    AUTH_PREVIEW_USER_ROLES: Judge,LegalTextManager,SystemAdministrator,Normal
-    AUTH_ACCESS_ROLES: Judge,LegalTextManager,SystemAdministrator,Normal
+    # No APP_JWT_SIGNING_KEY: a preview signs the BenchNotes access token (DIAAT-373) with a key
+    # the API makes for itself at startup (domain/auth/app_token.py), so there is nothing to
+    # commit or to guess. It runs one pod; its tokens end with it and the web signs in again.
+    # The preview user holds every role (no AUTH_PREVIEW_USER_ROLES) and nothing gates access
+    # on an Entra role (no AUTH_ACCESS_ROLES: the values.yaml default is none).
     APP_URL: https://transcribe-web-pr-${CHANGE_ID}.preview.platform.hmcts.net
     AZURE_AD_CLIENT_ID: 18996d70-494e-4ddb-9ebd-17b4a1077314
     DATABASE_CONNECTION_STRING: postgresql://transcribe:transcribe@{{ .Release.Name }}-postgresql:5432/transcribe

@@ -224,7 +224,7 @@ class TestStartup:
         with TestClient(create_app()):
             pass
 
-    @pytest.mark.parametrize("environment", ["production", "aat", "demo", "preview", "dev"])
+    @pytest.mark.parametrize("environment", ["production", "aat", "demo", "dev"])
     def test_a_deployed_environment_without_the_key_does_not_start(self, monkeypatch, environment):
         with pytest.raises(RuntimeError, match="APP_JWT_SIGNING_KEY is not set"):
             self._start(monkeypatch, environment, None)
@@ -237,3 +237,25 @@ class TestStartup:
     def test_local_and_test_start_without_one(self, monkeypatch):
         for environment in ("local", "test"):
             self._start(monkeypatch, environment, None)
+
+    def test_a_preview_needs_no_key_in_any_spelling_and_a_deployed_environment_does(self):
+        """(The preview's startup also checks audio tools, so this asks the startup's own question.)"""
+        for spelling in ("preview", "Preview", "PREVIEW"):
+            assert app_token.signing_key_problem(spelling, None) is None
+        for environment in ("production", "aat", "demo", "dev"):
+            assert app_token.signing_key_problem(environment, None) == "APP_JWT_SIGNING_KEY is not set"
+
+    def test_a_preview_without_a_key_signs_with_one_of_its_own_that_is_not_a_published_value(self, monkeypatch):
+        """No key is committed for a preview (it would let anyone forge a token for any user of it): the
+        process makes its own, long enough for HS256, the same for the whole process, different per process."""
+        monkeypatch.setenv("ENVIRONMENT", "preview")
+        monkeypatch.delenv("APP_JWT_SIGNING_KEY", raising=False)
+        get_settings.cache_clear()
+        monkeypatch.setattr(app_token, "_ephemeral_key", None)
+
+        key = app_token._signing_key()
+
+        assert len(key) >= app_token.MIN_KEY_LENGTH
+        assert key == app_token._signing_key()
+        monkeypatch.setattr(app_token, "_ephemeral_key", None)
+        assert app_token._signing_key() != key

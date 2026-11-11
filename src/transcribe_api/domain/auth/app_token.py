@@ -58,7 +58,11 @@ DEFAULT_TTL_SECONDS = 300
 # HS256 wants a key as long as its hash (RFC 7518 3.2).
 MIN_KEY_LENGTH = 32
 
-_ENVIRONMENTS_WITHOUT_A_REQUIRED_KEY = ("local", "test")
+# local and test have no key unless they set one; preview (a PR preview) gets one of its own per process:
+# a committed key would let anyone forge a token for any user of a preview, which also takes real Entra
+# sign-ins. A preview runs one API pod, so one key per process is one key per preview; its tokens end
+# with the pod, and the web signs the preview user in again.
+_ENVIRONMENTS_WITHOUT_A_REQUIRED_KEY = ("local", "test", "preview")
 # What an ENVIRONMENT that was never set counts as: not local (the settings default of "local" is not a
 # decision), so a deployed pod that lost the variable is refused at startup, not given a key of its own.
 UNSET_ENVIRONMENT = "unset"
@@ -119,8 +123,8 @@ _ephemeral_key: str | None = None
 
 
 def signing_key_problem(environment: str, key: str | None) -> str | None:
-    """Why ``key`` is unusable in ``environment`` (None if it is fine). Outside local and
-    test it is required, and long enough for HS256."""
+    """Why ``key`` is unusable in ``environment`` (None if it is fine). Outside local, test
+    and preview it is required, and long enough for HS256."""
     if environment.strip().lower() in _ENVIRONMENTS_WITHOUT_A_REQUIRED_KEY:
         return None
     if not key:
@@ -138,12 +142,12 @@ def _signing_key() -> str:
     if effective_environment(settings) not in _ENVIRONMENTS_WITHOUT_A_REQUIRED_KEY:
         msg = "APP_JWT_SIGNING_KEY is not set"
         raise RuntimeError(msg)
-    # Local runs without a key in .env: one for this process, so sign-in still works. Tokens
-    # do not survive a restart.
+    # Local runs without a key in .env, and a preview never has one: a key for this process, so
+    # sign-in still works. Tokens do not survive a restart.
     global _ephemeral_key
     if _ephemeral_key is None:
         _ephemeral_key = secrets.token_urlsafe(48)
-        logger.warning("APP_JWT_SIGNING_KEY is not set: using a key for this process only (local)")
+        logger.warning("APP_JWT_SIGNING_KEY is not set: using a key for this process only (local or preview)")
     return _ephemeral_key
 
 

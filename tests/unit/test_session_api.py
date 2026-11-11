@@ -1140,7 +1140,8 @@ def test_a_deployed_environment_in_any_case_is_still_deployed(monkeypatch):
 
     assert ProductionSettings(ENVIRONMENT="PROD").ENVIRONMENT == "prod"
     assert signing_key_problem("AAT", None) == "APP_JWT_SIGNING_KEY is not set"
-    assert signing_key_problem("Preview", "short") is not None
+    assert signing_key_problem("Production", "short") is not None
+    assert signing_key_problem("Preview", None) is None  # a preview makes a key of its own (app_token._signing_key)
 
 
 def test_an_environment_that_was_never_set_needs_the_signing_key(monkeypatch):

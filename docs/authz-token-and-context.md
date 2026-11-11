@@ -65,8 +65,8 @@ one pair they were given (an administrator lands as administrator); two or more 
 
 Settings (`runtime/settings_dictation.py`):
 
-* `APP_JWT_SIGNING_KEY`: required outside `local` and `test` (the API refuses to start without it, or
-  with fewer than 32 characters). Generate one with
+* `APP_JWT_SIGNING_KEY`: required outside `local`, `test` and `preview` (the API refuses to start without it, or
+  with fewer than 32 characters; a PR preview makes its own at startup). Generate one with
   `python -c "import secrets; print(secrets.token_urlsafe(48))"`. Locally it is in `.env`; if it is
   missing there, local mode signs with a key for that process only (tokens do not survive a restart).
   It is a new Key Vault secret and chart value (not yet added: nothing here touches the cluster config).
@@ -199,4 +199,6 @@ Judge and LegalTextManager too) in every jurisdiction, so it chooses a context l
 area of the app is reachable. Then it holds a BenchNotes token like anyone else: **every other route still refuses a
 request with none** (401), so the web in a preview must sign in through that route (it sends no Authorization header).
 A sign-in that does send a token is verified as usual and gets what its user holds. The chart's preview values set
-`APP_JWT_SIGNING_KEY` (a fixed, non-secret value: previews are thrown away).
+no `APP_JWT_SIGNING_KEY`: a preview signs with a key the API makes for itself at startup (one pod, so one key per preview;
+tokens end with the pod, and the web signs the preview user in again). A committed key would let anyone forge a token
+for any user of a preview, and previews also take real Entra sign-ins.

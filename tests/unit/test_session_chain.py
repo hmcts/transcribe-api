@@ -123,17 +123,17 @@ def test_when_the_chain_has_run_out_the_token_is_401_and_a_sign_in_starts_afresh
 
 def test_the_sysadmin_claim_ends_with_the_session_even_if_the_user_keeps_calling(world, clock):
     boss = world.person("Boss", ("IAC", ADMIN), sysadmin=True)
-    clock.at(-299)
+    clock.at(-250)  # a sign-in 250 s ago: 50 s of the session left, however slow this machine is
     token = boss.sign_in(("IAC", ADMIN)).json()["token"]
+    sess_exp = claims(token)["sess_exp"]
     clock.real()
     for _ in range(3):  # "every few minutes": here, back to back
         response = world.client.put("/api/me/context", headers=bearer(token), json={"jurisdiction": "IAC", "role": ADMIN})
         assert response.status_code == 200
         token = response.json()["token"]
-    assert claims(token)["exp"] <= int(time.time()) + 2
-    # (The one-second-lifetime token is about to be refused; one that has run out is, whatever it claims.)
-    time.sleep(2.2)
-    assert world.client.get("/api/admin/feature-flags", headers=bearer(token)).status_code == 401
+    # Each re-mint is for what is left of the session, never longer: the claim ends where the sign-in's did.
+    assert claims(token)["exp"] == claims(token)["sess_exp"] == sess_exp
+    # (A token that has run out is refused whatever it claims: see the expired-token tests.)
 
 
 def test_the_session_claim_is_an_integer_and_a_token_without_it_is_its_own_session():
