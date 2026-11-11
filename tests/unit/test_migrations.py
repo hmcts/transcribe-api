@@ -357,7 +357,7 @@ def _truncates_a_live_table(statement: str) -> bool:
 # DIAAT-342 adds document_content.jurisdiction_id in 0006 and backfills that column
 # alone: it may set jurisdiction_id (one assignment, optionally with a WHERE) and
 # nothing else, so the admin's wording in `content` is never touched.
-# (0007 writes no live-edited table: jurisdiction.auto_enrol is set false by scripts-cutover-authz.py at
+# (0009 writes no live-edited table: jurisdiction.auto_enrol is set false by scripts-cutover-authz.py at
 # cutover, not by the migration, which ships first and must not change what the previous release does.)
 ALLOWED_LIVE_WRITES = {
     "0006": re.compile(
@@ -476,7 +476,7 @@ def test_the_live_write_guard_ignores_other_tables_and_schema_changes(statement)
 def test_only_the_revision_that_backfills_a_new_jurisdiction_column_may_write_document_content():
     backfill = "UPDATE document_content SET jurisdiction_id = '6a1c0f3e-3b7d-4c2a-9e51-1ac000000001'::uuid WHERE id = 1"
     assert _forbidden_live_writes("0006", f"{backfill};\n") == []
-    assert _forbidden_live_writes("0007", f"{backfill};\n") == [backfill]
+    assert _forbidden_live_writes("0009", f"{backfill};\n") == [backfill]
     assert _forbidden_live_writes("0006", "UPDATE jurisdiction SET settings = '{}';\n") != []
     subquery = "UPDATE document_content SET jurisdiction_id = (SELECT id FROM jurisdiction WHERE code = 'IAC')"
     assert _forbidden_live_writes("0006", f"{subquery};\n") == []
@@ -888,7 +888,7 @@ def test_0004_and_0005_keep_every_existing_value_unchanged():
                 connection.execute(text(statement), ids)
 
         # Whole rows, as JSON, without the columns 0004 adds.
-        added = {"user": ["active_jurisdiction_id", "name", "is_active"]}  # 0004, then 0007
+        added = {"user": ["active_jurisdiction_id", "name", "is_active"]}  # 0004, then 0009
         tables = (
             "user",
             "transcription",
@@ -918,13 +918,13 @@ def test_0004_and_0005_keep_every_existing_value_unchanged():
         engine.dispose()
 
 
-# 0007: DIAAT-373 role assignments, access requests, feature flags ----------------------
+# 0009: DIAAT-373 role assignments, access requests, feature flags ----------------------
 
 STORED_ROLES = ("Judge", "LegalTextManager", "JurisdictionAdministrator", "JurisdictionSuperAdministrator")
 
 
-def test_0007_creates_the_assignment_tables_with_their_rules(monkeypatch):
-    sql = _offline_sql(monkeypatch, "0006:0007")
+def test_0009_creates_the_assignment_tables_with_their_rules(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0008:0009")
     for table in ("role_assignment", "access_request", "access_request_role", "system_feature_flag"):
         assert f"CREATE TABLE {table} (" in sql, table
     # Only the four stored roles: SystemAdministrator (Entra only) and Normal (gone) cannot be stored.
@@ -951,8 +951,8 @@ def test_0007_creates_the_assignment_tables_with_their_rules(monkeypatch):
     assert "CHECK (role IN ('Judge', 'LegalTextManager'))" in sql  # access_request_role: never an admin role
 
 
-def test_0007_adds_the_user_and_audit_columns_without_breaking_the_previous_release(monkeypatch):
-    sql = _offline_sql(monkeypatch, "0006:0007")
+def test_0009_adds_the_user_and_audit_columns_without_breaking_the_previous_release(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0008:0009")
     # A default, so the previous release's inserts (which do not name it) still work.
     assert 'ALTER TABLE "user" ADD COLUMN is_active BOOLEAN DEFAULT true NOT NULL;' in sql
     assert 'ALTER TABLE "user" ADD COLUMN name VARCHAR;' in sql
@@ -965,8 +965,8 @@ def test_0007_adds_the_user_and_audit_columns_without_breaking_the_previous_rele
     assert "jurisdiction_membership" not in re.sub(r"INSERT INTO role_assignment.*?ON CONFLICT DO NOTHING", "", sql, flags=re.DOTALL)
 
 
-def test_0007_backfills_the_assignments_from_the_memberships_and_leaves_auto_enrol_alone(monkeypatch):
-    sql = _offline_sql(monkeypatch, "0006:0007")
+def test_0009_backfills_the_assignments_from_the_memberships_and_leaves_auto_enrol_alone(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0008:0009")
     assert "CASE m.role WHEN 'admin' THEN 'JurisdictionAdministrator' ELSE 'Judge' END" in sql
     assert "CASE WHEN m.user_id IS NULL THEN lower(m.email) END" in sql  # pending stays pending, lower case
     assert "FROM jurisdiction_membership m" in sql
@@ -975,8 +975,8 @@ def test_0007_backfills_the_assignments_from_the_memberships_and_leaves_auto_enr
     assert sql.index("INSERT INTO role_assignment") > sql.index("CREATE TABLE role_assignment")
 
 
-def test_0007_downgrade_removes_what_it_added(monkeypatch):
-    sql = _offline_sql(monkeypatch, "0007:0006", downgrade=True)
+def test_0009_downgrade_removes_what_it_added(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0009:0008", downgrade=True)
     for table in ("role_assignment", "access_request", "access_request_role", "system_feature_flag"):
         assert f"DROP TABLE {table};" in sql, table
     for column in ("is_active", "name"):
@@ -989,7 +989,7 @@ def test_0007_downgrade_removes_what_it_added(monkeypatch):
     )
 
 
-def test_the_models_declare_what_0007_makes():
+def test_the_models_declare_what_0009_makes():
     tables = migrations.target_metadata().tables
     assert {"role_assignment", "access_request", "access_request_role", "system_feature_flag"} <= set(tables)
     assert tables["user"].columns["role"].nullable
@@ -1028,7 +1028,7 @@ def _migrate(engine, step, revision):
 
 
 @pytest.mark.skipif(not os.getenv("TEST_POSTGRES_URL"), reason="needs TEST_POSTGRES_URL (a throwaway Postgres)")
-def test_0007_backfills_memberships_as_assignments_and_goes_up_down_up():
+def test_0009_backfills_memberships_as_assignments_and_goes_up_down_up():
     from sqlalchemy import create_engine, text
 
     from alembic import command
@@ -1105,7 +1105,7 @@ def test_0007_backfills_memberships_as_assignments_and_goes_up_down_up():
             ).all()
             return sorted(tuple(r) for r in rows)
 
-        _migrate(engine, command.upgrade, "0007")
+        _migrate(engine, command.upgrade, "0009")
         expected = [
             ("admin@example.test", "ET", "JurisdictionAdministrator", False, True),
             ("admin@example.test", "IAC", "Judge", False, True),
@@ -1164,7 +1164,7 @@ def test_0007_backfills_memberships_as_assignments_and_goes_up_down_up():
             )
             assert connection.execute(text("SELECT count(*) FROM jurisdiction_membership")).scalar_one() == 6
 
-        _migrate(engine, command.upgrade, "0007")
+        _migrate(engine, command.upgrade, "0009")
         with engine.connect() as connection:
             assert len(assignments(connection)) == 6  # the same again, from the same memberships
     finally:
@@ -1219,24 +1219,24 @@ def test_the_database_refuses_assignments_that_break_the_rules(fresh_postgres):
 
     refused = [
         # SystemAdministrator is Entra only and Normal is gone: neither can be stored.
-        dict(user=u2, jurisdiction=iac, role="SystemAdministrator"),
-        dict(user=u2, jurisdiction=iac, role="Normal"),
-        dict(user=u2, jurisdiction=iac, role="judge"),
+        {"user": u2, "jurisdiction": iac, "role": "SystemAdministrator"},
+        {"user": u2, "jurisdiction": iac, "role": "Normal"},
+        {"user": u2, "jurisdiction": iac, "role": "judge"},
         # A jurisdiction is required for all but the global role, and forbidden for it.
-        dict(user=u2, jurisdiction=None, role="Judge"),
-        dict(user=u2, jurisdiction=None, role="LegalTextManager"),
-        dict(user=u2, jurisdiction=None, role="JurisdictionAdministrator"),
-        dict(user=u2, jurisdiction=iac, role="JurisdictionSuperAdministrator"),
+        {"user": u2, "jurisdiction": None, "role": "Judge"},
+        {"user": u2, "jurisdiction": None, "role": "LegalTextManager"},
+        {"user": u2, "jurisdiction": None, "role": "JurisdictionAdministrator"},
+        {"user": u2, "jurisdiction": iac, "role": "JurisdictionSuperAdministrator"},
         # Somebody, by id or by email.
-        dict(jurisdiction=iac),
+        {"jurisdiction": iac},
         # A pending email is lower case.
-        dict(email="Upper@Example.test", jurisdiction=iac),
+        {"email": "Upper@Example.test", "jurisdiction": iac},
         # Unique per (user, jurisdiction, role), also for the global role (a NULL jurisdiction).
-        dict(user=u1, jurisdiction=iac),
-        dict(user=u1, jurisdiction=None, role="JurisdictionSuperAdministrator"),
+        {"user": u1, "jurisdiction": iac},
+        {"user": u1, "jurisdiction": None, "role": "JurisdictionSuperAdministrator"},
         # And per (pending email, jurisdiction, role).
-        dict(email="new@example.test", jurisdiction=iac),
-        dict(email="new@example.test", jurisdiction=None, role="JurisdictionSuperAdministrator"),
+        {"email": "new@example.test", "jurisdiction": iac},
+        {"email": "new@example.test", "jurisdiction": None, "role": "JurisdictionSuperAdministrator"},
     ]
     for kwargs in refused:
         with pytest.raises(IntegrityError):
@@ -1294,8 +1294,8 @@ def test_the_database_refuses_access_requests_that_break_the_rules(fresh_postgre
 
 
 @pytest.mark.skipif(not os.getenv("TEST_POSTGRES_URL"), reason="needs TEST_POSTGRES_URL (a throwaway Postgres)")
-def test_0007_keeps_every_existing_value_unchanged():
-    """DIAAT-331 again: after 0007 every row that existed before is still there with every
+def test_0009_keeps_every_existing_value_unchanged():
+    """DIAAT-331 again: after 0009 every row that existed before is still there with every
     value it had; only new columns are added, and the old membership table is untouched."""
     from sqlalchemy import create_engine, text
 
@@ -1332,11 +1332,11 @@ def test_0007_keeps_every_existing_value_unchanged():
 
         before = snapshot()
         before_jurisdiction = [dict(row[0]) for row in before["jurisdiction"]]
-        _migrate(engine, command.upgrade, "0007")
+        _migrate(engine, command.upgrade, "0009")
         after = snapshot()
         for table in ("user", "audit_log", "jurisdiction_membership"):
             assert after[table] == before[table], table
-        # The IAC's row: everything as it was, auto_enrol included (0004 set it true; 0007 leaves it).
+        # The IAC's row: everything as it was, auto_enrol included (0004 set it true; 0009 leaves it).
         [iac_after] = [dict(row[0]) for row in after["jurisdiction"]]
         [iac_before] = before_jurisdiction
         assert iac_before["auto_enrol"] is True

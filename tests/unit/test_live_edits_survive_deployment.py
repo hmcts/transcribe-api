@@ -47,7 +47,7 @@ def _jurisdiction_rows(engine) -> list[tuple]:
             tuple(r)
             for r in connection.execute(
                 text(
-                    # auto_enrol is left out (the tuple keeps its place): 0007 turns it off everywhere
+                    # auto_enrol is left out (the tuple keeps its place): 0009 turns it off everywhere
                     # (DIAAT-373: nobody is enrolled automatically); nothing an admin edits.
                     "SELECT id, code, name, enabled, false, settings, created_datetime, updated_datetime"
                     " FROM jurisdiction ORDER BY code"
@@ -79,7 +79,7 @@ def _edit_the_live_iac(engine) -> None:
 
 
 def _edit_the_live_iac_at_0004(engine) -> None:
-    """_edit_the_live_iac in SQL: this release's model has columns 0004 has not (0007)."""
+    """_edit_the_live_iac in SQL: this release's model has columns 0004 has not (0009)."""
     with engine.begin() as connection:
         connection.execute(
             text(

@@ -66,7 +66,7 @@ def iac(jurisdiction_db) -> Jurisdiction:
 
 
 def _iac_judge(engine, iac, email="iac.judge@example.test"):
-    """An IAC judge: signed up, and (as migration 0007 made of the old memberships) a Judge in the IAC."""
+    """An IAC judge: signed up, and (as migration 0009 made of the old memberships) a Judge in the IAC."""
     judge = sign_up(engine, email)
     add_member(engine, judge, iac)
     return judge

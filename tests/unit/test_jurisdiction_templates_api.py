@@ -4,7 +4,8 @@ code change or release. Real lookups on SQLite.
 
 AC1: an uploaded template whose boxes are all linked can be used by judges.
 AC2: saving with a box unlinked says which box.
-AC3: only a SystemAdministrator can manage templates.
+AC3: only an administrator can manage templates: a JurisdictionAdministrator of the jurisdiction, or a
+JurisdictionSuperAdministrator (DIAAT-373: not a judge, a LegalTextManager, nor a SystemAdministrator).
 """
 
 from __future__ import annotations
@@ -54,8 +55,9 @@ def et(jurisdiction_db):
 
 @pytest.fixture
 def as_admin(jurisdiction_db, admin_app, et):
-    admin = add_user(jurisdiction_db, "admin@example.test", roles=("SystemAdministrator",))
-    return client_as(admin_app, jurisdiction_db, admin)
+    admin = add_user(jurisdiction_db, "admin@example.test")
+    add_member(jurisdiction_db, admin, et, role="admin")
+    return client_as(admin_app, jurisdiction_db, admin, ctx=("ET", "JurisdictionAdministrator"))
 
 
 @pytest.fixture
@@ -263,11 +265,11 @@ def test_a_file_benchnotes_cannot_fill_says_why(as_admin):
     )
 
 
-@pytest.mark.parametrize("roles", [("Judge",), ("LegalTextManager",)])
-def test_only_a_system_administrator_may_manage_templates(jurisdiction_db, admin_app, et, roles):
-    user = add_user(jurisdiction_db, roles=roles)
-    add_member(jurisdiction_db, user, et, role="admin")  # even an admin of the jurisdiction
-    client = client_as(admin_app, jurisdiction_db, user)
+@pytest.mark.parametrize("role", ["Judge", "LegalTextManager"])
+def test_only_an_administrator_may_manage_templates(jurisdiction_db, admin_app, et, role):
+    user = add_user(jurisdiction_db)
+    add_member(jurisdiction_db, user, et, role=role)
+    client = client_as(admin_app, jurisdiction_db, user, ctx=("ET", role))
     some_id = "00000000-0000-4000-8000-000000000000"
     assert client.get("/api/admin/jurisdictions/ET/templates").status_code == 403
     assert upload(client).status_code == 403
@@ -275,6 +277,26 @@ def test_only_a_system_administrator_may_manage_templates(jurisdiction_db, admin
     assert client.delete(f"/api/admin/jurisdictions/ET/templates/{some_id}").status_code == 403
     with Session(jurisdiction_db) as session:
         assert session.exec(select(JurisdictionTemplate)).all() == []
+
+
+def test_a_system_administrator_has_no_part_in_templates(jurisdiction_db, admin_app, et):
+    user = add_user(jurisdiction_db, roles=("SystemAdministrator",))
+    client = client_as(admin_app, jurisdiction_db, user, ctx=None, sysadmin=True)
+    assert client.get("/api/admin/jurisdictions/ET/templates").status_code == 403
+    assert upload(client).status_code == 403
+
+
+def test_an_administrator_manages_only_the_templates_of_the_jurisdiction_they_work_in(
+    jurisdiction_db, admin_app, et
+):
+    iac = add_jurisdiction(jurisdiction_db, "IAC")
+    user = add_user(jurisdiction_db)
+    add_member(jurisdiction_db, user, iac, role="admin")
+    client = client_as(admin_app, jurisdiction_db, user, ctx=("IAC", "JurisdictionAdministrator"))
+    refused = client.get("/api/admin/jurisdictions/ET/templates")
+    assert refused.status_code == 403
+    assert refused.json()["detail"]["code"] == "jurisdiction_not_in_scope"
+    assert upload(client).status_code == 403
 
 
 # Judges --------------------------------------------------------------------------------

@@ -52,7 +52,7 @@ class CurrentJurisdiction(BaseModel):
 @router.get("/jurisdictions/current", response_model=CurrentJurisdiction)
 def current_jurisdiction(
     response: Response,
-    _user=Depends(require_permission("app.access")),  # noqa: B008
+    _user=Depends(require_permission("app.access")),
     active: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> CurrentJurisdiction:
     """The jurisdiction the user is acting in: its template, features and wording. 403
@@ -62,7 +62,7 @@ def current_jurisdiction(
     settings = active.settings
     return CurrentJurisdiction(
         code=active.code,
-        name=active.current.name,
+        name=active.current.shown_name,
         template=settings.template,
         features=settings.features,
         wording=settings.wording,
@@ -86,7 +86,7 @@ class WordingUpdate(BaseModel):
 
 def _wording_scope(
     response: Response,
-    _user=Depends(require_permission("jurisdiction.wording.edit")),  # noqa: B008
+    _user=Depends(require_permission("jurisdiction.wording.edit")),
     active: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> ActiveJurisdiction:
     """The request's jurisdiction, for someone who may edit its wording (``jurisdiction.wording.edit``).
@@ -116,7 +116,7 @@ def jurisdiction_wording(active: ActiveJurisdiction = Depends(_wording_scope)) -
 def update_jurisdiction_wording(
     body: WordingUpdate,
     active: ActiveJurisdiction = Depends(_wording_scope),
-    current_user: User = Depends(require_permission("jurisdiction.wording.edit")),  # noqa: B008
+    current_user: User = Depends(require_permission("jurisdiction.wording.edit")),
 ) -> JurisdictionWording:
     """Replace that jurisdiction's wording; blank text means the default. 400 for an
     unknown key or text that is too long, 409 if it changed since ``version``."""
@@ -177,10 +177,11 @@ def legal_issue_options(jurisdiction_id) -> list[TemplateOption]:
 
 @router.get("/jurisdictions/templates", response_model=list[AvailableTemplate])
 def available_templates(
+    _user=Depends(require_permission("recording.own", "dictation.use")),
     active: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> list[AvailableTemplate]:
     """The templates the jurisdiction's judges can choose, with the fields each asks for
-    (not those BenchNotes fills)."""
+    (not those BenchNotes fills). For a judge, in the jurisdiction they are working in."""
     with Session(get_engine()) as session:
         rows = jurisdiction_templates.available_templates(session, active.id)
         templates = [(row, jurisdiction_templates.judge_fields(row)) for row in rows]

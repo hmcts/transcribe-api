@@ -42,7 +42,7 @@ def create_access_request(
     body: AccessRequestCreate,
     response: Response,
     background: BackgroundTasks,
-    user: User = Depends(signed_in_endpoint),  # noqa: B008
+    user: User = Depends(signed_in_endpoint),
 ) -> AccessRequestOut:
     """Ask for Judge and/or LegalTextManager in a jurisdiction. 400 ``role_not_requestable`` for
     any other role, 404 for an unknown or disabled jurisdiction, 409 ``duplicate_request`` for an
@@ -60,7 +60,7 @@ def create_access_request(
 @router.get("/access-requests/mine", response_model=list[AccessRequestOut])
 def my_access_requests(
     response: Response,
-    user: User = Depends(signed_in_endpoint),  # noqa: B008
+    user: User = Depends(signed_in_endpoint),
 ) -> list[AccessRequestOut]:
     """Every request the signed-in user has made, newest first, with its status."""
     response.headers["Cache-Control"] = "no-store"
@@ -72,7 +72,7 @@ def my_access_requests(
 def withdraw_access_request(
     request_id: UUID,
     response: Response,
-    user: User = Depends(signed_in_endpoint),  # noqa: B008
+    user: User = Depends(signed_in_endpoint),
 ) -> AccessRequestOut:
     """Withdraw one of the user's own requests that is still pending (404 for anyone else's,
     409 ``request_not_pending`` after that). No email is sent."""
@@ -99,7 +99,7 @@ class DecisionBody(BaseModel):
 def list_access_requests(
     response: Response,
     status_: Literal["pending", "approved", "rejected", "withdrawn", "all"] = Query(default="pending", alias="status"),
-    admin_user: User = Depends(require_permission("access.approve")),  # noqa: B008
+    admin_user: User = Depends(require_permission("access.approve")),
 ) -> list[QueuedAccessRequest]:
     """The approvals queue: the requests of the jurisdiction the approver acts in (every one for a
     JurisdictionSuperAdministrator), by default the pending ones, oldest first."""
@@ -131,7 +131,7 @@ def approve_access_request(
     request_id: UUID,
     background: BackgroundTasks,
     body: DecisionBody | None = None,
-    admin_user: User = Depends(require_permission("access.approve")),  # noqa: B008
+    admin_user: User = Depends(require_permission("access.approve")),
 ) -> AccessRequestOut:
     """Approve a pending request: the requested roles are assigned in the same transaction. 403
     ``jurisdiction_not_in_scope`` for another jurisdiction's request, 409 ``request_not_pending``
@@ -144,7 +144,7 @@ def reject_access_request(
     request_id: UUID,
     background: BackgroundTasks,
     body: DecisionBody | None = None,
-    admin_user: User = Depends(require_permission("access.approve")),  # noqa: B008
+    admin_user: User = Depends(require_permission("access.approve")),
 ) -> AccessRequestOut:
     """Reject a pending request (nothing is assigned); ``reason`` is optional. As ``approve``."""
     return _decide(request_id, body, admin_user, background, approve=False)

@@ -81,7 +81,7 @@ def dispatch(kind: str, recipients: list[Recipient]) -> int:
         if not template_id:
             logger.warning("Notify email %s not sent: its template id is not set", kind)
             return 0
-    except Exception as exc:  # noqa: BLE001 - nothing here may fail a request
+    except Exception as exc:
         logger.warning("Notify email %s not sent (%s)", kind, type(exc).__name__)
         return 0
     sent = 0
@@ -91,7 +91,7 @@ def dispatch(kind: str, recipients: list[Recipient]) -> int:
                 email_address=recipient.email, template_id=template_id, personalisation=recipient.personalisation
             )
             sent += 1
-        except Exception as exc:  # noqa: BLE001 - one failure must not stop the others, or fail the request
+        except Exception as exc:
             logger.warning("Notify email %s to one recipient failed (%s)", kind, type(exc).__name__)
     logger.info("Notify email %s sent to %d of %d recipient(s)", kind, sent, len(recipients))
     return sent
@@ -149,7 +149,7 @@ def notify_approvers(request_id: UUID) -> None:
             request, jurisdiction, requester, roles = loaded
             recipients = approver_recipients(session, request, jurisdiction, requester, roles)
         dispatch(EMAIL_NEW_REQUEST, recipients)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("Notify email %s not sent (%s)", EMAIL_NEW_REQUEST, type(exc).__name__)
 
 
@@ -181,5 +181,5 @@ def notify_requester(request_id: UUID) -> None:
                 else []
             )
         dispatch(EMAIL_DECIDED, recipients)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("Notify email %s not sent (%s)", EMAIL_DECIDED, type(exc).__name__)

@@ -1,7 +1,7 @@
 """scripts-cutover-authz.py (review findings MIG-1, MIG-2): the cutover, on a real PostgreSQL.
 
 The script is run once when the new release goes live: it adds an assignment for every membership
-that has none (what the previous release wrote after migration 0007) and turns ``auto_enrol`` off. It
+that has none (what the previous release wrote after migration 0009) and turns ``auto_enrol`` off. It
 is a dry run unless ``--apply`` is given, and never duplicates.
 """
 
@@ -34,7 +34,7 @@ def cutover():
 
 @pytest.fixture
 def db(fresh_postgres):
-    """A migrated database (to head: 0007) with the IAC (auto_enrol on, as 0004 made it), an ET, and three users."""
+    """A migrated database (to head: 0009) with the IAC (auto_enrol on, as 0004 made it), an ET, and three users."""
     engine = fresh_postgres
     ids = {name: str(uuid4()) for name in ("alice", "bob", "carol")}
     with engine.begin() as connection:
@@ -85,7 +85,7 @@ def auto_enrol(engine) -> list[bool]:
 
 
 def window(engine) -> None:
-    """What the previous release wrote after 0007 ran (so what 0007's one-shot copy missed)."""
+    """What the previous release wrote after 0009 ran (so what 0009's one-shot copy missed)."""
     membership(engine, code="ET", role="judge", user="alice")  # an administrator added a judge
     membership(engine, code="ET", role="admin", user="bob")  # ... and an administrator
     membership(engine, code="IAC", role="judge", email="New.Judge@Example.TEST")  # added by email, mixed case
@@ -138,10 +138,10 @@ def test_running_it_again_changes_nothing(db, cutover, capsys):
 
 
 def test_what_the_migration_already_copied_is_not_copied_again_whatever_the_case_of_the_email(db, cutover):
-    """0007's copy (lower case, not trimmed) and the script's (lower case, trimmed) must agree: no duplicate."""
+    """0009's copy (lower case, not trimmed) and the script's (lower case, trimmed) must agree: no duplicate."""
     membership(db, code="ET", role="judge", user="carol")
     membership(db, code="IAC", role="admin", email="Mixed.Case@Example.TEST")
-    with db.begin() as connection:  # what 0007 would have made of them
+    with db.begin() as connection:  # what 0009 would have made of them
         connection.execute(
             text(
                 "INSERT INTO role_assignment (id, user_id, pending_email, jurisdiction_id, role, granted_at)"
@@ -159,7 +159,7 @@ def test_what_the_migration_already_copied_is_not_copied_again_whatever_the_case
 
 
 def test_a_pending_membership_the_old_code_claimed_becomes_the_users_assignment_and_the_pending_copy_goes(db, cutover):
-    """0007 copied a pending membership; the previous release then claimed it for the user on their first
+    """0009 copied a pending membership; the previous release then claimed it for the user on their first
     sign-in (the membership has a user now), so the new code would never claim the pending assignment."""
     membership(db, code="IAC", role="judge", email="alice@example.test")
     with db.begin() as connection:

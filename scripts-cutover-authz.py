@@ -7,12 +7,12 @@ role assignments in the new admin screens, WILL ADD BACK every assignment they r
 membership is still in ``jurisdiction_membership`` (the new code never changes that table), and
 will turn ``auto_enrol`` off again if someone turned it on. After the cutover, do not run it.
 
-Why it exists (review findings MIG-1 and MIG-2). Migration 0007 copies ``jurisdiction_membership``
+Why it exists (review findings MIG-1 and MIG-2). Migration 0009 copies ``jurisdiction_membership``
 into ``role_assignment`` once, when it runs. It ships on ``master`` first and the new code follows
 later, and in between the previous release keeps writing memberships (an administrator adds a judge;
 a first sign-in claims a pending membership) that reach no assignment, so those people would have no
 role the day the new code goes live. And the previous release still reads ``jurisdiction.auto_enrol``,
-so 0007 does not change it. This script does both at the cutover, when the old pods are gone:
+so 0009 does not change it. This script does both at the cutover, when the old pods are gone:
 
 1. For every membership with no matching assignment, add the assignment, with the migration's mapping:
    ``admin`` is JurisdictionAdministrator, ``judge`` is Judge, a membership still pending by email stays
@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection, Engine, make_url
 
-# The migration's mapping (alembic/versions/0007_role_assignments.py): admin -> JurisdictionAdministrator,
+# The migration's mapping (alembic/versions/0009_role_assignments.py): admin -> JurisdictionAdministrator,
 # anything else (judge) -> Judge.
 _ROLE = "CASE m.role WHEN 'admin' THEN 'JurisdictionAdministrator' ELSE 'Judge' END"
 # What a pending email is stored and matched as everywhere else (domain/assignments.normalise_email).

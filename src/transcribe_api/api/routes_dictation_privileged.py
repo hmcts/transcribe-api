@@ -120,7 +120,7 @@ def _record_content_change(scope: LegalWordingScope, action: str, item_id: str) 
 
 @router.get("/me", response_model=AdminUserResponse)
 async def admin_me(
-    admin_user: User = Depends(require_permission("admin.access")),  # noqa: B008
+    admin_user: User = Depends(require_permission("admin.access")),
 ) -> AdminUserResponse:
     """The admin landing page's identity check: who the caller is and the role they are acting
     as. Needs ``admin.access`` (LegalTextManager, JurisdictionAdministrator,
@@ -177,7 +177,7 @@ class LegalWordingScope:
 
 async def _legal_wording_scope(
     response: Response,
-    current_user: User = Depends(require_permission("legal_text.manage")),  # noqa: B008
+    current_user: User = Depends(require_permission("legal_text.manage")),
     jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> LegalWordingScope:
     response.headers["Cache-Control"] = "no-store"
@@ -437,14 +437,19 @@ def _audit_jurisdiction_change(action: str, admin_user: User, detail: dict[str, 
 
 
 def _refuse_name_or_enabled_change(admin_user: User, code: str, body: JurisdictionWrite) -> None:
-    """403 ``permission_denied`` (audited) if ``body`` would rename the jurisdiction or enable or disable it, for a
-    caller without ``jurisdiction.create``. Sending the name it already has, or the ``enabled`` it already has,
-    is no change."""
+    """403 ``permission_denied`` (audited) if ``body`` would rename the jurisdiction, enable or disable it, move
+    it to another stage (DIAAT-345) or change its display name or service, for a caller without
+    ``jurisdiction.create``. Sending what it already has is no change."""
     with Session(get_engine()) as session:
         row = session.exec(select(Jurisdiction).where(Jurisdiction.code == code.strip().upper())).first()
     if row is None:
         return
-    if body.name != row.name or (body.enabled is not None and body.enabled != row.enabled):
+    changes_name = body.name != row.name
+    changes_enabled = body.enabled is not None and body.enabled != row.enabled
+    changes_stage = body.stage is not None and body.stage != row.stage
+    changes_display_name = body.display_name is not None and (body.display_name or None) != row.display_name
+    changes_service = body.service is not None and (body.service or None) != row.service
+    if changes_name or changes_enabled or changes_stage or changes_display_name or changes_service:
         ensure_permission(admin_user, "jurisdiction.create")
 
 
@@ -484,9 +489,10 @@ def admin_put_jurisdiction(
 ) -> JurisdictionAdminRecord:
     """Create or update a jurisdiction. Its settings are validated first (400); a
     stale ``version`` is refused (409). Updating needs the jurisdiction to be in the caller's
-    scope; creating one, renaming one and enabling or disabling one need ``jurisdiction.create``
-    too (403 ``permission_denied``): a JurisdictionAdministrator changes only the template, features
-    and wording of its own jurisdiction (the ``settings``), never its name or whether it is on."""
+    scope; creating one, renaming one, enabling or disabling one, moving it between stages and changing its
+    display name or service need ``jurisdiction.create`` too (403 ``permission_denied``): a
+    JurisdictionAdministrator changes only the template, features and wording of its own jurisdiction (the
+    ``settings``), never its name, stage or whether it is on."""
     if _jurisdiction_exists(code):
         assert_jurisdiction_in_scope(admin_user, code)
         if not has_permission(admin_user, "jurisdiction.create"):
@@ -554,7 +560,7 @@ def _wording_view(code: str) -> JurisdictionWording:
 def admin_get_jurisdiction_wording(
     code: str,
     response: Response,
-    admin_user: User = Depends(require_permission("jurisdiction.wording.edit")),  # noqa: B008
+    admin_user: User = Depends(require_permission("jurisdiction.wording.edit")),
 ) -> JurisdictionWording:
     """A jurisdiction's wording, with the keys it can set and the version to send back with a save."""
     response.headers["Cache-Control"] = "no-store"
@@ -567,7 +573,7 @@ def admin_put_jurisdiction_wording(
     code: str,
     body: WordingUpdate,
     response: Response,
-    admin_user: User = Depends(require_permission("jurisdiction.wording.edit")),  # noqa: B008
+    admin_user: User = Depends(require_permission("jurisdiction.wording.edit")),
 ) -> JurisdictionWording:
     """Replace a jurisdiction's wording; blank text means the default. 400 for an unknown key or
     text that is too long, 404 for an unknown jurisdiction, 409 if it changed since ``version``."""
@@ -587,8 +593,10 @@ def admin_put_jurisdiction_wording(
 
 
 # ---------------------------------------------------------------------------
-# A jurisdiction's Word templates (DIAAT-344): ``templates.manage``, in the jurisdiction the
-# caller works in (a JurisdictionSuperAdministrator: any)
+# A jurisdiction's Word templates (DIAAT-344): ``jurisdictions.manage``, as for the jurisdiction
+# itself, so a JurisdictionAdministrator (in the jurisdiction they work in) or a
+# JurisdictionSuperAdministrator (any); not a LegalTextManager, whose ``templates.manage`` is for
+# the legal text templates, and not a SystemAdministrator (DIAAT-389)
 # ---------------------------------------------------------------------------
 # Uploaded as the raw request body with Content-Type exactly application/octet-stream,
 # like the browser's other uploads: Front Door's WAF blocks multipart bodies, and lets
@@ -596,7 +604,7 @@ def admin_put_jurisdiction_wording(
 # comes in X-Upload-Filename (URL-encoded).
 
 UPLOAD_CONTENT_TYPE = "application/octet-stream"
-_TEMPLATE_ADMIN = require_permission("templates.manage")
+_TEMPLATE_ADMIN = _JURISDICTION_ADMIN
 
 
 class TemplateAdminRecord(BaseModel):

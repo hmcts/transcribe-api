@@ -50,16 +50,16 @@ from transcribe_api.domain.audit_recording import (
 from transcribe_api.domain.auth import app_token
 from transcribe_api.domain.auth.app_token import AppTokenError
 from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
-from transcribe_api.domain.auth.context import context_of
 from transcribe_api.domain.auth.authorisation import public_endpoint, signed_url_endpoint
+from transcribe_api.domain.auth.context import context_of
 from transcribe_api.domain.auth.dependencies_recording import get_active_jurisdiction, require_permission
-from transcribe_api.domain.job_history import job_history
 from transcribe_api.domain.interface_recording import (
     get_job_by_id,
     get_job_by_idempotency_key_for_user,
     list_jobs_paginated,
     record_correction_dataset_entry,
 )
+from transcribe_api.domain.job_history import job_history
 from transcribe_api.domain.jurisdictions import (
     ActiveJurisdiction,
     job_owner_and_jurisdiction,
@@ -639,8 +639,8 @@ def _job_in_jurisdiction(resource_type: str, permission: str = "recording.own"):
     def check(
         request: Request,
         job_id: UUID,
-        current_user: AuthenticatedUser = Depends(require_permission(permission)),  # noqa: B008
-        jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),  # noqa: B008
+        current_user: AuthenticatedUser = Depends(require_permission(permission)),
+        jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),
     ) -> None:
         exists, owner_id, job_jurisdiction = job_owner_and_jurisdiction(job_id)
         if not exists or owner_id != current_user.id:
@@ -765,7 +765,7 @@ def _reject(upload_stage: StageHandle, error_code: str) -> None:
 async def upload_audio(
     request: Request,
     file: UploadFile = File(...),
-    current_user: AuthenticatedUser = Depends(require_permission("recording.upload")),  # noqa: B008
+    current_user: AuthenticatedUser = Depends(require_permission("recording.upload")),
     jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),
     x_hearing_id: Annotated[str | None, Header()] = None,
     x_hearing_file_count: Annotated[str | None, Header()] = None,
@@ -906,7 +906,7 @@ async def submit_job(
     request: Request,
     body: Annotated[SubmitJobRequest, Body()],
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(require_permission("recording.upload")),  # noqa: B008
+    current_user: AuthenticatedUser = Depends(require_permission("recording.upload")),
     jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),
 ) -> JobResponse:
     # DIAAT-286: "did X submit Y". An idempotent replay is recorded too (detail.replayed).
@@ -1016,7 +1016,7 @@ async def _submit_job(
 @router.get("/jobs", response_model=ListJobsResponse)
 async def list_jobs(
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),  # noqa: B008
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
     jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),
     status: str | None = Query(default=None, description="Filter by job status"),
     limit: int = Query(default=20, ge=1, le=100),
@@ -1066,7 +1066,7 @@ async def list_jobs(
 async def get_job(
     job_id: UUID,
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),  # noqa: B008
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> JobResponse:
     job = get_job_by_id(session, job_id)
     if not job:
@@ -1086,7 +1086,7 @@ async def upload_baseline_transcript(
     job_id: UUID,
     file: UploadFile = File(...),
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),  # noqa: B008
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> JobResponse:
     """Store a clerk-supplied reference transcript to compute a real WER against.
 
@@ -1305,7 +1305,7 @@ async def correct_segment(
     segment: str,
     body: CorrectSegmentRequest,
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),  # noqa: B008
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> JobResponse:
     """Record a clerk's whole-segment correction.
 
@@ -1361,7 +1361,7 @@ async def correct_word_range(
     segment: str,
     body: CorrectWordRangeRequest,
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),  # noqa: B008
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> JobResponse:
     """Record a clerk's correction for just a run of words within a segment.
 
@@ -1488,7 +1488,7 @@ async def merge_segment_with_next(
     segment: str,
     body: MergeNextRequest | None = None,
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),  # noqa: B008
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> JobResponse:
     """Combine a segment with the one after it, e.g. to rejoin a sentence split across two.
 
@@ -1522,7 +1522,7 @@ async def rollback_segment(
     job_id: UUID,
     segment: str,
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),  # noqa: B008
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> JobResponse:
     """Revert a segment entirely back to its original Speech Batch output.
 
@@ -1562,7 +1562,7 @@ async def accept_segment(
     job_id: UUID,
     segment: str,
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),  # noqa: B008
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> JobResponse:
     """Mark a segment as reviewed/accepted without editing its text.
 
@@ -1614,7 +1614,7 @@ async def rename_speaker(
     segment: str,
     body: RenameSpeakerRequest,
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),  # noqa: B008
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> JobResponse:
     """Rename the speaker of one segment, or of every segment that shares its speaker.
 
@@ -1655,7 +1655,7 @@ async def rollback_to_history_entry(
     segment: str,
     history_index: int,
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),  # noqa: B008
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> JobResponse:
     """Revert a segment to how it looked immediately before one specific past edit.
 
@@ -1794,7 +1794,7 @@ class JobHistoryResponse(BaseModel):
 async def get_job_history(
     job_id: UUID,
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(require_permission("recording.audit.read")),  # noqa: B008
+    current_user: AuthenticatedUser = Depends(require_permission("recording.audit.read")),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
 ) -> JobHistoryResponse:
@@ -1817,7 +1817,7 @@ async def get_job_audio(
     job_id: UUID,
     request: Request,
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),  # noqa: B008
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> Response:
     """Stream a job's source audio back for playback.
 
@@ -1915,7 +1915,7 @@ async def _stream_blob_range(blob_name: str, start: int, length: int) -> AsyncGe
 async def delete_job(
     job_id: UUID,
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),  # noqa: B008
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> Response:
     """Permanently delete a job: its transcript (the DB row) and audio blob.
 

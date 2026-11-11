@@ -7,7 +7,7 @@ import asyncio
 from uuid import uuid4
 
 import pytest
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
@@ -221,8 +221,9 @@ def test_a_denial_is_a_row_of_the_audit_log_stamped_with_the_active_context(juri
 
     set_audit_context(AuditContext(jurisdiction_id=iac.id, role="LegalTextManager"))
     try:
-        with pytest.raises(Exception):
+        with pytest.raises(HTTPException) as refused:
             _run(require_permission("dictation.use"), user)
+        assert refused.value.status_code == 403
     finally:
         set_audit_context(None)
 

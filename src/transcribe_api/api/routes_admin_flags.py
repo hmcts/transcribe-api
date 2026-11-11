@@ -64,7 +64,7 @@ def _flags(session: Session) -> FeatureFlagsResponse:
 @router.get("/feature-flags", response_model=FeatureFlagsResponse)
 def list_feature_flags(
     response: Response,
-    _user: User = Depends(require_permission("feature_flags.manage")),  # noqa: B008
+    _user: User = Depends(require_permission("feature_flags.manage")),
 ) -> FeatureFlagsResponse:
     """Every system feature flag with its effective value (its stored value, else its
     configured default), its description, and when and by whom it was last set."""
@@ -78,7 +78,7 @@ def set_feature_flag(
     name: str,
     body: FeatureFlagWrite,
     response: Response,
-    user: User = Depends(require_permission("feature_flags.manage")),  # noqa: B008
+    user: User = Depends(require_permission("feature_flags.manage")),
 ) -> FeatureFlagsResponse:
     """Set a flag (``{"value": true|false}``) and get the flags back, as the GET lists them.
     404 ``flag_not_found`` for a name that is not a flag. Audited with from, to and the roles

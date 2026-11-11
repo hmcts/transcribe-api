@@ -121,11 +121,16 @@ the shared routes.)
 | `PUT` | `/api/admin/feature-flags/{name}` | `feature_flags.manage` | sysadmin |
 | `GET` | `/api/admin/jurisdictions` | `jurisdictions.manage` | JA, JSA |
 | `GET` | `/api/admin/jurisdictions/wording-keys` | `jurisdictions.manage` | JA, JSA |
-| `PUT` | `/api/admin/jurisdictions/{code}` | `jurisdictions.manage` (creating, renaming and enabling or disabling: and `jurisdiction.create`) | JA (settings only), JSA |
+| `PUT` | `/api/admin/jurisdictions/{code}` | `jurisdictions.manage` (creating, renaming, enabling or disabling, moving between stages, display name and service: and `jurisdiction.create`) | JA (settings only), JSA |
+| `GET` | `/api/admin/jurisdictions/{code}/templates` | `jurisdictions.manage` (DIAAT-344: uploaded Word templates; in the caller's jurisdiction) | JA, JSA |
+| `POST` | `/api/admin/jurisdictions/{code}/templates` | `jurisdictions.manage` | JA, JSA |
+| `PUT` | `/api/admin/jurisdictions/{code}/templates/{template_id}` | `jurisdictions.manage` | JA, JSA |
+| `DELETE` | `/api/admin/jurisdictions/{code}/templates/{template_id}` | `jurisdictions.manage` | JA, JSA |
 | `GET` | `/api/admin/jurisdictions/{code}/wording` | `jurisdiction.wording.edit` | JA, JSA |
 | `PUT` | `/api/admin/jurisdictions/{code}/wording` | `jurisdiction.wording.edit` | JA, JSA |
 | `POST` | `/api/telemetry` | `app.access` | Judge, LTM, JA, JSA |
 | `GET` | `/api/jurisdictions/current` | `app.access` | Judge, LTM, JA, JSA |
+| `GET` | `/api/jurisdictions/templates` | `recording.own` or `dictation.use` (the uploaded templates a judge can choose) | Judge |
 | `GET` | `/api/jurisdictions/wording` | `jurisdiction.wording.edit` | JA, JSA |
 | `PUT` | `/api/jurisdictions/wording` | `jurisdiction.wording.edit` | JA, JSA |
 | `POST` | `/api/auth/session` | (exempt: sign_in) | - |

@@ -8,13 +8,18 @@ Background: [`authz-token-and-context.md`](authz-token-and-context.md), [`authz-
 
 ## Rollout order
 
-1. **Migration 0007 reaches `master` first**, by its own PR (README, "Migrations go only through `master`"), then `master` is merged into
-   `develop`, then the feature. The migration is additive; it copies `jurisdiction_membership` into `role_assignment` once and changes nothing
-   the previous release reads (it no longer sets `jurisdiction.auto_enrol`: the cutover script does).
+1. **Push order (trunk-based: README, "Branches and environments").** There is one long-lived branch, `master`: branch from it, open the PR
+   into it, and the API goes first, because a web feature that needs a schema change waits until its additive migration is on transcribe-api
+   `master`. Migration **0009** (`0009_role_assignments`, after 0007 jurisdiction stages and 0008 uploaded templates) is additive: it copies
+   `jurisdiction_membership` into `role_assignment` once (carrying `tester` over) and changes nothing the previous release reads (it does not set
+   `jurisdiction.auto_enrol`: the cutover script does). It can reach `master` ahead of the code that uses it, or in the same PR as the API.
+   The API change is not compatible with the previous web (every route needs a BenchNotes token, which only the new web obtains at sign-in), so
+   **the new API and the new web are released together**: merge the API PR, then the web PR, and let both reach an environment before
+   anyone signs in there.
 2. **While the old code is still serving**, it works on the new schema, with these known limits:
-   * an old image started with `RUN_MIGRATIONS=true` **crash-loops** with "Can't locate revision identified by '0007'" (it does not know the revision the
+   * an old image started with `RUN_MIGRATIONS=true` **crash-loops** with "Can't locate revision identified by '0009'" (it does not know the revision the
      database is at). Pods that are already running are fine; any old pod that restarts (OOM, node drain, scale-up) or an image rollback hits it. Roll
-     back with `alembic downgrade 0006` run from a newer image first, and accept that the new model's data (assignments, requests, flags, names,
+     back with `alembic downgrade 0008` run from a newer image first, and accept that the new model's data (assignments, requests, flags, names,
      deactivations) is lost by the downgrade; or keep `RUN_MIGRATIONS=false` on old pods;
    * the old `GET /api/admin/users` can answer **500** as soon as a user row has no role (any user the new code created while old pods still serve);
    * the old `DELETE /api/admin/users/{id}` fails (500) for a user who has role assignments (every backfilled user): a foreign key.
@@ -33,7 +38,7 @@ changes `jurisdiction_membership` and the script reads the memberships that are 
 What it does, in one transaction:
 
 1. For every membership with no matching assignment, adds the assignment with the migration's mapping (`admin` is JurisdictionAdministrator, `judge` is
-   Judge): memberships written by the old code after 0007, a membership still pending by email (pending assignment, email lower case and trimmed, so
+   Judge): memberships written by the old code after 0009, a membership still pending by email (pending assignment, email lower case and trimmed, so
    `New.Judge@Example.com ` and `new.judge@example.com` are one), and a membership the old code claimed for a user at their first sign-in (the user's
    assignment). Then removes the pending assignments the migration made for a pending membership that the old code has since claimed for a user who now holds the role.
 2. Sets `jurisdiction.auto_enrol` false everywhere.
