@@ -52,8 +52,8 @@ _ROLE = "CASE m.role WHEN 'admin' THEN 'JurisdictionAdministrator' ELSE 'Judge' 
 _PENDING_EMAIL = "lower(btrim(m.email))"
 
 _ADD_FOR_USERS = f"""
-INSERT INTO role_assignment (id, user_id, pending_email, jurisdiction_id, role, granted_by, granted_at)
-SELECT gen_random_uuid(), m.user_id, NULL, m.jurisdiction_id, {_ROLE}, NULL, m.created_datetime
+INSERT INTO role_assignment (id, user_id, pending_email, jurisdiction_id, role, granted_by, granted_at, tester)
+SELECT gen_random_uuid(), m.user_id, NULL, m.jurisdiction_id, {_ROLE}, NULL, m.created_datetime, m.tester
 FROM jurisdiction_membership m
 WHERE m.user_id IS NOT NULL
   AND NOT EXISTS (
@@ -63,13 +63,14 @@ WHERE m.user_id IS NOT NULL
 ON CONFLICT DO NOTHING
 """
 
-# DISTINCT ON: two pending memberships whose emails differ only in case or padding are one assignment.
+# GROUP BY: two pending memberships whose emails differ only in case or padding are one assignment, the
+# earliest created, in the test group if any of them was.
 _ADD_PENDING = f"""
-INSERT INTO role_assignment (id, user_id, pending_email, jurisdiction_id, role, granted_by, granted_at)
-SELECT gen_random_uuid(), NULL, s.email, s.jurisdiction_id, s.role, NULL, s.created
+INSERT INTO role_assignment (id, user_id, pending_email, jurisdiction_id, role, granted_by, granted_at, tester)
+SELECT gen_random_uuid(), NULL, s.email, s.jurisdiction_id, s.role, NULL, s.created, s.tester
 FROM (
-  SELECT DISTINCT ON ({_PENDING_EMAIL}, m.jurisdiction_id, {_ROLE})
-         {_PENDING_EMAIL} AS email, m.jurisdiction_id, {_ROLE} AS role, m.created_datetime AS created
+  SELECT {_PENDING_EMAIL} AS email, m.jurisdiction_id, {_ROLE} AS role,
+         min(m.created_datetime) AS created, bool_or(m.tester) AS tester
   FROM jurisdiction_membership m
   WHERE m.user_id IS NULL AND m.email IS NOT NULL AND btrim(m.email) <> ''
     AND NOT EXISTS (
@@ -77,9 +78,23 @@ FROM (
       WHERE a.user_id IS NULL AND a.pending_email = {_PENDING_EMAIL}
         AND a.jurisdiction_id = m.jurisdiction_id AND a.role = {_ROLE}
     )
-  ORDER BY {_PENDING_EMAIL}, m.jurisdiction_id, {_ROLE}, m.created_datetime
+  GROUP BY {_PENDING_EMAIL}, m.jurisdiction_id, {_ROLE}
 ) s
 ON CONFLICT DO NOTHING
+"""
+
+# An assignment the migration (or the statements above) made for a membership the previous release has
+# since put in the jurisdiction's test group (DIAAT-345): the test group is the previous release's, so
+# the assignment joins it. Only ever sets the flag: nobody loses access here.
+_SYNC_TESTER = f"""
+UPDATE role_assignment a SET tester = true
+FROM jurisdiction_membership m
+WHERE m.tester AND NOT a.tester
+  AND a.jurisdiction_id = m.jurisdiction_id AND a.role = {_ROLE}
+  AND (
+    (a.user_id IS NOT NULL AND a.user_id = m.user_id)
+    OR (a.user_id IS NULL AND m.user_id IS NULL AND a.pending_email = {_PENDING_EMAIL})
+  )
 """
 
 # A pending assignment (the migration's copy of a pending membership) whose membership the previous
@@ -118,6 +133,7 @@ class Report:
     added_for_users: int
     added_pending: int
     removed_claimed_pending: int
+    test_group_synced: int
     auto_enrol_turned_off: int
     still_unmatched: int
     assignments_after: int
@@ -137,6 +153,7 @@ def run(connection: Connection) -> Report:
     added_for_users = connection.execute(text(_ADD_FOR_USERS)).rowcount
     added_pending = connection.execute(text(_ADD_PENDING)).rowcount
     removed = connection.execute(text(_REMOVE_CLAIMED_PENDING)).rowcount
+    tester_synced = connection.execute(text(_SYNC_TESTER)).rowcount
     auto_enrol = connection.execute(text(_AUTO_ENROL_OFF)).rowcount
     return Report(
         memberships=memberships,
@@ -144,6 +161,7 @@ def run(connection: Connection) -> Report:
         added_for_users=added_for_users,
         added_pending=added_pending,
         removed_claimed_pending=removed,
+        test_group_synced=tester_synced,
         auto_enrol_turned_off=auto_enrol,
         still_unmatched=count(_STILL_UNMATCHED),
         assignments_after=count("SELECT count(*) FROM role_assignment"),
@@ -159,6 +177,7 @@ def _print(report: Report, *, apply: bool, target: str) -> None:
     print(f"assignments {verb} for users:                     {report.added_for_users}")
     print(f"assignments {verb} pending by email:              {report.added_pending}")
     print(f"redundant pending assignments {'removed' if apply else 'to remove'}:            {report.removed_claimed_pending}")
+    print(f"assignments {'put' if apply else 'to put'} in the test group (DIAAT-345):         {report.test_group_synced}")
     print(f"jurisdictions with auto_enrol turned {'off' if apply else 'off (would be)'}:     {report.auto_enrol_turned_off}")
     print(f"memberships still without an assignment:            {report.still_unmatched}  (0 expected)")
     print(f"assignments after:                                  {report.assignments_after}")

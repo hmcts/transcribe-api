@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
+from sqlalchemy import text
 from sqlmodel import Session, select
 
 from transcribe_api.domain.audit import stage_audit
@@ -54,11 +55,18 @@ CACHE_TTL_SECONDS = 5.0
 # defaulted because there is no row: never the fallback of an unreadable database.
 _cache: dict[str, tuple[bool, float]] = {}
 _cache_lock = threading.Lock()
+# Bumped by every invalidation. A read that started before one must not be cached after it: it may
+# hold the value from before the change (it read, the change committed and cleared the cache, then
+# this read stored what it had), which would keep the old value for the rest of the TTL.
+_cache_generation = 0
 
 
 def invalidate_cache() -> None:
-    """Forget what was read, so the next read goes to the database (a flag was changed here)."""
+    """Forget what was read, so the next read goes to the database (a flag was changed here), and
+    discard any read still in flight (``flag_value`` checks the generation before caching)."""
+    global _cache_generation
     with _cache_lock:
+        _cache_generation += 1
         _cache.clear()
 
 
@@ -94,11 +102,14 @@ def flag_value(name: str) -> bool:
         hit = _cache.get(name)
         if hit is not None and hit[1] > now:
             return hit[0]
+        generation = _cache_generation
     stored, readable = _stored_value(name)
     value = default_value(name) if stored is None else stored
     if readable:
         with _cache_lock:
-            _cache[name] = (value, now + CACHE_TTL_SECONDS)
+            # Not if a change cleared the cache while this was reading: the next request reads again.
+            if generation == _cache_generation:
+                _cache[name] = (value, now + CACHE_TTL_SECONDS)
     return value
 
 
@@ -166,9 +177,15 @@ def set_flag(
     the same moment both succeed (the later one wins) instead of one failing on the primary key.
     With ``updated_by`` the change is audited (``feature_flag.changed``: the flag, from, to and the
     roles ``acted_as``) in the same transaction: if the audit row cannot be written, the flag is not
-    changed."""
+    changed.
+
+    Changes to one flag are serialised (a transaction-scoped advisory lock on PostgreSQL, taken
+    before the old value is read and held until the commit), so two concurrent changes cannot both
+    read the same old value: the audit's ``from`` is always the value the change replaced, also when
+    there is no row yet to lock."""
     if name not in FLAG_DEFAULTS:
         raise UnknownFlagError(name)
+    _lock_flag(session, name)
     before = current_value(session, name)
     now = datetime.now(UTC)
     insert = _insert_for(session)
@@ -191,6 +208,13 @@ def set_flag(
     session.commit()
     invalidate_cache()
     return before
+
+
+def _lock_flag(session: Session, name: str) -> None:
+    """Take the flag's change lock until the transaction ends (PostgreSQL; SQLite, used by the unit
+    tests, has a single writer anyway)."""
+    if session.get_bind().dialect.name == "postgresql":
+        session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"system_feature_flag:{name}"})
 
 
 def _insert_for(session: Session):

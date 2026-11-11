@@ -56,15 +56,30 @@ def db(fresh_postgres):
     return engine
 
 
-def membership(engine, *, code: str, role: str, user: str | None = None, email: str | None = None) -> None:
+def membership(
+    engine, *, code: str, role: str, user: str | None = None, email: str | None = None, tester: bool = False
+) -> None:
     with engine.begin() as connection:
         connection.execute(
             text(
-                "INSERT INTO jurisdiction_membership (id, jurisdiction_id, user_id, email, role, created_datetime)"
-                " SELECT gen_random_uuid(), j.id, :uid, :email, :role, now() FROM jurisdiction j WHERE j.code = :code"
+                "INSERT INTO jurisdiction_membership (id, jurisdiction_id, user_id, email, role, tester, created_datetime)"
+                " SELECT gen_random_uuid(), j.id, :uid, :email, :role, :tester, now() FROM jurisdiction j WHERE j.code = :code"
             ),
-            {"uid": engine.ids[user] if user else None, "email": email, "role": role, "code": code},
+            {"uid": engine.ids[user] if user else None, "email": email, "role": role, "code": code, "tester": tester},
         )
+
+
+def in_the_test_group(engine) -> list[tuple]:
+    """(who, jurisdiction, role) of every assignment in the test group."""
+    with engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT coalesce(lower(u.email), a.pending_email), j.code, a.role"
+                ' FROM role_assignment a LEFT JOIN "user" u ON u.id = a.user_id'
+                " JOIN jurisdiction j ON j.id = a.jurisdiction_id WHERE a.tester ORDER BY 1, 2, 3"
+            )
+        ).all()
+    return [tuple(r) for r in rows]
 
 
 def assignments(engine) -> list[tuple]:
@@ -206,3 +221,36 @@ def test_without_a_database_url_it_says_so(cutover, monkeypatch, capsys):
     monkeypatch.delenv("DATABASE_CONNECTION_STRING", raising=False)
     assert cutover.main([]) == 2
     assert "DATABASE_CONNECTION_STRING" in capsys.readouterr().out
+
+
+def test_the_test_group_is_carried_over_for_users_and_pending_emails_and_onto_assignments_already_there(db, cutover):
+    """DIAAT-345: a membership in a jurisdiction's test group stays in it as an assignment, however the
+    assignment came to exist: written by the script for a user, written for a pending email (where two
+    memberships collapse into one, one in the group puts it in), or copied earlier by 0009 before the
+    previous release put the membership in the group."""
+    membership(db, code="ET", role="judge", user="alice", tester=True)  # for a user, written by the script
+    membership(db, code="ET", role="judge", user="bob")  # not in the group
+    membership(db, code="IAC", role="judge", email="Test.Pending@Example.TEST", tester=False)
+    membership(db, code="IAC", role="judge", email="  test.pending@example.test", tester=True)  # same person, in the group
+    membership(db, code="IAC", role="judge", email="other.pending@example.test")
+    membership(db, code="ET", role="judge", user="carol")  # copied by 0009 before it was put in the group
+    with db.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO role_assignment (id, user_id, jurisdiction_id, role, granted_at)"
+                " SELECT gen_random_uuid(), :uid, j.id, 'Judge', now() FROM jurisdiction j WHERE j.code = 'ET'"
+            ),
+            {"uid": db.ids["carol"]},
+        )
+        connection.execute(text("UPDATE jurisdiction_membership SET tester = true WHERE user_id = :uid"), {"uid": db.ids["carol"]})
+
+    assert cutover.main(["--apply"], engine=db) == 0
+
+    assert in_the_test_group(db) == [
+        ("alice@example.test", "ET", "Judge"),
+        ("carol@example.test", "ET", "Judge"),
+        ("test.pending@example.test", "IAC", "Judge"),
+    ]
+    with db.connect() as connection:
+        total = connection.execute(text("SELECT count(*) FROM role_assignment")).scalar_one()
+    assert total == 5  # alice, bob, carol, and the two pending emails: no duplicate

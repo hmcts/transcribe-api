@@ -84,6 +84,78 @@ def test_a_change_to_the_row_applies_to_the_next_request_with_no_restart(flag_ta
     assert feature_flags.is_dictation_enabled() is True
 
 
+@pytest.mark.real_jurisdictions
+@pytest.mark.real_feature_flags
+def test_a_read_in_flight_when_the_flag_changed_is_not_cached_over_the_change(flag_table, monkeypatch):
+    """A read that took the old value, then a change that committed and cleared the cache, must not leave
+    the old value cached for the rest of the TTL (review finding: dictation stays on after switching it off)."""
+    _set_default(monkeypatch, True)
+    flag_table(True)
+    feature_flags.invalidate_cache()
+    read_row = feature_flags._stored_value
+
+    def read_then_the_change_lands(name):
+        old = read_row(name)  # the read has the old value ...
+        flag_table(False)  # ... then the administrator's change commits ...
+        feature_flags.invalidate_cache()  # ... and clears the cache
+        return old
+
+    monkeypatch.setattr(feature_flags, "_stored_value", read_then_the_change_lands)
+    assert feature_flags.is_dictation_enabled() is True  # the in-flight request answers with what it read
+
+    monkeypatch.setattr(feature_flags, "_stored_value", read_row)
+    assert feature_flags.is_dictation_enabled() is False  # but it did not cache that: the next request sees the change
+
+
+@pytest.mark.real_feature_flags
+def test_changing_a_flag_takes_the_flags_lock_before_reading_the_old_value_on_postgresql():
+    """The lock is what makes the audit's 'from' the value the change replaced (see the Postgres test below)."""
+    calls: list[str] = []
+
+    class Dialect:
+        name = "postgresql"
+
+    class Bind:
+        dialect = Dialect()
+
+    class FakeSession:
+        def get_bind(self):
+            return Bind()
+
+        def execute(self, statement, params=None):
+            calls.append(str(statement))
+
+    feature_flags._lock_flag(FakeSession(), "dictation_enabled")
+    assert calls == ["SELECT pg_advisory_xact_lock(hashtext(:key))"]
+
+
+def test_two_changes_to_one_flag_run_one_after_the_other_on_postgresql(fresh_postgres):
+    """A second change waits for the first to finish, so it reads the first's value as its 'from'."""
+    import threading
+    import time
+
+    from sqlalchemy import text
+
+    engine = fresh_postgres
+    holder = Session(engine)
+    holder.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": "system_feature_flag:dictation_enabled"})
+    finished = threading.Event()
+
+    def second_change():
+        with Session(engine) as session:
+            feature_flags.set_flag(session, "dictation_enabled", False, updated_by=None)
+        finished.set()
+
+    worker = threading.Thread(target=second_change, daemon=True)
+    worker.start()
+    time.sleep(1.0)
+    assert not finished.is_set()  # blocked on the first change's lock
+    holder.commit()  # the first change finishes
+    holder.close()
+    assert finished.wait(10)
+    worker.join(5)
+
+
 @pytest.mark.real_feature_flags
 @pytest.mark.parametrize("setting", [True, False])
 def test_if_the_database_cannot_be_read_the_default_applies(monkeypatch, setting):
