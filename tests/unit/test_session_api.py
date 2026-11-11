@@ -206,8 +206,9 @@ def test_one_pair_is_selected_automatically(client, world, db):
     me = response.json()["me"]
 
     assert me["status"] == "ready"
-    assert me["assignments"] == [{"jurisdiction": {"code": "ET", "name": "ET name"}, "role": "Judge"}]
-    assert me["active"] == {"jurisdiction": {"code": "ET", "name": "ET name"}, "role": "Judge"}
+    et = {"code": "ET", "name": "ET name", "stage": "live"}
+    assert me["assignments"] == [{"jurisdiction": et, "role": "Judge"}]
+    assert me["active"] == {"jurisdiction": et, "role": "Judge"}
     assert "dictation.use" in me["permissions"] and "users.manage" not in me["permissions"]
     claims = claims_of(response.json()["token"])
     assert claims["ctx"] == {"jurisdiction": "ET", "role": "Judge"}
@@ -273,6 +274,22 @@ def test_an_administrator_lands_as_the_administrator_and_can_switch_to_the_inclu
     # The included roles stop at the administrator's own jurisdiction.
     elsewhere = client.put("/api/me/context", json={"jurisdiction": "ET", "role": "Judge"}, headers=bearer(token))
     assert elsewhere.status_code == 403 and elsewhere.json()["detail"]["code"] == "context_not_available"
+
+
+def test_an_assignment_says_what_stage_its_jurisdiction_is_at_so_a_screen_can_mark_one_not_live(client, world, db):
+    """DIAAT-345: draft and test jurisdictions are marked in the chooser; it can only do so if it is told."""
+    with Session(db) as session:
+        et = session.get(type(world["et"]), world["et"].id)
+        et.stage = "draft"
+        session.add(et)
+        session.commit()
+    person = user_with(client, db, (world["et"], "admin"), (world["iac"], "judge"))
+    me = person.sign_in().json()["me"]
+
+    stages = {(a["jurisdiction"]["code"], a["role"]): a["jurisdiction"]["stage"] for a in me["assignments"]}
+    assert stages[("ET", ADMIN)] == "draft"
+    assert stages[("ET", "Judge")] == "draft"  # included with the administrator role: the same jurisdiction
+    assert stages[("IAC", "Judge")] == "live"
 
 
 def test_an_administrator_with_a_second_given_role_must_choose(client, world, db):
@@ -439,7 +456,7 @@ def test_system_administrator_is_never_an_assignment_or_a_context(client, world,
 
     assert claims_of(body["token"])["sysadmin"] is True
     assert "SystemAdministrator" not in str(body["me"]["assignments"])
-    assert body["me"]["active"] == {"jurisdiction": {"code": "ET", "name": "ET name"}, "role": "Judge"}
+    assert body["me"]["active"] == {"jurisdiction": {"code": "ET", "name": "ET name", "stage": "live"}, "role": "Judge"}
     assert "SystemAdministrator" not in str(claims_of(body["token"])["assignments"])
     assert claims_of(body["token"])["ctx"] == {"jurisdiction": "ET", "role": "Judge"}
     # Added to the active role's permissions.

@@ -56,6 +56,8 @@ class Assignment:
     jurisdiction_code: str | None
     jurisdiction_name: str | None
     derived: bool = False
+    # The jurisdiction's stage (draft, test or live: DIAAT-345), so a screen can mark one that is not live.
+    jurisdiction_stage: str | None = None
 
     @property
     def context(self) -> Context:
@@ -91,6 +93,7 @@ def load_assignments(session: Session, user_id: UUID) -> list[Assignment]:
             jurisdiction_id=row.jurisdiction_id,
             jurisdiction_code=jurisdiction.code if jurisdiction else None,
             jurisdiction_name=jurisdiction.name if jurisdiction else None,
+            jurisdiction_stage=jurisdiction.stage if jurisdiction else None,
         )
         for row, jurisdiction in rows
         if row.role in STORED_ROLES
@@ -121,6 +124,7 @@ def _included_with_admin(assignments: list[Assignment]) -> list[Assignment]:
                     jurisdiction_code=admin.jurisdiction_code,
                     jurisdiction_name=admin.jurisdiction_name,
                     derived=True,
+                    jurisdiction_stage=admin.jurisdiction_stage,
                 )
             )
     return included

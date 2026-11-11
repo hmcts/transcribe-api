@@ -111,7 +111,7 @@ All under `/api`. Errors are `{"detail": {"code": ..., "message": ...}}`.
 {
   "user": {"id": "...", "email": "...", "name": "..."},
   "status": "ready | choose | no_access",
-  "assignments": [{"jurisdiction": {"code": "ET", "name": "Employment Tribunal"} | null, "role": "Judge"}],
+  "assignments": [{"jurisdiction": {"code": "ET", "name": "Employment Tribunal", "stage": "live"} | null, "role": "Judge"}],
   "active": {"jurisdiction": {...} | null, "role": "Judge"} | null,
   "permissions": ["app.access", "..."],
   "pending_requests": []

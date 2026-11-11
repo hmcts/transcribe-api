@@ -57,8 +57,13 @@ class UserOut(BaseModel):
     name: str
 
 
+class AssignedJurisdiction(JurisdictionRef):
+    # draft, test or live (DIAAT-345): what the person sees it as, so the chooser can mark one that is not live yet.
+    stage: str | None = None
+
+
 class AssignmentOut(BaseModel):
-    jurisdiction: JurisdictionRef | None
+    jurisdiction: AssignedJurisdiction | None
     role: str
 
 
@@ -139,7 +144,11 @@ def select_context(
 def _out(assignment: Assignment) -> AssignmentOut:
     return AssignmentOut(
         jurisdiction=(
-            JurisdictionRef(code=assignment.jurisdiction_code, name=assignment.jurisdiction_name)
+            AssignedJurisdiction(
+                code=assignment.jurisdiction_code,
+                name=assignment.jurisdiction_name,
+                stage=assignment.jurisdiction_stage,
+            )
             if assignment.jurisdiction_code is not None
             else None
         ),
@@ -157,8 +166,12 @@ def _active_out(ctx: Context | None, assignments: list[Assignment], session: Ses
         return AssignmentOut(jurisdiction=None, role=ctx.role)
     # The token's context is no longer one of their assignments (removed since it was
     # minted): still what this token acts as, until it is replaced.
-    name = session.exec(select(Jurisdiction.name).where(Jurisdiction.code == ctx.jurisdiction)).first()
-    return AssignmentOut(jurisdiction=JurisdictionRef(code=ctx.jurisdiction, name=name or ctx.jurisdiction), role=ctx.role)
+    row = session.exec(select(Jurisdiction.name, Jurisdiction.stage).where(Jurisdiction.code == ctx.jurisdiction)).first()
+    name, stage = row if row else (None, None)
+    return AssignmentOut(
+        jurisdiction=AssignedJurisdiction(code=ctx.jurisdiction, name=name or ctx.jurisdiction, stage=stage),
+        role=ctx.role,
+    )
 
 
 def pending_requests(session: Session, user_id: UUID) -> list[AccessRequestOut]:
