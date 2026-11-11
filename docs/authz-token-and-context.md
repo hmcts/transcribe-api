@@ -185,3 +185,18 @@ but logged as a warning (no addresses in it). **Residual risk, for the owner to 
 `xms_edov` (email domain owner verified) claim or a member (non-guest) account at sign-in; a unique index on `lower(user.email)` with the clash treated as an
 error for an administrator to resolve; an administrator confirmation step for pending administrator roles. Until then, the sign-in gate (who may obtain a token for this
 app at all) is the control that matters: keep guest accounts out of the app registration's assignment.
+
+
+## PR previews
+
+A PR preview has no Entra and runs the web app with sign-in off (DIAAT-399), so no Entra token is sent. With
+`AUTH_PREVIEW_USER_ENABLED=true` and `ENVIRONMENT=preview` (the API refuses to start with the flag on in any other
+environment), `POST /api/auth/session` with **no** Authorization header signs in the fixed preview user
+(`domain/auth/token_auth.get_entra_identity`): the roles in `AUTH_PREVIEW_USER_ROLES` (default: every app role, so
+the SystemAdministrator flag too), still through the `AUTH_ACCESS_ROLES` check. It is given every role at sign-in
+(`domain/auth/sessions.ensure_preview_assignments`): JurisdictionSuperAdministrator, and JurisdictionAdministrator (so
+Judge and LegalTextManager too) in every jurisdiction, so it chooses a context like anyone with several, and every
+area of the app is reachable. Then it holds a BenchNotes token like anyone else: **every other route still refuses a
+request with none** (401), so the web in a preview must sign in through that route (it sends no Authorization header).
+A sign-in that does send a token is verified as usual and gets what its user holds. The chart's preview values set
+`APP_JWT_SIGNING_KEY` (a fixed, non-secret value: previews are thrown away).

@@ -38,10 +38,16 @@ from transcribe_api.domain.auth.sessions import (
     SessionResponse,
     SignInIdentity,
     build_me,
+    ensure_preview_assignments,
     mint_session,
     sign_in,
 )
-from transcribe_api.domain.auth.token_auth import _is_local_dev, get_entra_identity
+from transcribe_api.domain.auth.token_auth import (
+    PREVIEW_USER_ID,
+    _is_local_dev,
+    get_entra_identity,
+    preview_user_enabled,
+)
 from transcribe_api.domain.models_dictation import Jurisdiction, User
 from transcribe_api.runtime.db_connection import get_engine
 from transcribe_api.runtime.local_dev_database import UnsafeDatabaseURLError, local_dev_database_url
@@ -100,6 +106,8 @@ async def get_sign_in_identity(
         # Only the Entra roles claim says so, at sign-in; the database never does. The role's
         # value in the token is its name (the library's configurable role map is not used).
         sysadmin=ROLE_SYSTEM_ADMIN in entra.roles,
+        # No token sent, with the preview user on (ENVIRONMENT=preview only): the preview user.
+        preview=entra.user_id == PREVIEW_USER_ID and not request.headers.get("authorization"),
     )
 
 
@@ -129,6 +137,8 @@ def create_session(
     _no_store(response)
     with Session(get_engine()) as session:
         user = sign_in(session, azure_user_id=identity.azure_user_id, email=identity.email, name=identity.name)
+        if identity.preview and preview_user_enabled():
+            ensure_preview_assignments(session, user)
         return mint_session(
             session,
             user,

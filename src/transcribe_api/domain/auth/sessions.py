@@ -25,10 +25,20 @@ from uuid import UUID
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from transcribe_api.domain.assignments import Assignment, distinct_contexts, load_assignments, stored_contexts
+from transcribe_api.domain.assignments import (
+    Assignment,
+    distinct_contexts,
+    ensure_assignment,
+    load_assignments,
+    stored_contexts,
+)
 from transcribe_api.domain.auth import app_token
 from transcribe_api.domain.auth.app_token import Context
-from transcribe_api.domain.auth.permissions import permissions_for
+from transcribe_api.domain.auth.permissions import (
+    ROLE_JURISDICTION_ADMIN,
+    ROLE_JURISDICTION_SUPER_ADMIN,
+    permissions_for,
+)
 from transcribe_api.domain.auth.user_creation import insert_user_or_load_existing
 from transcribe_api.domain.auth.user_loading import user_deactivated
 from transcribe_api.domain.models_dictation import AccessRequest, AccessRequestRole, Jurisdiction, User
@@ -259,3 +269,17 @@ class SignInIdentity:
     email: str
     name: str
     sysadmin: bool
+    # The fixed user of a PR preview (domain/auth/token_auth.py): given every role at sign-in.
+    preview: bool = False
+
+
+def ensure_preview_assignments(session: Session, user: User) -> None:
+    """A PR preview has no Entra and no administrator to give anyone a role, so its fixed user
+    is given every role (DIAAT-399, DIAAT-373): JurisdictionSuperAdministrator, and
+    JurisdictionAdministrator (so also Judge and LegalTextManager) in every jurisdiction.
+    Idempotent: what is already held is left alone, and a jurisdiction created since is added
+    at the next sign-in. Only ever called for the preview user (``SignInIdentity.preview``)."""
+    ensure_assignment(session, role=ROLE_JURISDICTION_SUPER_ADMIN, jurisdiction_id=None, user_id=user.id)
+    for jurisdiction_id in session.exec(select(Jurisdiction.id)).all():
+        ensure_assignment(session, role=ROLE_JURISDICTION_ADMIN, jurisdiction_id=jurisdiction_id, user_id=user.id)
+    session.commit()
