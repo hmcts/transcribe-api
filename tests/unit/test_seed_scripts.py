@@ -64,6 +64,33 @@ def test_the_personas_script_refuses_outside_local_mode_without_connecting(monke
     assert "ENVIRONMENT is not local" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://user:secret@prod-db.postgres.database.azure.com:5432/transcribe",
+        "postgresql://user:secret@10.0.0.5:5432/transcribe",
+    ],
+)
+def test_the_personas_script_refuses_a_database_that_is_not_the_developers_own_without_connecting(
+    monkeypatch, capsys, url
+):
+    """In local mode but pointed at a shared database: the second guard. It never connects, never seeds."""
+    from transcribe_api.runtime.settings_dictation import get_settings
+
+    script = _load_script("scripts-seed-personas.py")
+    monkeypatch.setattr(script, "create_engine", lambda *a, **k: pytest.fail("must not connect"))
+    monkeypatch.setenv("ENVIRONMENT", "local")
+    monkeypatch.setenv("DATABASE_CONNECTION_STRING", url)
+    get_settings.cache_clear()
+    try:
+        assert script.main() == 1
+    finally:
+        get_settings.cache_clear()
+    out = capsys.readouterr().out
+    assert "Refusing to run against DATABASE_CONNECTION_STRING" in out
+    assert "secret" not in out  # the password is not echoed
+
+
 @pytest.fixture
 def personas_db(jurisdiction_db):
     return jurisdiction_db
