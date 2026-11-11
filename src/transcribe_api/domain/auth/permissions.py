@@ -12,6 +12,10 @@ from the Entra ``roles`` claim, is copied into the BenchNotes token as ``sysadmi
 the token is minted, and adds the system-level permissions to whatever the active role
 grants, whatever the context, also with no context at all.
 
+A JurisdictionAdministrator is also offered ``Judge`` and ``LegalTextManager`` as contexts in their own
+jurisdiction (``ROLES_INCLUDED_WITH_ADMIN``): derived when assignments are read
+(domain/assignments.py), not stored.
+
 ``Normal`` is gone (merged into Judge).
 
 Permissions are not in the token: they are derived here from the token's active role
@@ -37,6 +41,11 @@ STORED_ROLES: tuple[str, ...] = (
 )
 # Stored roles that apply to every jurisdiction: held with no jurisdiction.
 GLOBAL_ROLES: tuple[str, ...] = (ROLE_JURISDICTION_SUPER_ADMIN,)
+# Roles a JurisdictionAdministrator holds in their jurisdiction without being given them (DIAAT-373):
+# derived at read time from the administrator assignment, never stored, so removing the administrator
+# role (or leaving the jurisdiction) removes them too. Not for the global JurisdictionSuperAdministrator
+# or the SystemAdministrator, who are not tied to one jurisdiction.
+ROLES_INCLUDED_WITH_ADMIN: tuple[str, ...] = (ROLE_JUDGE, ROLE_LEGAL_TEXT_MANAGER)
 # Roles a user may ask for (access requests): never an administrator role.
 REQUESTABLE_ROLES: tuple[str, ...] = (ROLE_JUDGE, ROLE_LEGAL_TEXT_MANAGER)
 

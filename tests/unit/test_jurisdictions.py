@@ -104,7 +104,13 @@ def test_assignments_are_the_users_enabled_jurisdictions_only(engine):
     add_member(engine, user, off)
     add_member(engine, other, iac)
 
-    assert _assignments(engine, user) == [("ET", "JurisdictionAdministrator"), ("IAC", "Judge")]
+    # The administrator role in ET brings Judge and LegalTextManager there; OFF is disabled and left out.
+    assert _assignments(engine, user) == [
+        ("ET", "Judge"),
+        ("ET", "JurisdictionAdministrator"),
+        ("ET", "LegalTextManager"),
+        ("IAC", "Judge"),
+    ]
 
 
 def _error_code(excinfo) -> tuple[int, str]:
@@ -192,7 +198,11 @@ def test_a_new_user_claims_assignments_added_for_their_email(engine):
     user = sign_up(engine, "ET.Judge@Example.test")
 
     # Claimed, and nothing else: an ET test judge sees the ET only.
-    assert _assignments(engine, user) == [("ET", "JurisdictionAdministrator")]
+    assert _assignments(engine, user) == [
+        ("ET", "Judge"),
+        ("ET", "JurisdictionAdministrator"),
+        ("ET", "LegalTextManager"),
+    ]
     with Session(engine) as session:
         assert session.exec(select(RoleAssignment.pending_email)).all() == [None]
 

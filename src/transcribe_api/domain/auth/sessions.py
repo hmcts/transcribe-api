@@ -25,7 +25,7 @@ from uuid import UUID
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from transcribe_api.domain.assignments import Assignment, distinct_contexts, load_assignments
+from transcribe_api.domain.assignments import Assignment, distinct_contexts, load_assignments, stored_contexts
 from transcribe_api.domain.auth import app_token
 from transcribe_api.domain.auth.app_token import Context
 from transcribe_api.domain.auth.permissions import permissions_for
@@ -107,12 +107,22 @@ def sign_in(session: Session, *, azure_user_id: str, email: str, name: str) -> U
 # --- the context -----------------------------------------------------------------------
 
 
-def select_context(contexts: list[Context], *, requested: Context | None, requested_given: bool) -> Context | None:
+def select_context(
+    contexts: list[Context],
+    *,
+    requested: Context | None,
+    requested_given: bool,
+    given: list[Context] | None = None,
+) -> Context | None:
     """The context a minted token carries. ``requested_given``: the caller named one (even
     one that makes no sense): it is kept if the user holds it, and otherwise there is none.
-    Not named: the single pair, if there is exactly one."""
+    Not named: the single pair, if there is exactly one. ``given``: the pairs the user was given
+    (``contexts`` also has those included with an administrator role): when there is exactly one
+    of those, it is the choice, so an administrator lands as one and is not asked."""
     if requested_given:
         return requested if requested is not None and requested in contexts else None
+    if given is not None and len(given) == 1 and given[0] in contexts:
+        return given[0]
     return contexts[0] if len(contexts) == 1 else None
 
 
@@ -219,7 +229,13 @@ def mint_session(
     Only a sign-in, which verified an Entra token, starts a new session."""
     assignments = load_assignments(session, user.id)
     contexts = distinct_contexts(assignments)
-    ctx = chosen if chosen is not None else select_context(contexts, requested=requested, requested_given=requested_given)
+    ctx = (
+        chosen
+        if chosen is not None
+        else select_context(
+            contexts, requested=requested, requested_given=requested_given, given=stored_contexts(assignments)
+        )
+    )
     token, expires_at = app_token.mint(
         user.id,
         sysadmin=sysadmin,

@@ -231,14 +231,60 @@ def test_two_pairs_must_be_chosen_and_the_context_is_null_until_then(client, wor
     assert me["active"] is None and me["permissions"] == []
     assert [(a["jurisdiction"]["code"], a["role"]) for a in me["assignments"]] == [
         ("ET", "Judge"),
+        ("IAC", "Judge"),  # included with the administrator role
+        ("IAC", "LegalTextManager"),  # likewise
         ("IAC", ADMIN),
     ]
     claims = claims_of(response.json()["token"])
     assert claims["ctx"] is None
-    assert len(claims["assignments"]) == 2
+    assert len(claims["assignments"]) == 4
     # And until they choose, every ordinary route is refused.
     refused = client.get("/api/user", headers=bearer(response.json()["token"]))
     assert refused.status_code == 403 and refused.json()["detail"]["code"] == "context_required"
+
+
+def test_an_administrator_lands_as_the_administrator_and_can_switch_to_the_included_roles(client, world, db):
+    person = user_with(client, db, (world["iac"], "admin"))
+    response = person.sign_in()
+    me = response.json()["me"]
+
+    # Three pairs are offered, but only one was given: they are not asked to choose.
+    assert me["status"] == "ready"
+    assert me["active"]["role"] == ADMIN
+    assert [(a["jurisdiction"]["code"], a["role"]) for a in me["assignments"]] == [
+        ("IAC", "Judge"),
+        ("IAC", "LegalTextManager"),
+        ("IAC", ADMIN),
+    ]
+    token = response.json()["token"]
+    assert len(claims_of(token)["assignments"]) == 3
+
+    judge = client.put("/api/me/context", json={"jurisdiction": "IAC", "role": "Judge"}, headers=bearer(token))
+    assert judge.status_code == 200
+    assert "dictation.use" in judge.json()["me"]["permissions"]
+    assert "users.manage" not in judge.json()["me"]["permissions"]
+
+    manager = client.put(
+        "/api/me/context", json={"jurisdiction": "IAC", "role": "LegalTextManager"}, headers=bearer(token)
+    )
+    assert manager.status_code == 200
+    assert "document_content.write" in manager.json()["me"]["permissions"]
+
+    # The included roles stop at the administrator's own jurisdiction.
+    elsewhere = client.put("/api/me/context", json={"jurisdiction": "ET", "role": "Judge"}, headers=bearer(token))
+    assert elsewhere.status_code == 403 and elsewhere.json()["detail"]["code"] == "context_not_available"
+
+
+def test_an_administrator_with_a_second_given_role_must_choose(client, world, db):
+    person = user_with(client, db, (world["iac"], "admin"), (world["et"], "judge"))
+    assert person.sign_in().json()["me"]["status"] == "choose"
+
+
+def test_a_renewal_keeps_an_included_role_the_session_chose(client, world, db):
+    person = user_with(client, db, (world["iac"], "admin"))
+    renewed = person.sign_in(requested_context="IAC:Judge").json()
+    assert renewed["me"]["active"]["role"] == "Judge"
+    assert claims_of(renewed["token"])["ctx"] == {"jurisdiction": "IAC", "role": "Judge"}
 
 
 def test_two_roles_in_one_jurisdiction_are_two_pairs(client, world, db):
@@ -279,7 +325,8 @@ def test_the_permissions_are_those_of_the_active_role_only_not_the_union(client,
 @pytest.mark.parametrize(
     "body",
     [
-        pytest.param({"jurisdiction": "IAC", "role": "Judge"}, id="a-role-held-in-another-jurisdiction"),
+        pytest.param({"jurisdiction": "ET", "role": "LegalTextManager"}, id="a-role-not-held-in-that-jurisdiction"),
+        pytest.param({"jurisdiction": "XX", "role": "LegalTextManager"}, id="a-role-in-no-such-jurisdiction"),
         pytest.param({"jurisdiction": "ET", "role": ADMIN}, id="another-role-in-the-jurisdiction"),
         pytest.param({"jurisdiction": None, "role": "Judge"}, id="a-judge-with-no-jurisdiction"),
         pytest.param({"jurisdiction": None, "role": SUPER}, id="super-administrator-not-held"),
@@ -360,7 +407,7 @@ def test_a_role_removed_while_active_is_gone_at_the_next_token(client, world, db
     # ... and the renewal, which keeps the context only if it is held, drops it.
     renewed = person.sign_in(requested_context="ET:Judge").json()
     assert renewed["me"]["active"] is None
-    assert [a["role"] for a in renewed["me"]["assignments"]] == [ADMIN]
+    assert [a["role"] for a in renewed["me"]["assignments"]] == ["Judge", "LegalTextManager", ADMIN]
 
 
 # --- SystemAdministrator ----------------------------------------------------------------
@@ -764,6 +811,8 @@ def test_leaving_a_jurisdiction_deletes_only_that_jurisdictions_assignments(clie
     # The global role first (by jurisdiction name: none), then the IAC's.
     assert [(a["jurisdiction"] and a["jurisdiction"]["code"], a["role"]) for a in me["assignments"]] == [
         (None, SUPER),
+        ("IAC", "Judge"),
+        ("IAC", "LegalTextManager"),
         ("IAC", ADMIN),
     ]
     # They were acting in the IAC, which they have not left: the context is kept.
@@ -781,7 +830,7 @@ def test_leaving_the_active_jurisdiction_means_choosing_again(client, world, db)
     me = response.json()["me"]
     assert me["status"] == "choose" and me["active"] is None
     assert claims_of(response.json()["token"])["ctx"] is None
-    assert [a["role"] for a in me["assignments"]] == [SUPER, ADMIN]
+    assert [a["role"] for a in me["assignments"]] == [SUPER, "Judge", "LegalTextManager", ADMIN]
 
 
 def test_leaving_the_active_jurisdiction_with_one_pair_left_selects_it(client, world, db):
@@ -864,9 +913,10 @@ def persona(client, name, **headers):
     [
         ("judge-et", "ready", [("ET", "Judge")], False),
         ("judge-iac", "ready", [("IAC", "Judge")], False),
-        ("multi", "choose", [("ET", "Judge"), ("IAC", ADMIN)], False),
-        ("jadmin-iac", "ready", [("IAC", ADMIN)], False),
-        ("jadmin-et", "ready", [("ET", ADMIN)], False),
+        # An administrator also holds Judge and LegalTextManager in their jurisdiction, but lands as the administrator.
+        ("multi", "choose", [("ET", "Judge"), ("IAC", "Judge"), ("IAC", "LegalTextManager"), ("IAC", ADMIN)], False),
+        ("jadmin-iac", "ready", [("IAC", "Judge"), ("IAC", "LegalTextManager"), ("IAC", ADMIN)], False),
+        ("jadmin-et", "ready", [("ET", "Judge"), ("ET", "LegalTextManager"), ("ET", ADMIN)], False),
         ("legal-iac", "ready", [("IAC", "LegalTextManager")], False),
         ("jsuper", "ready", [(None, SUPER)], False),
         ("sysadmin", "ready", [], True),

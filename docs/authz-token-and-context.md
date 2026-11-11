@@ -56,6 +56,13 @@ map in code, so a change to the map needs no new tokens. The roles are `Judge`, 
 `JurisdictionAdministrator` and `JurisdictionSuperAdministrator` (stored; the last is global, with a null
 jurisdiction) and `SystemAdministrator` (Entra only: never stored, never an assignment, never a context).
 
+A `JurisdictionAdministrator` also holds `Judge` and `LegalTextManager` in their own jurisdiction, without being given
+them: `domain/assignments.load_assignments` adds them (`derived`) to what a user may act as, so they appear in the token's
+`assignments`, in `GET /me/permissions` and in `PUT /me/context`, and are never written to `role_assignment`. Removing
+the administrator role (or leaving the jurisdiction) removes them. Not for another jurisdiction, and not for the global
+`JurisdictionSuperAdministrator` or the `SystemAdministrator`. When no context is named at sign-in, the user lands in the
+one pair they were given (an administrator lands as administrator); two or more given pairs, or none, means they choose.
+
 Settings (`runtime/settings_dictation.py`):
 
 * `APP_JWT_SIGNING_KEY`: required outside `local` and `test` (the API refuses to start without it, or

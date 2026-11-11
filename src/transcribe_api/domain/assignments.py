@@ -24,7 +24,12 @@ from sqlalchemy import delete, func
 from sqlmodel import Session, select
 
 from transcribe_api.domain.auth.app_token import Context
-from transcribe_api.domain.auth.permissions import GLOBAL_ROLES, STORED_ROLES
+from transcribe_api.domain.auth.permissions import (
+    GLOBAL_ROLES,
+    ROLE_JURISDICTION_ADMIN,
+    ROLES_INCLUDED_WITH_ADMIN,
+    STORED_ROLES,
+)
 from transcribe_api.domain.jurisdiction_stages import sees
 from transcribe_api.domain.models_dictation import Jurisdiction, RoleAssignment, User
 
@@ -42,13 +47,15 @@ class DuplicateAssignmentError(AssignmentError):
 
 @dataclass(frozen=True)
 class Assignment:
-    """One assignment, with its jurisdiction (None: global)."""
+    """One assignment, with its jurisdiction (None: global). ``derived``: not a row of its own but
+    included with a JurisdictionAdministrator assignment in the same jurisdiction (``id`` is None)."""
 
-    id: UUID
+    id: UUID | None
     role: str
     jurisdiction_id: UUID | None
     jurisdiction_code: str | None
     jurisdiction_name: str | None
+    derived: bool = False
 
     @property
     def context(self) -> Context:
@@ -89,7 +96,40 @@ def load_assignments(session: Session, user_id: UUID) -> list[Assignment]:
         if row.role in STORED_ROLES
         and (jurisdiction is None or (jurisdiction.enabled and sees(jurisdiction.stage, row.role, row.tester)))
     ]
-    return sorted(assignments, key=_sort_key)
+    return sorted([*assignments, *_included_with_admin(assignments)], key=_sort_key)
+
+
+def _included_with_admin(assignments: list[Assignment]) -> list[Assignment]:
+    """The roles a JurisdictionAdministrator holds in their jurisdiction without being given them
+    (``ROLES_INCLUDED_WITH_ADMIN``), except those they also hold as a row of their own. Derived
+    from ``assignments`` (already without disabled jurisdictions), never stored."""
+    held = {assignment.context for assignment in assignments}
+    included: list[Assignment] = []
+    for admin in assignments:
+        if admin.role != ROLE_JURISDICTION_ADMIN or admin.jurisdiction_code is None:
+            continue
+        for role in ROLES_INCLUDED_WITH_ADMIN:
+            context = Context(jurisdiction=admin.jurisdiction_code, role=role)
+            if context in held:
+                continue
+            held.add(context)
+            included.append(
+                Assignment(
+                    id=None,
+                    role=role,
+                    jurisdiction_id=admin.jurisdiction_id,
+                    jurisdiction_code=admin.jurisdiction_code,
+                    jurisdiction_name=admin.jurisdiction_name,
+                    derived=True,
+                )
+            )
+    return included
+
+
+def stored_contexts(assignments: list[Assignment]) -> list[Context]:
+    """The (jurisdiction, role) pairs the user was given (not those included with an administrator
+    role), once each: what they land in when they have not chosen (``sessions.select_context``)."""
+    return distinct_contexts([assignment for assignment in assignments if not assignment.derived])
 
 
 def distinct_contexts(assignments: list[Assignment]) -> list[Context]:

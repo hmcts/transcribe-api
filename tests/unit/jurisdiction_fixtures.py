@@ -188,14 +188,14 @@ def acting_as(engine, user: User, ctx=AUTO, sysadmin: bool | None = None, *, are
 
     ``ctx``: the context they act in, a Context or a (jurisdiction code, role) pair, or None for
     none chosen. Left out, it is the one a tab would have: the assignment in the jurisdiction the
-    request names with ``X-Jurisdiction`` if they hold one there, else their first assignment (so
+    request names with ``X-Jurisdiction`` if they hold one there, else their first given assignment (so
     a user with one pair just acts in it). And as for a real token, a header that names another
     jurisdiction is 409 ``context_changed``, and no context is 403 ``context_required`` (except for
     a SystemAdministrator). ``sysadmin``: the Entra role; left out, whether ``SystemAdministrator``
     is among the roles ``add_user`` was given."""
     import importlib
 
-    from transcribe_api.domain.assignments import distinct_contexts, load_assignments
+    from transcribe_api.domain.assignments import distinct_contexts, load_assignments, stored_contexts
     from transcribe_api.domain.auth.context import check_advisory_headers, context_required
 
     authenticated_user = importlib.import_module(f"transcribe_api.domain.auth.auth_models_{area}").AuthenticatedUser
@@ -205,11 +205,14 @@ def acting_as(engine, user: User, ctx=AUTO, sysadmin: bool | None = None, *, are
     def current_user(request: Request):
         with Session(engine) as session:
             fresh = session.get(User, user.id)
-            held = distinct_contexts(load_assignments(session, user.id))
+            assignments = load_assignments(session, user.id)
+        held = distinct_contexts(assignments)
+        given = stored_contexts(assignments)  # not the roles included with an administrator role
         if ctx is AUTO:
             named = (request.headers.get("X-Jurisdiction") or "").strip().upper()
-            context = next((c for c in held if c.jurisdiction == named), None) if named else None
-            context = context or (held[0] if held else None)
+            # Of the pairs in that jurisdiction, one they were given before one included with the administrator role.
+            context = next((c for c in [*given, *held] if c.jurisdiction == named), None) if named else None
+            context = context or (given[0] if given else held[0] if held else None)
         else:
             context = Context(*ctx) if isinstance(ctx, tuple) else ctx
         if context is None and not is_sysadmin:  # as build_token_user_dep does
