@@ -40,6 +40,8 @@ class AssignmentOut(BaseModel):
     id: UUID
     jurisdiction: JurisdictionOut | None
     role: str
+    # In the jurisdiction's test group (DIAAT-345): sees it while it is at stage "test".
+    tester: bool = False
 
 
 class AdminUserOut(BaseModel):
@@ -65,6 +67,8 @@ class AssignmentCreate(BaseModel):
     # null: the global role (JurisdictionSuperAdministrator).
     jurisdiction: str | None = Field(default=None, max_length=16)
     role: str = Field(max_length=64)
+    # Judge or LegalTextManager only: in the jurisdiction's test group (DIAAT-345).
+    tester: bool = False
 
 
 class AssignmentCreated(AssignmentOut):
@@ -81,7 +85,10 @@ def _jurisdiction(code: str | None, name: str | None) -> JurisdictionOut | None:
 
 def _assignment(view: user_admin.AssignmentView) -> AssignmentOut:
     return AssignmentOut(
-        id=view.id, jurisdiction=_jurisdiction(view.jurisdiction_code, view.jurisdiction_name), role=view.role
+        id=view.id,
+        jurisdiction=_jurisdiction(view.jurisdiction_code, view.jurisdiction_name),
+        role=view.role,
+        tester=view.tester,
     )
 
 
@@ -93,7 +100,7 @@ def list_admin_users(
     role: str | None = Query(default=None, max_length=64),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=200),
-    admin_user: User = Depends(require_permission("users.manage", "jurisdiction_super_admin.assign")),  # noqa: B008
+    admin_user: User = Depends(require_permission("users.manage", "jurisdiction_super_admin.assign")),
 ) -> AdminUsersResponse:
     """Users with their assignments, ordered by email, then the people added by email who have
     not signed in (``pending``). A JurisdictionAdministrator lists the jurisdiction it acts in; a
@@ -144,6 +151,7 @@ def create_assignment(
             email=body.email,
             jurisdiction_code=body.jurisdiction,
             role=body.role,
+            tester=body.tester,
         )
     return AssignmentCreated(
         **_assignment(view).model_dump(), user_id=view.user_id, email=view.email, pending=view.pending
@@ -165,7 +173,7 @@ def delete_assignment(
 @router.post("/users/{user_id}/deactivate", status_code=204)
 def deactivate_user(
     user_id: UUID,
-    admin_user: User = Depends(require_permission("users.manage")),  # noqa: B008
+    admin_user: User = Depends(require_permission("users.manage")),
 ) -> Response:
     """Deactivate a user: they are refused at their next request, and cannot sign in again until
     reactivated. Nobody deactivates themselves. Idempotent."""
@@ -177,7 +185,7 @@ def deactivate_user(
 @router.post("/users/{user_id}/reactivate", status_code=204)
 def reactivate_user(
     user_id: UUID,
-    admin_user: User = Depends(require_permission("users.manage")),  # noqa: B008
+    admin_user: User = Depends(require_permission("users.manage")),
 ) -> Response:
     """Reactivate a deactivated user. Idempotent."""
     with Session(db_connection.get_engine()) as session:
@@ -224,7 +232,7 @@ def get_role_history(
     jurisdiction: str | None = Query(default=None, max_length=16),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
-    admin_user: User = Depends(require_permission("role_audit.read")),  # noqa: B008
+    admin_user: User = Depends(require_permission("role_audit.read")),
 ) -> RoleHistoryResponse:
     """Who changed whose roles, newest first: assignments added and removed, users deactivated and
     reactivated, jurisdictions left, access requests decided. A JurisdictionAdministrator reads its

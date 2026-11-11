@@ -31,8 +31,19 @@ A new jurisdiction goes through three **stages**, without a release:
 | **Test** | its admins, and the members marked **tester** (the test group) |
 | **Live** | every member |
 
-**Enabled** still switches a jurisdiction off for everyone, whatever its stage. Every
-jurisdiction from before stages is live (migration `0007`), so nothing changes for it.
+**Enabled** still switches a jurisdiction off for everyone, whatever its stage (and nobody
+can be given a role in a disabled one). Every jurisdiction from before stages is live
+(migration `0007`), so nothing changes for it.
+
+A user acts in a context they hold (a role in a jurisdiction: see
+[`../authz-token-and-context.md`](../authz-token-and-context.md)), and a context in a jurisdiction
+their stage does not let them see is not offered to them (`domain/assignments.load_assignments`,
+`domain/jurisdiction_stages.sees`). A JurisdictionAdministrator is offered it at every stage (with
+Judge and LegalTextManager there), a **tester** (the `tester` flag of a Judge or LegalTextManager
+assignment, set when it is made: `POST /api/admin/assignments` with `"tester": true`) from the test
+stage, and everyone else only when it is live. The stage, display name and
+service of a jurisdiction are changed by a JurisdictionSuperAdministrator only, as its name and
+whether it is on.
 
 **Deploying the release that adds stages:** wait for its rollout to finish before you
 create a jurisdiction or change one's stage. Until then, pods still running the

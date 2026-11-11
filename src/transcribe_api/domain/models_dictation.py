@@ -78,15 +78,15 @@ class User(BaseTable, table=True):
     azure_user_id: str = Field(unique=True, index=True)
     has_completed_onboarding: bool = Field(default=False)
     # Retired (DIAAT-382): nothing reads or writes it any more; a user's roles are their
-    # role_assignment rows. NULL for users created since 0007 (a new user has no role).
+    # role_assignment rows. NULL for users created since 0009 (a new user has no role).
     # Dropped in a later release, with jurisdiction_membership and jurisdiction.auto_enrol.
     role: str | None = Field(default=None, index=True)
     # Retired (DIAAT-390): the active jurisdiction is chosen per session (the BenchNotes
     # token's ctx), not remembered here. Dropped in a later release.
     active_jurisdiction_id: UUID | None = Field(default=None, foreign_key="jurisdiction.id")
-    # 0007 (DIAAT-382): display name from the sign-in (Entra ``name`` claim).
+    # 0009 (DIAAT-382): display name from the sign-in (Entra ``name`` claim).
     name: str | None = Field(default=None)
-    # 0007: a deactivated user is refused at sign-in and never re-enabled by it.
+    # 0009: a deactivated user is refused at sign-in and never re-enabled by it.
     is_active: bool = Field(default=True)
     transcriptions: list["Transcription"] = Relationship(back_populates="user")
 
@@ -142,7 +142,7 @@ class UploadJurisdiction(SQLModel, table=True):
 
 class JurisdictionMembership(SQLModel, table=True):
     """A user's role in a jurisdiction (DIAAT-322, 0004). Retired by DIAAT-382: nothing
-    reads it since role_assignment (0007, backfilled from this table) took over; dropped
+    reads it since role_assignment (0009, backfilled from this table) took over; dropped
     in a later release.
 
     ``user_id`` is NULL for someone added by email before their first sign-in: the row
@@ -181,7 +181,7 @@ STORED_ROLES_SQL = "'Judge', 'LegalTextManager', 'JurisdictionAdministrator', 'J
 
 
 class RoleAssignment(SQLModel, table=True):
-    """A user's role in a jurisdiction (DIAAT-382, 0007): the source of truth for what a
+    """A user's role in a jurisdiction (DIAAT-382, 0009): the source of truth for what a
     user may be, replacing user.role and jurisdiction_membership (and its ``tester`` flag).
 
     One row per (user, jurisdiction, role). Judge, LegalTextManager and
@@ -261,7 +261,7 @@ ACCESS_REQUEST_STATUSES = ("pending", "approved", "rejected", "withdrawn")
 
 
 class AccessRequest(SQLModel, table=True):
-    """A user's request for roles in a jurisdiction (DIAAT-396, 0007), approved or
+    """A user's request for roles in a jurisdiction (DIAAT-396, 0009), approved or
     rejected by a JurisdictionAdministrator of it or a JurisdictionSuperAdministrator.
     The roles asked for are ``access_request_role`` rows."""
 
@@ -297,7 +297,7 @@ class AccessRequestRole(SQLModel, table=True):
 
 
 class SystemFeatureFlag(SQLModel, table=True):
-    """A system-wide switch a SystemAdministrator sets (DIAAT-392, 0007). A flag with no
+    """A system-wide switch a SystemAdministrator sets (DIAAT-392, 0009). A flag with no
     row has its default (from configuration)."""
 
     __tablename__ = "system_feature_flag"
@@ -453,7 +453,7 @@ class AuditLog(SQLModel, table=True):
     object_id: str | None = Field(default=None, max_length=64, index=True)
     # hmcts.request.id: joins the row to the request's telemetry.
     request_id: str | None = Field(default=None, max_length=64, index=True)
-    # 0007 (DIAAT-390): the jurisdiction and role the actor was acting in. NULL on older
+    # 0009 (DIAAT-390): the jurisdiction and role the actor was acting in. NULL on older
     # rows, on a global role's rows (no jurisdiction) and where no context was chosen.
     active_jurisdiction_id: UUID | None = Field(default=None)
     active_role: str | None = Field(default=None, max_length=32)

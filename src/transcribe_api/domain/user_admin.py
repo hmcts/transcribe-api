@@ -53,8 +53,10 @@ from transcribe_api.domain.auth.authorisation import (
 from transcribe_api.domain.auth.context import error
 from transcribe_api.domain.auth.permissions import (
     GLOBAL_ROLES,
+    ROLE_JUDGE,
     ROLE_JURISDICTION_ADMIN,
     ROLE_JURISDICTION_SUPER_ADMIN,
+    ROLE_LEGAL_TEXT_MANAGER,
     ROLE_SYSTEM_ADMIN,
     STORED_ROLES,
     assignable_roles,
@@ -199,6 +201,8 @@ class AssignmentView:
     user_id: UUID | None
     email: str | None
     pending: bool
+    # In the jurisdiction's test group (DIAAT-345): of a Judge or LegalTextManager.
+    tester: bool = False
 
 
 def _view(row: RoleAssignment, jurisdiction: Jurisdiction | None, user: User | None) -> AssignmentView:
@@ -210,6 +214,7 @@ def _view(row: RoleAssignment, jurisdiction: Jurisdiction | None, user: User | N
         user_id=row.user_id,
         email=(user.email if user else row.pending_email),
         pending=row.user_id is None,
+        tester=row.tester,
     )
 
 
@@ -278,10 +283,12 @@ def create_assignment(
     email: str | None,
     jurisdiction_code: str | None,
     role: str,
+    tester: bool = False,
 ) -> AssignmentView:
     """Give a user, or an email (pending until they first sign in), a role. 400 for what is not
     a valid assignment, 403 for what the rules refuse, 404 for an unknown user or jurisdiction,
-    409 if they already hold it."""
+    409 if they already hold it. ``tester``: in the jurisdiction's test group, who see it while it
+    is at stage "test" (DIAAT-345); for a Judge or LegalTextManager only."""
     if (user_id is None) == (not (email or "").strip()):
         raise error(400, "invalid_target", "Name the user (user_id) or an email, not both and not neither.")
     if role != ROLE_SYSTEM_ADMIN and role not in STORED_ROLES:
@@ -326,6 +333,8 @@ def create_assignment(
         raise error(400, "invalid_assignment", f"{role} is global: it has no jurisdiction.")
     if role not in GLOBAL_ROLES and jurisdiction is None:
         raise error(400, "invalid_assignment", f"{role} needs a jurisdiction.")
+    if tester and role not in (ROLE_JUDGE, ROLE_LEGAL_TEXT_MANAGER):
+        raise error(400, "invalid_assignment", "Only a judge or legal text manager is in a test group.")
     try:
         row = assignment_service.add_assignment(
             session,
@@ -334,6 +343,7 @@ def create_assignment(
             user_id=target.id if target else None,
             email=pending_email,
             granted_by=actor.id,  # type: ignore[attr-defined]
+            tester=tester,
         )
         # In the same transaction: if the audit row cannot be written the assignment is not made.
         audit_role_change(
@@ -344,6 +354,7 @@ def create_assignment(
             target_user_id=row.user_id,
             target_email=row.pending_email,
             role=role,
+            extra={"tester": True} if tester else None,
         )
         session.commit()
     except assignment_service.DuplicateAssignmentError:
