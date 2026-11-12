@@ -558,8 +558,11 @@ def test_decisions_are_in_the_role_history_of_their_jurisdiction(world, cast):
     assert iac[0]["actor_context"] == {"jurisdiction": "IAC", "role": ADMIN}
     et = cast.jadmin_et.get("/api/admin/role-history", role=ADMIN, jurisdiction="ET").json()["items"]
     assert [(e["change"], e["jurisdiction"], e["role"]) for e in et] == [("access_request.rejected", "ET", LTM)]
-    refused = cast.jsuper.get("/api/admin/role-history", role=SUPER)
-    assert refused.status_code == 403 and code(refused) == "permission_denied"
+    both = cast.jsuper.get("/api/admin/role-history", role=SUPER).json()["items"]
+    assert sorted((e["change"], e["jurisdiction"]) for e in both) == [
+        ("access_request.approved", "IAC"),
+        ("access_request.rejected", "ET"),
+    ]
 
 
 def test_every_change_the_history_documents_can_appear(world, cast):

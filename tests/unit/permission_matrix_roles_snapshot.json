@@ -56,7 +56,8 @@
     "SystemAdministrator"
   ],
   "GET /api/admin/role-history": [
-    "JurisdictionAdministrator"
+    "JurisdictionAdministrator",
+    "JurisdictionSuperAdministrator"
   ],
   "GET /api/admin/roles": [
     "JurisdictionAdministrator",
@@ -89,9 +90,6 @@
   ],
   "GET /api/jurisdictions/templates": [
     "Judge"
-  ],
-  "GET /api/jurisdictions/wording": [
-    "JurisdictionSuperAdministrator"
   ],
   "GET /api/live-draft": [
     "Judge"
@@ -196,10 +194,12 @@
     "JurisdictionAdministrator"
   ],
   "POST /api/admin/users/{user_id}/deactivate": [
-    "JurisdictionAdministrator"
+    "JurisdictionAdministrator",
+    "JurisdictionSuperAdministrator"
   ],
   "POST /api/admin/users/{user_id}/reactivate": [
-    "JurisdictionAdministrator"
+    "JurisdictionAdministrator",
+    "JurisdictionSuperAdministrator"
   ],
   "POST /api/generate-or-edit-minutes": [
     "Judge"
@@ -298,9 +298,6 @@
     "JurisdictionAdministrator"
   ],
   "PUT /api/admin/jurisdictions/{code}/wording": [
-    "JurisdictionSuperAdministrator"
-  ],
-  "PUT /api/jurisdictions/wording": [
     "JurisdictionSuperAdministrator"
   ],
   "PUT /api/live-draft": [

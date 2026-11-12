@@ -8,34 +8,29 @@ change it are gone.
 ``GET /api/jurisdictions/current`` is the active jurisdiction's own setup: what the web app
 loads once a context is chosen (its template, its features and its wording).
 
-``/api/jurisdictions/wording`` is the screen wording of the jurisdiction the caller works in
-(DIAAT-356). It needs ``jurisdiction.wording.edit``, which since DIAAT-406 only the global
-JurisdictionSuperAdministrator holds, and it has no active jurisdiction to edit here (403
-``no_jurisdiction``): it edits screen wording from the Jurisdictions screen
-(``/api/admin/jurisdictions/{code}/wording``). Who, if anyone, edits it from within a jurisdiction is
-still to be decided.
+A jurisdiction's screen wording is edited only by the JurisdictionSuperAdministrator, from the
+Jurisdictions screen (``/api/admin/jurisdictions/{code}/wording``, DIAAT-406); the models it shares are
+here.
 """
 
 from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel
 from sqlmodel import Session
 
-from transcribe_api import jurisdiction_templates, jurisdictions_admin
-from transcribe_api.domain.audit import record_audit
+from transcribe_api import jurisdiction_templates
 from transcribe_api.domain.auth.dependencies_dictation import (
     get_active_jurisdiction,
     require_permission,
 )
 from transcribe_api.domain.jurisdictions import (
-    WORDING_KEYS,
     ActiveJurisdiction,
     JurisdictionFeatures,
 )
-from transcribe_api.domain.models_dictation import JurisdictionTemplate, User
+from transcribe_api.domain.models_dictation import JurisdictionTemplate
 from transcribe_api.runtime.db_connection import get_engine
 
 router = APIRouter(tags=["jurisdictions"])
@@ -84,65 +79,6 @@ class JurisdictionWording(BaseModel):
 class WordingUpdate(BaseModel):
     wording: dict[str, str]
     version: str | None = None
-
-
-def _wording_scope(
-    response: Response,
-    _user=Depends(require_permission("jurisdiction.wording.edit")),
-    active: ActiveJurisdiction = Depends(get_active_jurisdiction),
-) -> ActiveJurisdiction:
-    """The request's jurisdiction, for someone who may edit its wording (``jurisdiction.wording.edit``).
-    The permission is the active role's, and applies to the jurisdiction they are working in (the
-    token's context, which is always one of their own): holding it in one jurisdiction gives
-    nothing in another."""
-    response.headers["Cache-Control"] = "no-store"
-    return active
-
-
-def _wording(active: ActiveJurisdiction, wording: dict[str, str], version: str) -> JurisdictionWording:
-    return JurisdictionWording(
-        code=active.code, name=active.current.shown_name, keys=WORDING_KEYS, wording=wording, version=version
-    )
-
-
-# Plain defs, as above.
-@router.get("/jurisdictions/wording", response_model=JurisdictionWording)
-def jurisdiction_wording(active: ActiveJurisdiction = Depends(_wording_scope)) -> JurisdictionWording:
-    """The wording of the jurisdiction the admin is working in."""
-    with Session(get_engine()) as session:
-        wording, version = jurisdictions_admin.wording_and_version(session, active.code)
-    return _wording(active, wording, version)
-
-
-@router.put("/jurisdictions/wording", response_model=JurisdictionWording)
-def update_jurisdiction_wording(
-    body: WordingUpdate,
-    active: ActiveJurisdiction = Depends(_wording_scope),
-    current_user: User = Depends(require_permission("jurisdiction.wording.edit")),
-) -> JurisdictionWording:
-    """Replace that jurisdiction's wording; blank text means the default. 400 for an
-    unknown key or text that is too long, 409 if it changed since ``version``."""
-    with Session(get_engine()) as session:
-        try:
-            saved = jurisdictions_admin.set_wording(
-                session, active.code, body.wording, expected_version=body.version
-            )
-        except jurisdictions_admin.ConflictError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from None
-        except jurisdictions_admin.NotFoundError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from None
-        except jurisdictions_admin.AdminError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from None
-    before, wording = saved.before, saved.wording
-    changed = sorted(key for key in set(before) | set(wording) if before.get(key) != wording.get(key))
-    record_audit(
-        "jurisdiction.edit",
-        actor_id=current_user.id,
-        outcome="success",
-        object_type="jurisdiction",
-        detail={"code": active.code, "fields": ["wording"], "wording_keys_changed": changed},
-    )
-    return _wording(active, wording, saved.version)
 
 
 # DIAAT-344: the uploaded templates a judge can choose ---------------------------------

@@ -172,7 +172,7 @@ def test_a_system_administrator_acting_as_a_jurisdiction_administrator_lists_onl
     assert outside.status_code == 403 and code(outside) == "jurisdiction_not_in_scope"
 
 
-def test_a_system_administrator_acting_as_a_super_administrator_still_cannot_deactivate_another_one(world, cast):
+def test_a_system_administrator_acting_as_a_super_administrator_deactivates_another_one(world, cast):
     assert (
         cast.sysadmin.post(
             "/api/admin/assignments",
@@ -183,13 +183,13 @@ def test_a_system_administrator_acting_as_a_super_administrator_still_cannot_dea
 
     response = cast.sysadmin.post(f"/api/admin/users/{cast.jsuper.user_id}/deactivate", role=SUPER)
 
-    assert response.status_code == 403 and code(response) == "permission_denied"
-    assert world.user(cast.jsuper).is_active is True
+    assert response.status_code == 204
+    assert world.user(cast.jsuper).is_active is False
 
 
 def test_a_system_administrator_with_no_context_still_finds_who_to_make_an_administrator(world, cast):
     """Its own permission (jurisdiction_super_admin.assign) reaches the user list: unchanged, for the
-    Super administrators screen (it lists, it cannot deactivate: that needs users.manage)."""
+    Super administrators screen (it lists, it cannot deactivate: that needs users.manage or accounts.manage)."""
     page = cast.sysadmin.get("/api/admin/users").json()
     emails = {item["email"] for item in page["items"]}
     assert {cast.judge_iac.email, cast.judge_et.email, cast.jsuper.email} <= emails

@@ -105,9 +105,6 @@
     "dictation.use",
     "recording.own"
   ],
-  "GET /api/jurisdictions/wording": [
-    "jurisdiction.wording.edit"
-  ],
   "GET /api/live-draft": [
     "dictation.use"
   ],
@@ -219,9 +216,11 @@
     "templates.manage"
   ],
   "POST /api/admin/users/{user_id}/deactivate": [
+    "accounts.manage",
     "users.manage"
   ],
   "POST /api/admin/users/{user_id}/reactivate": [
+    "accounts.manage",
     "users.manage"
   ],
   "POST /api/auth/session": [
@@ -312,9 +311,6 @@
     "templates.manage"
   ],
   "PUT /api/admin/jurisdictions/{code}/wording": [
-    "jurisdiction.wording.edit"
-  ],
-  "PUT /api/jurisdictions/wording": [
     "jurisdiction.wording.edit"
   ],
   "PUT /api/live-draft": [

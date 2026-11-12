@@ -14,8 +14,9 @@ acting in it (DIAAT-403): acting as any other role, they have that role's permis
 more, like anyone else. It is invisible to everyone else (never assignable, never listed).
 
 Responsibilities (DIAAT-406): the SystemAdministrator appoints JurisdictionSuperAdministrators; the
-JurisdictionSuperAdministrator manages only jurisdictions (their settings and screen wording) and appoints
-their JurisdictionAdministrators; a JurisdictionAdministrator manages its jurisdiction's users (Judge and
+JurisdictionSuperAdministrator manages jurisdictions (their settings and screen wording), appoints their
+JurisdictionAdministrators, deactivates and reactivates any user account (``accounts.manage``) and reads
+the role history of every jurisdiction; a JurisdictionAdministrator manages its jurisdiction's users (Judge and
 LegalTextManager), templates and access requests; a LegalTextManager its Document Content (hearing types,
 legal frameworks, anonymity); a Judge dictates and transcribes. Every role a user acts in is one they were
 given: none is derived from another. A user holds any combination of roles in any number of jurisdictions,
@@ -73,6 +74,7 @@ PERMISSIONS: tuple[str, ...] = (
     "document_content.read",
     "document_content.write",
     "users.manage",
+    "accounts.manage",
     "jurisdiction_admin.assign",
     "jurisdiction_super_admin.assign",
     "role_audit.read",
@@ -122,6 +124,8 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
         _COMMON
         | {
             "admin.access",
+            "accounts.manage",
+            "role_audit.read",
             "jurisdiction.create",
             "jurisdictions.manage",
             "jurisdiction.wording.edit",

@@ -566,12 +566,11 @@ def test_who_reaches_every_route_per_active_role_is_the_committed_snapshot(route
 
 def test_each_admin_area_is_reached_by_its_one_role(routes):
     """DIAAT-406: users, approvals and templates are the JurisdictionAdministrator's, jurisdictions the
-    JurisdictionSuperAdministrator's, legal text the LegalTextManager's."""
+    JurisdictionSuperAdministrator's, legal text the LegalTextManager's; deactivation and the role history
+    are both administrators' (each with its own scope)."""
     by_key = {r.key: r for r in routes}
     areas = {
         "JurisdictionAdministrator": [
-            ("POST", "/api/admin/users/{user_id}/deactivate"),
-            ("GET", "/api/admin/role-history"),
             ("GET", "/api/admin/access-requests"),
             ("POST", "/api/admin/access-requests/{request_id}/approve"),
             ("POST", "/api/admin/access-requests/{request_id}/reject"),
@@ -597,6 +596,13 @@ def test_each_admin_area_is_reached_by_its_one_role(routes):
         for key in keys:
             reached = [role for role in ACTIVE_ROLES if allowed(PERSONAS[role], by_key[key])]
             assert reached == [owner], (key, reached)
+    for key in (
+        ("POST", "/api/admin/users/{user_id}/deactivate"),
+        ("POST", "/api/admin/users/{user_id}/reactivate"),
+        ("GET", "/api/admin/role-history"),
+    ):
+        reached = [role for role in ACTIVE_ROLES if allowed(PERSONAS[role], by_key[key])]
+        assert reached == ["JurisdictionAdministrator", "JurisdictionSuperAdministrator"], (key, reached)
 
 
 def test_the_matrix_is_printed(routes, capsys):
@@ -620,8 +626,8 @@ ADMIN_ROUTE_PERMISSIONS: dict[tuple[str, str], set[str]] = {
         "jurisdiction_admin.assign",
         "jurisdiction_super_admin.assign",
     },
-    ("POST", "/api/admin/users/{user_id}/deactivate"): {"users.manage"},
-    ("POST", "/api/admin/users/{user_id}/reactivate"): {"users.manage"},
+    ("POST", "/api/admin/users/{user_id}/deactivate"): {"users.manage", "accounts.manage"},
+    ("POST", "/api/admin/users/{user_id}/reactivate"): {"users.manage", "accounts.manage"},
     ("GET", "/api/admin/role-history"): {"role_audit.read"},
     ("GET", "/api/admin/access-requests"): {"access.approve"},
     ("POST", "/api/admin/access-requests/{request_id}/approve"): {"access.approve"},

@@ -413,11 +413,12 @@ def _role_may_assign(actor: object, role: str) -> bool:
 def set_user_active(session: Session, actor: object, user_id: UUID, *, active: bool) -> bool:
     """Deactivate or reactivate a user (instead of deleting them); False if they already were.
 
-    Needs ``users.manage``. 403 ``cannot_deactivate_self`` for the actor's own account. A
-    JurisdictionAdministrator reaches only users whose roles are all in the jurisdiction it acts
-    in (404 for any other: they are not in its list; 403 ``assignment_not_allowed`` for one who
-    also works elsewhere, since deactivation is across every jurisdiction), and, like every
-    actor, may not touch a user who holds an administrator role it may not assign."""
+    Nobody deactivates themselves (403 ``cannot_deactivate_self``). The JurisdictionSuperAdministrator
+    (``accounts.manage``) reaches any account, administrators and users of several jurisdictions included
+    (DIAAT-406). A JurisdictionAdministrator (``users.manage``) reaches only users whose roles are all in
+    the jurisdiction it acts in (404 for any other: they are not in its list; 403 ``assignment_not_allowed``
+    for one who also works elsewhere, since deactivation is across every jurisdiction), and never one who
+    holds an administrator role."""
     target = session.get(User, user_id)
     if target is None:
         raise error(404, "user_not_found", "There is no such user.")
@@ -428,11 +429,9 @@ def set_user_active(session: Session, actor: object, user_id: UUID, *, active: b
         .join(Jurisdiction, Jurisdiction.id == RoleAssignment.jurisdiction_id, isouter=True)
         .where(RoleAssignment.user_id == user_id)
     ).all()
-    # The scope is the role's (a SystemAdministrator who acts in a stored role has that role's, not a
-    # global one: the system permissions give no say over users).
-    scope = jurisdiction_scope(actor)
-    if scope is not None:
-        in_scope = [row for row, j in held if j is not None and j.code in scope]
+    if not has_permission(actor, "accounts.manage"):
+        scope = jurisdiction_scope(actor)
+        in_scope = [row for row, j in held if j is not None and scope is not None and j.code in scope]
         if not in_scope:
             raise error(404, "user_not_found", "There is no such user.")
         if len(in_scope) != len(held):
@@ -441,13 +440,9 @@ def set_user_active(session: Session, actor: object, user_id: UUID, *, active: b
                 ASSIGNMENT_NOT_ALLOWED,
                 "That user has roles in other jurisdictions too: remove their roles here instead.",
             )
-    for row, j in held:
-        # Whoever may not assign a role (as the role they act in: the SystemAdministrator's own
-        # permissions do not count here) may not switch its holder off.
-        if row.role == ROLE_JURISDICTION_SUPER_ADMIN and not _role_may_assign(actor, row.role):
-            raise refuse(actor, ASSIGNMENT_NOT_ALLOWED, "You cannot deactivate a JurisdictionSuperAdministrator.")
-        if row.role == ROLE_JURISDICTION_ADMIN and not _role_may_assign(actor, row.role):
-            raise refuse(actor, ASSIGNMENT_NOT_ALLOWED, "You cannot deactivate a JurisdictionAdministrator.")
+        for row, _j in held:
+            if not _role_may_assign(actor, row.role):
+                raise refuse(actor, ASSIGNMENT_NOT_ALLOWED, f"You cannot deactivate a {row.role}.")
     if target.is_active == active:
         return False
     target.is_active = active
@@ -715,10 +710,18 @@ def _uuid(value: object) -> UUID | None:
 
 
 def role_history(
-    session: Session, actor: object, *, jurisdiction: str | None, page: int, page_size: int
+    session: Session,
+    actor: object,
+    *,
+    jurisdiction: str | None,
+    page: int,
+    page_size: int,
+    user_id: UUID | None = None,
 ) -> HistoryPage:
-    """The role changes (``ROLE_CHANGE_ACTIONS``), newest first: a JurisdictionAdministrator
-    (``role_audit.read``) reads those of the jurisdiction it acts in (403 for another via ``jurisdiction=``)."""
+    """The role changes (``ROLE_CHANGE_ACTIONS``), newest first. A JurisdictionAdministrator reads those of
+    the jurisdiction it acts in (403 for another via ``jurisdiction=``); the JurisdictionSuperAdministrator
+    all of them, the global ones included, or one jurisdiction's with ``jurisdiction=``. ``user_id``: only
+    the changes made to that user (who left a jurisdiction is the row's actor)."""
     scope = jurisdiction_scope(actor)
     query = select(AuditLog).where(AuditLog.event_type.in_(ROLE_CHANGE_ACTIONS))  # type: ignore[attr-defined]
     count_query = select(func.count(AuditLog.id)).where(AuditLog.event_type.in_(ROLE_CHANGE_ACTIONS))  # type: ignore[attr-defined,arg-type]
@@ -734,6 +737,12 @@ def role_history(
         keep = (AuditLog.object_type == "jurisdiction") & AuditLog.object_id.in_([str(i) for i in wanted_ids])  # type: ignore[union-attr]
         query = query.where(keep)
         count_query = count_query.where(keep)
+    if user_id is not None:
+        about = (AuditLog.detail["target_user_id"].as_string() == str(user_id)) | (  # type: ignore[index]
+            (AuditLog.event_type == CHANGE_MEMBERSHIP_LEAVE) & (AuditLog.user_id == str(user_id))
+        )
+        query = query.where(about)
+        count_query = count_query.where(about)
     total = session.exec(count_query).one()
     rows = session.exec(
         query.order_by(AuditLog.timestamp.desc(), AuditLog.id).offset((page - 1) * page_size).limit(page_size)  # type: ignore[attr-defined]

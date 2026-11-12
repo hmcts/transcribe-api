@@ -95,22 +95,8 @@ def test_a_jurisdiction_administrator_edits_no_wording_not_even_its_own(world, c
                 json={"wording": {"home.intro": "Hello from the ET"}},
             )
         )
-    for method in ("get", "put"):
-        kwargs = {"json": {"wording": {"home.intro": "Hello from the ET"}}} if method == "put" else {}
-        response = getattr(cast.jadmin_et, method)(
-            "/api/jurisdictions/wording", role=ADMIN, jurisdiction="ET", **kwargs
-        )
-        assert _permission_denied(response), method
     assert "home.intro" not in stored(world.engine, "ET")["wording"]
     assert stored(world.engine, "IAC")["wording"].get("home.intro") != "Hello from the ET"
-
-
-def test_the_super_administrator_has_no_jurisdiction_whose_screen_wording_it_edits_in_place(world, cast):
-    for method in ("get", "put"):
-        kwargs = {"json": {"wording": {"home.intro": "x"}}} if method == "put" else {}
-        response = getattr(cast.jsuper, method)("/api/jurisdictions/wording", role=SUPER, **kwargs)
-        assert response.status_code == 403 and response.json()["detail"]["code"] == "no_jurisdiction", method
-    assert "home.intro" not in stored(world.engine, "ET")["wording"]
 
 
 def test_a_stale_version_is_a_conflict_and_changes_nothing(world, cast):
@@ -163,10 +149,6 @@ def test_nobody_else_edits_wording_by_code(world, cast, who, role, at):
 
 def test_a_judge_promoted_to_administrator_still_edits_no_wording_and_loses_the_role_when_demoted(world, cast):
     """The product team's flow end to end, by the real assignment endpoints."""
-    assert (
-        cast.judge.put("/api/jurisdictions/wording", role=JUDGE, jurisdiction="ET", json={"wording": {}}).status_code
-        == 403
-    )
     created = cast.jsuper.post(
         "/api/admin/assignments",
         role=SUPER,
@@ -183,11 +165,6 @@ def test_a_judge_promoted_to_administrator_still_edits_no_wording_and_loses_the_
             role=ADMIN,
             jurisdiction="ET",
             json={"wording": {"home.intro": "Hello"}},
-        )
-    )
-    assert _permission_denied(
-        cast.judge.put(
-            "/api/jurisdictions/wording", role=ADMIN, jurisdiction="ET", json={"wording": {"home.intro": "Hi"}}
         )
     )
     assert "home.intro" not in stored(world.engine, "ET")["wording"]

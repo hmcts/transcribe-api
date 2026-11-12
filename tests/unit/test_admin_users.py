@@ -450,13 +450,32 @@ def test_a_jurisdiction_administrator_may_not_deactivate_another_administrator(w
     assert world.user(other_admin).is_active is True
 
 
-@pytest.mark.parametrize("action", ["deactivate", "reactivate"])
-def test_a_super_administrator_cannot_deactivate_or_reactivate(world, cast, action):
-    for target in (cast.judge_iac, cast.jadmin_iac, cast.nobody):
-        refused = cast.jsuper.post(f"/api/admin/users/{target.user_id}/{action}", role=SUPER)
-        assert refused.status_code == 403 and code(refused) == "permission_denied"
+def test_a_super_administrator_deactivates_and_reactivates_any_account(world, cast):
+    """DIAAT-406: administrators and users of several jurisdictions included, which no
+    JurisdictionAdministrator can reach."""
+    other_super = world.person("Other Super", (None, SUPER))
+    for target in (cast.judge_iac, cast.jadmin_iac, cast.both, cast.nobody, other_super):
+        off = cast.jsuper.post(f"/api/admin/users/{target.user_id}/deactivate", role=SUPER)
+        assert off.status_code == 204, (target.email, off.text)
+        assert world.user(target).is_active is False
+        on = cast.jsuper.post(f"/api/admin/users/{target.user_id}/reactivate", role=SUPER)
+        assert on.status_code == 204
         assert world.user(target).is_active is True
-    assert world.audit(f"user.{action}d") == []
+    assert len(world.audit("user.deactivated")) == len(world.audit("user.reactivated")) == 5
+
+
+def test_a_super_administrator_does_not_deactivate_itself(world, cast):
+    refused = cast.jsuper.post(f"/api/admin/users/{cast.jsuper.user_id}/deactivate", role=SUPER)
+    assert refused.status_code == 403 and code(refused) == "cannot_deactivate_self"
+    assert world.user(cast.jsuper).is_active is True
+
+
+def test_a_deactivated_account_is_refused_whichever_jurisdiction_it_works_in(world, cast):
+    tokens = [cast.both.headers(JUDGE, "IAC"), cast.both.headers(LTM, "ET")]
+    assert cast.jsuper.post(f"/api/admin/users/{cast.both.user_id}/deactivate", role=SUPER).status_code == 204
+    for token in tokens:
+        refused = world.client.get("/api/user/onboarding-status", headers=token)
+        assert refused.status_code == 403 and code(refused) == "user_deactivated"
 
 
 def test_a_system_administrator_and_a_judge_cannot_deactivate(world, cast):
@@ -547,10 +566,65 @@ def test_a_jurisdiction_administrator_reads_its_own_jurisdictions_history_only(w
     assert [(e["jurisdiction"], e["role"]) for e in theirs["items"]] == [("ET", JUDGE)]
 
 
-def test_a_super_administrator_cannot_read_the_history(world, cast):
-    for params in ({}, {"jurisdiction": "IAC"}):
-        refused = _history(cast.jsuper, role=SUPER, **params)
-        assert refused.status_code == 403 and code(refused) == "permission_denied"
+def test_a_super_administrator_reads_every_jurisdictions_history_and_the_global_changes(world, cast):
+    cast.jadmin_iac.post(
+        "/api/admin/assignments",
+        role=ADMIN,
+        jurisdiction="IAC",
+        json={"user_id": str(cast.nobody.user_id), "role": JUDGE, "jurisdiction": "IAC"},
+    )
+    cast.jadmin_et.post(
+        "/api/admin/assignments",
+        role=ADMIN,
+        jurisdiction="ET",
+        json={"user_id": str(cast.nobody.user_id), "role": LTM, "jurisdiction": "ET"},
+    )
+    cast.jsuper.post(f"/api/admin/users/{cast.nobody.user_id}/deactivate", role=SUPER)
+    everything = _history(cast.jsuper, role=SUPER).json()["items"]
+    assert {(e["change"], e["jurisdiction"]) for e in everything} >= {
+        ("assignment.added", "IAC"),
+        ("assignment.added", "ET"),
+        ("user.deactivated", None),
+    }
+    iac = _history(cast.jsuper, role=SUPER, jurisdiction="IAC").json()["items"]
+    assert {e["jurisdiction"] for e in iac} == {"IAC"}
+
+
+def test_one_users_history_is_across_jurisdictions_for_the_super_administrator_and_its_own_for_an_administrator(
+    world, cast
+):
+    for admin, at, role in ((cast.jadmin_iac, "IAC", JUDGE), (cast.jadmin_et, "ET", LTM)):
+        assert (
+            admin.post(
+                "/api/admin/assignments",
+                role=ADMIN,
+                jurisdiction=at,
+                json={"user_id": str(cast.nobody.user_id), "role": role, "jurisdiction": at},
+            ).status_code
+            == 201
+        )
+    cast.jadmin_iac.post(
+        "/api/admin/assignments",
+        role=ADMIN,
+        jurisdiction="IAC",
+        json={"user_id": str(cast.judge_et.user_id), "role": JUDGE, "jurisdiction": "IAC"},
+    )
+    left = cast.nobody.delete("/api/me/jurisdictions/ET", role=LTM, jurisdiction="ET")
+    assert left.status_code == 200
+
+    theirs = _history(cast.jsuper, role=SUPER, user=str(cast.nobody.user_id)).json()
+    assert theirs["total"] == 3
+    assert sorted((e["change"], e["jurisdiction"]) for e in theirs["items"]) == [
+        ("assignment.added", "ET"),
+        ("assignment.added", "IAC"),
+        ("membership.leave", "ET"),
+    ]
+    assert {e["target"]["id"] for e in theirs["items"]} == {str(cast.nobody.user_id)}
+
+    in_iac = _history(cast.jadmin_iac, role=ADMIN, at="IAC", user=str(cast.nobody.user_id)).json()["items"]
+    assert [(e["change"], e["jurisdiction"]) for e in in_iac] == [("assignment.added", "IAC")]
+    refused = _history(cast.jadmin_iac, role=ADMIN, at="IAC", jurisdiction="ET", user=str(cast.nobody.user_id))
+    assert refused.status_code == 403 and code(refused) == "jurisdiction_not_in_scope"
 
 
 def test_a_user_leaving_a_jurisdiction_is_in_its_history(world, cast):

@@ -7,7 +7,7 @@ import pytest
 from transcribe_api.domain.auth import permissions as p
 
 # The contract's list, exactly (authz-contract.md section 1).
-CONTRACT_PERMISSIONS = ["app.access", "context.switch", "access.request", "access.approve", "dictation.use", "recording.upload", "recording.own", "documents.export", "recording.audit.read", "recording.any.read", "recording.any.edit", "recording.any.delete", "dictation.any.read", "admin.access", "legal_text.manage", "templates.manage", "document_content.read", "document_content.write", "users.manage", "jurisdiction_admin.assign", "jurisdiction_super_admin.assign", "role_audit.read", "jurisdiction.create", "jurisdictions.manage", "jurisdiction.wording.edit", "jurisdiction.features", "feature_flags.manage", "system.settings", "security.alert_test"]
+CONTRACT_PERMISSIONS = ["app.access", "context.switch", "access.request", "access.approve", "dictation.use", "recording.upload", "recording.own", "documents.export", "recording.audit.read", "recording.any.read", "recording.any.edit", "recording.any.delete", "dictation.any.read", "admin.access", "legal_text.manage", "templates.manage", "document_content.read", "document_content.write", "users.manage", "accounts.manage", "jurisdiction_admin.assign", "jurisdiction_super_admin.assign", "role_audit.read", "jurisdiction.create", "jurisdictions.manage", "jurisdiction.wording.edit", "jurisdiction.features", "feature_flags.manage", "system.settings", "security.alert_test"]
 
 COMMON = ["app.access", "context.switch", "access.request"]
 
@@ -22,6 +22,8 @@ CONTRACT_ROLE_MAP = {
     "JurisdictionSuperAdministrator": COMMON
     + [
         "admin.access",
+        "accounts.manage",
+        "role_audit.read",
         "jurisdiction.create",
         "jurisdictions.manage",
         "jurisdiction.wording.edit",
@@ -141,6 +143,7 @@ def test_each_area_is_managed_by_one_role():
         permission: {role for role in p.STORED_ROLES if permission in p.permissions_for(role)}
         for permission in (
             "users.manage",
+            "accounts.manage",
             "access.approve",
             "templates.manage",
             "legal_text.manage",
@@ -150,6 +153,7 @@ def test_each_area_is_managed_by_one_role():
     }
     assert holders == {
         "users.manage": {"JurisdictionAdministrator"},
+        "accounts.manage": {"JurisdictionSuperAdministrator"},
         "access.approve": {"JurisdictionAdministrator"},
         "templates.manage": {"JurisdictionAdministrator"},
         "legal_text.manage": {"LegalTextManager"},

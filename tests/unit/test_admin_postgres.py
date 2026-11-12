@@ -211,6 +211,34 @@ def test_the_role_history_reads_the_jurisdictions_rows_by_object_and_is_paged(pg
     assert paged.total == 2 and [(e.jurisdiction, e.role) for e in paged.items] == [("IAC", JUDGE)]
 
 
+def test_one_users_role_history_is_read_by_the_json_target_on_the_real_schema(pg):
+    jurisdiction(pg, "IAC")
+    jurisdiction(pg, "ET")
+    admin_iac = acting(signed_up(pg, "AdminIAC"), ADMIN, "IAC")
+    admin_et = acting(signed_up(pg, "AdminET"), ADMIN, "ET")
+    super_admin = acting(signed_up(pg, "Super"), SUPER, None)
+    target = signed_up(pg, "Target")
+    other = signed_up(pg, "Other")
+    for actor, code, who in ((admin_iac, "IAC", target), (admin_et, "ET", target), (admin_iac, "IAC", other)):
+        with Session(pg) as session:
+            user_admin.create_assignment(session, actor, user_id=who.id, email=None, jurisdiction_code=code, role=JUDGE)
+    with Session(pg) as session:
+        user_admin.set_user_active(session, super_admin, target.id, active=False)
+    with Session(pg) as session:
+        everywhere = user_admin.role_history(
+            session, super_admin, jurisdiction=None, user_id=target.id, page=1, page_size=50
+        )
+        in_iac = user_admin.role_history(session, admin_iac, jurisdiction=None, user_id=target.id, page=1, page_size=50)
+    assert everywhere.total == 3
+    assert sorted((e.change, e.jurisdiction or "") for e in everywhere.items) == [
+        ("assignment.added", "ET"),
+        ("assignment.added", "IAC"),
+        ("user.deactivated", ""),
+    ]
+    assert {e.target_id for e in everywhere.items} == {str(target.id)}
+    assert [(e.change, e.jurisdiction) for e in in_iac.items] == [("assignment.added", "IAC")]
+
+
 # --- access requests ------------------------------------------------------------------------------------------------
 
 

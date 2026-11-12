@@ -9,8 +9,11 @@ DIAAT-394), under ``/api/admin``.
   by the rules in domain/user_admin.py (403 ``assignment_not_allowed``, 403
   ``jurisdiction_not_in_scope``). ``users.manage``, ``jurisdiction_admin.assign`` or
   ``jurisdiction_super_admin.assign``: which of them is enough depends on the role (the rules decide).
-* ``POST /admin/users/{id}/deactivate`` and ``/reactivate``: ``users.manage``.
-* ``GET /admin/role-history``: ``role_audit.read``.
+* ``POST /admin/users/{id}/deactivate`` and ``/reactivate``: ``users.manage`` (a JurisdictionAdministrator:
+  users whose roles are all in its jurisdiction) or ``accounts.manage`` (the JurisdictionSuperAdministrator:
+  any account but its own).
+* ``GET /admin/role-history``: ``role_audit.read`` (a JurisdictionAdministrator: its jurisdiction's; the
+  JurisdictionSuperAdministrator: all of it). ``user=`` narrows it to the changes made to one user.
 
 Every change is audited with the actor, the target and the change (domain/user_admin.py). Plain
 defs: the database work is synchronous, so FastAPI runs them in the threadpool.
@@ -175,7 +178,7 @@ def delete_assignment(
 @router.post("/users/{user_id}/deactivate", status_code=204)
 def deactivate_user(
     user_id: UUID,
-    admin_user: User = Depends(require_permission("users.manage")),
+    admin_user: User = Depends(require_permission("users.manage", "accounts.manage")),
 ) -> Response:
     """Deactivate a user: they are refused at their next request, and cannot sign in again until
     reactivated. Nobody deactivates themselves. Idempotent."""
@@ -187,7 +190,7 @@ def deactivate_user(
 @router.post("/users/{user_id}/reactivate", status_code=204)
 def reactivate_user(
     user_id: UUID,
-    admin_user: User = Depends(require_permission("users.manage")),
+    admin_user: User = Depends(require_permission("users.manage", "accounts.manage")),
 ) -> Response:
     """Reactivate a deactivated user. Idempotent."""
     with Session(db_connection.get_engine()) as session:
@@ -232,16 +235,20 @@ class RoleHistoryResponse(BaseModel):
 def get_role_history(
     response: Response,
     jurisdiction: str | None = Query(default=None, max_length=16),
+    user: UUID | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
     admin_user: User = Depends(require_permission("role_audit.read")),
 ) -> RoleHistoryResponse:
     """Who changed whose roles, newest first: assignments added and removed, users deactivated and
-    reactivated, jurisdictions left, access requests decided: those of the JurisdictionAdministrator's
-    jurisdiction."""
+    reactivated, jurisdictions left, access requests decided. A JurisdictionAdministrator reads its
+    jurisdiction's; the JurisdictionSuperAdministrator every jurisdiction's and the global ones
+    (``jurisdiction=`` narrows it). ``user=``: only the changes made to that user."""
     response.headers["Cache-Control"] = "no-store"
     with Session(db_connection.get_engine()) as session:
-        result = user_admin.role_history(session, admin_user, jurisdiction=jurisdiction, page=page, page_size=page_size)
+        result = user_admin.role_history(
+            session, admin_user, jurisdiction=jurisdiction, user_id=user, page=page, page_size=page_size
+        )
     return RoleHistoryResponse(
         items=[
             RoleHistoryItem(

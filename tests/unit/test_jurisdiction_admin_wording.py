@@ -1,7 +1,6 @@
 """DIAAT-356, DIAAT-406: a jurisdiction's screen wording. The JurisdictionSuperAdministrator edits it from the
-Jurisdictions screen (``/api/admin/jurisdictions/{code}/wording``); ``/api/jurisdictions/wording``, the
-wording of the jurisdiction the caller acts in, is refused to everyone for now, a JurisdictionAdministrator
-included. Real lookups on SQLite."""
+Jurisdictions screen (``/api/admin/jurisdictions/{code}/wording``); nobody else does, and there is no
+route for the wording of the jurisdiction the caller acts in. Real lookups on SQLite."""
 
 from __future__ import annotations
 
@@ -90,8 +89,6 @@ def test_a_jurisdiction_administrator_changes_no_wording_where_it_acts(
     headers = {"X-Jurisdiction": acting_in}
 
     for request in (
-        lambda: client.get("/api/jurisdictions/wording", headers=headers),
-        lambda: client.put("/api/jurisdictions/wording", headers=headers, json={"wording": {"help.subtitle": "x"}}),
         lambda: client.get(f"/api/admin/jurisdictions/{acting_in}/wording", headers=headers),
         lambda: client.put(
             f"/api/admin/jurisdictions/{acting_in}/wording", headers=headers, json={"wording": {"help.subtitle": "x"}}
@@ -104,33 +101,9 @@ def test_a_jurisdiction_administrator_changes_no_wording_where_it_acts(
     assert _settings(jurisdiction_db, "ET")["wording"] == {"help.subtitle": "Employment Tribunal"}
 
 
-def test_the_super_administrator_has_no_jurisdiction_to_edit_in_place(jurisdiction_db, as_super):
-    for refused in (
-        as_super.get("/api/jurisdictions/wording"),
-        as_super.put("/api/jurisdictions/wording", json={"wording": {"help.subtitle": "x"}}),
-    ):
-        assert refused.status_code == 403
-        assert refused.json()["detail"]["code"] == "no_jurisdiction"
-    assert _settings(jurisdiction_db, "ET")["wording"] == {"help.subtitle": "Employment Tribunal"}
-
-
-def test_a_jurisdiction_they_do_not_belong_to_is_out_of_reach(jurisdiction_db, jurisdiction_app, setup):
-    """A tab naming a jurisdiction the user's token is not in is out of step with it (409)."""
-    _, et_judge = setup
-    add_jurisdiction(jurisdiction_db, "SSCS")
-    refused = client_as(jurisdiction_app, jurisdiction_db, et_judge).put(
-        "/api/jurisdictions/wording", headers={"X-Jurisdiction": "IAC"}, json={"wording": {"help.subtitle": "x"}}
-    )
-    assert refused.status_code == 409
-    assert refused.json()["detail"]["code"] == "context_changed"
-    assert _settings(jurisdiction_db, "IAC") == IAC_SETTINGS
-
-
-def test_a_judge_cannot_change_their_own_jurisdictions_wording(jurisdiction_db, jurisdiction_app, setup):
-    _, et_judge = setup
-    client = client_as(jurisdiction_app, jurisdiction_db, et_judge)
-    assert client.get("/api/jurisdictions/wording").status_code == 403
-    assert client.put("/api/jurisdictions/wording", json={"wording": {}}).status_code == 403
+def test_there_is_no_route_for_the_wording_of_the_jurisdiction_acted_in(jurisdiction_db, as_super):
+    assert as_super.get("/api/jurisdictions/wording").status_code in (404, 405)
+    assert as_super.put("/api/jurisdictions/wording", json={"wording": {}}).status_code in (404, 405)
 
 
 def test_the_wording_change_keeps_the_rest_of_the_settings(jurisdiction_db, as_super):
@@ -147,21 +120,6 @@ def test_unknown_or_overlong_wording_is_refused(jurisdiction_db, as_super):
     assert "unknown wording keys" in str(unknown.json()["detail"])
     long = as_super.put(ET_WORDING, json={"wording": {"help.subtitle": "x" * 501}})
     assert long.status_code == 400
-    assert _settings(jurisdiction_db, "ET")["wording"] == {"help.subtitle": "Employment Tribunal"}
-
-
-def test_the_admin_of_a_disabled_jurisdiction_cannot_edit_it_either(jurisdiction_db, jurisdiction_app, setup):
-    et_admin, _ = setup
-    with Session(jurisdiction_db) as session:
-        et = session.exec(select(Jurisdiction).where(Jurisdiction.code == "ET")).one()
-        et.enabled = False
-        session.add(et)
-        session.commit()
-    # Their token, minted before it was disabled, still says they act as its admin.
-    refused = client_as(jurisdiction_app, jurisdiction_db, et_admin, ctx=("ET", "JurisdictionAdministrator")).put(
-        "/api/jurisdictions/wording", headers={"X-Jurisdiction": "ET"}, json={"wording": {"help.subtitle": "x"}}
-    )
-    assert refused.status_code == 403
     assert _settings(jurisdiction_db, "ET")["wording"] == {"help.subtitle": "Employment Tribunal"}
 
 
