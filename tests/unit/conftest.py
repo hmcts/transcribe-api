@@ -64,6 +64,9 @@ TEST_ENV: dict[str, str] = {
     "APP_JWT_TTL_SECONDS": "300",
     "DISABLE_FASTAPI_INSTRUMENTATION": "true",
     "RUN_WORKERS": "false",
+    # The fallback when no feature flag row is stored: pinned so a runner's
+    # DICTATION_ENABLED=false cannot turn dictation off for the whole suite.
+    "DICTATION_ENABLED": "true",
 }
 
 

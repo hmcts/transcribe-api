@@ -18,10 +18,13 @@ def _load_script(filename: str):
 @pytest.mark.parametrize(
     "filename", ["scripts-seed-local.py", "scripts-seed-demo-data.py", "scripts-seed-personas.py"]
 )
-def test_refuses_a_redirected_database_url_without_connecting(monkeypatch, filename):
+def test_refuses_a_redirected_database_url_without_connecting(monkeypatch, capsys, filename):
     from transcribe_api.runtime.settings_recording import get_settings
 
     script = _load_script(filename)
+    if filename == "scripts-seed-personas.py":
+        # Past its environment check, so the database URL guard is what refuses.
+        monkeypatch.setenv("ENVIRONMENT", "local")
     monkeypatch.setattr(script, "create_engine", lambda *a, **k: pytest.fail("must not connect"))
     if hasattr(script, "_ensure_seed_audio"):
         monkeypatch.setattr(script, "_ensure_seed_audio", lambda: None)
@@ -31,6 +34,7 @@ def test_refuses_a_redirected_database_url_without_connecting(monkeypatch, filen
         assert script.main() == 1
     finally:
         get_settings.cache_clear()
+    assert "ENVIRONMENT is not local" not in capsys.readouterr().out
 
 
 # scripts-seed-personas.py (DIAAT-373) ---------------------------------------------------------
