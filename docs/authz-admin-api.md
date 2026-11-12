@@ -149,7 +149,9 @@ is checked on every request).
 jurisdiction it acts in (`jurisdiction=` for another is 403 `jurisdiction_not_in_scope`); the JurisdictionSuperAdministrator reads every jurisdiction's
 and the global changes (appointments of JurisdictionSuperAdministrators, deactivations of users of several jurisdictions), or one jurisdiction's with
 `jurisdiction=` (DIAAT-406). `user=<id>` narrows either to the changes made to that user (a user leaving a jurisdiction included): across all
-jurisdictions for the JurisdictionSuperAdministrator, in its own for a JurisdictionAdministrator. `change`
+jurisdictions for the JurisdictionSuperAdministrator, in its own for a JurisdictionAdministrator. A role given to an email before its owner first
+signed in is included by the assignment they claimed: each claim is audited as `assignment.claimed` (user and assignment id; not itself listed),
+and every grant and removal records its `assignment_id`. A grant to the same address that was removed before anyone claimed it is not linked. `change`
 is one of `assignment.added`, `assignment.removed`, `user.deactivated`, `user.reactivated`, `membership.leave`, `access_request.approved`,
 `access_request.rejected` (an approved request is one row per role).
 

@@ -23,6 +23,7 @@ from uuid import UUID
 from sqlalchemy import delete, func
 from sqlmodel import Session, select
 
+from transcribe_api.domain.audit import stage_audit
 from transcribe_api.domain.auth.app_token import Context
 from transcribe_api.domain.auth.permissions import (
     GLOBAL_ROLES,
@@ -33,6 +34,10 @@ from transcribe_api.domain.jurisdiction_stages import sees
 from transcribe_api.domain.models_dictation import Jurisdiction, RoleAssignment, User
 
 logger = logging.getLogger(__name__)
+
+# Staged when a user claims an assignment made for their email: links the grant's audit row (made when
+# there was no user to name) to the user, for their role history (user_admin.role_history).
+ASSIGNMENT_CLAIMED = "assignment.claimed"
 
 
 class AssignmentError(ValueError):
@@ -240,6 +245,14 @@ def claim_pending_assignments(session: Session, user_id: UUID, email: str | None
             row.user_id = user_id
             row.pending_email = None
             session.add(row)
+            stage_audit(
+                session,
+                ASSIGNMENT_CLAIMED,
+                actor_id=user_id,
+                object_type="user",
+                object_id=user_id,
+                detail={"target_user_id": str(user_id), "assignment_id": str(row.id)},
+            )
             claimed += 1
         session.flush()
     if pending:

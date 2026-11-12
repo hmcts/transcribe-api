@@ -146,6 +146,36 @@ def test_a_pending_assignment_is_claimed_at_the_first_sign_in_and_its_id_works_u
         assert session.exec(select(RoleAssignment).where(RoleAssignment.user_id == claimed.id)).all() == []
 
 
+def test_a_grant_made_to_an_email_is_in_the_role_history_of_the_user_who_claims_it(pg):
+    jurisdiction(pg, "IAC")
+    jurisdiction(pg, "ET")
+    admin = acting(signed_up(pg, "Admin"), ADMIN, "IAC")
+    jsuper = acting(signed_up(pg, "Super"), SUPER, None)
+    with Session(pg) as session:
+        user_admin.create_assignment(
+            session, admin, user_id=None, email="shared@justice.gov.uk", jurisdiction_code="IAC", role=JUDGE
+        )
+    with Session(pg) as session:
+        removed = user_admin.create_assignment(
+            session, admin, user_id=None, email="shared@justice.gov.uk", jurisdiction_code="IAC", role=LTM
+        )
+    with Session(pg) as session:
+        user_admin.delete_assignment(session, admin, removed.id)
+    claimed = signed_up(pg, "Claimer", "shared@justice.gov.uk")
+    other = signed_up(pg, "Other", "shared-later@justice.gov.uk")
+
+    with Session(pg) as session:
+        theirs = user_admin.role_history(session, jsuper, jurisdiction=None, user_id=claimed.id, page=1, page_size=50)
+        in_iac = user_admin.role_history(session, admin, jurisdiction=None, user_id=claimed.id, page=1, page_size=50)
+        nobody_else = user_admin.role_history(
+            session, jsuper, jurisdiction=None, user_id=other.id, page=1, page_size=50
+        )
+    assert [(e.change, e.role) for e in theirs.items] == [("assignment.added", JUDGE)]
+    assert theirs.items[0].target_email == "shared@justice.gov.uk"
+    assert [(e.change, e.role) for e in in_iac.items] == [("assignment.added", JUDGE)]
+    assert nobody_else.total == 0
+
+
 def test_the_user_list_pages_users_then_pending_rows_and_escapes_its_search(pg):
     jurisdiction(pg, "IAC")
     jsuper = acting(signed_up(pg, "Super", "super@justice.gov.uk"), SUPER, None)

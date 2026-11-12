@@ -355,7 +355,7 @@ def create_assignment(
             target_user_id=row.user_id,
             target_email=row.pending_email,
             role=role,
-            extra={"tester": True} if tester else None,
+            extra={"assignment_id": str(row.id), **({"tester": True} if tester else {})},
         )
         session.commit()
     except assignment_service.DuplicateAssignmentError:
@@ -394,6 +394,7 @@ def delete_assignment(session: Session, actor: object, assignment_id: UUID) -> N
         target_user_id=user_id,
         target_email=pending_email,
         role=role,
+        extra={"assignment_id": str(assignment_id)},
     )
     session.commit()
 
@@ -721,7 +722,8 @@ def role_history(
     """The role changes (``ROLE_CHANGE_ACTIONS``), newest first. A JurisdictionAdministrator reads those of
     the jurisdiction it acts in (403 for another via ``jurisdiction=``); the JurisdictionSuperAdministrator
     all of them, the global ones included, or one jurisdiction's with ``jurisdiction=``. ``user_id``: only
-    the changes made to that user (who left a jurisdiction is the row's actor)."""
+    the changes made to that user (who left a jurisdiction is the row's actor), those made to their email
+    before they first signed in included (by the assignment they claimed)."""
     scope = jurisdiction_scope(actor)
     query = select(AuditLog).where(AuditLog.event_type.in_(ROLE_CHANGE_ACTIONS))  # type: ignore[attr-defined]
     count_query = select(func.count(AuditLog.id)).where(AuditLog.event_type.in_(ROLE_CHANGE_ACTIONS))  # type: ignore[attr-defined,arg-type]
@@ -738,8 +740,14 @@ def role_history(
         query = query.where(keep)
         count_query = count_query.where(keep)
     if user_id is not None:
-        about = (AuditLog.detail["target_user_id"].as_string() == str(user_id)) | (  # type: ignore[index]
-            (AuditLog.event_type == CHANGE_MEMBERSHIP_LEAVE) & (AuditLog.user_id == str(user_id))
+        claimed = select(AuditLog.detail["assignment_id"].as_string()).where(  # type: ignore[index]
+            AuditLog.event_type == assignment_service.ASSIGNMENT_CLAIMED,
+            AuditLog.detail["target_user_id"].as_string() == str(user_id),  # type: ignore[index]
+        )
+        about = (
+            (AuditLog.detail["target_user_id"].as_string() == str(user_id))  # type: ignore[index]
+            | ((AuditLog.event_type == CHANGE_MEMBERSHIP_LEAVE) & (AuditLog.user_id == str(user_id)))
+            | AuditLog.detail["assignment_id"].as_string().in_(claimed)  # type: ignore[index]
         )
         query = query.where(about)
         count_query = count_query.where(about)
