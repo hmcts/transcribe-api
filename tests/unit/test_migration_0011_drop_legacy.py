@@ -8,7 +8,6 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine, text
-from sqlmodel import Session
 
 from alembic import command
 from transcribe_api.domain.models_dictation import Jurisdiction
@@ -147,9 +146,13 @@ def test_0011_drops_the_legacy_table_and_auto_enrol_and_keeps_everything_else(at
     assert "auto_enrol" not in [column[0] for column in columns(at_0010, "jurisdiction")]
     assert leftovers(at_0010) == []
     assert everything_else(at_0010) == before
-    with Session(at_0010) as session:
-        session.add(Jurisdiction(code="SSCS", name="Social Security and Child Support", enabled=True, settings={}))
-        session.commit()
+    # Only the columns 0011 has: later revisions' (0012's sign-off) are not there yet.
+    with at_0010.begin() as connection:
+        connection.execute(
+            Jurisdiction.__table__.insert().values(
+                id=uuid4(), code="SSCS", name="Social Security and Child Support", enabled=True, settings={}
+            )
+        )
 
 
 def test_0011_runs_where_the_table_and_the_column_are_already_gone(at_0010):

@@ -536,33 +536,6 @@ def test_a_new_file_that_leaves_a_box_unlinked_takes_a_live_template_back_to_dra
     )
 
 
-def test_a_template_switched_off_by_the_previous_release_is_off_until_signed_off_again(
-    jurisdiction_db, as_admin, as_et_judge
-):
-    """During the rolling deploy the previous release's pods switch a template off by
-    ``enabled`` alone, leaving its stage live: it is off here too, and going live again
-    needs the service lead's sign-off again."""
-    template = _enabled_template(as_admin)
-    with Session(jurisdiction_db) as session:
-        row = session.get(JurisdictionTemplate, UUID(template["id"]))
-        row.enabled = False
-        session.add(row)
-        session.commit()
-
-    assert as_et_judge.get("/api/jurisdictions/templates").json() == []
-    refused = as_et_judge.post("/api/live-transcription/submission", json=_submission(template["id"], VALUES))
-    assert refused.status_code == 404
-    (listed,) = as_admin.get("/api/admin/jurisdictions/ET/templates").json()
-    assert (listed["stage"], listed["enabled"], listed["sign_off"]) == ("draft", False, None)
-
-    path = f"/api/admin/jurisdictions/ET/templates/{template['id']}"
-    again = as_admin.put(path, json={**complete(listed), "sign_off": None})
-    assert (again.status_code, again.json()["detail"]["code"]) == (400, "sign_off_required")
-    live = as_admin.put(path, json=complete(listed, sign_off={"service_lead": "B Lead", "confirmed": True})).json()
-    assert (live["stage"], live["enabled"], live["sign_off"]["service_lead"]) == ("live", True, "B Lead")
-    assert [t["id"] for t in as_et_judge.get("/api/jurisdictions/templates").json()] == [template["id"]]
-
-
 @pytest.mark.parametrize("stage", ["draft", "test"])
 def test_the_previous_release_cannot_switch_on_a_template_that_is_not_live(jurisdiction_db, as_admin, stage):
     """Its pods write ``enabled`` alone: switching on a draft or a template in test would

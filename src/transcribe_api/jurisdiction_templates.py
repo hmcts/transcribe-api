@@ -196,20 +196,10 @@ def _check_version(row: JurisdictionTemplate, expected_version: str) -> None:
         raise ConflictError(msg)
 
 
-def stage_of(row: JurisdictionTemplate) -> str:
-    """Who can choose it. The previous release's pods switch a template off by
-    ``enabled`` alone, leaving ``stage`` live: such a one is a draft, not live."""
-    if row.stage == STAGE_LIVE and not row.enabled:
-        return STAGE_DRAFT
-    return row.stage
-
-
 def _move(row: JurisdictionTemplate, stage: str, sign_off: SignOff | None) -> None:
-    if row.stage != stage_of(row):
-        # Switched off by the previous release: settle it, so going live asks again.
-        set_stage(row, stage_of(row), None)
     set_stage(row, stage, sign_off)
     # For the previous release's pods while this one rolls out: they read ``enabled``.
+    # What they write to it is kept to the stage rules by the database (0012).
     row.enabled = row.stage == STAGE_LIVE
 
 
@@ -268,16 +258,15 @@ def templates_of(session: Session, code: str) -> list[JurisdictionTemplate]:
 
 def template_record(row: JurisdictionTemplate) -> dict[str, Any]:
     """The admin area's view of a template: everything but the file itself."""
-    stage = stage_of(row)
     return {
         "id": str(row.id),
         "name": row.name,
         "service": row.service,
         "file_name": row.file_name,
-        "stage": stage,
-        "sign_off": sign_off_record(row) if stage == STAGE_LIVE else None,
+        "stage": row.stage,
+        "sign_off": sign_off_record(row),
         # Live; what the previous web release shows (DIAAT-344).
-        "enabled": stage == STAGE_LIVE,
+        "enabled": row.stage == STAGE_LIVE,
         "boxes": row.boxes,
         "fields": row.fields,
         "problems": problems_of(row),
@@ -306,7 +295,7 @@ def available_templates(session: Session, jurisdiction_id: UUID, user_id: UUID) 
         .order_by(JurisdictionTemplate.name)
     ).all()
     testing = any(row.stage == STAGE_TEST for row in rows) and in_test_group(session, user_id, jurisdiction_id)
-    return [row for row in rows if sees_template(stage_of(row), testing) and not problems_of(row)]
+    return [row for row in rows if sees_template(row.stage, testing) and not problems_of(row)]
 
 
 def available_template(
@@ -321,7 +310,7 @@ def available_template(
     if row is None or problems_of(row):
         return None
     testing = row.stage == STAGE_TEST and in_test_group(session, user_id, jurisdiction_id)
-    return row if sees_template(stage_of(row), testing) else None
+    return row if sees_template(row.stage, testing) else None
 
 
 def judge_fields(row: JurisdictionTemplate) -> list[TemplateField]:

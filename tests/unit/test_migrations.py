@@ -312,6 +312,8 @@ def test_0012_makes_each_template_judges_could_choose_live_and_writes_no_jurisdi
         assert f"ALTER TABLE {table} ADD COLUMN signed_off_by VARCHAR(200);" in sql
         assert f"ALTER TABLE {table} ADD COLUMN signed_off_at TIMESTAMP WITH TIME ZONE;" in sql
         assert f"ALTER TABLE {table} ADD COLUMN signed_off_recorded_by UUID;" in sql
+        # The previous release's writes kept to the rules (test_sign_off_postgres.py).
+        assert f"CREATE TRIGGER {table}_sign_off_guard BEFORE UPDATE ON {table}" in sql
     assert _forbidden_live_writes("0012", sql) == []
 
 
@@ -320,6 +322,7 @@ def test_0012_downgrade_reverses_it(monkeypatch):
     for table in ("jurisdiction", "jurisdiction_template"):
         for column in ("signed_off_by", "signed_off_at", "signed_off_recorded_by"):
             assert f"ALTER TABLE {table} DROP COLUMN {column};" in sql
+        assert sql.index(f"DROP FUNCTION {table}_sign_off_guard()") < sql.index(f"ALTER TABLE {table} DROP COLUMN")
     assert "ALTER TABLE jurisdiction_template DROP CONSTRAINT ck_jurisdiction_template_enabled_is_live;" in sql
     assert "ALTER TABLE jurisdiction_template DROP COLUMN stage;" in sql
 
