@@ -49,13 +49,7 @@ from transcribe_api.documents.minutes.types import (
 )
 from transcribe_api.documents.models import DEFAULT_JURISDICTION
 from transcribe_api.documents.template_renderer import render_hearing_document
-from transcribe_api.documents.uploaded_templates import (
-    FillContext,
-    box_text,
-    check_values,
-    dictated_text,
-    fill_template,
-)
+from transcribe_api.documents.uploaded_templates import dictated_text, fill_template
 from transcribe_api.documents.versioning import DECISION_TEMPLATE, track_render
 from transcribe_api.domain.audit import (
     SECTIONED_TRANSCRIPT,
@@ -1547,35 +1541,20 @@ def _uploaded_template_plan(
             raise HTTPException(status_code=404, detail="This template is not available in this jurisdiction.")
         fields = jurisdiction_templates.fields_of(row)
         content, sha256, name = row.content, row.sha256, row.name
-    legal_issue_titles: dict[str, str] = {}
-    if any(f.type == "legal_issues" for f in fields):
-        frameworks = get_document_content(jurisdiction.id).get("legal_frameworks") or []
-        legal_issue_titles = {
-            str(f["id"]): str(f.get("title") or f["id"])
-            for f in sorted(frameworks, key=lambda f: f.get("rank", 0))
-            if f.get("id")
-        }
-    values, problems = check_values(fields, request.values or {}, list(legal_issue_titles))
-    if problems:
+    transcript = [m.text for m in request.get_sectioned_messages().get_all_messages()]
+    try:
+        values, texts = jurisdiction_templates.template_texts(
+            fields,
+            request.values or {},
+            jurisdiction_id=jurisdiction.id,
+            jurisdiction_name=jurisdiction.current.shown_name,
+            dictated=dictated_text(transcript, request.notes),
+        )
+    except jurisdiction_templates.TemplateValuesError as exc:
         raise HTTPException(
             status_code=400,
-            detail={
-                "code": "template_values_invalid",
-                "message": "The hearing details do not fit the template. " + " ".join(problems),
-                "problems": problems,
-            },
-        )
-    transcript = [m.text for m in request.get_sectioned_messages().get_all_messages()]
-    texts = box_text(
-        fields,
-        values,
-        FillContext(
-            jurisdiction_name=jurisdiction.current.shown_name,
-            year=datetime.now(UTC).year,
-            dictated_text=dictated_text(transcript, request.notes),
-            legal_issue_titles=legal_issue_titles,
-        ),
-    )
+            detail={"code": "template_values_invalid", "message": str(exc), "problems": exc.problems},
+        ) from None
     # The first text the judge gave (a case reference, say) tells their hearings apart.
     first_text = next(
         (str(values[f.tag]) for f in fields if f.type == "text" and isinstance(values.get(f.tag), str)), None

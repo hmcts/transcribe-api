@@ -5,12 +5,16 @@ code change or release. Real lookups on SQLite.
 AC1: an uploaded template whose boxes are all linked can be used by judges.
 AC2: saving with a box unlinked says which box.
 AC3: only a SystemAdministrator can manage templates.
+
+DIAAT-346: the product team previews a template with sample details before any judge
+sees it, and is told in plain words when the preview fails.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 import urllib.parse
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -273,6 +277,9 @@ def test_only_a_system_administrator_may_manage_templates(jurisdiction_db, admin
     assert upload(client).status_code == 403
     assert client.put(f"/api/admin/jurisdictions/ET/templates/{some_id}", json={}).status_code == 403
     assert client.delete(f"/api/admin/jurisdictions/ET/templates/{some_id}").status_code == 403
+    preview = client.post(f"/api/admin/jurisdictions/ET/templates/{some_id}/preview", json={"version": ""})
+    assert preview.status_code == 403
+    assert client.get(f"/api/admin/jurisdictions/ET/templates/{some_id}/form").status_code == 403
     with Session(jurisdiction_db) as session:
         assert session.exec(select(JurisdictionTemplate)).all() == []
 
@@ -425,6 +432,131 @@ def test_a_submission_is_either_the_decision_form_or_a_template(as_admin, as_et_
     assert as_et_judge.post("/api/live-transcription/submission", json=neither).status_code == 422
     no_values = {k: v for k, v in _submission(template["id"], VALUES).items() if k != "values"}
     assert as_et_judge.post("/api/live-transcription/submission", json=no_values).status_code == 422
+
+
+# Previewing (DIAAT-346) ---------------------------------------------------------------
+
+
+def preview(client, template: dict, values: dict, version: str | None = None):
+    return client.post(
+        f"/api/admin/jurisdictions/ET/templates/{template['id']}/preview",
+        json={"values": values, "version": template["version"] if version is None else version},
+    )
+
+
+def test_a_template_is_previewed_as_a_judge_would_get_it_before_judges_see_it(as_admin, as_et_judge, mocker):
+    folders = mocker.spy(tempfile, "mkdtemp")
+    template = upload(as_admin).json()
+    saved = as_admin.put(
+        f"/api/admin/jurisdictions/ET/templates/{template['id']}", json=complete(template, enabled=False)
+    ).json()
+    assert as_et_judge.get("/api/jurisdictions/templates").json() == []  # judges cannot choose it yet
+
+    response = preview(as_admin, saved, VALUES)
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    assert response.headers["content-disposition"] == "attachment; filename*=UTF-8''Preview%20-%20ET%20judgment.docx"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert not Path(folders.spy_return).exists()  # removed once sent
+    # The judge's document (test_a_judge_gets_a_document_from_the_template_with_no_release),
+    # with sample text where the dictation goes.
+    assert document_text(response.content) == [
+        "Jurisdiction: ET name",
+        "Case Number: 1234/2026",
+        "Heard on 12 February 2026",
+        "A Smith (Claimant)",
+        (
+            "This is where the judge's dictated text goes.\n\n"
+            "Each paragraph the judge dictates or types appears here, in this box's style."
+        ),
+        f"© Crown copyright {document_year()}",
+    ]
+
+
+def test_the_sample_details_form_is_the_judges_before_judges_can_choose_it(as_admin, et):
+    save_document_content(et.id, {"legal_frameworks": [{"id": "unfair", "title": "Unfair dismissal", "rank": 1}]})
+    template = upload(as_admin).json()
+    body = complete(template, enabled=False)
+    body["fields"] = [{**f, "type": "legal_issues"} if f["tag"] == "Party2Rep" else f for f in body["fields"]]
+    as_admin.put(f"/api/admin/jurisdictions/ET/templates/{template['id']}", json=body)
+
+    response = as_admin.get(f"/api/admin/jurisdictions/ET/templates/{template['id']}/form")
+
+    assert response.status_code == 200
+    form = response.json()
+    assert (form["id"], form["name"]) == (template["id"], "ET judgment")
+    fields = {f["tag"]: f for f in form["fields"]}
+    # As in test_judges_see_an_enabled_template_with_the_fields_they_fill.
+    assert set(fields) == {"Reference", "HearingDate", "Party1", "Party1Title", "Party2", "Party2Title", "Party2Rep"}
+    assert fields["Party2Rep"]["options"] == [{"value": "unfair", "label": "Unfair dismissal"}]
+    unknown = "00000000-0000-4000-8000-000000000000"
+    assert as_admin.get(f"/api/admin/jurisdictions/ET/templates/{unknown}/form").status_code == 404
+
+
+def test_a_preview_of_an_incomplete_template_says_what_is_missing(as_admin):
+    template = upload(as_admin).json()
+    new_file = make_template([*JUDGMENT, ["Costs: ", Sdt("Costs")]])
+    replaced = upload(as_admin, new_file, "v2.docx", replace=template["id"], version=template["version"]).json()
+
+    response = preview(as_admin, replaced, VALUES)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == {
+        "code": "template_not_ready",
+        "message": "The template cannot be previewed yet. The box “Costs” (Costs) has no field linked to it.",
+        "problems": ["The box “Costs” (Costs) has no field linked to it."],
+    }
+
+
+def test_sample_details_that_do_not_fit_say_which(as_admin):
+    template = _enabled_template(as_admin)
+
+    response = preview(as_admin, template, {**VALUES, "Party1Title": "Judge", "HearingDate": "", "Extra": "x"})
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["code"] == "template_values_invalid"
+    assert detail["problems"] == [
+        "“Extra” is not a field of this template.",
+        "“Hearing date” is required.",
+        "“Party1Title” has a choice that is not one of its options.",
+    ]
+    assert detail["message"].startswith("The hearing details do not fit the template. ")
+
+
+def test_a_preview_is_named_after_its_template_with_every_character_encoded(as_admin):
+    template = _enabled_template(as_admin, name="Judgment / Reasons; final")
+
+    response = preview(as_admin, template, VALUES)
+
+    assert response.headers["content-disposition"] == (
+        "attachment; filename*=UTF-8''Preview%20-%20Judgment%20%2F%20Reasons%3B%20final.docx"
+    )
+
+
+def test_a_preview_of_a_template_changed_meanwhile_is_refused(as_admin):
+    template = _enabled_template(as_admin)
+    assert preview(as_admin, template, VALUES, version="2020-01-01T00:00:00").status_code == 409
+
+
+def test_a_file_that_cannot_be_filled_is_explained(as_admin, mocker):
+    template = _enabled_template(as_admin)
+    mocker.patch("transcribe_api.jurisdiction_templates.fill_template", side_effect=KeyError("rId9"))
+    folders = mocker.spy(tempfile, "mkdtemp")
+
+    response = preview(as_admin, template, VALUES)
+
+    assert (response.status_code, response.json()["detail"]) == (
+        400,
+        (
+            "BenchNotes could not fill this Word file, so judges would not get a document from it either. "
+            "Check that it opens in Word, then upload it again."
+        ),
+    )
+    assert not Path(folders.spy_return).exists()
 
 
 def test_a_local_web_app_may_send_the_files_name(monkeypatch):

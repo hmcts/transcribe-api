@@ -9,7 +9,10 @@ import asyncio
 import copy
 import hashlib
 import logging
+import shutil
+import tempfile
 import urllib.parse
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,10 +20,12 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse
 from hmcts_azure_auth.audit import AuditEvent, AuditEventType
 from pydantic import BaseModel, StringConstraints
 from pydantic import Field as PydanticField
 from sqlmodel import Field, Session
+from starlette.background import BackgroundTask
 
 from transcribe_api import jurisdiction_templates, jurisdictions_admin
 from transcribe_api.api.document_content_models import (
@@ -30,6 +35,7 @@ from transcribe_api.api.document_content_models import (
     JurisdictionRef,
     LegalFrameworkPayload,
 )
+from transcribe_api.api.routes_jurisdictions import AvailableTemplate, template_forms
 from transcribe_api.documents.content_loader import get_document_content as load_document_content
 from transcribe_api.documents.content_loader import has_legal_wording, save_document_content
 from transcribe_api.documents.minutes.types import AdminTranscriptionListResponse, AdminTranscriptionRecord
@@ -837,30 +843,42 @@ class WordingKeysResponse(BaseModel):
 
 JURISDICTION_NOT_READY = "jurisdiction_not_ready"
 TEMPLATE_NOT_READY = "template_not_ready"
+TEMPLATE_VALUES_INVALID = "template_values_invalid"
+
+
+@contextmanager
+def _admin_errors():
+    """A jurisdictions_admin refusal is the caller's 400, an unknown jurisdiction 404, a
+    change made meanwhile 409."""
+    try:
+        yield
+    except jurisdiction_templates.TemplateProblemsError as exc:  # DIAAT-344: which box
+        raise HTTPException(
+            status_code=400,
+            detail={"code": TEMPLATE_NOT_READY, "message": str(exc), "problems": exc.problems},
+        ) from None
+    except jurisdiction_templates.TemplateValuesError as exc:  # DIAAT-346: which value
+        raise HTTPException(
+            status_code=400,
+            detail={"code": TEMPLATE_VALUES_INVALID, "message": str(exc), "problems": exc.problems},
+        ) from None
+    except jurisdictions_admin.NotReadyError as exc:  # DIAAT-345: what is missing
+        raise HTTPException(
+            status_code=400,
+            detail={"code": JURISDICTION_NOT_READY, "message": str(exc), "problems": exc.problems},
+        ) from None
+    except jurisdictions_admin.NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except jurisdictions_admin.ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except jurisdictions_admin.AdminError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
 def _admin_session_run(operation):
-    """Run a jurisdictions_admin operation; its refusals are the caller's 400, an
-    unknown jurisdiction 404, a change made meanwhile 409."""
-    with Session(get_engine()) as session:
-        try:
-            return operation(session)
-        except jurisdiction_templates.TemplateProblemsError as exc:  # DIAAT-344: which box
-            raise HTTPException(
-                status_code=400,
-                detail={"code": TEMPLATE_NOT_READY, "message": str(exc), "problems": exc.problems},
-            ) from None
-        except jurisdictions_admin.NotReadyError as exc:  # DIAAT-345: what is missing
-            raise HTTPException(
-                status_code=400,
-                detail={"code": JURISDICTION_NOT_READY, "message": str(exc), "problems": exc.problems},
-            ) from None
-        except jurisdictions_admin.NotFoundError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from None
-        except jurisdictions_admin.ConflictError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from None
-        except jurisdictions_admin.AdminError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from None
+    """Run a jurisdictions_admin operation in a session, its errors mapped (_admin_errors)."""
+    with _admin_errors(), Session(get_engine()) as session:
+        return operation(session)
 
 
 def _audit_jurisdiction_change(action: str, admin_user: User, detail: dict[str, Any]) -> None:
@@ -1020,6 +1038,15 @@ class TemplateAdminRecord(BaseModel):
     version: str
 
 
+class TemplatePreviewRequest(BaseModel):
+    # Sample hearing details, by box tag, as a judge's submission sends them.
+    values: dict[str, str | bool | list[str] | None] = PydanticField(default_factory=dict, max_length=500)
+    version: str
+
+
+DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
 class TemplateWrite(BaseModel):
     name: str = PydanticField(min_length=1, max_length=200)
     service: str | None = PydanticField(default=None, max_length=200)
@@ -1134,6 +1161,58 @@ def admin_update_template(
         "template.edit", admin_user, code, record["id"], {"change": "fields", "enabled": record["enabled"]}
     )
     return TemplateAdminRecord(**record)
+
+
+@router.get("/jurisdictions/{code}/templates/{template_id}/form", response_model=AvailableTemplate)
+def admin_template_form(
+    code: str,
+    template_id: UUID,
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),
+) -> AvailableTemplate:
+    """DIAAT-346: the template's Hearing Details form as its judges will get it, for
+    the admin to fill with sample details, whether or not judges can choose it yet."""
+
+    row = _admin_session_run(lambda s: jurisdiction_templates.template_of(s, code, template_id))
+    (result,) = template_forms([row], row.jurisdiction_id)
+    return result
+
+
+@router.post("/jurisdictions/{code}/templates/{template_id}/preview")
+def admin_preview_template(
+    code: str,
+    template_id: UUID,
+    body: TemplatePreviewRequest,
+    admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),
+) -> FileResponse:
+    """DIAAT-346: the template filled with sample hearing details, as a judge would get
+    it (a .docx), before judges can choose it. Refused in plain words (400, with
+    ``problems``): ``template_not_ready`` while a box has no complete field,
+    ``template_values_invalid`` for details that do not fit; 409 if it changed since
+    ``version``."""
+    row, jurisdiction = _admin_session_run(
+        lambda s: jurisdiction_templates.preview_source(s, code, template_id, body.version)
+    )
+    # Filled once the session is closed, as a judge's submission is, and sent from the
+    # file, whose folder is removed once it has been sent.
+    directory = Path(tempfile.mkdtemp(prefix="template-preview-"))
+    try:
+        with _admin_errors():
+            path = jurisdiction_templates.preview_template(row, jurisdiction, body.values, directory)
+    except BaseException:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
+    # RFC 5987: every reserved character encoded, a slash in the name too.
+    file_name = urllib.parse.quote(f"Preview - {row.name}.docx", safe="")
+    return FileResponse(
+        path,
+        media_type=DOCX_MEDIA_TYPE,
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{file_name}",
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+        background=BackgroundTask(shutil.rmtree, directory, ignore_errors=True),
+    )
 
 
 @router.delete("/jurisdictions/{code}/templates/{template_id}", status_code=204)
