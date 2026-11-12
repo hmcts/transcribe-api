@@ -212,7 +212,7 @@ the shared routes.)
   decided per request in `domain/user_admin.py` (403 `assignment_not_allowed`, or `jurisdiction_not_in_scope`), not by the route's declaration.
 * **The access request routes for the requester are exempt (`signed_in_endpoint`)**, not `access.request`: a user with no role has no context, and the
   contract says any signed-in user. Approving and listing are `access.approve`: a JurisdictionAdministrator sees and decides the requests of the jurisdiction it
-  acts in, a JurisdictionSuperAdministrator all of them; a SystemAdministrator is refused (`permission_denied`, in any context).
+  acts in, a JurisdictionSuperAdministrator all of them; acting as SystemAdministrator, it is refused (`permission_denied`); a SystemAdministrator who also holds an approving role has its rights only while acting in it, and with no context gets `context_required`.
 * **`GET /api/v1/jobs/{id}/history` is `recording.audit.read`** (Judge), and only the owner reads it: another Judge, or the owner in another jurisdiction, gets the
   404 of a recording they cannot see. A role without the permission (JurisdictionAdministrator, JurisdictionSuperAdministrator, LegalTextManager,
   SystemAdministrator) gets `permission_denied`, as on every other recording route.
