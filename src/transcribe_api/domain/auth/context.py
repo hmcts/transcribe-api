@@ -23,7 +23,7 @@ from uuid import UUID
 from fastapi import HTTPException, Request
 
 from transcribe_api.domain.auth.app_token import Context
-from transcribe_api.domain.auth.permissions import STORED_ROLES
+from transcribe_api.domain.auth.permissions import CONTEXT_ROLES, ROLE_SYSTEM_ADMIN
 
 CONTEXT_REQUIRED = "context_required"
 CONTEXT_CHANGED = "context_changed"
@@ -32,11 +32,11 @@ CONTEXT_NOT_AVAILABLE = "context_not_available"
 HEADER_JURISDICTION = "X-Jurisdiction"
 HEADER_ROLE = "X-Role"
 HEADER_REQUESTED_CONTEXT = "X-Requested-Context"
-# The header's spelling of "no jurisdiction" (a global role).
+# The header's spelling of "no jurisdiction" (a global role, or SystemAdministrator).
 GLOBAL = "-"
 # The roles by their lower-case spelling, for the header (X-Requested-Context is matched like the advisory
 # X-Jurisdiction: without regard to case).
-_ROLES_BY_LOWER_CASE = {role.lower(): role for role in STORED_ROLES}
+_ROLES_BY_LOWER_CASE = {role.lower(): role for role in CONTEXT_ROLES}
 
 
 def error(status_code: int, code: str, message: str) -> HTTPException:
@@ -102,8 +102,11 @@ def context_of(user: object) -> Context | None:
 
 
 def sysadmin_of(user: object) -> bool:
-    """Whether the token says ``user`` is a SystemAdministrator (``AuthenticatedUser.sysadmin``)."""
-    return bool(getattr(user, "sysadmin", False))
+    """Whether ``user`` acts as SystemAdministrator: the token says they hold the Entra role
+    (``AuthenticatedUser.sysadmin``) and its context is the SystemAdministrator one. Holding the
+    role while acting in another context gives nothing of it (DIAAT-403)."""
+    ctx = context_of(user)
+    return bool(getattr(user, "sysadmin", False)) and ctx is not None and ctx.role == ROLE_SYSTEM_ADMIN
 
 
 @dataclass(frozen=True)

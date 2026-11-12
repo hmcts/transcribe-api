@@ -1,8 +1,7 @@
 """Users and role assignments, as the administration endpoints work on them (DIAAT-383).
 
 Who may assign what is decided here, in one place, from what the caller's BenchNotes token
-says they hold (the permissions of the role they act in, plus the SystemAdministrator's,
-domain/auth/authorisation.py): the rules of the contract's section 1.
+says they hold (the permissions of the role they act in only, domain/auth/authorisation.py): the rules of the contract's section 1.
 
 * **Judge, LegalTextManager** in a jurisdiction: whoever holds ``users.manage`` there. A
   JurisdictionAdministrator holds it in the jurisdiction it acts in (403
@@ -12,7 +11,7 @@ domain/auth/authorisation.py): the rules of the contract's section 1.
 * **JurisdictionSuperAdministrator** (global): whoever holds ``jurisdiction_super_admin.assign``,
   which only the SystemAdministrator does.
 * **SystemAdministrator**: nobody. It is not a stored role.
-* A SystemAdministrator may give **themselves** any stored role (that is how the first
+* Acting as SystemAdministrator, a holder may give **themselves** any stored role (that is how the first
   JurisdictionSuperAdministrator is set up) and take it away again.
 * Nobody else changes their own administrator role (JurisdictionAdministrator,
   JurisdictionSuperAdministrator), and nobody deactivates themselves.
@@ -745,19 +744,20 @@ def role_history(
         target_uuid = _uuid(target_id)
         roles = detail.get("roles")
         role = detail.get("role") or (roles[0] if isinstance(roles, list) and len(roles) == 1 else None)
-        # An assignment made or removed through a SystemAdministrator's own permissions (the row says so:
-        # ``audit_role_change``) does not name the actor: the SystemAdministrator is invisible in the app.
-        # (One acting in a stored role and using that role's rights is stamped with the role and shown as
-        # its holder: the row cannot tell them apart.)
-        by_system = bool(detail.get("by_system"))
+        # A change made acting as SystemAdministrator (the row says so: ``audit_role_change``, or its
+        # context) names neither the actor nor that context: the SystemAdministrator is invisible in the app.
+        # (One acting in a stored role is stamped with the role and shown as its holder.)
+        by_system = bool(detail.get("by_system")) or row.active_role == ROLE_SYSTEM_ADMIN
         items.append(
             HistoryEntry(
                 id=row.id,
                 timestamp=row.timestamp,
                 actor_id=None if by_system else row.user_id,
                 actor_email=SYSTEM_ACTOR_LABEL if by_system else (emails.get(actor_id, "") if actor_id else ""),
-                actor_jurisdiction=codes.get(row.active_jurisdiction_id) if row.active_jurisdiction_id else None,
-                actor_role=row.active_role,
+                actor_jurisdiction=None
+                if by_system or not row.active_jurisdiction_id
+                else codes.get(row.active_jurisdiction_id),
+                actor_role=None if by_system else row.active_role,
                 target_id=str(target_uuid) if target_uuid else None,
                 target_email=(emails.get(target_uuid) if target_uuid else None) or detail.get("target_email") or "",
                 change=row.event_type,

@@ -343,8 +343,7 @@ def test_the_permissions_are_those_of_the_active_role_only_not_the_union(client,
         pytest.param({"jurisdiction": None, "role": "Judge"}, id="a-judge-with-no-jurisdiction"),
         pytest.param({"jurisdiction": None, "role": SUPER}, id="super-administrator-not-held"),
         pytest.param({"jurisdiction": "XX", "role": "Judge"}, id="no-such-jurisdiction"),
-        pytest.param({"jurisdiction": "ET", "role": "SystemAdministrator"}, id="system-administrator"),
-        pytest.param({"jurisdiction": None, "role": "SystemAdministrator"}, id="global-system-administrator"),
+        pytest.param({"jurisdiction": "ET", "role": "SystemAdministrator"}, id="system-administrator-in-a-jurisdiction"),
         pytest.param({"jurisdiction": "ET", "role": "Normal"}, id="normal"),
     ],
 )
@@ -425,46 +424,102 @@ def test_a_role_removed_while_active_is_gone_at_the_next_token(client, world, db
 # --- SystemAdministrator ----------------------------------------------------------------
 
 
-def test_a_system_administrator_with_no_assignments_is_ready_for_the_system_pages(client, world):
+SYSTEM = {"jurisdiction": None, "role": "SystemAdministrator"}
+SYSTEM_PERMISSIONS = {
+    "admin.access",
+    "feature_flags.manage",
+    "system.settings",
+    "security.alert_test",
+    "jurisdiction_super_admin.assign",
+    "jurisdiction_admin.assign",
+}
+
+
+def test_a_system_administrator_with_no_assignments_lands_in_the_system_administrator_context(client, world):
     person = Person(client, roles=["SystemAdministrator"])
     response = person.sign_in()
     me = response.json()["me"]
 
     assert me["status"] == "ready"
-    assert me["assignments"] == [] and me["active"] is None
-    assert set(me["permissions"]) == {
-        "admin.access",
-        "feature_flags.manage",
-        "system.settings",
-        "security.alert_test",
-        "jurisdiction_super_admin.assign",
-        "jurisdiction_admin.assign",
-    }
+    assert me["assignments"] == [SYSTEM] and me["active"] == SYSTEM
+    assert set(me["permissions"]) == SYSTEM_PERMISSIONS
     claims = claims_of(response.json()["token"])
-    assert claims["sysadmin"] is True and claims["ctx"] is None and claims["assignments"] == []
+    assert claims["sysadmin"] is True and claims["ctx"] == SYSTEM and claims["assignments"] == [SYSTEM]
 
 
-def test_system_administrator_is_never_an_assignment_or_a_context(client, world, db):
+def test_system_administrator_is_a_context_of_its_own_for_its_holder(client, world, db):
+    """DIAAT-403: offered after the user's assignments, never stored, and not chosen for them."""
     person = user_with(client, db, (world["et"], "judge"), roles=["SystemAdministrator"])
-    response = person.sign_in()
-    body = response.json()
+    body = person.sign_in().json()
 
-    assert claims_of(body["token"])["sysadmin"] is True
-    assert "SystemAdministrator" not in str(body["me"]["assignments"])
-    assert body["me"]["active"] == {"jurisdiction": {"code": "ET", "name": "ET name", "stage": "live"}, "role": "Judge"}
-    assert "SystemAdministrator" not in str(claims_of(body["token"])["assignments"])
-    assert claims_of(body["token"])["ctx"] == {"jurisdiction": "ET", "role": "Judge"}
-    # Added to the active role's permissions.
-    assert {"dictation.use", "feature_flags.manage"} <= set(body["me"]["permissions"])
+    assert body["me"]["assignments"] == [
+        {"jurisdiction": {"code": "ET", "name": "ET name", "stage": "live"}, "role": "Judge"},
+        SYSTEM,
+    ]
+    assert body["me"]["status"] == "choose" and body["me"]["active"] is None
+    assert body["me"]["permissions"] == []
+    with Session(db) as session:
+        assert "SystemAdministrator" not in {r.role for r in session.exec(select(RoleAssignment)).all()}
 
 
-def test_a_system_administrator_with_a_pair_to_choose_keeps_the_system_permissions_with_no_context(client, world, db):
+def test_acting_in_another_context_a_system_administrator_has_that_roles_permissions_only(client, world, db):
+    """DIAAT-403: a SystemAdministrator who also holds roles, switched to Judge, has a Judge's permissions
+    and none of the system ones; switched back, the system ones and no Judge's."""
+    person = user_with(client, db, (world["et"], "judge"), (None, SUPER), roles=["SystemAdministrator"])
+    token = person.sign_in().json()["token"]
+
+    judge = client.put("/api/me/context", json={"jurisdiction": "ET", "role": "Judge"}, headers=bearer(token)).json()
+    assert set(judge["me"]["permissions"]) == {
+        "app.access",
+        "context.switch",
+        "access.request",
+        "dictation.use",
+        "recording.upload",
+        "recording.own",
+        "documents.export",
+        "recording.audit.read",
+        "document_content.read",
+    }
+    as_judge = bearer(judge["token"])
+    for method, path in (("GET", "/api/admin/me"), ("GET", "/api/admin/roles"), ("POST", "/api/security/alert-test")):
+        refused = client.request(method, path, headers=as_judge)
+        assert refused.status_code == 403 and refused.json()["detail"]["code"] == "permission_denied", path
+
+    system = client.put("/api/me/context", json=SYSTEM, headers=as_judge).json()
+    assert system["me"]["active"] == SYSTEM
+    assert set(system["me"]["permissions"]) == SYSTEM_PERMISSIONS
+    assert client.get("/api/admin/me", headers=bearer(system["token"])).status_code == 200
+    refused = client.get("/api/transcriptions-metadata", headers=bearer(system["token"]))
+    assert refused.status_code == 403 and refused.json()["detail"]["code"] == "permission_denied"
+
+
+def test_a_system_administrator_with_no_context_chosen_has_no_permissions(client, world, db):
     person = user_with(
         client, db, (world["et"], "judge"), (world["iac"], "admin"), roles=["SystemAdministrator"]
     )
-    me = person.sign_in().json()["me"]
-    assert me["status"] == "choose" and me["active"] is None
-    assert "feature_flags.manage" in me["permissions"] and "dictation.use" not in me["permissions"]
+    token = person.sign_in().json()["token"]
+    me = client.get("/api/me/permissions", headers=bearer(token)).json()
+    assert me["status"] == "choose" and me["active"] is None and me["permissions"] == []
+    refused = client.get("/api/admin/me", headers=bearer(token))
+    assert refused.status_code == 403 and refused.json()["detail"]["code"] == "context_required"
+
+
+def test_only_a_holder_of_the_entra_role_may_choose_or_keep_the_system_administrator_context(client, world, db):
+    person = user_with(client, db, (world["et"], "judge"))
+    token = person.sign_in().json()["token"]
+    refused = client.put("/api/me/context", json=SYSTEM, headers=bearer(token))
+    assert refused.status_code == 403 and refused.json()["detail"]["code"] == "context_not_available"
+    renewed = person.sign_in(requested_context="-:SystemAdministrator").json()
+    assert renewed["me"]["active"] is None and claims_of(renewed["token"])["ctx"] is None
+
+
+def test_a_renewal_keeps_the_system_administrator_context_while_the_entra_role_is_held(client, world, db):
+    person = user_with(client, db, (world["et"], "judge"), roles=["SystemAdministrator"])
+    kept = person.sign_in(requested_context="-:SystemAdministrator").json()
+    assert kept["me"]["active"] == SYSTEM
+    person.roles = []
+    lost = person.sign_in(requested_context="-:SystemAdministrator").json()
+    assert lost["me"]["active"] is None and SYSTEM not in lost["me"]["assignments"]
 
 
 def test_the_system_administrator_flag_comes_only_from_the_entra_roles_claim(client, world, db):
@@ -723,19 +778,19 @@ def test_the_permission_checks_follow_the_active_role(client, world, db, mocker)
     assert client.get("/api/admin/me", headers=acting("ET", "Judge")).status_code == 403
 
 
-def test_a_system_administrator_reaches_the_system_routes_with_no_context_and_nothing_else(client, world, db):
+def test_a_system_administrator_reaches_the_system_routes_as_one_and_nothing_else(client, world, db):
     person = Person(client, roles=["SystemAdministrator"])
     token = person.sign_in().json()["token"]
     headers = bearer(token)
 
-    # System-level: the Entra role is enough, with no assignment and no context.
+    # Acting as SystemAdministrator (the one context they hold, so chosen for them).
     assert client.get("/api/admin/me", headers=headers).status_code == 200
     assert client.get("/api/flags", headers=headers).status_code == 200
     # The security alert test passes the permission (and is then 404: not enabled in the tests).
     assert client.post("/api/security/alert-test", headers=headers).status_code == 404
-    # Not jurisdiction material: there is no jurisdiction to act in, and no permission for it.
+    # Not jurisdiction material: no permission for it.
     refused = client.get("/api/jurisdictions/current", headers=headers)
-    assert refused.status_code == 403 and refused.json()["detail"]["code"] == "context_required"
+    assert refused.status_code == 403 and refused.json()["detail"]["code"] == "permission_denied"
     assert client.get("/api/transcriptions-metadata", headers=headers).status_code == 403
     assert client.get("/api/admin/jurisdictions", headers=headers).status_code == 403
 
@@ -931,7 +986,7 @@ def persona(client, name, **headers):
         ("jadmin-et", "ready", [("ET", "Judge"), ("ET", "LegalTextManager"), ("ET", ADMIN)], False),
         ("legal-iac", "ready", [("IAC", "LegalTextManager")], False),
         ("jsuper", "ready", [(None, SUPER)], False),
-        ("sysadmin", "ready", [], True),
+        ("sysadmin", "ready", [(None, "SystemAdministrator")], True),
         ("no-role", "no_access", [], False),
     ],
 )

@@ -187,8 +187,8 @@ def acting_as(engine, user: User, ctx=AUTO, sysadmin: bool | None = None, *, are
     none chosen. Left out, it is the one a tab would have: the assignment in the jurisdiction the
     request names with ``X-Jurisdiction`` if they hold one there, else their first given assignment (so
     a user with one pair just acts in it). And as for a real token, a header that names another
-    jurisdiction is 409 ``context_changed``, and no context is 403 ``context_required`` (except for
-    a SystemAdministrator). ``sysadmin``: the Entra role; left out, whether ``SystemAdministrator``
+    jurisdiction is 409 ``context_changed``, and no context is 403 ``context_required``. A SystemAdministrator
+    also holds the SystemAdministrator context, after their assignments. ``sysadmin``: the Entra role; left out, whether ``SystemAdministrator``
     is among the roles ``add_user`` was given."""
     import importlib
 
@@ -203,8 +203,9 @@ def acting_as(engine, user: User, ctx=AUTO, sysadmin: bool | None = None, *, are
         with Session(engine) as session:
             fresh = session.get(User, user.id)
             assignments = load_assignments(session, user.id)
-        held = distinct_contexts(assignments)
-        given = stored_contexts(assignments)  # not the roles included with an administrator role
+        system = [Context(None, "SystemAdministrator")] if is_sysadmin else []
+        held = [*distinct_contexts(assignments), *system]
+        given = [*stored_contexts(assignments), *system]  # not the roles included with an administrator role
         if ctx is AUTO:
             named = (request.headers.get("X-Jurisdiction") or "").strip().upper()
             # Of the pairs in that jurisdiction, one they were given before one included with the administrator role.
@@ -212,7 +213,7 @@ def acting_as(engine, user: User, ctx=AUTO, sysadmin: bool | None = None, *, are
             context = context or (given[0] if given else held[0] if held else None)
         else:
             context = Context(*ctx) if isinstance(ctx, tuple) else ctx
-        if context is None and not is_sysadmin:  # as build_token_user_dep does
+        if context is None:  # as build_token_user_dep does
             raise context_required()
         check_advisory_headers(request, context)
         return authenticated_user(

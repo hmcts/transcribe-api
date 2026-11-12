@@ -311,10 +311,11 @@ def test_an_assignment_is_audited_with_actor_active_context_target_and_change(wo
     assert removed.detail["target_user_id"] == str(cast.bob.user_id)
 
 
-def test_a_system_administrator_with_no_context_is_audited_with_no_active_role(world, cast):
+def test_a_system_administrator_is_audited_with_the_system_administrator_context(world, cast):
     assert assign(cast.sysadmin, cast.bob, "ET", ADMIN).status_code == 201
     (row,) = world.audit("assignment.added")
-    assert row.user_id == str(cast.sysadmin.user_id) and row.active_role is None
+    assert row.user_id == str(cast.sysadmin.user_id)
+    assert row.active_role == "SystemAdministrator" and row.active_jurisdiction_id is None
 
 
 def test_a_refused_change_is_audited_as_denied_and_writes_no_assignment(world, cast):

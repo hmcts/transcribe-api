@@ -407,6 +407,7 @@ def test_a_super_administrator_reads_all_of_it_and_can_filter_by_jurisdiction(wo
     assert sorted((e["jurisdiction"], e["role"]) for e in everything["items"] if e["jurisdiction"]) == [("ET", LTM), ("IAC", JUDGE)]
     global_change = next(e for e in everything["items"] if e["jurisdiction"] is None)
     assert global_change["role"] == SUPER and global_change["actor_context"] is None
+    assert global_change["actor"] == {"id": None, "email": "system administrator"}
     et = _history(cast.jsuper, role=SUPER, jurisdiction="ET").json()
     assert [(e["jurisdiction"], e["role"]) for e in et["items"]] == [("ET", LTM)]
     assert _history(cast.jsuper, role=SUPER, jurisdiction="NOPE").status_code == 404

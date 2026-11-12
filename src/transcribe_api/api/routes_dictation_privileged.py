@@ -135,9 +135,8 @@ async def admin_me(
 ) -> AdminUserResponse:
     """The admin landing page's identity check: who the caller is and the role they are acting
     as. Needs ``admin.access`` (LegalTextManager, JurisdictionAdministrator,
-    JurisdictionSuperAdministrator in their context; a SystemAdministrator for the system pages).
-    ``role`` is the stored role of the context, never SystemAdministrator (invisible in the app:
-    null for a SystemAdministrator acting in no context)."""
+    JurisdictionSuperAdministrator in their context; SystemAdministrator for the system pages).
+    ``role`` is the role of the caller's own context."""
     ctx = auth_context.context_of(admin_user)
     return AdminUserResponse(
         email=admin_user.email,
@@ -159,7 +158,7 @@ async def get_admin_roles(
     """The roles the caller may assign (DIAAT-374: ``{"roles": [...]}``, which is what the Users
     tab reads), by the contract's assignment rules for the role they act in: a
     JurisdictionAdministrator Judge and LegalTextManager; a JurisdictionSuperAdministrator also
-    JurisdictionAdministrator; a SystemAdministrator JurisdictionAdministrator and
+    JurisdictionAdministrator; acting as SystemAdministrator JurisdictionAdministrator and
     JurisdictionSuperAdministrator. Never SystemAdministrator, which nobody can grant."""
     ctx = auth_context.context_of(admin_user)
     return RolesResponse(roles=assignable_roles(ctx.role if ctx else None, auth_context.sysadmin_of(admin_user)))

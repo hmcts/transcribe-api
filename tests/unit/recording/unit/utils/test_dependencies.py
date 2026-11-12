@@ -78,12 +78,15 @@ class TestResolveUserLoadsTheTokensUser:
         result, _ = _resolve(_existing_user(), principal)
         assert "dictation.use" in permissions_of(result) and "users.manage" not in permissions_of(result)
 
-    def test_a_system_administrator_with_no_context_holds_only_the_system_permissions(self):
+    def test_a_system_administrator_holds_the_system_permissions_only_acting_as_one(self):
+        from transcribe_api.domain.auth.app_token import Context
         from transcribe_api.domain.auth.authorisation import permissions_of
         from transcribe_api.domain.auth.permissions import SYSTEM_ADMIN_PERMISSIONS
 
-        result, _ = _resolve(_existing_user(), _principal(ctx=None, sysadmin=True))
-        assert set(permissions_of(result)) == SYSTEM_ADMIN_PERMISSIONS and result.ctx is None
+        acting, _ = _resolve(_existing_user(), _principal(ctx=Context(None, "SystemAdministrator"), sysadmin=True))
+        assert set(permissions_of(acting)) == SYSTEM_ADMIN_PERMISSIONS
+        no_context, _ = _resolve(_existing_user(), _principal(ctx=None, sysadmin=True))
+        assert permissions_of(no_context) == []
 
     def test_no_context_and_no_sysadmin_holds_no_permission_at_all(self):
         from transcribe_api.domain.auth.authorisation import permissions_of

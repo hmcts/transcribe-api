@@ -24,7 +24,7 @@ from pydantic import BaseModel, StringConstraints
 from sqlmodel import Session, select
 from starlette.concurrency import run_in_threadpool
 
-from transcribe_api.domain.assignments import distinct_contexts, leave_jurisdiction, load_assignments
+from transcribe_api.domain.assignments import leave_jurisdiction, load_assignments
 from transcribe_api.domain.audit import stage_audit
 from transcribe_api.domain.auth.app_token import Context
 from transcribe_api.domain.auth.authorisation import sign_in_endpoint
@@ -38,6 +38,7 @@ from transcribe_api.domain.auth.sessions import (
     SessionResponse,
     SignInIdentity,
     build_me,
+    contexts_of,
     ensure_preview_assignments,
     mint_session,
     sign_in,
@@ -150,17 +151,17 @@ def create_session(
 
 @router.get("/me/permissions", response_model=MeResponse)
 def my_permissions(response: Response, current_user: User = Depends(signed_in_endpoint)) -> MeResponse:
-    """Who the signed-in user is, what they hold (read now), what they are acting as (the
-    token's context) and the permissions of that role, plus the system ones for a
-    SystemAdministrator. Works with no context chosen, and for a user with no role."""
+    """Who the signed-in user is, the contexts they may act in (read now), what they are acting
+    as (the token's context) and the permissions of that role only. Works with no context
+    chosen, and for a user with no role."""
     _no_store(response)
     with Session(get_engine()) as session:
         return build_me(session, current_user.db_user, sysadmin=current_user.sysadmin, ctx=current_user.ctx)
 
 
 class ContextBody(BaseModel):
-    # null: the global JurisdictionSuperAdministrator. Required, so that leaving it out is not
-    # taken to mean that.
+    # null: the global JurisdictionSuperAdministrator, or SystemAdministrator. Required, so that
+    # leaving it out is not taken to mean that.
     jurisdiction: Annotated[str, StringConstraints(strip_whitespace=True, max_length=16)] | None
     role: Annotated[str, StringConstraints(strip_whitespace=True, max_length=64)]
 
@@ -170,12 +171,12 @@ def set_context(
     body: ContextBody, response: Response, current_user: User = Depends(signed_in_endpoint)
 ) -> SessionResponse:
     """Act as ``role`` in ``jurisdiction`` from now on: a new token with that context. 403
-    ``context_not_available`` for a pair the user does not hold (SystemAdministrator is never
-    one); nothing changes."""
+    ``context_not_available`` for a pair the user does not hold (SystemAdministrator, with no
+    jurisdiction, only for a holder of the Entra role); nothing changes."""
     _no_store(response)
     wanted = Context(jurisdiction=body.jurisdiction.upper() if body.jurisdiction else None, role=body.role)
     with Session(get_engine()) as session:
-        held = distinct_contexts(load_assignments(session, current_user.id))
+        held = contexts_of(load_assignments(session, current_user.id), current_user.sysadmin)
         if wanted not in held:
             raise context_not_available()
         return mint_session(
