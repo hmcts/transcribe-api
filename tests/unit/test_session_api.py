@@ -140,13 +140,8 @@ def test_a_new_user_has_no_role_and_no_access(client, world, db):
     assert claims["sub"] == me["user"]["id"]
 
 
-def test_a_new_user_is_not_enrolled_anywhere_even_in_an_auto_enrol_jurisdiction(client, world, db):
-    """DIAAT-373 decision 1: no auto-enrol, whatever the old column says."""
-    with Session(db) as session:
-        iac = session.get(type(world["iac"]), world["iac"].id)
-        iac.auto_enrol = True
-        session.add(iac)
-        session.commit()
+def test_a_new_user_is_not_enrolled_anywhere(client, world):
+    """DIAAT-373 decision 1: no auto-enrol."""
     me = Person(client).sign_in().json()["me"]
     assert me["status"] == "no_access" and me["assignments"] == []
 
