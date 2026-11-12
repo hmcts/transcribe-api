@@ -357,3 +357,105 @@ def test_0010_merges_pending_copies_that_differ_only_in_padding(engine):
     migrate(engine, "0010")
 
     assert assignments(engine) == [("pat@example.test", "IAC", "Judge", True, True)]
+
+
+def _with_et(engine) -> None:
+    run(
+        engine,
+        "INSERT INTO jurisdiction (id, code, name, enabled, auto_enrol, settings, created_datetime, updated_datetime)"
+        " VALUES (gen_random_uuid(), 'ET', 'Employment Tribunal', true, false, '{}', now(), now())",
+    )
+
+
+def test_0010_gives_a_blank_email_to_nobody_not_even_a_user_who_signed_in_without_one(engine):
+    migrate(engine, "0009")
+    run(
+        engine,
+        'INSERT INTO "user" (id, created_datetime, email, azure_user_id, has_completed_onboarding)'
+        " VALUES (gen_random_uuid(), now(), '', 'oid-no-email', false)",
+    )
+    membership(engine, "IAC", "admin", email="  ")
+
+    migrate(engine, "0010")
+
+    assert assignments(engine) == []
+
+
+def test_0010_does_not_make_a_padded_copy_claimable_when_its_twin_was_removed(engine):
+    """0009 lowered but did not trim: `pat@` and ` pat@` were two pending copies. An administrator removed
+    the first; trimming the second would give it back."""
+    migrate(engine, "0008")
+    _with_et(engine)
+    admin = add_user(engine, "admin")
+    membership(engine, "ET", "judge", email="Pat@Example.TEST")
+    membership(engine, "ET", "judge", email=" pat@example.test")
+    migrate(engine, "0009")
+    assert [a[0] for a in assignments(engine)] == [" pat@example.test", "pat@example.test"]
+
+    remove_assignment(engine, admin, "ET", "Judge", email="pat@example.test")
+    migrate(engine, "0010")
+
+    assert assignments(engine) == []
+
+
+def test_0010_leaves_a_pending_copy_whose_email_several_users_have(engine):
+    """Which account the email is is unknown, so the pending copy is not taken as claimed by either."""
+    migrate(engine, "0008")
+    membership(engine, "IAC", "judge", email="olga@example.test")
+    migrate(engine, "0009")
+    olga = add_user(engine, "olga")
+    run(
+        engine,
+        'INSERT INTO "user" (id, created_datetime, email, azure_user_id, has_completed_onboarding)'
+        " VALUES (gen_random_uuid(), now(), 'OLGA@example.test', 'oid-olga-2', false)",
+    )
+    run(
+        engine,
+        "INSERT INTO role_assignment (id, user_id, jurisdiction_id, role, granted_at)"
+        " SELECT gen_random_uuid(), :uid, id, 'Judge', now() FROM jurisdiction WHERE code = 'IAC'",
+        uid=olga,
+    )
+
+    migrate(engine, "0010")
+
+    assert ("olga@example.test", "IAC", "Judge", True, False) in assignments(engine)
+
+
+def test_0010_waits_for_a_sign_in_in_progress_and_then_sees_its_user(engine):
+    """A pod still on the 0009 release signs someone in while 0010 runs. Without waiting, 0010 would see no
+    user, add a pending assignment, and the sign-in (already past its claim) would never pick it up."""
+    import threading
+
+    migrate(engine, "0008")
+    membership(engine, "IAC", "judge", email="quinn@example.test")
+    migrate(engine, "0009")
+    run(engine, "DELETE FROM role_assignment")  # as if the old pods added the membership after 0009: the gap
+
+    sign_in = engine.connect()
+    transaction = sign_in.begin()
+    quinn = str(uuid4())
+    sign_in.execute(
+        text(
+            'INSERT INTO "user" (id, created_datetime, email, azure_user_id, has_completed_onboarding)'
+            " VALUES (:uid, now(), 'Quinn@Example.TEST', 'oid-quinn', false)"
+        ),
+        {"uid": quinn},
+    )
+    errors: list[BaseException] = []
+
+    def upgrade():
+        try:
+            migrate(engine, "0010")
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=upgrade)
+    worker.start()
+    worker.join(timeout=2)
+    assert worker.is_alive()  # held by the sign-in's uncommitted user row
+    transaction.commit()
+    sign_in.close()
+    worker.join(timeout=30)
+
+    assert not worker.is_alive() and errors == []
+    assert assignments(engine) == [("quinn@example.test", "IAC", "Judge", False, False)]

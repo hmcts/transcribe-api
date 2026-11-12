@@ -1025,13 +1025,18 @@ def test_0010_catches_up_the_memberships_then_retires_them(monkeypatch):
     assert "UPDATE role_assignment a SET tester = true" in sql
     # What was removed in the new code since 0009 is not given back.
     assert "e.event_type = 'assignment.removed'" in sql and "e.event_type = 'membership.leave'" in sql
-    assert "UPDATE role_assignment SET pending_email = btrim(pending_email)" in sql  # 0009 only lowered them
+    assert "SET pending_email = btrim(p.pending_email)" in sql  # 0009 only lowered them
+    # Resolved once, after the pods still serving are held off: every statement reads the same people.
+    assert sql.index('LOCK TABLE "user" IN SHARE ROW EXCLUSIVE MODE') < sql.index(
+        "LOCK TABLE role_assignment IN SHARE ROW EXCLUSIVE MODE"
+    ) < sql.index("CREATE TEMPORARY TABLE cutover_legacy") < sql.index("INSERT INTO role_assignment")
+    assert "DROP TABLE cutover_legacy" in sql
     assert "UPDATE jurisdiction SET auto_enrol = false WHERE auto_enrol" in sql
     assert "ALTER TABLE jurisdiction ALTER COLUMN auto_enrol SET DEFAULT false" in sql
     assert "ALTER TABLE jurisdiction_membership RENAME TO jurisdiction_membership_legacy" in sql
     assert sql.index("RENAME TO jurisdiction_membership_legacy") > sql.rindex("FROM jurisdiction_membership m")
     # The 0009 release still selects auto_enrol: the column stays while its pods may serve.
-    assert not re.search(r"DROP (TABLE|COLUMN)", sql)
+    assert not re.search(r"DROP COLUMN|DROP TABLE (?!cutover_legacy;)", sql)
 
 
 def test_0010_downgrade_restores_the_table_and_the_column_as_they_were(monkeypatch):

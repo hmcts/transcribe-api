@@ -9,10 +9,13 @@ the 0009 release only, so nothing writes memberships any more and this catches u
 Each membership is first resolved to its person: its user, or for one pending by email (lower case and
 trimmed, as domain/assignments.normalise_email stores it) the one user who has since signed in with that
 email, else the email itself. A pending membership whose email belongs to more than one user is left
-alone (the new code refuses such an email too: ``ambiguous_email``). Then:
+alone (the new code refuses such an email too: ``ambiguous_email``), and a blank one matches nobody.
+The memberships are resolved once, into a temporary table every statement reads, under locks that hold
+sign-ins and role changes on pods still serving until this commits. Then:
 
 1. 0009's pending copies are trimmed (it only lowered them, so a padded one could never be claimed); two
-   that become the same are one, in the test group if either was.
+   that become the same are one, in the test group if either was. A padded copy whose email had a role
+   removed in its jurisdiction since 0009 is dropped instead, so trimming cannot give it back.
 2. An assignment for every person who holds none for their membership, with 0009's mapping (``admin`` is
    JurisdictionAdministrator, anything else Judge): to the user, or pending by email. Memberships of the
    same person are one assignment, in the test group if any of them was.
@@ -62,21 +65,29 @@ logger = logging.getLogger("alembic.runtime.migration")
 
 LEGACY_TABLE = "jurisdiction_membership_legacy"
 
-# Every membership as (person, jurisdiction, role): user_id is its user, or the one user with its pending
-# email; email is the person's, normalised; ambiguous: a pending email more than one user has.
-_LEGACY = """WITH legacy AS (
-  SELECT m.id, m.jurisdiction_id, m.tester, m.created_datetime,
-         CASE m.role WHEN 'admin' THEN 'JurisdictionAdministrator' ELSE 'Judge' END AS role,
-         coalesce(m.user_id, s.user_id) AS user_id,
-         lower(btrim(coalesce(u.email, m.email))) AS email,
-         m.user_id IS NULL AND coalesce(s.users, 0) > 1 AS ambiguous
-  FROM jurisdiction_membership m
-  LEFT JOIN "user" u ON u.id = m.user_id
-  LEFT JOIN LATERAL (
-    SELECT count(*) AS users, (array_agg(o.id))[1] AS user_id FROM "user" o
-    WHERE m.user_id IS NULL AND lower(btrim(o.email)) = lower(btrim(m.email))
-  ) s ON true
+# Sign-ins and role changes on pods still serving wait until this commits: a user created, or a role
+# removed, between two of the statements below would otherwise be missed by both. "user" first, as the
+# sign-in takes them, so the two cannot deadlock.
+LOCKS = (
+    'LOCK TABLE "user" IN SHARE ROW EXCLUSIVE MODE',
+    "LOCK TABLE role_assignment IN SHARE ROW EXCLUSIVE MODE",
 )
+
+# Every membership as (person, jurisdiction, role), resolved once: user_id is its user, or the only user
+# with its pending email; email is the person's, normalised; ambiguous: a pending email several users have.
+RESOLVE = """
+CREATE TEMPORARY TABLE cutover_legacy ON COMMIT DROP AS
+SELECT m.id, m.jurisdiction_id, m.tester, m.created_datetime,
+       CASE m.role WHEN 'admin' THEN 'JurisdictionAdministrator' ELSE 'Judge' END AS role,
+       coalesce(m.user_id, CASE WHEN s.users = 1 THEN s.user_id END) AS user_id,
+       lower(btrim(coalesce(u.email, m.email))) AS email,
+       m.user_id IS NULL AND s.users > 1 AS ambiguous
+FROM jurisdiction_membership m
+LEFT JOIN "user" u ON u.id = m.user_id
+CROSS JOIN LATERAL (
+  SELECT count(*) AS users, (array_agg(o.id))[1] AS user_id FROM "user" o
+  WHERE m.user_id IS NULL AND btrim(m.email) <> '' AND lower(btrim(o.email)) = lower(btrim(m.email))
+) s
 """
 
 # Someone removed a role of this person in this jurisdiction after 0009 (user_admin.delete_assignment,
@@ -100,52 +111,63 @@ _HELD = """EXISTS (
 
 _GRANTABLE = f"NOT l.ambiguous AND (l.user_id IS NOT NULL OR l.email <> '') AND NOT {_HELD} AND NOT {_DECIDED}"
 
-MERGE_PADDED_TESTER = """
-UPDATE role_assignment k SET tester = true
-FROM role_assignment d
-WHERE k.user_id IS NULL AND d.user_id IS NULL AND k.id <> d.id AND d.tester AND NOT k.tester
-  AND btrim(k.pending_email) = btrim(d.pending_email) AND d.pending_email <> btrim(d.pending_email)
-  AND k.jurisdiction_id IS NOT DISTINCT FROM d.jurisdiction_id AND k.role = d.role
-"""
+_PADDED = "p.user_id IS NULL AND p.pending_email <> btrim(p.pending_email)"
 
-DELETE_PADDED_DUPLICATES = """
-DELETE FROM role_assignment d
-WHERE d.user_id IS NULL AND d.pending_email <> btrim(d.pending_email)
+# A padded copy could never be claimed; once trimmed it could. One whose email had a role removed in its
+# jurisdiction since 0009 (its unpadded twin's, say) is dropped instead, so trimming gives nothing back.
+DELETE_PADDED_REMOVED = f"""
+DELETE FROM role_assignment p
+WHERE {_PADDED}
   AND EXISTS (
-    SELECT 1 FROM role_assignment k
-    WHERE k.user_id IS NULL AND k.id <> d.id AND btrim(k.pending_email) = btrim(d.pending_email)
-      AND k.jurisdiction_id IS NOT DISTINCT FROM d.jurisdiction_id AND k.role = d.role
-      AND (k.pending_email = btrim(k.pending_email) OR k.id < d.id)
+    SELECT 1 FROM audit_log e
+    WHERE e.event_type = 'assignment.removed' AND e.object_id = p.jurisdiction_id::text
+      AND lower(btrim(e.detail->>'target_email')) = btrim(p.pending_email)
   )
 """
 
-TRIM_PENDING = """
-UPDATE role_assignment SET pending_email = btrim(pending_email)
-WHERE user_id IS NULL AND pending_email <> btrim(pending_email)
+MERGE_PADDED_TESTER = f"""
+UPDATE role_assignment k SET tester = true
+FROM role_assignment p
+WHERE {_PADDED} AND p.tester
+  AND k.user_id IS NULL AND k.id <> p.id AND NOT k.tester AND btrim(k.pending_email) = btrim(p.pending_email)
+  AND k.jurisdiction_id IS NOT DISTINCT FROM p.jurisdiction_id AND k.role = p.role
 """
 
-ADD_FOR_USERS = f"""{_LEGACY}
+DELETE_PADDED_DUPLICATES = f"""
+DELETE FROM role_assignment p
+WHERE {_PADDED}
+  AND EXISTS (
+    SELECT 1 FROM role_assignment k
+    WHERE k.user_id IS NULL AND k.id <> p.id AND btrim(k.pending_email) = btrim(p.pending_email)
+      AND k.jurisdiction_id IS NOT DISTINCT FROM p.jurisdiction_id AND k.role = p.role
+      AND (k.pending_email = btrim(k.pending_email) OR k.id < p.id)
+  )
+"""
+
+TRIM_PENDING = f"UPDATE role_assignment p SET pending_email = btrim(p.pending_email) WHERE {_PADDED}"
+
+ADD_FOR_USERS = f"""
 INSERT INTO role_assignment (id, user_id, pending_email, jurisdiction_id, role, granted_by, granted_at, tester)
 SELECT gen_random_uuid(), l.user_id, NULL, l.jurisdiction_id, l.role, NULL, min(l.created_datetime), bool_or(l.tester)
-FROM legacy l
+FROM cutover_legacy l
 WHERE l.user_id IS NOT NULL AND {_GRANTABLE}
 GROUP BY l.user_id, l.jurisdiction_id, l.role
 ON CONFLICT DO NOTHING
 """
 
-ADD_PENDING = f"""{_LEGACY}
+ADD_PENDING = f"""
 INSERT INTO role_assignment (id, user_id, pending_email, jurisdiction_id, role, granted_by, granted_at, tester)
 SELECT gen_random_uuid(), NULL, l.email, l.jurisdiction_id, l.role, NULL, min(l.created_datetime), bool_or(l.tester)
-FROM legacy l
+FROM cutover_legacy l
 WHERE l.user_id IS NULL AND l.email IS NOT NULL AND {_GRANTABLE}
 GROUP BY l.email, l.jurisdiction_id, l.role
 ON CONFLICT DO NOTHING
 """
 
-REMOVE_CLAIMED_PENDING = f"""{_LEGACY}
+REMOVE_CLAIMED_PENDING = """
 DELETE FROM role_assignment p
-USING legacy l
-WHERE p.user_id IS NULL AND l.user_id IS NOT NULL
+USING cutover_legacy l
+WHERE p.user_id IS NULL AND l.user_id IS NOT NULL AND NOT l.ambiguous
   AND p.pending_email = l.email AND p.jurisdiction_id = l.jurisdiction_id AND p.role = l.role
   AND EXISTS (
     SELECT 1 FROM role_assignment a
@@ -153,9 +175,9 @@ WHERE p.user_id IS NULL AND l.user_id IS NOT NULL
   )
 """
 
-SYNC_TESTER = f"""{_LEGACY}
+SYNC_TESTER = f"""
 UPDATE role_assignment a SET tester = true
-FROM legacy l
+FROM cutover_legacy l
 WHERE l.tester AND NOT a.tester AND NOT l.ambiguous
   AND a.jurisdiction_id = l.jurisdiction_id AND a.role = l.role
   AND CASE WHEN l.user_id IS NOT NULL THEN a.user_id = l.user_id
@@ -163,13 +185,12 @@ WHERE l.tester AND NOT a.tester AND NOT l.ambiguous
   AND NOT {_DECIDED}
 """
 
-UNMATCHED = f"""{_LEGACY}
-SELECT l.id, {_DECIDED} FROM legacy l WHERE NOT {_HELD} ORDER BY l.id
-"""
+UNMATCHED = f"SELECT l.id, {_DECIDED} FROM cutover_legacy l WHERE NOT {_HELD} ORDER BY l.id"
 
 AUTO_ENROL_OFF = "UPDATE jurisdiction SET auto_enrol = false WHERE auto_enrol"
 
 CATCH_UP = (
+    ("padded pending assignments removed since 0009 dropped", DELETE_PADDED_REMOVED),
     ("padded pending assignments merged", MERGE_PADDED_TESTER),
     ("padded pending duplicates removed", DELETE_PADDED_DUPLICATES),
     ("pending emails trimmed", TRIM_PENDING),
@@ -182,6 +203,8 @@ CATCH_UP = (
 
 
 def upgrade() -> None:
+    for statement in (*LOCKS, RESOLVE):
+        op.execute(sa.text(statement))
     if context.is_offline_mode():
         for _name, statement in CATCH_UP:
             op.execute(sa.text(statement))
@@ -201,6 +224,7 @@ def upgrade() -> None:
         )
         if other:
             logger.warning("DIAAT-402 cutover: memberships with no assignment (ids): %s", ", ".join(other))
+    op.execute(sa.text("DROP TABLE cutover_legacy"))
 
     op.alter_column("jurisdiction", "auto_enrol", existing_type=sa.Boolean(), server_default=sa.false())
     op.rename_table("jurisdiction_membership", LEGACY_TABLE)
