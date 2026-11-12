@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import os
 import re
+from types import SimpleNamespace
 
 import pytest
 from alembic.script import ScriptDirectory
@@ -99,7 +100,7 @@ def _alter_type_sql(table: str, column: str, type_sql: str) -> re.Pattern[str]:
 def test_there_is_one_history_with_one_head():
     script = ScriptDirectory.from_config(migrations.alembic_config())
     assert script.get_bases() == ["0001"]
-    assert script.get_heads() == ["0009"]
+    assert script.get_heads() == ["0010"]
 
 
 def test_baseline_creates_every_table(monkeypatch):
@@ -357,12 +358,13 @@ def _truncates_a_live_table(statement: str) -> bool:
 # DIAAT-342 adds document_content.jurisdiction_id in 0006 and backfills that column
 # alone: it may set jurisdiction_id (one assignment, optionally with a WHERE) and
 # nothing else, so the admin's wording in `content` is never touched.
-# (0009 writes no live-edited table: jurisdiction.auto_enrol is set false by scripts-cutover-authz.py at
-# cutover, not by the migration, which ships first and must not change what the previous release does.)
+# DIAAT-402: 0010 turns auto_enrol off and nothing else. No administrator can set it since DIAAT-373
+# (the option is gone and nothing reads it), so there is no live edit of it to keep.
 ALLOWED_LIVE_WRITES = {
     "0006": re.compile(
         r'^\s*UPDATE\s+"?document_content"?\s+SET\s+"?jurisdiction_id"?\s*=\s*[^,]+?(?:\s+WHERE\s.+)?$', re.IGNORECASE | re.DOTALL
     ),
+    "0010": re.compile(r'^\s*UPDATE\s+"?jurisdiction"?\s+SET\s+"?auto_enrol"?\s*=\s*false\s+WHERE\s+"?auto_enrol"?$', re.IGNORECASE),
 }
 
 
@@ -602,7 +604,7 @@ def test_baseline_matches_the_models_on_a_real_database():
     migrations.run_migrations(engine)
 
     with engine.connect() as connection:
-        context = MigrationContext.configure(connection)
+        context = MigrationContext.configure(connection, opts={"include_object": migrations.include_object})
         diff = compare_metadata(context, migrations.target_metadata())
     assert diff == []
 
@@ -970,7 +972,7 @@ def test_0009_backfills_the_assignments_from_the_memberships_and_leaves_auto_enr
     assert "CASE m.role WHEN 'admin' THEN 'JurisdictionAdministrator' ELSE 'Judge' END" in sql
     assert "CASE WHEN m.user_id IS NULL THEN lower(m.email) END" in sql  # pending stays pending, lower case
     assert "FROM jurisdiction_membership m" in sql
-    assert "auto_enrol" not in sql  # review MIG-2: the old pods read it; the cutover script sets it
+    assert "auto_enrol" not in sql  # review MIG-2: the old pods read it; 0010 sets it
     assert not re.search(r"UPDATE\s+\"?jurisdiction\"?", sql)
     assert sql.index("INSERT INTO role_assignment") > sql.index("CREATE TABLE role_assignment")
 
@@ -1011,6 +1013,51 @@ def test_the_models_declare_what_0009_makes():
         "ck_role_assignment_who",
         "ck_role_assignment_email_lower",
     } <= checks
+
+
+# 0010: DIAAT-402 the cutover, and the old access data retired ------------------------
+
+
+def test_0010_catches_up_the_memberships_then_retires_them(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0009:0010")
+    assert sql.count("INSERT INTO role_assignment") == 2  # for users, and pending by email
+    assert "DELETE FROM role_assignment p" in sql  # the pending copies the old release claimed
+    assert "UPDATE role_assignment a SET tester = true" in sql
+    # What was removed in the new code since 0009 is not given back.
+    assert "e.event_type = 'assignment.removed'" in sql and "e.event_type = 'membership.leave'" in sql
+    assert "SET pending_email = btrim(p.pending_email)" in sql  # 0009 only lowered them
+    # Resolved once, after the pods still serving are held off: every statement reads the same people.
+    assert sql.index("LOCK TABLE jurisdiction IN ACCESS EXCLUSIVE MODE") < sql.index(
+        'LOCK TABLE "user" IN SHARE ROW EXCLUSIVE MODE'
+    ) < sql.index(
+        "LOCK TABLE role_assignment IN SHARE ROW EXCLUSIVE MODE"
+    ) < sql.index("CREATE TEMPORARY TABLE cutover_legacy") < sql.index("INSERT INTO role_assignment")
+    assert "DROP TABLE cutover_legacy" in sql
+    assert "UPDATE jurisdiction SET auto_enrol = false WHERE auto_enrol" in sql
+    assert "ALTER TABLE jurisdiction ALTER COLUMN auto_enrol SET DEFAULT false" in sql
+    assert "ALTER TABLE jurisdiction_membership RENAME TO jurisdiction_membership_legacy" in sql
+    assert sql.index("RENAME TO jurisdiction_membership_legacy") > sql.rindex("FROM jurisdiction_membership m")
+    # The 0009 release still selects auto_enrol: the column stays while its pods may serve.
+    assert not re.search(r"DROP COLUMN|DROP TABLE (?!cutover_legacy;)", sql)
+
+
+def test_0010_downgrade_restores_the_table_and_the_column_as_they_were(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0010:0009", downgrade=True)
+    assert "ALTER TABLE jurisdiction_membership_legacy RENAME TO jurisdiction_membership" in sql
+    assert "ALTER TABLE jurisdiction ALTER COLUMN auto_enrol DROP DEFAULT" in sql
+
+
+def test_the_models_no_longer_map_the_retired_access_data():
+    tables = migrations.target_metadata().tables
+    assert "jurisdiction_membership" not in tables
+    assert "auto_enrol" not in tables["jurisdiction"].columns
+    jurisdiction = tables["jurisdiction"]
+    assert not migrations.include_object(None, "jurisdiction_membership_legacy", "table", True, None)
+    assert not migrations.include_object(
+        SimpleNamespace(table=jurisdiction), "auto_enrol", "column", True, None
+    )
+    assert migrations.include_object(jurisdiction, "jurisdiction", "table", False, None)
+    assert migrations.include_object(jurisdiction.columns["code"], "code", "column", False, None)
 
 
 def _reset(engine):
@@ -1116,7 +1163,7 @@ def test_0009_backfills_memberships_as_assignments_and_goes_up_down_up():
         ]
         with engine.connect() as connection:
             assert assignments(connection) == expected
-            # auto_enrol is as it was (the old pods read it): the cutover script turns it off, not the migration.
+            # auto_enrol is as it was (the old pods read it): 0010 turns it off, not 0009.
             assert connection.execute(text("SELECT count(*) FROM jurisdiction WHERE auto_enrol")).scalar_one() == 2
             # Existing users stay active, with a name to come; the old tables are untouched.
             assert connection.execute(text('SELECT bool_and(is_active) FROM "user"')).scalar_one() is True

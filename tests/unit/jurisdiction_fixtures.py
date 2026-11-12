@@ -28,7 +28,6 @@ from transcribe_api.domain.models_dictation import (
     AuditLog,
     DocumentContent,
     Jurisdiction,
-    JurisdictionMembership,
     JurisdictionTemplate,
     MinuteVersion,
     RoleAssignment,
@@ -47,7 +46,6 @@ IAC_JURISDICTION_ID = UUID("6a1c0f3e-3b7d-4c2a-9e51-1ac000000001")
 JURISDICTION_TABLES = [
     User.__table__,
     Jurisdiction.__table__,
-    JurisdictionMembership.__table__,
     JurisdictionTemplate.__table__,
     RoleAssignment.__table__,
     AccessRequest.__table__,
@@ -93,11 +91,11 @@ def load_migration(file_name: str) -> ModuleType:
 
 
 def add_jurisdiction(
-    engine, code: str, *, enabled=True, auto_enrol=False, settings=None, stage="live"
+    engine, code: str, *, enabled=True, settings=None, stage="live"
 ) -> Jurisdiction:
     with Session(engine) as session:
         row = Jurisdiction(
-            code=code, name=f"{code} name", enabled=enabled, auto_enrol=auto_enrol, settings=settings or {}, stage=stage
+            code=code, name=f"{code} name", enabled=enabled, settings=settings or {}, stage=stage
         )
         session.add(row)
         session.commit()
@@ -114,7 +112,6 @@ def add_iac_as_migrated(engine) -> Jurisdiction:
             code=m.IAC_CODE,
             name=m.IAC_NAME,
             enabled=m.IAC_ENABLED,
-            auto_enrol=m.IAC_AUTO_ENROL,
             settings=m.IAC_SETTINGS,
         )
         session.add(row)

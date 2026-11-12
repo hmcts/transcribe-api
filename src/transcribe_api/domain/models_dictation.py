@@ -79,7 +79,7 @@ class User(BaseTable, table=True):
     has_completed_onboarding: bool = Field(default=False)
     # Retired (DIAAT-382): nothing reads or writes it any more; a user's roles are their
     # role_assignment rows. NULL for users created since 0009 (a new user has no role).
-    # Dropped in a later release, with jurisdiction_membership and jurisdiction.auto_enrol.
+    # Dropped in a later release, with jurisdiction.auto_enrol (unmapped since 0010).
     role: str | None = Field(default=None, index=True)
     # Retired (DIAAT-390): the active jurisdiction is chosen per session (the BenchNotes
     # token's ctx), not remembered here. Dropped in a later release.
@@ -115,9 +115,6 @@ class Jurisdiction(SQLModel, table=True):
     # testers and admins; live, all of them. The admin area creates drafts; a row
     # made without a stage is live, as every jurisdiction was before stages.
     stage: str = Field(default="live", max_length=8, sa_column_kwargs={"server_default": text("'live'")})
-    # Retired (DIAAT-373): nothing reads it, and the cutover script sets it false. A new
-    # user has no role until an administrator adds them or approves their request.
-    auto_enrol: bool = Field(default=False)
     settings: dict = Field(sa_column=Column(JSONB, nullable=False))
     created_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
     updated_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
@@ -137,41 +134,6 @@ class UploadJurisdiction(SQLModel, table=True):
 
     transcription_id: UUID = Field(primary_key=True)
     jurisdiction_id: UUID = Field(foreign_key="jurisdiction.id")
-    created_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
-
-
-class JurisdictionMembership(SQLModel, table=True):
-    """A user's role in a jurisdiction (DIAAT-322, 0004). Retired by DIAAT-382: nothing
-    reads it since role_assignment (0009, backfilled from this table) took over; dropped
-    in a later release.
-
-    ``user_id`` is NULL for someone added by email before their first sign-in: the row
-    is claimed (user_id set) when they first sign in (domain/jurisdictions.py).
-    """
-
-    __tablename__ = "jurisdiction_membership"
-    __table_args__ = (
-        UniqueConstraint("jurisdiction_id", "user_id", name="uq_jurisdiction_membership_user"),
-        Index(
-            "uq_jurisdiction_membership_pending_email",
-            "jurisdiction_id",
-            "email",
-            unique=True,
-            postgresql_where=text("user_id IS NULL"),
-            sqlite_where=text("user_id IS NULL"),
-        ),
-        CheckConstraint("role IN ('judge', 'admin')", name="ck_jurisdiction_membership_role"),
-        CheckConstraint("user_id IS NOT NULL OR email IS NOT NULL", name="ck_jurisdiction_membership_who"),
-    )
-
-    id: UUID = Field(default_factory=uuid4, primary_key=True, nullable=False)
-    jurisdiction_id: UUID = Field(foreign_key="jurisdiction.id", index=True)
-    user_id: UUID | None = Field(default=None, foreign_key="user.id", index=True)
-    # Lower case. Only used to claim a pending membership on first sign-in.
-    email: str | None = Field(default=None)
-    role: str = Field(default="judge", max_length=16)
-    # In the jurisdiction's test group: sees it while it is in test (DIAAT-345).
-    tester: bool = Field(default=False, sa_column_kwargs={"server_default": text("false")})
     created_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
 
 

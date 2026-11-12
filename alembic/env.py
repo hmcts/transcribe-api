@@ -12,7 +12,7 @@ from logging.config import fileConfig
 from sqlalchemy import create_engine, pool
 
 from alembic import context
-from transcribe_api.runtime.migrations import target_metadata
+from transcribe_api.runtime.migrations import include_object, target_metadata
 
 config = context.config
 
@@ -29,6 +29,7 @@ def run_migrations_offline() -> None:
     context.configure(
         url=get_url(),
         target_metadata=target_metadata(),
+        include_object=include_object,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -39,14 +40,14 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     connection = config.attributes.get("connection")
     if connection is not None:
-        context.configure(connection=connection, target_metadata=target_metadata())
+        context.configure(connection=connection, target_metadata=target_metadata(), include_object=include_object)
         with context.begin_transaction():
             context.run_migrations()
         return
 
     engine = create_engine(get_url(), poolclass=pool.NullPool)
     with engine.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata())
+        context.configure(connection=connection, target_metadata=target_metadata(), include_object=include_object)
         with context.begin_transaction():
             context.run_migrations()
 
