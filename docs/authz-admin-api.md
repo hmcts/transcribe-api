@@ -132,18 +132,24 @@ is checked on every request).
 
 ## Deactivating
 
-`POST /api/admin/users/{id}/deactivate` and `/reactivate` (`users.manage`): **204**, idempotent. A deactivated user is refused 403 `user_deactivated`
-on their next request and cannot sign in. 404 `user_not_found` (also for a user a JurisdictionAdministrator cannot see). Refused with 403:
-`cannot_deactivate_self`; `assignment_not_allowed` for a user who holds a role the caller may not assign (a JurisdictionAdministrator cannot
-deactivate another one, or a JurisdictionSuperAdministrator), and for a user who also works in another jurisdiction (deactivation is across all of
-them: remove their role in yours instead). Only a JurisdictionAdministrator holds `users.manage` (DIAAT-406): a JurisdictionSuperAdministrator and a
-SystemAdministrator deactivate nobody. The scope is the **role** the caller acts in: a SystemAdministrator who acts in a stored role has that role's
-scope and rights only.
+`POST /api/admin/users/{id}/deactivate` and `/reactivate` (`users.manage` or `accounts.manage`): **204**, idempotent. A deactivated user is refused
+403 `user_deactivated` on their next request, in every jurisdiction, and cannot sign in. Nobody deactivates themselves (403 `cannot_deactivate_self`).
+
+* The **JurisdictionSuperAdministrator** (`accounts.manage`, DIAAT-406) reaches any account: JurisdictionAdministrators, other
+  JurisdictionSuperAdministrators and users who hold roles in several jurisdictions included.
+* A **JurisdictionAdministrator** (`users.manage`) reaches only users whose roles are all in the jurisdiction it acts in: 404 `user_not_found` for a
+  user it cannot see; 403 `assignment_not_allowed` for one who also works in another jurisdiction (remove their roles in yours instead) or who holds
+  an administrator role.
+* A SystemAdministrator deactivates nobody. The scope is the **role** the caller acts in: a SystemAdministrator who acts in a stored role has that
+  role's scope and rights only.
 
 ## Role-change history
 
-`GET /api/admin/role-history?jurisdiction=&page=1&page_size=50` (`role_audit.read`, a JurisdictionAdministrator's only): newest first, those of the
-jurisdiction it acts in (`jurisdiction=` for another is 403). `change`
+`GET /api/admin/role-history?jurisdiction=&user=&page=1&page_size=50` (`role_audit.read`): newest first. A JurisdictionAdministrator reads those of the
+jurisdiction it acts in (`jurisdiction=` for another is 403 `jurisdiction_not_in_scope`); the JurisdictionSuperAdministrator reads every jurisdiction's
+and the global changes (appointments of JurisdictionSuperAdministrators, deactivations of users of several jurisdictions), or one jurisdiction's with
+`jurisdiction=` (DIAAT-406). `user=<id>` narrows either to the changes made to that user (a user leaving a jurisdiction included): across all
+jurisdictions for the JurisdictionSuperAdministrator, in its own for a JurisdictionAdministrator. `change`
 is one of `assignment.added`, `assignment.removed`, `user.deactivated`, `user.reactivated`, `membership.leave`, `access_request.approved`,
 `access_request.rejected` (an approved request is one row per role).
 
@@ -237,9 +243,8 @@ also needs `jurisdiction.create` (also the JurisdictionSuperAdministrator's). Th
   jurisdiction, 409 if it changed since `version`. `jurisdiction.wording.edit`: a JurisdictionSuperAdministrator, any jurisdiction's; nobody else (a
   JurisdictionAdministrator and a SystemAdministrator included).
 
-Screen wording is the UI labels (`WORDING_KEYS`), not legal text (Document Content, the LegalTextManager's). `/api/jurisdictions/wording`, the active
-jurisdiction's screen wording, cannot be used by anyone now (a JurisdictionAdministrator lacks the permission; a JurisdictionSuperAdministrator has no
-jurisdiction, 403 `no_jurisdiction`); who edits screen wording from within a jurisdiction is an open decision.
+Screen wording is the UI labels (`WORDING_KEYS`), not legal text (Document Content, the LegalTextManager's). Only the JurisdictionSuperAdministrator
+edits it, here; the in-jurisdiction route `/api/jurisdictions/wording` was removed (DIAAT-406).
 
 A jurisdiction's uploaded Word templates (`/api/admin/jurisdictions/{code}/templates...`, DIAAT-344) are `templates.manage`: a JurisdictionAdministrator, in the
 jurisdiction it acts in only (403 `jurisdiction_not_in_scope` for another).

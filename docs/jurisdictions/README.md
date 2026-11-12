@@ -63,10 +63,9 @@ missing, and moving it to test or live is refused (400 `jurisdiction_not_ready`)
 A jurisdiction also has an optional **display name**, which is what users see (for
 example "Employment Tribunals (ET)"), and an optional **service**, where it applies.
 
-A user acting as the **JurisdictionAdministrator** of a jurisdiction changes that
-jurisdiction's wording, and nothing else, from the **Wording** link in the header
-(`/jurisdiction-wording`, behind it `/api/jurisdictions/wording`). Being an administrator
-in one jurisdiction gives nothing in another.
+A jurisdiction's screen wording is changed only by a **JurisdictionSuperAdministrator**, in
+the Jurisdictions screen (`/api/admin/jurisdictions/{code}/wording`, DIAAT-406). A
+JurisdictionAdministrator does not edit it.
 
 A jurisdiction's **legal wording** (hearing types, legal frameworks, anonymity text: what
 its decision document is built from) is its own too, edited by its LegalTextManager: see

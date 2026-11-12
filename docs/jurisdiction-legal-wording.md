@@ -6,9 +6,8 @@ Before DIAAT-342 it was one global row. Now each jurisdiction has its own, and i
 LegalTextManager edits that one only, in the Document Content screen (Legal Frameworks
 included). (Not to be confused with the *screen wording*, the 16 `WORDING_KEYS` in
 `jurisdiction.settings.wording`: UI labels, not legal text, which the JurisdictionSuperAdministrator
-edits from the Jurisdictions screen at `/api/admin/jurisdictions/{code}/wording`. Since DIAAT-406
-nobody can use `/api/jurisdictions/wording`, the active jurisdiction's; who edits screen wording
-from within a jurisdiction is an open decision.)
+edits from the Jurisdictions screen at `/api/admin/jurisdictions/{code}/wording`, and nobody else:
+the in-jurisdiction route `/api/jurisdictions/wording` was removed in DIAAT-406.)
 
 ## Which jurisdiction
 

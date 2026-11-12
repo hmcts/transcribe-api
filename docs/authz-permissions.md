@@ -35,7 +35,9 @@ legal-wording routes).
 | document_content.read | yes | yes | | | |
 | document_content.write, legal_text.manage | | yes | | | |
 | admin.access | | yes | yes | yes | yes |
-| users.manage, access.approve, role_audit.read, templates.manage | | | yes | | |
+| users.manage, access.approve, templates.manage | | | yes | | |
+| role_audit.read | | | yes (its jurisdiction) | yes (all) | |
+| accounts.manage | | | | yes | |
 | jurisdiction.create, jurisdictions.manage, jurisdiction.wording.edit, jurisdiction.features, jurisdiction_admin.assign | | | | yes | |
 | jurisdiction_super_admin.assign | | | | | yes |
 | feature_flags.manage, system.settings, security.alert_test | | | | | yes |
@@ -50,8 +52,8 @@ Judge or LegalTextManager unless it holds them too ([`authz-token-and-context.md
 |---|---|
 | Judge | Dictation, Recordings |
 | LegalTextManager | Document Content (hearing types, legal frameworks, anonymity) |
-| JurisdictionAdministrator | Users, Templates, Approvals (its jurisdiction) |
-| JurisdictionSuperAdministrator | Jurisdictions (settings, screen wording, appointing JurisdictionAdministrators) |
+| JurisdictionAdministrator | Users (with its jurisdiction's role history), Templates, Approvals (its jurisdiction) |
+| JurisdictionSuperAdministrator | Jurisdictions (settings, screen wording, appointing JurisdictionAdministrators); User accounts (deactivate and reactivate any account, any user's role history across all jurisdictions) |
 | SystemAdministrator | Super administrators, Feature flags |
 
 Who gives which role: a SystemAdministrator JurisdictionSuperAdministrator; a JurisdictionSuperAdministrator JurisdictionAdministrator (any
@@ -130,9 +132,9 @@ the shared routes.)
 | `GET` | `/api/admin/users` | `users.manage` or `jurisdiction_admin.assign` or `jurisdiction_super_admin.assign` | JA, JSA, sysadmin |
 | `POST` | `/api/admin/assignments` | `users.manage` or `jurisdiction_admin.assign` or `jurisdiction_super_admin.assign` (the rules decide which role) | JA, JSA, sysadmin |
 | `DELETE` | `/api/admin/assignments/{assignment_id}` | as `POST /api/admin/assignments` | JA, JSA, sysadmin |
-| `POST` | `/api/admin/users/{user_id}/deactivate` | `users.manage` | JA |
-| `POST` | `/api/admin/users/{user_id}/reactivate` | `users.manage` | JA |
-| `GET` | `/api/admin/role-history` | `role_audit.read` | JA |
+| `POST` | `/api/admin/users/{user_id}/deactivate` | `users.manage` or `accounts.manage` | JA (its jurisdiction's users), JSA (any account) |
+| `POST` | `/api/admin/users/{user_id}/reactivate` | `users.manage` or `accounts.manage` | JA (its jurisdiction's users), JSA (any account) |
+| `GET` | `/api/admin/role-history` | `role_audit.read` (`user=` narrows it to one user) | JA (its jurisdiction), JSA (all) |
 | `GET` | `/api/admin/access-requests` | `access.approve` | JA |
 | `POST` | `/api/admin/access-requests/{request_id}/approve` | `access.approve` | JA |
 | `POST` | `/api/admin/access-requests/{request_id}/reject` | `access.approve` | JA |
@@ -152,8 +154,6 @@ the shared routes.)
 | `POST` | `/api/telemetry` | `app.access` | Judge, LTM, JA, JSA |
 | `GET` | `/api/jurisdictions/current` | `app.access` | Judge, LTM, JA, JSA |
 | `GET` | `/api/jurisdictions/templates` | `recording.own` or `dictation.use` (the uploaded templates a judge can choose) | Judge |
-| `GET` | `/api/jurisdictions/wording` | `jurisdiction.wording.edit` | JSA by the map, but it has no jurisdiction (403 `no_jurisdiction`): nobody |
-| `PUT` | `/api/jurisdictions/wording` | `jurisdiction.wording.edit` | JSA by the map, but it has no jurisdiction (403 `no_jurisdiction`): nobody |
 | `POST` | `/api/auth/session` | (exempt: sign_in) | - |
 | `GET` | `/api/me/permissions` | (exempt: signed_in) | - |
 | `PUT` | `/api/me/context` | (exempt: signed_in) | - |
@@ -214,11 +214,13 @@ the shared routes.)
 * **User, onboarding, profile and telemetry routes are `app.access`**: any role acting in a context. `GET /api/user/onboarding-status` now always says
   `is_allowlisted: true` (the allowlist is the role assignment: a user with none never reaches it); its fields stay for the web app.
 * **`GET /api/jurisdictions/current` is `app.access`** and needs a jurisdiction: a JurisdictionSuperAdministrator (global) gets 403 `no_jurisdiction`.
-* **`/api/jurisdictions/wording` is `jurisdiction.wording.edit`** on the active jurisdiction (in scope by construction). Since DIAAT-406 only the
-  JurisdictionSuperAdministrator holds the permission, and it has no active jurisdiction (403 `no_jurisdiction`), so **nobody can use these routes**:
-  a JurisdictionAdministrator lacks the permission. The JurisdictionSuperAdministrator edits screen wording by code,
-  `GET/PUT /api/admin/jurisdictions/{code}/wording`. Who, if anyone, edits screen wording from within a jurisdiction is an open decision.
+* **Screen wording is the JurisdictionSuperAdministrator's alone (DIAAT-406)**: `GET/PUT /api/admin/jurisdictions/{code}/wording`, from the
+  Jurisdictions screen. There is no route for the wording of the jurisdiction the caller acts in (`/api/jurisdictions/wording` was removed).
   Screen wording is the UI labels (`WORDING_KEYS`), not legal text.
+* **Deactivation (DIAAT-406)**: `users.manage` (a JurisdictionAdministrator: only users whose roles are all in its jurisdiction, never an
+  administrator) or `accounts.manage` (the JurisdictionSuperAdministrator: any account but its own, administrators and users of several
+  jurisdictions included). **Role history**: `role_audit.read`, a JurisdictionAdministrator's for its jurisdiction, the
+  JurisdictionSuperAdministrator's for all of it (global changes included); `user=` gives one user's changes within that scope.
 * **`/api/v1` uploads and job submission are `recording.upload`; everything else on a job is `recording.own`**, and a job is reachable only by its owner (404 as
   for an unknown job). There is no administrator or SystemAdministrator bypass; nothing lists or reads ownerless pre-migration jobs.
 * **`GET /api/admin/me` is `admin.access`**; its response is `{email, role, user_id}` where `role` is the caller's own active role (SystemAdministrator for one acting as it);
@@ -253,7 +255,7 @@ the shared routes.)
 * **A SystemAdministrator acting in a stored role has that role's permissions and scope, and nothing else (DIAAT-403).** The system permissions
   (`jurisdiction_super_admin.assign` among them) are the SystemAdministrator context's alone, and are not read as "global administrator". The user list and
   deactivation take their scope from the role acted in (`jurisdiction_scope`, review finding S4): a JurisdictionAdministrator's is its jurisdiction, and
-  nobody else holds `users.manage` (DIAAT-406).
+  nobody else holds `users.manage`; the JurisdictionSuperAdministrator deactivates by `accounts.manage`, which is global (DIAAT-406).
   Acting as SystemAdministrator: assigning JurisdictionSuperAdministrator (the only role it gives, DIAAT-403), listing users to find who to assign, the
   feature flags, the system routes.
 * **Giving yourself a role follows the same rules as giving it to anyone else** (DIAAT-406; 403 `assignment_not_allowed` otherwise). A
