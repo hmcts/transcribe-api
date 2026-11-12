@@ -390,6 +390,31 @@ def test_a_renewal_keeps_the_context_the_session_chose_when_it_is_still_held(cli
     assert claims_of(renewed.json()["token"])["ctx"] == {"jurisdiction": "IAC", "role": ADMIN}
 
 
+def test_a_jurisdiction_administrator_in_two_jurisdictions_has_one_context_in_each(client, world, db):
+    """DIAAT-403: JurisdictionAdministrator is held in one jurisdiction per assignment; holding it in two is two
+    contexts, each with only its own jurisdiction's scope."""
+    person = user_with(client, db, (world["iac"], "admin"), (world["et"], "admin"))
+    me = person.sign_in().json()["me"]
+    admins = [(a["jurisdiction"]["code"], a["role"]) for a in me["assignments"] if a["role"] == ADMIN]
+    assert sorted(admins) == [("ET", ADMIN), ("IAC", ADMIN)]
+    assert me["status"] == "choose"
+
+    for code in ("IAC", "ET"):
+        token = person.sign_in(requested_context=f"{code}:{ADMIN}").json()["token"]
+        assert claims_of(token)["ctx"] == {"jurisdiction": code, "role": ADMIN}
+
+
+def test_a_super_administrator_has_one_context_for_all_jurisdictions(client, world, db):
+    person = user_with(client, db, (None, SUPER))
+    me = person.sign_in().json()["me"]
+    supers = [a for a in me["assignments"] if a["role"] == SUPER]
+    assert len(supers) == 1 and supers[0]["jurisdiction"] is None
+    assert me["status"] == "ready" and me["active"]["role"] == SUPER and me["active"]["jurisdiction"] is None
+    for code in ("IAC", "ET"):
+        refused = client.put("/api/me/context", json={"jurisdiction": code, "role": SUPER}, headers=bearer(person.sign_in().json()["token"]))
+        assert refused.status_code == 403 and refused.json()["detail"]["code"] == "context_not_available"
+
+
 def test_a_renewal_names_a_global_context_with_a_dash(client, world, db):
     person = user_with(client, db, (world["et"], "judge"), (None, SUPER))
     renewed = person.sign_in(requested_context=f"-:{SUPER}")

@@ -99,7 +99,7 @@ def test_the_same_assignment_made_at_the_same_moment_is_made_once_and_refused_on
 def test_the_databases_constraints_back_the_rules_up(pg):
     iac = jurisdiction(pg, "IAC")
     user = signed_up(pg, "U")
-    for role, jurisdiction_id in (("SystemAdministrator", iac.id), ("Normal", iac.id), (SUPER, iac.id), (JUDGE, None)):
+    for role, jurisdiction_id in (("SystemAdministrator", iac.id), ("Normal", iac.id), (SUPER, iac.id), (ADMIN, None), (JUDGE, None)):
         with Session(pg) as session:
             session.add(RoleAssignment(user_id=user.id, jurisdiction_id=jurisdiction_id, role=role))
             with pytest.raises(IntegrityError):

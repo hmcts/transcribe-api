@@ -31,6 +31,13 @@ The rule (DIAAT-403): nobody gives a role equal to or above the one they act in,
 SystemAdministrator giving JurisdictionSuperAdministrator, which is the only role a SystemAdministrator gives (or takes away), to others or to
 themselves: never JurisdictionAdministrator, Judge or LegalTextManager. Giving a role to yourself follows the same rules as giving it to someone else.
 
+Where a role is held: a JurisdictionAdministrator assignment (like Judge and LegalTextManager) names exactly one jurisdiction, never none and never
+several (`"jurisdiction"` is one code; null is 400 `invalid_assignment`, a list 422). A JurisdictionSuperAdministrator assignment is global
+(`"jurisdiction": null`; a code is 400 `invalid_assignment`). The database backs this with `ck_role_assignment_jurisdiction` (migration 0009).
+One person may be JurisdictionAdministrator in several jurisdictions through separate assignments, one per jurisdiction: each is its own context
+in the switcher, with that jurisdiction's scope only. A JurisdictionSuperAdministrator is one context, for all jurisdictions. Neither administrator
+role can be asked for in an access request (400 `role_not_requestable`): only Judge and LegalTextManager can.
+
 Nothing is assigned into a **disabled** jurisdiction: 409 `jurisdiction_disabled` (also for a SystemAdministrator, and when approving a request for one
 that was disabled after the request was made; rejecting still works). An email that matches **more than one** user row (two Entra accounts have signed in with
 the same address) is not guessed: 409 `ambiguous_email`, choose the person from the user list and assign by `user_id`.

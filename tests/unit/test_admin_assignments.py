@@ -273,6 +273,17 @@ def test_a_role_in_a_jurisdiction_needs_the_jurisdiction_and_the_global_role_has
     assert global_in_a_jurisdiction.status_code == 400 and code(global_in_a_jurisdiction) == "invalid_assignment"
 
 
+def test_a_jurisdiction_administrator_is_given_one_jurisdiction_per_assignment(world, cast):
+    """DIAAT-403: never several jurisdictions at once; several separate assignments are fine."""
+    several = cast.jsuper.post(
+        "/api/admin/assignments", role=SUPER, json={"user_id": str(cast.bob.user_id), "jurisdiction": ["IAC", "ET"], "role": ADMIN}
+    )
+    assert several.status_code == 422
+    for jurisdiction in ("IAC", "ET"):
+        assert assign(cast.jsuper, cast.bob, jurisdiction, ADMIN, as_role=SUPER).status_code == 201
+    assert world.assignments_of(cast.bob) == {("IAC", ADMIN), ("ET", ADMIN)}
+
+
 def test_an_unknown_user_or_jurisdiction_is_a_404(world, cast):
     response = cast.jsuper.post(
         "/api/admin/assignments",
