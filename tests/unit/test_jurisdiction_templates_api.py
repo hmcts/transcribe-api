@@ -527,6 +527,16 @@ def test_sample_details_that_do_not_fit_say_which(as_admin):
     assert detail["message"].startswith("The hearing details do not fit the template. ")
 
 
+def test_a_preview_is_named_after_its_template_with_every_character_encoded(as_admin):
+    template = _enabled_template(as_admin, name="Judgment / Reasons; final")
+
+    response = preview(as_admin, template, VALUES)
+
+    assert response.headers["content-disposition"] == (
+        "attachment; filename*=UTF-8''Preview%20-%20Judgment%20%2F%20Reasons%3B%20final.docx"
+    )
+
+
 def test_a_preview_of_a_template_changed_meanwhile_is_refused(as_admin):
     template = _enabled_template(as_admin)
     assert preview(as_admin, template, VALUES, version="2020-01-01T00:00:00").status_code == 409

@@ -1201,7 +1201,8 @@ def admin_preview_template(
     except BaseException:
         shutil.rmtree(directory, ignore_errors=True)
         raise
-    file_name = urllib.parse.quote(f"Preview - {row.name}.docx")
+    # RFC 5987: every reserved character encoded, a slash in the name too.
+    file_name = urllib.parse.quote(f"Preview - {row.name}.docx", safe="")
     return FileResponse(
         path,
         media_type=DOCX_MEDIA_TYPE,
