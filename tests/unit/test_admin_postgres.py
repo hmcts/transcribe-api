@@ -29,6 +29,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 JUDGE, LTM, ADMIN, SUPER = "Judge", "LegalTextManager", "JurisdictionAdministrator", "JurisdictionSuperAdministrator"
+SYSTEM = "SystemAdministrator"
 
 
 @pytest.fixture
@@ -302,16 +303,24 @@ def test_an_assignment_made_while_a_request_is_being_approved_is_not_a_failure(p
         assert [r.role for r in session.exec(select(RoleAssignment).where(RoleAssignment.user_id == requester.id))] == [JUDGE]
 
 
-def test_a_system_administrator_gives_themselves_the_global_role_on_the_real_schema_and_a_judge_cannot_assign(pg):
+def test_administrators_give_themselves_a_role_below_their_own_on_the_real_schema_and_a_judge_cannot_assign(pg):
     jurisdiction(pg, "IAC")
     system_user = signed_up(pg, "Sys")
-    system = acting(system_user, None, None, sysadmin=True)
+    system = acting(system_user, SYSTEM, None, sysadmin=True)
     with Session(pg) as session:
         own = user_admin.create_assignment(session, system, user_id=system_user.id, email=None, jurisdiction_code=None, role=SUPER)
     assert own.role == SUPER and own.jurisdiction_code is None
     with Session(pg) as session:
         row = session.get(RoleAssignment, own.id)
         assert row.jurisdiction_id is None and row.granted_by == system_user.id
+
+    for held, held_at, given in ((SUPER, None, ADMIN), (ADMIN, "IAC", JUDGE), (ADMIN, "IAC", LTM)):
+        user = signed_up(pg, held)
+        with Session(pg) as session:
+            made = user_admin.create_assignment(
+                session, acting(user, held, held_at), user_id=user.id, email=None, jurisdiction_code="IAC", role=given
+            )
+        assert (made.role, made.jurisdiction_code) == (given, "IAC")
 
     other = signed_up(pg, "Other")
     judge = acting(signed_up(pg, "Ju"), JUDGE, "IAC")

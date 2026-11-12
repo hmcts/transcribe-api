@@ -20,12 +20,16 @@ JADMIN=$(tok jadmin-iac IAC:JurisdictionAdministrator)     # acting as the IAC's
 | Role to assign | Who | Refused with |
 |---|---|---|
 | `Judge`, `LegalTextManager` in J | a JurisdictionAdministrator acting in J (`users.manage`); a JurisdictionSuperAdministrator in any J | another jurisdiction: 403 `jurisdiction_not_in_scope`; anyone else: 403 `assignment_not_allowed` / `permission_denied` |
-| `JurisdictionAdministrator` in J | a JurisdictionSuperAdministrator, a SystemAdministrator (`jurisdiction_admin.assign`) | a JurisdictionAdministrator: 403 `assignment_not_allowed` |
+| `JurisdictionAdministrator` in J | a JurisdictionSuperAdministrator (`jurisdiction_admin.assign`) | a JurisdictionAdministrator, a SystemAdministrator: 403 `assignment_not_allowed` |
 | `JurisdictionSuperAdministrator` (global, no jurisdiction) | a SystemAdministrator only (`jurisdiction_super_admin.assign`) | everyone else: 403 `assignment_not_allowed` |
 | `SystemAdministrator` | nobody (it is not a stored role) | 403 `assignment_not_allowed` |
-| any stored role, **to themselves** | a SystemAdministrator (how the first JurisdictionSuperAdministrator is set up) | |
-| any role, **to themselves** | nobody else: you cannot give yourself Judge, LegalTextManager or an administrator role | 403 `assignment_not_allowed` |
-| their own `JurisdictionAdministrator` / `JurisdictionSuperAdministrator` (removing) | nobody else changes their own administrator role | 403 `assignment_not_allowed` |
+| `JurisdictionSuperAdministrator`, **to themselves** | a SystemAdministrator acting as SystemAdministrator (how the first JurisdictionSuperAdministrator is set up) | |
+| a role **to themselves** | everyone else by the rows above, as for anyone: a JurisdictionSuperAdministrator gives themselves JurisdictionAdministrator, Judge or LegalTextManager; a JurisdictionAdministrator Judge or LegalTextManager in its jurisdiction; a Judge or LegalTextManager nothing (they raise an access request) | a role equal to or above the one they act in: 403 `assignment_not_allowed` |
+| their own `JurisdictionAdministrator` / `JurisdictionSuperAdministrator` (removing) | nobody but a SystemAdministrator takes away their own administrator role | 403 `assignment_not_allowed` |
+
+The rule (DIAAT-403): nobody gives a role equal to or above the one they act in, to themselves or to anyone else; the one exception is a
+SystemAdministrator giving JurisdictionSuperAdministrator, which is the only role a SystemAdministrator gives (or takes away), to others or to
+themselves: never JurisdictionAdministrator, Judge or LegalTextManager. Giving a role to yourself follows the same rules as giving it to someone else.
 
 Nothing is assigned into a **disabled** jurisdiction: 409 `jurisdiction_disabled` (also for a SystemAdministrator, and when approving a request for one
 that was disabled after the request was made; rejecting still works). An email that matches **more than one** user row (two Entra accounts have signed in with
@@ -39,14 +43,14 @@ that exactly those are accepted.
 ## Roles
 
 `GET /api/admin/roles` (`users.manage`, `jurisdiction_admin.assign` or `jurisdiction_super_admin.assign`): the roles the caller may
-assign to others, never `SystemAdministrator`. One shape, pinned by a test.
+assign, to others or to themselves, never `SystemAdministrator`. One shape, pinned by a test.
 
 ```json
 {"roles": ["Judge", "LegalTextManager"]}
 ```
 
 A JurisdictionSuperAdministrator gets `["Judge", "LegalTextManager", "JurisdictionAdministrator"]`; a SystemAdministrator
-`["JurisdictionAdministrator", "JurisdictionSuperAdministrator"]` (and may also give themselves any stored role).
+`["JurisdictionSuperAdministrator"]`, to others or to themselves.
 
 ## Users
 
@@ -92,7 +96,7 @@ curl -s -X POST localhost:8000/api/admin/assignments -H "Authorization: Bearer $
 The same administrator assigning a role it may not:
 
 ```json
-{"detail": {"code": "assignment_not_allowed", "message": "Only a JurisdictionSuperAdministrator or a SystemAdministrator assigns the JurisdictionAdministrator role."}}
+{"detail": {"code": "assignment_not_allowed", "message": "Only a JurisdictionSuperAdministrator assigns the JurisdictionAdministrator role."}}
 {"detail": {"code": "jurisdiction_not_in_scope", "message": "That jurisdiction is not the one you are working in."}}
 ```
 

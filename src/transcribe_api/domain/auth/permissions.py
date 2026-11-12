@@ -133,7 +133,6 @@ SYSTEM_ADMIN_PERMISSIONS: frozenset[str] = frozenset(
         "system.settings",
         "security.alert_test",
         "jurisdiction_super_admin.assign",
-        "jurisdiction_admin.assign",
     }
 )
 
@@ -177,18 +176,18 @@ def role_needs_jurisdiction(role: str) -> bool:
 
 
 # Who may assign which stored roles (contract s1, "Assignment rules"): the roles a caller
-# acting as ``role`` may give or take away. A caller acting as SystemAdministrator may assign the
-# two administrator roles and, on themselves only, any stored role; Phase 4 enforces the
-# rules per request; this is the list GET /admin/roles shows.
+# acting as ``role`` may give or take away, to others or to themselves: those strictly below it,
+# and for a caller acting as SystemAdministrator only JurisdictionSuperAdministrator (DIAAT-403).
+# Phase 4 enforces the rules per request; this is the list GET /admin/roles shows.
 _ASSIGNABLE_BY_ROLE: dict[str, tuple[str, ...]] = {
     ROLE_JURISDICTION_ADMIN: (ROLE_JUDGE, ROLE_LEGAL_TEXT_MANAGER),
     ROLE_JURISDICTION_SUPER_ADMIN: (ROLE_JUDGE, ROLE_LEGAL_TEXT_MANAGER, ROLE_JURISDICTION_ADMIN),
 }
-_ASSIGNABLE_BY_SYSADMIN: tuple[str, ...] = (ROLE_JURISDICTION_ADMIN, ROLE_JURISDICTION_SUPER_ADMIN)
+_ASSIGNABLE_BY_SYSADMIN: tuple[str, ...] = (ROLE_JURISDICTION_SUPER_ADMIN,)
 
 
 def assignable_roles(role: str | None, sysadmin: bool = False) -> list[str]:
-    """The stored roles a caller acting as ``role`` may assign to others, in ``STORED_ROLES``
+    """The stored roles a caller acting as ``role`` may assign, in ``STORED_ROLES``
     order (acting as SystemAdministrator needs ``sysadmin`` too). Never SystemAdministrator:
     nobody can grant it, and it is not a stored role."""
     if role == ROLE_SYSTEM_ADMIN:

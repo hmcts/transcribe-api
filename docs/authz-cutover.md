@@ -115,9 +115,9 @@ SystemAdministrator (the Entra app role `SystemAdministrator`, assigned to someo
    (a pending assignment, claimed at that person's first sign-in: compared without regard to case; refused with `ambiguous_email` if two Entra accounts have
    signed in with that address, then pick the person from the list) or, if the person has signed in, from the user list. The API call is
    `POST /api/admin/assignments {"email": "...", "jurisdiction": null, "role": "JurisdictionSuperAdministrator"}` with a SystemAdministrator's BenchNotes token.
-3. A SystemAdministrator may also give **themselves** any stored role (contract section 1): `{"user_id": "<their id, from GET /api/me/permissions>", "jurisdiction": null,
+3. A SystemAdministrator may also give **themselves** JurisdictionSuperAdministrator, the only role it gives (contract section 1, DIAAT-403): `{"user_id": "<their id, from GET /api/me/permissions>", "jurisdiction": null,
    "role": "JurisdictionSuperAdministrator"}`. Then they sign in again and choose the context. A SystemAdministrator acting in a stored role has **that role's permissions and scope** only, not a
-   global one, and the self-assigned role is subject to the same rules as anyone's (nobody else gives themselves a role; nobody deactivates themselves). They can
+   global one, and the self-assigned role is subject to the same rules as anyone's (a role strictly below the one acted in, for themselves as for others; nobody deactivates themselves). They can
    remove it again the same way.
 4. The JurisdictionSuperAdministrator then adds the JurisdictionAdministrators of each jurisdiction (by email or from the user list), who add the judges and legal text
    managers and approve access requests. LegalTextManager is **not** carried over from Entra: nobody can edit the legal wording until a JurisdictionAdministrator or a

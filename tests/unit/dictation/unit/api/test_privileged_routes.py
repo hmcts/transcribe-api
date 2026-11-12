@@ -177,7 +177,7 @@ def test_admin_me_returns_403_for_judge_only(client, as_user):
     [
         ("JurisdictionAdministrator", False, ["Judge", "LegalTextManager"]),
         ("JurisdictionSuperAdministrator", False, ["Judge", "LegalTextManager", "JurisdictionAdministrator"]),
-        ("SystemAdministrator", True, ["JurisdictionAdministrator", "JurisdictionSuperAdministrator"]),
+        ("SystemAdministrator", True, ["JurisdictionSuperAdministrator"]),
         ("JurisdictionSuperAdministrator", True, ["Judge", "LegalTextManager", "JurisdictionAdministrator"]),
     ],
 )
