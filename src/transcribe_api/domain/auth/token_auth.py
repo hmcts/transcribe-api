@@ -184,7 +184,7 @@ async def _verified_entra_user(authorization: str | None) -> AuthUser:
     )
 
 
-async def get_token_auth_user(
+def get_token_auth_user(
     authorization: Annotated[str | None, Header()] = None,
 ) -> AppPrincipal:
     """What a verified BenchNotes access token says about the caller. 401 for anything

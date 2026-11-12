@@ -118,7 +118,7 @@ get_active_jurisdiction = jurisdiction_dependency(get_current_user)
 require_permission = build_require_permission(get_current_user)
 
 
-async def signed_in_endpoint(user=Depends(get_signed_in_user)):
+def signed_in_endpoint(user=Depends(get_signed_in_user)):
     """Any signed-in user, with or without a context or a role: the no-context endpoints of
     contract section 3. A route using it declares that explicitly: it needs no permission."""
     return user

@@ -394,11 +394,13 @@ def test_each_route_is_allowed_exactly_to_the_callers_whose_permissions_grant_it
             user = user_for(persona, area_of(route))
             try:
                 outcome = call_dependency(route, user)
-                got_through, code = True, None
-                assert outcome is user  # the route gets the authenticated user back
             except Exception as exc:
                 got_through = False
                 code = getattr(exc, "detail", {}).get("code") if getattr(exc, "status_code", None) == 403 else repr(exc)
+            else:
+                got_through, code = True, None
+                if outcome is not user:
+                    wrong.append(f"{route.method} {route.path} as {persona.name}: did not return the authenticated user")
             expected = allowed(persona, route)
             if got_through != expected:
                 wrong.append(f"{route.method} {route.path} as {persona.name}: allowed={got_through}, contract says {expected}")

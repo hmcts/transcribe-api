@@ -175,7 +175,7 @@ class LegalWordingScope:
     jurisdiction: ActiveJurisdiction
 
 
-async def _legal_wording_scope(
+def _legal_wording_scope(
     response: Response,
     current_user: User = Depends(require_permission("legal_text.manage")),
     jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),

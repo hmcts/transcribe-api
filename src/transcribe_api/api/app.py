@@ -257,13 +257,14 @@ async def lifespan(app: FastAPI):
     if settings.ENVIRONMENT != "test" and _run_workers_in_web_process():
         tasks += await start_background_workers()
 
-    yield
+    try:
+        yield
+    finally:
+        await stop_background_workers(tasks)
+        # Audit rows handed to worker threads from the event loop (DIAAT-286): not lost.
+        from transcribe_api.domain.audit import drain_pending_writes
 
-    await stop_background_workers(tasks)
-    # Audit rows handed to worker threads from the event loop (DIAAT-286): not lost.
-    from transcribe_api.domain.audit import drain_pending_writes
-
-    await drain_pending_writes()
+        await drain_pending_writes()
 
 
 def create_app() -> FastAPI:
