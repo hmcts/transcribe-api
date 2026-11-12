@@ -1096,7 +1096,8 @@ async def admin_upload_template(
     record = await asyncio.to_thread(_admin_session_run, upload)
     if replace is None:
         response.status_code = 201
-    _audit_template_change(
+    await asyncio.to_thread(
+        _audit_template_change,
         "template.add" if replace is None else "template.edit",
         admin_user,
         code,
