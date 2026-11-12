@@ -782,7 +782,13 @@ async def admin_upload_template(
         admin_user,
         code,
         record["id"],
-        {"change": "uploaded" if replace is None else "file_replaced", "boxes": len(record["boxes"])},
+        # A new file that leaves a box unlinked takes it back to draft (DIAAT-347).
+        {
+            "change": "uploaded" if replace is None else "file_replaced",
+            "boxes": len(record["boxes"]),
+            "stage": record["stage"],
+            "sign_off": record["sign_off"],
+        },
     )
     return TemplateAdminRecord(**record)
 

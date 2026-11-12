@@ -140,7 +140,10 @@ def test_an_upload_lists_the_templates_boxes_as_fields(jurisdiction_db, as_admin
     assert fields["JudgmentText"]["type"] == "dictated"
     assert as_admin.get("/api/admin/jurisdictions/ET/templates").json() == [template]
     (action, detail), *_ = _audit(jurisdiction_db)
-    assert (action, detail) == ("template.add", {"code": "ET", "change": "uploaded", "boxes": 10})
+    assert (action, detail) == (
+        "template.add",
+        {"code": "ET", "change": "uploaded", "boxes": 10, "stage": "draft", "sign_off": None},
+    )
 
 
 def test_a_second_upload_with_the_same_name_gets_a_name_of_its_own(as_admin):
@@ -513,7 +516,9 @@ def test_a_template_goes_live_only_with_the_service_leads_sign_off(jurisdiction_
     ]
 
 
-def test_a_new_file_that_leaves_a_box_unlinked_takes_a_live_template_back_to_draft(as_admin, as_et_judge):
+def test_a_new_file_that_leaves_a_box_unlinked_takes_a_live_template_back_to_draft(
+    jurisdiction_db, as_admin, as_et_judge
+):
     template = _enabled_template(as_admin)
     new_file = make_template([*JUDGMENT, ["Costs: ", Sdt("Costs")]])
 
@@ -521,6 +526,40 @@ def test_a_new_file_that_leaves_a_box_unlinked_takes_a_live_template_back_to_dra
 
     assert (replaced["stage"], replaced["sign_off"]) == ("draft", None)
     assert as_et_judge.get("/api/jurisdictions/templates").json() == []
+    action, detail = _audit(jurisdiction_db)[-1]
+    assert (action, detail["change"], detail["stage"], detail["sign_off"]) == (
+        "template.edit",
+        "file_replaced",
+        "draft",
+        None,
+    )
+
+
+def test_a_template_switched_off_by_the_previous_release_is_off_until_signed_off_again(
+    jurisdiction_db, as_admin, as_et_judge
+):
+    """During the rolling deploy the previous release's pods switch a template off by
+    ``enabled`` alone, leaving its stage live: it is off here too, and going live again
+    needs the service lead's sign-off again."""
+    template = _enabled_template(as_admin)
+    with Session(jurisdiction_db) as session:
+        row = session.get(JurisdictionTemplate, UUID(template["id"]))
+        row.enabled = False
+        session.add(row)
+        session.commit()
+
+    assert as_et_judge.get("/api/jurisdictions/templates").json() == []
+    refused = as_et_judge.post("/api/live-transcription/submission", json=_submission(template["id"], VALUES))
+    assert refused.status_code == 404
+    (listed,) = as_admin.get("/api/admin/jurisdictions/ET/templates").json()
+    assert (listed["stage"], listed["enabled"], listed["sign_off"]) == ("draft", False, None)
+
+    path = f"/api/admin/jurisdictions/ET/templates/{template['id']}"
+    again = as_admin.put(path, json={**complete(listed), "sign_off": None})
+    assert (again.status_code, again.json()["detail"]["code"]) == (400, "sign_off_required")
+    live = as_admin.put(path, json=complete(listed, sign_off={"service_lead": "B Lead", "confirmed": True})).json()
+    assert (live["stage"], live["enabled"], live["sign_off"]["service_lead"]) == ("live", True, "B Lead")
+    assert [t["id"] for t in as_et_judge.get("/api/jurisdictions/templates").json()] == [template["id"]]
 
 
 def test_a_submission_is_either_the_decision_form_or_a_template(as_admin, as_et_judge, stored):
