@@ -207,20 +207,13 @@ def test_a_new_user_claims_assignments_added_for_their_email(engine):
         assert session.exec(select(RoleAssignment.pending_email)).all() == [None]
 
 
-def test_a_new_user_with_nothing_pending_gets_nothing_even_from_an_auto_enrol_jurisdiction(engine):
-    """DIAAT-373: no auto-enrol. The column stays, and is not read."""
-    add_jurisdiction(engine, "IAC", auto_enrol=True)
+def test_a_new_user_with_nothing_pending_gets_nothing(engine):
+    """DIAAT-373: nobody is enrolled automatically."""
+    add_jurisdiction(engine, "IAC")
     add_jurisdiction(engine, "ET")
-    add_jurisdiction(engine, "OLD", auto_enrol=True, enabled=False)
+    add_jurisdiction(engine, "OLD", enabled=False)
 
-    user = sign_up(engine, "new.judge@example.test")
-
-    assert _assignments(engine, user) == []
-
-
-def test_without_an_auto_enrol_jurisdiction_a_new_user_has_none(engine):
-    add_jurisdiction(engine, "ET")
-    assert _assignments(engine, sign_up(engine, "someone@example.test")) == []
+    assert _assignments(engine, sign_up(engine, "new.judge@example.test")) == []
 
 
 # Records are made in, and listed from, one jurisdiction ---------------------------------

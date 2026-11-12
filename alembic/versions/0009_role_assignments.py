@@ -28,11 +28,11 @@ changed here: the previous release still reads it, and a migration that ships on
 before the new code would change what the old pods do (first-time users would get no
 jurisdiction and the old web has no request form). The new code never reads it (nobody is
 enrolled automatically: a new user has no role until an administrator adds them or approves
-their request), and ``scripts-cutover-authz.py`` sets it false at cutover.
+their request), and 0010 sets it false.
 
 The backfill is one-shot: memberships the previous release writes after this runs reach no
-assignment. ``scripts-cutover-authz.py`` (run once, when the new release goes live; see
-docs/authz-cutover.md) repeats it for the memberships that have no assignment.
+assignment. 0010 (DIAAT-402) repeats it, once the previous release is gone, for the memberships
+that have no assignment.
 
 Additive, so the previous release keeps working against this schema while a release
 rolls out: jurisdiction_membership, user.role and jurisdiction.auto_enrol stay (dropped
@@ -213,4 +213,4 @@ def downgrade() -> None:
     ):
         op.drop_index(index, table_name="role_assignment")
     op.drop_table("role_assignment")
-    # auto_enrol was not touched by the upgrade, so there is nothing to restore (the cutover script sets it).
+    # auto_enrol was not touched by the upgrade, so there is nothing to restore (0010 sets it).
