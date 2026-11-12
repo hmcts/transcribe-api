@@ -4,6 +4,7 @@ its own, on a real PostgreSQL."""
 from __future__ import annotations
 
 import os
+import threading
 from uuid import uuid4
 
 import pytest
@@ -124,3 +125,48 @@ def test_0013_downgrade_keeps_the_rows(at_0012):
     after = assignments(at_0012)
     migrate(at_0012, "0012", down=True)
     assert assignments(at_0012) == after
+
+
+def test_0013_waits_for_a_sign_in_reading_pending_rows_and_then_sees_its_claim(at_0012):
+    """A first sign-in has read the pending administrator row when 0013 starts: 0013 waits for it, so the
+    rows it adds belong to the user who claimed it, not to an email nobody will claim again."""
+    request = at_0012.connect()
+    transaction = request.begin()
+    request.execute(text("SELECT id FROM role_assignment WHERE pending_email = 'new@example.test'"))
+    errors: list[BaseException] = []
+
+    def upgrade():
+        try:
+            migrate(at_0012, "0013")
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=upgrade)
+    worker.start()
+    worker.join(timeout=1.5)
+    assert worker.is_alive()
+    uid = str(uuid4())
+    request.execute(
+        text(
+            'INSERT INTO "user" (id, created_datetime, email, azure_user_id, has_completed_onboarding)'
+            " VALUES (:uid, now(), 'new@example.test', 'oid-new', true)"
+        ),
+        {"uid": uid},
+    )
+    request.execute(
+        text(
+            "UPDATE role_assignment SET user_id = :uid, pending_email = NULL WHERE pending_email = 'new@example.test'"
+        ),
+        {"uid": uid},
+    )
+    transaction.commit()
+    request.close()
+    worker.join(timeout=60)
+
+    assert not worker.is_alive() and errors == []
+    assert rows(at_0012, "SELECT count(*) FROM role_assignment WHERE pending_email IS NOT NULL") == [(0,)]
+    assert {
+        ("new@example.test", "ET", "JurisdictionAdministrator"),
+        ("new@example.test", "ET", "Judge"),
+        ("new@example.test", "ET", "LegalTextManager"),
+    } <= assignments(at_0012)
