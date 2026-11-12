@@ -28,11 +28,12 @@ from uuid import uuid4
 
 import fastapi.routing as fastapi_routing
 import pytest
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from tests.unit.test_permissions import CONTRACT_PERMISSIONS, CONTRACT_ROLE_MAP, CONTRACT_SYSADMIN
+from transcribe_api.domain import user_admin
 from transcribe_api.domain.auth import authorisation, dependencies_dictation
 from transcribe_api.domain.auth import permissions as p
 from transcribe_api.domain.auth.app_token import Context
@@ -628,3 +629,45 @@ def test_the_system_permissions_never_leak_into_another_context(routes):
     for persona in PERSONAS.values():
         acting_as_system = persona.ctx == SYSTEM_ADMIN_CONTEXT and persona.sysadmin
         assert bool(persona.permissions & system_only) is acting_as_system, persona.name
+
+
+# ---------------------------------------------------------------------------
+# Who may give which role, to themselves and to others (DIAAT-403)
+# ---------------------------------------------------------------------------
+
+# The rule, not the code under test: a role strictly below the one acted in, the same for yourself as for
+# anyone else. Acting as SystemAdministrator: JurisdictionSuperAdministrator only, for others and for
+# themselves (how the first one is set up).
+_STRICTLY_BELOW = {
+    "Judge": set(),
+    "LegalTextManager": set(),
+    "JurisdictionAdministrator": {"Judge", "LegalTextManager"},
+    "JurisdictionSuperAdministrator": {"JurisdictionAdministrator", "Judge", "LegalTextManager"},
+}
+
+
+def _may_give(persona: Persona, role: str) -> bool:
+    if persona.ctx is None or role == "SystemAdministrator":
+        return False
+    if persona.ctx.role == "SystemAdministrator":
+        return persona.sysadmin and role == "JurisdictionSuperAdministrator"
+    return role in _STRICTLY_BELOW[persona.ctx.role]
+
+
+@pytest.mark.parametrize("persona_name", list(PERSONAS))
+def test_giving_a_role_to_yourself_follows_the_same_rule_as_giving_it_to_anyone_else(monkeypatch, persona_name):
+    monkeypatch.setattr(user_admin, "record_audit", lambda *a, **k: None)
+    persona = PERSONAS[persona_name]
+    actor = user_for(persona, "dictation")
+    for role in (*p.STORED_ROLES, "SystemAdministrator"):
+        jurisdiction = None if role in (*p.GLOBAL_ROLES, "SystemAdministrator") else "IAC"
+        for to_self, target in ((True, actor.id), (False, uuid4())):
+            try:
+                user_admin.check_may_change_assignment(
+                    actor, role=role, jurisdiction_code=jurisdiction, target_user_id=target, adding=True
+                )
+                given = True
+            except HTTPException as refused:
+                assert refused.status_code == 403
+                given = False
+            assert given is _may_give(persona, role), (role, "self" if to_self else "other")

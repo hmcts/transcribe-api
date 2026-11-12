@@ -7,13 +7,18 @@ says they hold (the permissions of the role they act in only, domain/auth/author
   JurisdictionAdministrator holds it in the jurisdiction it acts in (403
   ``jurisdiction_not_in_scope`` for another), a JurisdictionSuperAdministrator in every one.
 * **JurisdictionAdministrator**: whoever holds ``jurisdiction_admin.assign``: the
-  JurisdictionSuperAdministrator and the SystemAdministrator. Never a JurisdictionAdministrator.
+  JurisdictionSuperAdministrator only. Never a JurisdictionAdministrator or a SystemAdministrator.
 * **JurisdictionSuperAdministrator** (global): whoever holds ``jurisdiction_super_admin.assign``,
-  which only the SystemAdministrator does.
+  which only the SystemAdministrator does. It is the only role a SystemAdministrator gives (DIAAT-403).
 * **SystemAdministrator**: nobody. It is not a stored role.
-* Acting as SystemAdministrator, a holder may give **themselves** any stored role (that is how the first
-  JurisdictionSuperAdministrator is set up) and take it away again.
-* Nobody else changes their own administrator role (JurisdictionAdministrator,
+* Giving a role to **yourself** follows the same rules as giving it to anyone else (DIAAT-403): a
+  JurisdictionSuperAdministrator may give themselves JurisdictionAdministrator, Judge or
+  LegalTextManager, a JurisdictionAdministrator Judge or LegalTextManager in its jurisdiction; a Judge
+  or LegalTextManager gives nobody a role (they raise an access request). Nobody gives a role equal to
+  or above the one they act in.
+* Acting as SystemAdministrator, a holder may give **themselves** JurisdictionSuperAdministrator (that is
+  how the first one is set up) and take it away again.
+* Nobody else takes away their own administrator role (JurisdictionAdministrator,
   JurisdictionSuperAdministrator), and nobody deactivates themselves.
 
 Every refusal is 403 ``assignment_not_allowed`` (or ``jurisdiction_not_in_scope``), audited as
@@ -135,7 +140,8 @@ def check_may_change_assignment(
 ) -> None:
     """Raise the 403 unless the actor may give (or take away) ``role`` in ``jurisdiction_code``
     (None for the global role) to the user ``target_user_id`` (None: someone who has not signed in).
-    ``adding``: the role is being given (not taken away): nobody gives themselves one.
+    ``adding``: the role is being given (not taken away). Giving a role to yourself follows the same
+    rules as giving it to anyone else: only a role strictly below the one you act in (DIAAT-403).
     The role and where it is held are valid (``check_assignable``); this is only about who may."""
     if role == ROLE_SYSTEM_ADMIN:
         raise refuse(actor, ASSIGNMENT_NOT_ALLOWED, "SystemAdministrator cannot be assigned.", detail={"role": role})
@@ -143,16 +149,10 @@ def check_may_change_assignment(
     is_self = target_user_id is not None and target_user_id == me
     sysadmin = auth_context.sysadmin_of(actor)
 
-    # A SystemAdministrator gives (and takes) any stored role for themselves: nothing else is
-    # asked, in any jurisdiction.
-    if is_self and sysadmin:
-        return
-    # Nobody else gives themselves a role, nor changes their own administrator role.
-    if is_self and adding:
-        raise refuse(actor, ASSIGNMENT_NOT_ALLOWED, "You cannot give yourself a role.", detail={"role": role})
-    if is_self and role in (ROLE_JURISDICTION_ADMIN, ROLE_JURISDICTION_SUPER_ADMIN):
+    # Nobody but a SystemAdministrator takes away their own administrator role.
+    if is_self and not adding and not sysadmin and role in (ROLE_JURISDICTION_ADMIN, ROLE_JURISDICTION_SUPER_ADMIN):
         raise refuse(
-            actor, ASSIGNMENT_NOT_ALLOWED, "You cannot change your own administrator role.", detail={"role": role}
+            actor, ASSIGNMENT_NOT_ALLOWED, "You cannot remove your own administrator role.", detail={"role": role}
         )
 
     if role == ROLE_JURISDICTION_SUPER_ADMIN:
@@ -169,8 +169,7 @@ def check_may_change_assignment(
             raise refuse(
                 actor,
                 ASSIGNMENT_NOT_ALLOWED,
-                "Only a JurisdictionSuperAdministrator or a SystemAdministrator assigns the "
-                "JurisdictionAdministrator role.",
+                "Only a JurisdictionSuperAdministrator assigns the JurisdictionAdministrator role.",
                 detail={"role": role, "code": jurisdiction_code},
             )
         return

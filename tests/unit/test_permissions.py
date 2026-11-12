@@ -39,7 +39,6 @@ CONTRACT_SYSADMIN = [
     "system.settings",
     "security.alert_test",
     "jurisdiction_super_admin.assign",
-    "jurisdiction_admin.assign",
 ]
 
 

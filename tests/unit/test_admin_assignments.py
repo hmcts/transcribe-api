@@ -38,6 +38,7 @@ def cast(world):
             "jsuper": world.person("Super", (None, SUPER)),
             "sysadmin": world.person("Sysadmin", sysadmin=True),
             "judge": world.person("Judge IAC", ("IAC", JUDGE)),
+            "ltm": world.person("LTM IAC", ("IAC", LTM)),
             "bob": world.person("Bob Target"),
         },
     )
@@ -140,46 +141,31 @@ def test_a_role_that_does_not_exist_is_a_400(world, cast, role):
     assert response.status_code == 400 and code(response) == "invalid_role"
 
 
-# --- SystemAdministrator: the two administrator roles for others, anything for themselves -------------
+# --- SystemAdministrator: JurisdictionSuperAdministrator only, for others and for themselves (DIAAT-403) --
 
 
-def test_a_system_administrator_assigns_jurisdiction_administrator_in_any_jurisdiction(world, cast):
-    for jurisdiction in ("IAC", "ET"):
-        response = assign(cast.sysadmin, cast.bob, jurisdiction, ADMIN)
-        assert response.status_code == 201, response.text
-    assert world.assignments_of(cast.bob) == {("IAC", ADMIN), ("ET", ADMIN)}
-
-
-@pytest.mark.parametrize("role", [JUDGE, LTM])
-def test_a_system_administrator_does_not_assign_judge_or_legal_text_manager_to_others(world, cast, role):
-    response = assign(cast.sysadmin, cast.bob, "IAC", role)
+@pytest.mark.parametrize("target", ["bob", "sysadmin"])
+@pytest.mark.parametrize("role", [ADMIN, JUDGE, LTM])
+def test_a_system_administrator_gives_no_role_in_a_jurisdiction_to_anyone(world, cast, target, role):
+    person = getattr(cast, target)
+    response = assign(cast.sysadmin, person, "IAC", role)
     assert response.status_code == 403 and code(response) == "assignment_not_allowed"
-    assert world.assignments_of(cast.bob) == set()
+    assert world.assignments_of(person) == set()
 
 
-def test_a_system_administrator_can_give_themselves_super_administrator_and_a_role_in_a_jurisdiction(world, cast):
+def test_a_system_administrator_can_give_themselves_super_administrator_and_take_it_away(world, cast):
     """How the first JurisdictionSuperAdministrator of an environment is set up (DIAAT-394)."""
-    for jurisdiction, role in ((None, SUPER), ("IAC", ADMIN), ("ET", JUDGE), ("ET", LTM)):
-        response = assign(cast.sysadmin, cast.sysadmin, jurisdiction, role)
-        assert response.status_code == 201, (jurisdiction, role, response.text)
-    assert world.assignments_of(cast.sysadmin) == {(None, SUPER), ("IAC", ADMIN), ("ET", JUDGE), ("ET", LTM)}
-    # And they can take it away again.
-    listed = cast.sysadmin.get("/api/admin/users", params={"search": cast.sysadmin.email}).json()["items"]
-    (mine,) = listed
-    for assignment in mine["assignments"]:
-        assert cast.sysadmin.delete(f"/api/admin/assignments/{assignment['id']}").status_code == 204
+    response = assign(cast.sysadmin, cast.sysadmin, None, SUPER)
+    assert response.status_code == 201, response.text
+    assert world.assignments_of(cast.sysadmin) == {(None, SUPER)}
+    assert cast.sysadmin.delete(f"/api/admin/assignments/{response.json()['id']}").status_code == 204
     assert world.assignments_of(cast.sysadmin) == set()
 
 
-# --- nobody else changes their own administrator role ---------------------------------------------------
+# --- nobody else takes away their own administrator role -----------------------------------------------
 
 
-def test_a_jurisdiction_administrator_cannot_assign_or_remove_their_own_administrator_role(world, cast):
-    own = next(iter(world.assignments_of(cast.jadmin_iac)))
-    assert own == ("IAC", ADMIN)
-    refused = assign(cast.jadmin_iac, cast.jadmin_iac, "IAC", ADMIN, as_role=ADMIN, at="IAC")
-    assert refused.status_code == 403 and code(refused) == "assignment_not_allowed"
-
+def test_a_jurisdiction_administrator_cannot_remove_their_own_administrator_role(world, cast):
     listed = cast.jsuper.get("/api/admin/users", params={"search": cast.jadmin_iac.email}, role=SUPER).json()["items"]
     assignment_id = listed[0]["assignments"][0]["id"]
     removal = cast.jadmin_iac.delete(f"/api/admin/assignments/{assignment_id}", role=ADMIN, jurisdiction="IAC")
@@ -187,29 +173,57 @@ def test_a_jurisdiction_administrator_cannot_assign_or_remove_their_own_administ
     assert world.assignments_of(cast.jadmin_iac) == {("IAC", ADMIN)}
 
 
-def test_a_super_administrator_cannot_change_their_own_administrator_roles(world, cast):
-    refused = assign(cast.jsuper, cast.jsuper, "ET", ADMIN, as_role=SUPER)
-    assert refused.status_code == 403 and code(refused) == "assignment_not_allowed"
-    refused = assign(cast.jsuper, cast.jsuper, None, SUPER, as_role=SUPER)
-    assert refused.status_code == 403 and code(refused) == "assignment_not_allowed"
+def test_a_super_administrator_cannot_remove_their_own_administrator_role(world, cast):
     listed = cast.jsuper.get("/api/admin/users", params={"search": cast.jsuper.email}, role=SUPER).json()["items"]
     removal = cast.jsuper.delete(f"/api/admin/assignments/{listed[0]['assignments'][0]['id']}", role=SUPER)
     assert removal.status_code == 403 and code(removal) == "assignment_not_allowed"
     assert world.assignments_of(cast.jsuper) == {(None, SUPER)}
 
 
-def test_nobody_gives_themselves_any_role_not_even_judge(world, cast):
-    """Review finding S-low (a): a JurisdictionAdministrator or JurisdictionSuperAdministrator gave themselves Judge
-    (recording and dictation access) and approved their own requests. Now no one gives themselves a role."""
-    for person, role, where, jurisdiction in (
-        (cast.jadmin_iac, ADMIN, "IAC", "IAC"),
-        (cast.jsuper, SUPER, None, "ET"),
-    ):
-        for given in (JUDGE, LTM):
-            response = assign(person, person, jurisdiction, given, as_role=role, at=where)
-            assert response.status_code == 403 and code(response) == "assignment_not_allowed", (role, given)
-    assert world.assignments_of(cast.jadmin_iac) == {("IAC", ADMIN)}
-    assert world.assignments_of(cast.jsuper) == {(None, SUPER)}
+# --- giving yourself a role: the same rules as giving it to anyone else (DIAAT-403) ----------------------
+
+
+@pytest.mark.parametrize("role", [ADMIN, JUDGE, LTM])
+def test_a_super_administrator_gives_themselves_any_role_below_its_own_in_any_jurisdiction(world, cast, role):
+    for jurisdiction in ("IAC", "ET"):
+        response = assign(cast.jsuper, cast.jsuper, jurisdiction, role, as_role=SUPER)
+        assert response.status_code == 201, (jurisdiction, response.text)
+    assert world.assignments_of(cast.jsuper) == {(None, SUPER), ("IAC", role), ("ET", role)}
+
+
+@pytest.mark.parametrize("role", [JUDGE, LTM])
+def test_a_jurisdiction_administrator_gives_themselves_a_role_below_its_own_in_its_jurisdiction_only(world, cast, role):
+    response = assign(cast.jadmin_iac, cast.jadmin_iac, "IAC", role, as_role=ADMIN, at="IAC")
+    assert response.status_code == 201, response.text
+    elsewhere = assign(cast.jadmin_iac, cast.jadmin_iac, "ET", role, as_role=ADMIN, at="IAC")
+    assert elsewhere.status_code == 403 and code(elsewhere) == "jurisdiction_not_in_scope"
+    assert world.assignments_of(cast.jadmin_iac) == {("IAC", ADMIN), ("IAC", role)}
+
+
+@pytest.mark.parametrize(
+    ("who", "as_role", "at", "given", "jurisdiction"),
+    [
+        ("jadmin_iac", ADMIN, "IAC", ADMIN, "IAC"),
+        ("jadmin_iac", ADMIN, "IAC", SUPER, None),
+        ("jsuper", SUPER, None, SUPER, None),
+    ],
+)
+def test_nobody_gives_themselves_a_role_equal_to_or_above_the_one_they_act_in(world, cast, who, as_role, at, given, jurisdiction):
+    person = getattr(cast, who)
+    before = world.assignments_of(person)
+    response = assign(person, person, jurisdiction, given, as_role=as_role, at=at)
+    assert response.status_code == 403 and code(response) == "assignment_not_allowed"
+    assert world.assignments_of(person) == before
+
+
+@pytest.mark.parametrize(("who", "held"), [("judge", JUDGE), ("ltm", LTM)])
+@pytest.mark.parametrize("given", [JUDGE, LTM, ADMIN])
+def test_a_judge_or_legal_text_manager_gives_themselves_no_role(world, cast, who, held, given):
+    """They raise an access request instead."""
+    person = getattr(cast, who)
+    response = assign(person, person, "IAC", given, as_role=held, at="IAC")
+    assert response.status_code == 403 and code(response) == "permission_denied"
+    assert world.assignments_of(person) == {("IAC", held)}
 
 
 def test_the_email_of_your_own_account_is_still_you(world, cast):
@@ -257,6 +271,17 @@ def test_a_role_in_a_jurisdiction_needs_the_jurisdiction_and_the_global_role_has
     assert admin_without.status_code == 400 and code(admin_without) == "invalid_assignment"
     global_in_a_jurisdiction = assign(cast.sysadmin, cast.bob, "IAC", SUPER)
     assert global_in_a_jurisdiction.status_code == 400 and code(global_in_a_jurisdiction) == "invalid_assignment"
+
+
+def test_a_jurisdiction_administrator_is_given_one_jurisdiction_per_assignment(world, cast):
+    """DIAAT-403: never several jurisdictions at once; several separate assignments are fine."""
+    several = cast.jsuper.post(
+        "/api/admin/assignments", role=SUPER, json={"user_id": str(cast.bob.user_id), "jurisdiction": ["IAC", "ET"], "role": ADMIN}
+    )
+    assert several.status_code == 422
+    for jurisdiction in ("IAC", "ET"):
+        assert assign(cast.jsuper, cast.bob, jurisdiction, ADMIN, as_role=SUPER).status_code == 201
+    assert world.assignments_of(cast.bob) == {("IAC", ADMIN), ("ET", ADMIN)}
 
 
 def test_an_unknown_user_or_jurisdiction_is_a_404(world, cast):
@@ -312,7 +337,7 @@ def test_an_assignment_is_audited_with_actor_active_context_target_and_change(wo
 
 
 def test_a_system_administrator_is_audited_with_the_system_administrator_context(world, cast):
-    assert assign(cast.sysadmin, cast.bob, "ET", ADMIN).status_code == 201
+    assert assign(cast.sysadmin, cast.bob, None, SUPER).status_code == 201
     (row,) = world.audit("assignment.added")
     assert row.user_id == str(cast.sysadmin.user_id)
     assert row.active_role == "SystemAdministrator" and row.active_jurisdiction_id is None
@@ -358,13 +383,14 @@ def test_removing_follows_the_same_rules_as_assigning(world, cast):
     assert world.assignments_of(cast.bob) == {("IAC", JUDGE), ("ET", JUDGE), ("IAC", ADMIN)}
     assert cast.jadmin_iac.delete(f"/api/admin/assignments/{iac_judge}", role=ADMIN, jurisdiction="IAC").status_code == 204
 
-    # A system administrator removes administrators, not judges.
-    judge = cast.sysadmin.delete(f"/api/admin/assignments/{et_judge}")
-    assert judge.status_code == 403 and code(judge) == "assignment_not_allowed"
-    assert cast.sysadmin.delete(f"/api/admin/assignments/{iac_admin}").status_code == 204
+    # A system administrator removes only the global role: no judges, no jurisdiction administrators.
+    for assignment_id in (et_judge, iac_admin):
+        refused = cast.sysadmin.delete(f"/api/admin/assignments/{assignment_id}")
+        assert refused.status_code == 403 and code(refused) == "assignment_not_allowed"
 
-    # A super administrator removes judges anywhere.
+    # A super administrator removes judges and jurisdiction administrators anywhere.
     assert cast.jsuper.delete(f"/api/admin/assignments/{et_judge}", role=SUPER).status_code == 204
+    assert cast.jsuper.delete(f"/api/admin/assignments/{iac_admin}", role=SUPER).status_code == 204
     assert world.assignments_of(cast.bob) == set()
 
 
@@ -390,7 +416,7 @@ def test_removing_an_unknown_assignment_is_a_404(world, cast):
     [
         ("jadmin_iac", ADMIN, "IAC", [JUDGE, LTM]),
         ("jsuper", SUPER, None, [JUDGE, LTM, ADMIN]),
-        ("sysadmin", None, None, [ADMIN, SUPER]),
+        ("sysadmin", None, None, [SUPER]),
     ],
 )
 def test_the_roles_endpoint_offers_exactly_the_roles_the_rules_let_the_caller_assign(

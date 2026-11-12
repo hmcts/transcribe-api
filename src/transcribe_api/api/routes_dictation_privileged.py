@@ -158,8 +158,7 @@ async def get_admin_roles(
     """The roles the caller may assign (DIAAT-374: ``{"roles": [...]}``, which is what the Users
     tab reads), by the contract's assignment rules for the role they act in: a
     JurisdictionAdministrator Judge and LegalTextManager; a JurisdictionSuperAdministrator also
-    JurisdictionAdministrator; acting as SystemAdministrator JurisdictionAdministrator and
-    JurisdictionSuperAdministrator. Never SystemAdministrator, which nobody can grant."""
+    JurisdictionAdministrator; acting as SystemAdministrator JurisdictionSuperAdministrator only. Never SystemAdministrator, which nobody can grant."""
     ctx = auth_context.context_of(admin_user)
     return RolesResponse(roles=assignable_roles(ctx.role if ctx else None, auth_context.sysadmin_of(admin_user)))
 

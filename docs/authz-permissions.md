@@ -37,7 +37,7 @@ legal-wording routes).
 | templates.manage | | yes | yes | yes | |
 | admin.access | | yes | yes | yes | yes |
 | users.manage, access.approve, role_audit.read, jurisdictions.manage, jurisdiction.wording.edit, jurisdiction.features | | | yes | yes | |
-| jurisdiction.create, jurisdiction_admin.assign | | | | yes | yes (assign only) |
+| jurisdiction.create, jurisdiction_admin.assign | | | | yes | |
 | jurisdiction_super_admin.assign | | | | | yes |
 | feature_flags.manage, system.settings, security.alert_test | | | | | yes |
 | recording.any.read, recording.any.edit, recording.any.delete, dictation.any.read | nobody | | | | |
@@ -200,7 +200,7 @@ the shared routes.)
 * **`GET /api/admin/me` is `admin.access`**; its response is `{email, role, user_id}` where `role` is the caller's own active role (SystemAdministrator for one acting as it);
   `is_admin` is gone.
 * **`GET /api/admin/roles` returns `{"roles": [...]}`** (DIAAT-374), the roles the caller may assign by the contract's rules for the role they act as (JA: Judge,
-  LegalTextManager; JSA: and JurisdictionAdministrator; sysadmin: JurisdictionAdministrator and JurisdictionSuperAdministrator), never SystemAdministrator. Any of
+  LegalTextManager; JSA: and JurisdictionAdministrator; sysadmin: JurisdictionSuperAdministrator only), never SystemAdministrator. Any of
   `users.manage`, `jurisdiction_admin.assign`, `jurisdiction_super_admin.assign`. A pinned-shape test: `test_privileged_routes.py`.
 * **`GET /api/admin/users` is `users.manage` or `jurisdiction_super_admin.assign`** and answers the contract's list (users with their assignments, pending rows,
   paging): a JurisdictionAdministrator lists the jurisdiction it acts in (and, searching with 3 or more characters and no `jurisdiction=`/`role=`, any user
@@ -225,9 +225,12 @@ the shared routes.)
 * **A SystemAdministrator acting in a stored role has that role's permissions and scope, and nothing else (DIAAT-403).** The system permissions
   (`jurisdiction_super_admin.assign` among them) are the SystemAdministrator context's alone, and are not read as "global administrator". The user list and
   deactivation take their scope from the role acted in (`jurisdiction_scope`): only an active JurisdictionSuperAdministrator is global (review finding S4).
-  Acting as SystemAdministrator: assigning the two administrator roles, listing users to find who to assign, the feature flags, the system routes.
-* **Nobody gives themselves a role, nor decides their own access request** (403 `assignment_not_allowed` / `own_request`), except the self-assignment of any
-  stored role by someone acting as SystemAdministrator (contract section 1). At most five access requests are pending per user (409 `too_many_pending_requests`).
+  Acting as SystemAdministrator: assigning JurisdictionSuperAdministrator (the only role it gives, DIAAT-403), listing users to find who to assign, the
+  feature flags, the system routes.
+* **Giving yourself a role follows the same rules as giving it to anyone else: only a role strictly below the one you act in** (DIAAT-403; 403
+  `assignment_not_allowed` otherwise). A JurisdictionSuperAdministrator gives themselves JurisdictionAdministrator, Judge or LegalTextManager, a
+  JurisdictionAdministrator Judge or LegalTextManager in its jurisdiction; a Judge or LegalTextManager raises an access request. Acting as
+  SystemAdministrator, a holder gives JurisdictionSuperAdministrator only, to others or to themselves (contract section 1). Nobody decides their own access request (403 `own_request`). At most five access requests are pending per user (409 `too_many_pending_requests`).
 * **`GET /api/healthcheck/azure-storage` is `system.settings`** (a SystemAdministrator). It was open, called storage on every request and answered with the
   container name and the exception text. Nothing in the repository or the chart calls it; `GET /api/health/dependencies` has the storage state for probes.
 * **`POST /api/security/alert-test` is `security.alert_test`** (unchanged in effect: SystemAdministrator, and 404 unless the test is enabled).
