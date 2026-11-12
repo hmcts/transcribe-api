@@ -459,3 +459,49 @@ def test_0010_waits_for_a_sign_in_in_progress_and_then_sees_its_user(engine):
 
     assert not worker.is_alive() and errors == []
     assert assignments(engine) == [("quinn@example.test", "IAC", "Judge", False, False)]
+
+
+def test_0010_lets_a_removal_already_reading_the_jurisdictions_finish_and_honours_it(engine):
+    """A pod's removal has read the jurisdiction (as delete_assignment does) when 0010 starts, then deletes
+    the assignment. Had 0010 locked role_assignment first and waited for the jurisdiction afterwards, each
+    would wait for the other. It takes the jurisdiction first, gives way while the removal finishes, and
+    then does not give the removed role back."""
+    import threading
+
+    migrate(engine, "0008")
+    membership(engine, "IAC", "judge", email="rose@example.test")
+    migrate(engine, "0009")
+    rose = add_user(engine, "rose")
+    claim_at_first_sign_in(engine, rose, "rose@example.test")
+    iac = jurisdiction(engine, "IAC")
+
+    removal = engine.connect()
+    transaction = removal.begin()
+    removal.execute(text("SELECT code FROM jurisdiction WHERE id = :id"), {"id": iac.id})
+    errors: list[BaseException] = []
+
+    def upgrade():
+        try:
+            migrate(engine, "0010")
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=upgrade)
+    worker.start()
+    worker.join(timeout=1.5)
+    assert worker.is_alive()  # giving way to the removal's read
+    removal.execute(text("DELETE FROM role_assignment WHERE user_id = :uid"), {"uid": rose})
+    removal.execute(
+        text(
+            "INSERT INTO audit_log (id, timestamp, event_type, user_id, held_roles, required_roles, outcome,"
+            " object_type, object_id, detail) VALUES (gen_random_uuid(), now(), 'assignment.removed', :actor, '[]',"
+            " '[]', 'success', 'jurisdiction', :jid, CAST(:detail AS jsonb))"
+        ),
+        {"actor": rose, "jid": str(iac.id), "detail": f'{{"target_user_id": "{rose}", "role": "Judge"}}'},
+    )
+    transaction.commit()
+    removal.close()
+    worker.join(timeout=60)
+
+    assert not worker.is_alive() and errors == []
+    assert assignments(engine) == []

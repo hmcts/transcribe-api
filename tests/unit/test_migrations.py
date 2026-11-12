@@ -1027,7 +1027,9 @@ def test_0010_catches_up_the_memberships_then_retires_them(monkeypatch):
     assert "e.event_type = 'assignment.removed'" in sql and "e.event_type = 'membership.leave'" in sql
     assert "SET pending_email = btrim(p.pending_email)" in sql  # 0009 only lowered them
     # Resolved once, after the pods still serving are held off: every statement reads the same people.
-    assert sql.index('LOCK TABLE "user" IN SHARE ROW EXCLUSIVE MODE') < sql.index(
+    assert sql.index("LOCK TABLE jurisdiction IN ACCESS EXCLUSIVE MODE") < sql.index(
+        'LOCK TABLE "user" IN SHARE ROW EXCLUSIVE MODE'
+    ) < sql.index(
         "LOCK TABLE role_assignment IN SHARE ROW EXCLUSIVE MODE"
     ) < sql.index("CREATE TEMPORARY TABLE cutover_legacy") < sql.index("INSERT INTO role_assignment")
     assert "DROP TABLE cutover_legacy" in sql

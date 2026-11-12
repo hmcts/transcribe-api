@@ -11,7 +11,8 @@ trimmed, as domain/assignments.normalise_email stores it) the one user who has s
 email, else the email itself. A pending membership whose email belongs to more than one user is left
 alone (the new code refuses such an email too: ``ambiguous_email``), and a blank one matches nobody.
 The memberships are resolved once, into a temporary table every statement reads, under locks that hold
-sign-ins and role changes on pods still serving until this commits. Then:
+sign-ins and role changes on pods still serving until this commits (all taken up front, giving way to a
+request in progress rather than deadlocking with it: see LOCKS). Then:
 
 1. 0009's pending copies are trimmed (it only lowered them, so a padded one could never be claimed); two
    that become the same are one, in the test group if either was. A padded copy whose email had a role
@@ -49,6 +50,7 @@ Create Date: 2026-11-12
 """
 
 import logging
+import time
 
 import sqlalchemy as sa
 
@@ -66,12 +68,20 @@ logger = logging.getLogger("alembic.runtime.migration")
 LEGACY_TABLE = "jurisdiction_membership_legacy"
 
 # Sign-ins and role changes on pods still serving wait until this commits: a user created, or a role
-# removed, between two of the statements below would otherwise be missed by both. "user" first, as the
-# sign-in takes them, so the two cannot deadlock.
+# removed, between two of the statements below would otherwise be missed by both. Every lock the
+# migration needs is taken up front (the ALTER and the RENAME need ACCESS EXCLUSIVE), so nothing waits
+# for a lock once the work has started. The pods' transactions take these tables in no fixed order, so
+# taking them can still meet one halfway: each attempt gives up after LOCK_TIMEOUT, shorter than
+# PostgreSQL's deadlock_timeout (1s), and releases what it took, so the request is never the one aborted.
 LOCKS = (
+    "LOCK TABLE jurisdiction IN ACCESS EXCLUSIVE MODE",
     'LOCK TABLE "user" IN SHARE ROW EXCLUSIVE MODE',
     "LOCK TABLE role_assignment IN SHARE ROW EXCLUSIVE MODE",
+    "LOCK TABLE jurisdiction_membership IN ACCESS EXCLUSIVE MODE",
 )
+LOCK_TIMEOUT = "500ms"
+LOCK_ATTEMPTS = 120
+LOCK_NOT_AVAILABLE = "55P03"
 
 # Every membership as (person, jurisdiction, role), resolved once: user_id is its user, or the only user
 # with its pending email; email is the person's, normalised; ambiguous: a pending email several users have.
@@ -202,9 +212,33 @@ CATCH_UP = (
 )
 
 
+def _lock(bind) -> None:
+    """Take LOCKS, all or none per attempt (a savepoint), until they are free. lock_timeout stays set after:
+    a wait that was not foreseen fails the migration (the pod restarts and tries again) rather than a request."""
+    bind.execute(sa.text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
+    for attempt in range(1, LOCK_ATTEMPTS + 1):
+        savepoint = bind.begin_nested()
+        try:
+            for statement in LOCKS:
+                bind.execute(sa.text(statement))
+        except sa.exc.OperationalError as exc:
+            savepoint.rollback()
+            if getattr(exc.orig, "pgcode", None) != LOCK_NOT_AVAILABLE or attempt == LOCK_ATTEMPTS:
+                raise
+            logger.info("DIAAT-402 cutover: tables busy, trying again (attempt %d)", attempt)
+            time.sleep(0.25)
+        else:
+            savepoint.commit()
+            return
+
+
 def upgrade() -> None:
-    for statement in (*LOCKS, RESOLVE):
-        op.execute(sa.text(statement))
+    if context.is_offline_mode():
+        for statement in LOCKS:
+            op.execute(sa.text(statement))
+    else:
+        _lock(op.get_bind())
+    op.execute(sa.text(RESOLVE))
     if context.is_offline_mode():
         for _name, statement in CATCH_UP:
             op.execute(sa.text(statement))

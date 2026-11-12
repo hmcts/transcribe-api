@@ -45,7 +45,8 @@ memberships any more. In one transaction:
    theirs: what they claimed is not offered again, and a missing role is given to the user directly. One whose email more than one user
    has is left alone, and a blank email matches nobody. 0009's pending copies are trimmed first (it only lowered them), except one whose
    email had a role removed in its jurisdiction since, which is dropped. The memberships are resolved once, under locks that make sign-ins
-   and role changes on pods still serving wait the moment the migration takes.
+   and role changes on pods still serving wait the moment the migration takes. The locks are all taken up front, each attempt giving way
+   after 500 ms (shorter than PostgreSQL's deadlock timeout) and trying again, so a request in progress is never the one aborted.
 2. **It does not give back what was taken away in the new code.** By the time 0010 runs, administrators have been removing roles in the
    new screens, and the memberships those roles came from are still there. Every removal is audited in the same transaction as the change
    (`assignment.removed` by an administrator, by user or pending email, compared normalised; `membership.leave` by the user), filed against the jurisdiction. A
