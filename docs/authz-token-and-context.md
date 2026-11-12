@@ -172,9 +172,9 @@ token) a route is 401, as anywhere else.
 
 The permission checks on every route are [`authz-permissions.md`](authz-permissions.md) (Phase 3). The endpoints that let administrators
 give and take away roles, decide access requests, set feature flags and read a recording's history are
-[`authz-admin-api.md`](authz-admin-api.md) (Phase 4), with an example for each. `user.role` and `jurisdiction.auto_enrol` are no longer
-read (nobody is enrolled automatically; a new user has no role) and are dropped in a later release; migration 0010 renamed
-`jurisdiction_membership` to `jurisdiction_membership_legacy` ([`authz-cutover.md`](authz-cutover.md)).
+[`authz-admin-api.md`](authz-admin-api.md) (Phase 4), with an example for each. `user.role` is no longer read (a new user has no role)
+and is dropped in a later release. Nobody is enrolled automatically: migration 0010 retired `jurisdiction_membership` and
+`jurisdiction.auto_enrol`, and migration 0011 dropped them ([`authz-cutover.md`](authz-cutover.md)).
 
 ## Identity: the email claim is not verified (a decision for the owner)
 

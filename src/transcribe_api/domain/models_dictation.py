@@ -79,7 +79,7 @@ class User(BaseTable, table=True):
     has_completed_onboarding: bool = Field(default=False)
     # Retired (DIAAT-382): nothing reads or writes it any more; a user's roles are their
     # role_assignment rows. NULL for users created since 0009 (a new user has no role).
-    # Dropped in a later release, with jurisdiction.auto_enrol (unmapped since 0010).
+    # Dropped in a later release.
     role: str | None = Field(default=None, index=True)
     # Retired (DIAAT-390): the active jurisdiction is chosen per session (the BenchNotes
     # token's ctx), not remembered here. Dropped in a later release.

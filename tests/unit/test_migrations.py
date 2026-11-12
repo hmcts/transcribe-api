@@ -10,7 +10,6 @@ from __future__ import annotations
 import io
 import os
 import re
-from types import SimpleNamespace
 
 import pytest
 from alembic.script import ScriptDirectory
@@ -100,7 +99,7 @@ def _alter_type_sql(table: str, column: str, type_sql: str) -> re.Pattern[str]:
 def test_there_is_one_history_with_one_head():
     script = ScriptDirectory.from_config(migrations.alembic_config())
     assert script.get_bases() == ["0001"]
-    assert script.get_heads() == ["0010"]
+    assert script.get_heads() == ["0011"]
 
 
 def test_baseline_creates_every_table(monkeypatch):
@@ -604,7 +603,7 @@ def test_baseline_matches_the_models_on_a_real_database():
     migrations.run_migrations(engine)
 
     with engine.connect() as connection:
-        context = MigrationContext.configure(connection, opts={"include_object": migrations.include_object})
+        context = MigrationContext.configure(connection)
         diff = compare_metadata(context, migrations.target_metadata())
     assert diff == []
 
@@ -1051,13 +1050,23 @@ def test_the_models_no_longer_map_the_retired_access_data():
     tables = migrations.target_metadata().tables
     assert "jurisdiction_membership" not in tables
     assert "auto_enrol" not in tables["jurisdiction"].columns
-    jurisdiction = tables["jurisdiction"]
-    assert not migrations.include_object(None, "jurisdiction_membership_legacy", "table", True, None)
-    assert not migrations.include_object(
-        SimpleNamespace(table=jurisdiction), "auto_enrol", "column", True, None
-    )
-    assert migrations.include_object(jurisdiction, "jurisdiction", "table", False, None)
-    assert migrations.include_object(jurisdiction.columns["code"], "code", "column", False, None)
+
+
+# 0011: DIAAT-405 the retired access data dropped ---------------------------------------
+
+
+def test_0011_drops_the_legacy_table_and_auto_enrol_under_the_locks(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0010:0011")
+    assert sql.index("SET LOCAL lock_timeout = '500ms'") < sql.index("LOCK TABLE jurisdiction IN ACCESS EXCLUSIVE MODE") < sql.index(
+        'LOCK TABLE "user" IN ACCESS EXCLUSIVE MODE'
+    ) < sql.index("DROP TABLE IF EXISTS jurisdiction_membership_legacy") < sql.index("ALTER TABLE jurisdiction DROP COLUMN IF EXISTS auto_enrol")
+
+
+def test_0011_downgrade_puts_back_an_empty_table_and_the_column(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0011:0010", downgrade=True)
+    assert "ALTER TABLE jurisdiction ADD COLUMN auto_enrol BOOLEAN DEFAULT false NOT NULL" in sql
+    assert "CREATE TABLE jurisdiction_membership_legacy (" in sql
+    assert "CREATE UNIQUE INDEX uq_jurisdiction_membership_pending_email" in sql
 
 
 def _reset(engine):
@@ -1228,9 +1237,8 @@ def test_the_database_refuses_assignments_that_break_the_rules(fresh_postgres):
     with engine.begin() as connection:
         connection.execute(
             text(
-                "INSERT INTO jurisdiction (id, code, name, enabled, auto_enrol, settings, created_datetime,"
-                " updated_datetime) VALUES ('7e7e7e7e-0000-4000-8000-0000000000e1', 'ET', 'ET', true, false, '{}',"
-                " now(), now())"
+                "INSERT INTO jurisdiction (id, code, name, enabled, settings, created_datetime, updated_datetime)"
+                " VALUES ('7e7e7e7e-0000-4000-8000-0000000000e1', 'ET', 'ET', true, '{}', now(), now())"
             )
         )
         for n in (1, 2):
