@@ -322,6 +322,8 @@ class JurisdictionTemplate(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint("jurisdiction_id", "name", name="uq_jurisdiction_template_name"),
         CheckConstraint("stage IN ('draft', 'test', 'live')", name="ck_jurisdiction_template_stage"),
+        # The previous release's pods cannot switch on one that is not live (0012).
+        CheckConstraint("NOT enabled OR stage = 'live'", name="ck_jurisdiction_template_enabled_is_live"),
     )
 
     id: UUID = Field(default_factory=uuid4, primary_key=True, nullable=False)

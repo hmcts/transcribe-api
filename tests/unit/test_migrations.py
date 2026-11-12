@@ -305,6 +305,9 @@ def test_0012_makes_each_template_judges_could_choose_live_and_writes_no_jurisdi
     assert "ALTER TABLE jurisdiction_template ADD COLUMN stage VARCHAR(8) DEFAULT 'draft' NOT NULL" in sql
     assert "CHECK (stage IN ('draft', 'test', 'live'))" in sql
     assert "UPDATE jurisdiction_template SET stage = 'live' WHERE enabled" in sql
+    # After the backfill, so every template switched on is live by then.
+    enabled_is_live = "ADD CONSTRAINT ck_jurisdiction_template_enabled_is_live CHECK (NOT enabled OR stage = 'live')"
+    assert sql.index("SET stage = 'live' WHERE enabled") < sql.index(enabled_is_live)
     for table in ("jurisdiction", "jurisdiction_template"):
         assert f"ALTER TABLE {table} ADD COLUMN signed_off_by VARCHAR(200);" in sql
         assert f"ALTER TABLE {table} ADD COLUMN signed_off_at TIMESTAMP WITH TIME ZONE;" in sql
@@ -317,6 +320,7 @@ def test_0012_downgrade_reverses_it(monkeypatch):
     for table in ("jurisdiction", "jurisdiction_template"):
         for column in ("signed_off_by", "signed_off_at", "signed_off_recorded_by"):
             assert f"ALTER TABLE {table} DROP COLUMN {column};" in sql
+    assert "ALTER TABLE jurisdiction_template DROP CONSTRAINT ck_jurisdiction_template_enabled_is_live;" in sql
     assert "ALTER TABLE jurisdiction_template DROP COLUMN stage;" in sql
 
 

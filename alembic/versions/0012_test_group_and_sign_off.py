@@ -7,7 +7,11 @@ recorded (jurisdictions_admin.set_stage):
 - jurisdiction_template.stage: 'draft' (no one chooses it), 'test' (the
   jurisdiction's testers and admins) or 'live' (all its judges). A template judges
   could choose (enabled) is live, as it was; any other a draft. ``enabled`` stays,
-  kept equal to live, for the previous release's pods while this one rolls out;
+  kept equal to live, for the previous release's pods while this one rolls out.
+  Those pods write ``enabled`` alone: ck_jurisdiction_template_enabled_is_live refuses
+  one switching on a template that is not live, which would reach every judge without
+  the test group or the sign-off. Switching one off there is allowed; the code takes
+  it as a draft (jurisdiction_templates.stage_of);
 - jurisdiction.signed_off_* and jurisdiction_template.signed_off_*: the service
   lead's name, when, and the admin who recorded it. NULL for what was live before.
 
@@ -42,6 +46,9 @@ def upgrade() -> None:
         "ck_jurisdiction_template_stage", "jurisdiction_template", f"stage IN ({', '.join(repr(s) for s in STAGES)})"
     )
     op.execute(sa.text("UPDATE jurisdiction_template SET stage = 'live' WHERE enabled"))
+    op.create_check_constraint(
+        "ck_jurisdiction_template_enabled_is_live", "jurisdiction_template", "NOT enabled OR stage = 'live'"
+    )
     for table in SIGNED_OFF:
         op.add_column(table, sa.Column("signed_off_by", sa.String(length=200), nullable=True))
         op.add_column(table, sa.Column("signed_off_at", sa.DateTime(timezone=True), nullable=True))
@@ -55,5 +62,6 @@ def downgrade() -> None:
         op.drop_column(table, "signed_off_recorded_by")
         op.drop_column(table, "signed_off_at")
         op.drop_column(table, "signed_off_by")
+    op.drop_constraint("ck_jurisdiction_template_enabled_is_live", "jurisdiction_template", type_="check")
     op.drop_constraint("ck_jurisdiction_template_stage", "jurisdiction_template", type_="check")
     op.drop_column("jurisdiction_template", "stage")

@@ -23,6 +23,7 @@ from uuid import UUID
 
 import pytest
 from fastapi import FastAPI
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from tests.unit.jurisdiction_fixtures import (
@@ -560,6 +561,27 @@ def test_a_template_switched_off_by_the_previous_release_is_off_until_signed_off
     live = as_admin.put(path, json=complete(listed, sign_off={"service_lead": "B Lead", "confirmed": True})).json()
     assert (live["stage"], live["enabled"], live["sign_off"]["service_lead"]) == ("live", True, "B Lead")
     assert [t["id"] for t in as_et_judge.get("/api/jurisdictions/templates").json()] == [template["id"]]
+
+
+@pytest.mark.parametrize("stage", ["draft", "test"])
+def test_the_previous_release_cannot_switch_on_a_template_that_is_not_live(jurisdiction_db, as_admin, stage):
+    """Its pods write ``enabled`` alone: switching on a draft or a template in test would
+    reach every judge there, without the test group or the sign-off. The database
+    refuses it, and the template is as it was."""
+    template = upload(as_admin).json()
+    if stage == "test":
+        path = f"/api/admin/jurisdictions/ET/templates/{template['id']}"
+        template = as_admin.put(path, json=complete(template, stage="test")).json()
+
+    with Session(jurisdiction_db) as session:
+        row = session.get(JurisdictionTemplate, UUID(template["id"]))
+        row.enabled = True
+        session.add(row)
+        with pytest.raises(IntegrityError, match="ck_jurisdiction_template_enabled_is_live"):
+            session.commit()
+
+    (listed,) = as_admin.get("/api/admin/jurisdictions/ET/templates").json()
+    assert (listed["stage"], listed["enabled"], listed["version"]) == (stage, False, template["version"])
 
 
 def test_a_submission_is_either_the_decision_form_or_a_template(as_admin, as_et_judge, stored):
