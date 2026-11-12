@@ -71,11 +71,9 @@ def test_put_creates_then_updates_a_jurisdiction(session, put):
     assert admin.put_jurisdiction(session, "ET", "Employment Tribunals", {}, enabled=False) == "Updated ET"
 
     [row] = session.exec(select(Jurisdiction)).all()
-    # Nobody is enrolled automatically any more (DIAAT-373): a new jurisdiction never is.
-    assert (row.code, row.name, row.auto_enrol, row.enabled, row.settings["wording"]) == (
+    assert (row.code, row.name, row.enabled, row.settings["wording"]) == (
         "ET",
         "Employment Tribunals",
-        False,
         False,
         {},
     )
@@ -155,7 +153,7 @@ def test_a_jurisdiction_created_by_someone_else_at_the_same_moment_is_a_conflict
 
     def commit_after_the_other_admin():
         with Session(session.get_bind()) as other:
-            other.add(Jurisdiction(code="ET", name="Theirs", settings={}, auto_enrol=False, enabled=True))
+            other.add(Jurisdiction(code="ET", name="Theirs", settings={}, enabled=True))
             other.commit()
         monkeypatch.setattr(session, "commit", real_commit)
         real_commit()

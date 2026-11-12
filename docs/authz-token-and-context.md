@@ -51,10 +51,14 @@ the token is 401 as any expired one and the web re-mints from Entra (it already 
 unchanged; `expires_at` of a re-minted token is simply the session's end if that is sooner than a full lifetime. A token without `sess_exp` (minted
 before it existed) counts as its own session.
 
-Permissions are **not** in the token: they are derived from `ctx.role` (plus `sysadmin`) with the role
+Permissions are **not** in the token: they are derived from `ctx.role` alone (DIAAT-403) with the role
 map in code, so a change to the map needs no new tokens. The roles are `Judge`, `LegalTextManager`,
 `JurisdictionAdministrator` and `JurisdictionSuperAdministrator` (stored; the last is global, with a null
-jurisdiction) and `SystemAdministrator` (Entra only: never stored, never an assignment, never a context).
+jurisdiction) and `SystemAdministrator` (Entra only: never stored and never an assignment, but a context of its own,
+`{"jurisdiction": null, "role": "SystemAdministrator"}`, for a holder of the Entra role: listed last in their own `me.assignments` and
+the token's `assignments`, and chosen like any other. Its permissions apply only while it is the active context, and need the `sysadmin`
+claim too: a token with that context and no `sysadmin` is refused. Nobody else ever sees it: it is never in a user list, role list or the
+Users screens).
 
 A `JurisdictionAdministrator` also holds `Judge` and `LegalTextManager` in their own jurisdiction, without being given
 them: `domain/assignments.load_assignments` adds them (`derived`) to what a user may act as, so they appear in the token's
@@ -81,13 +85,14 @@ Settings (`runtime/settings_dictation.py`):
 
 * Exactly one distinct (jurisdiction, role) pair and the token carries it already: no choice to make.
 * Several pairs: `ctx` is `null` and `me.status` is `choose` until `PUT /api/me/context`.
-* No pair and not a SystemAdministrator: `no_access`. A SystemAdministrator with no pair is `ready` (the
-  system pages only); their system permissions apply whatever the context, also with none.
+* No pair and not a SystemAdministrator: `no_access`. A SystemAdministrator with no assignment has one pair, their
+  SystemAdministrator context, and lands in it; one with assignments chooses, as anyone with several pairs does.
+* Acting in any context, the user has that role's permissions and nothing from the other roles they hold
+  (DIAAT-403): a SystemAdministrator acting as a Judge is a Judge.
 * On a new token (`POST /api/auth/session`), `X-Requested-Context: <jurisdiction|->:<role>` (`-` for the
-  global role) keeps the context the web session chose, **only if the user still holds it**. Otherwise
+  global role and SystemAdministrator) keeps the context the web session chose, **only if the user still holds it**. Otherwise
   `ctx` is `null` and they choose again.
-* A route that needs a context, reached with none, is 403 `context_required` (a SystemAdministrator is
-  let through to the routes that do not need one).
+* A route that needs a context, reached with none, is 403 `context_required`, for everyone.
 * Advisory headers: the browser sends `X-Jurisdiction: <code|->` and `X-Role: <role>` for its tab. If
   present and different from the token's `ctx`, the answer is 409 `context_changed` and the tab reloads.
   Absent is fine, and they are not checked on the no-context endpoints.
@@ -153,7 +158,7 @@ curl -s localhost:8000/api/me/permissions -H "Authorization: Bearer $TOKEN"
 | `jadmin-et` | JurisdictionAdministrator in ET | no |
 | `legal-iac` | LegalTextManager in IAC | no |
 | `jsuper` | JurisdictionSuperAdministrator (global) | no |
-| `sysadmin` | none | yes |
+| `sysadmin` | none (SystemAdministrator context only) | yes |
 | `no-role` | none | no |
 
 Emails are `<name>@localhost.test`. The seed script creates the jurisdictions ET ("Employment Tribunal")
@@ -167,8 +172,9 @@ token) a route is 401, as anywhere else.
 
 The permission checks on every route are [`authz-permissions.md`](authz-permissions.md) (Phase 3). The endpoints that let administrators
 give and take away roles, decide access requests, set feature flags and read a recording's history are
-[`authz-admin-api.md`](authz-admin-api.md) (Phase 4), with an example for each. `user.role`, `jurisdiction_membership` and
-`jurisdiction.auto_enrol` are no longer read (nobody is enrolled automatically; a new user has no role) and are dropped in a later release.
+[`authz-admin-api.md`](authz-admin-api.md) (Phase 4), with an example for each. `user.role` is no longer read (a new user has no role)
+and is dropped in a later release. Nobody is enrolled automatically: migration 0010 retired `jurisdiction_membership` and
+`jurisdiction.auto_enrol`, and migration 0011 dropped them ([`authz-cutover.md`](authz-cutover.md)).
 
 ## Identity: the email claim is not verified (a decision for the owner)
 

@@ -7,10 +7,11 @@ Roles
 LegalTextManager and a JurisdictionAdministrator hold their role in one jurisdiction;
 the JurisdictionSuperAdministrator is global.
 
-``SystemAdministrator`` is never stored and never offered as a context: it comes only
-from the Entra ``roles`` claim, is copied into the BenchNotes token as ``sysadmin`` when
-the token is minted, and adds the system-level permissions to whatever the active role
-grants, whatever the context, also with no context at all.
+``SystemAdministrator`` is never stored: it comes only from the Entra ``roles`` claim and is
+copied into the BenchNotes token as ``sysadmin`` when the token is minted. A holder is offered
+it as a context of its own (no jurisdiction), and has the system-level permissions only while
+acting in it (DIAAT-403): acting as any other role, they have that role's permissions and no
+more, like anyone else. It is invisible to everyone else (never assignable, never listed).
 
 A JurisdictionAdministrator is also offered ``Judge`` and ``LegalTextManager`` as contexts in their own
 jurisdiction (``ROLES_INCLUDED_WITH_ADMIN``): derived when assignments are read
@@ -19,7 +20,7 @@ jurisdiction (``ROLES_INCLUDED_WITH_ADMIN``): derived when assignments are read
 ``Normal`` is gone (merged into Judge).
 
 Permissions are not in the token: they are derived here from the token's active role
-and ``sysadmin`` flag (``permissions_for``), so the map has one home and a change to it
+(``permissions_for``), so the map has one home and a change to it
 needs no re-issue of tokens. ``recording.any.*`` and ``dictation.any.read`` are granted
 to no role; they exist so that a test can prove nobody has them.
 """
@@ -39,6 +40,9 @@ STORED_ROLES: tuple[str, ...] = (
     ROLE_JURISDICTION_ADMIN,
     ROLE_JURISDICTION_SUPER_ADMIN,
 )
+# The roles a context can be acted in: the stored ones, and SystemAdministrator for a holder of
+# the Entra role (with no jurisdiction).
+CONTEXT_ROLES: tuple[str, ...] = (*STORED_ROLES, ROLE_SYSTEM_ADMIN)
 # Stored roles that apply to every jurisdiction: held with no jurisdiction.
 GLOBAL_ROLES: tuple[str, ...] = (ROLE_JURISDICTION_SUPER_ADMIN,)
 # Roles a JurisdictionAdministrator holds in their jurisdiction without being given them (DIAAT-373):
@@ -121,7 +125,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     ROLE_JURISDICTION_SUPER_ADMIN: frozenset(_JURISDICTION_ADMIN | {"jurisdiction.create", "jurisdiction_admin.assign"}),
 }
 
-# Added by the Entra SystemAdministrator app role, whatever the active context.
+# The SystemAdministrator context's: only while acting as SystemAdministrator.
 SYSTEM_ADMIN_PERMISSIONS: frozenset[str] = frozenset(
     {
         "admin.access",
@@ -157,12 +161,13 @@ UNGRANTED_PERMISSIONS: frozenset[str] = frozenset(PERMISSIONS) - set().union(
 
 
 def permissions_for(role: str | None, sysadmin: bool = False) -> list[str]:
-    """The permissions of the active ``role`` (None: no active context), plus the
-    system-level ones when ``sysadmin``. In ``PERMISSIONS`` order; empty for a role that
-    is not a stored role (a token cannot make one up)."""
-    granted: set[str] = set(ROLE_PERMISSIONS.get(role or "", ()))
-    if sysadmin:
-        granted |= SYSTEM_ADMIN_PERMISSIONS
+    """The permissions of the active ``role`` only (None: no active context, none). The
+    SystemAdministrator role's need ``sysadmin``, the Entra role, as well. In ``PERMISSIONS``
+    order; empty for a role that is not a context role (a token cannot make one up)."""
+    if role == ROLE_SYSTEM_ADMIN:
+        granted: frozenset[str] = SYSTEM_ADMIN_PERMISSIONS if sysadmin else frozenset()
+    else:
+        granted = ROLE_PERMISSIONS.get(role or "", frozenset())
     return [permission for permission in PERMISSIONS if permission in granted]
 
 
@@ -172,7 +177,7 @@ def role_needs_jurisdiction(role: str) -> bool:
 
 
 # Who may assign which stored roles (contract s1, "Assignment rules"): the roles a caller
-# acting as ``role`` may give or take away. A SystemAdministrator (token claim) may assign the
+# acting as ``role`` may give or take away. A caller acting as SystemAdministrator may assign the
 # two administrator roles and, on themselves only, any stored role; Phase 4 enforces the
 # rules per request; this is the list GET /admin/roles shows.
 _ASSIGNABLE_BY_ROLE: dict[str, tuple[str, ...]] = {
@@ -183,10 +188,11 @@ _ASSIGNABLE_BY_SYSADMIN: tuple[str, ...] = (ROLE_JURISDICTION_ADMIN, ROLE_JURISD
 
 
 def assignable_roles(role: str | None, sysadmin: bool = False) -> list[str]:
-    """The stored roles a caller acting as ``role`` (plus SystemAdministrator if ``sysadmin``)
-    may assign to others, in ``STORED_ROLES`` order. Never SystemAdministrator: nobody can
-    grant it, and it is not a stored role."""
-    granted: set[str] = set(_ASSIGNABLE_BY_ROLE.get(role or "", ()))
-    if sysadmin:
-        granted |= set(_ASSIGNABLE_BY_SYSADMIN)
+    """The stored roles a caller acting as ``role`` may assign to others, in ``STORED_ROLES``
+    order (acting as SystemAdministrator needs ``sysadmin`` too). Never SystemAdministrator:
+    nobody can grant it, and it is not a stored role."""
+    if role == ROLE_SYSTEM_ADMIN:
+        granted: tuple[str, ...] = _ASSIGNABLE_BY_SYSADMIN if sysadmin else ()
+    else:
+        granted = _ASSIGNABLE_BY_ROLE.get(role or "", ())
     return [r for r in STORED_ROLES if r in granted]

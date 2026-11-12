@@ -149,10 +149,15 @@ def test_no_other_role_reads_or_changes_flags(world, cast, who, role, at):
     assert world.audit("feature_flag.changed") == []
 
 
-def test_the_system_administrator_works_whatever_role_they_act_as(world):
+def test_a_system_administrator_acting_as_another_role_is_refused(world):
+    """DIAAT-403: the system permissions are the SystemAdministrator context's only."""
     both = world.person("Sysadmin Judge", ("IAC", JUDGE), sysadmin=True)
-    assert both.get("/api/admin/feature-flags", role=JUDGE, jurisdiction="IAC").status_code == 200
-    assert both.put("/api/admin/feature-flags/dictation_enabled", role=JUDGE, jurisdiction="IAC", json={"value": False}).status_code == 200
+    for response in (
+        both.get("/api/admin/feature-flags", role=JUDGE, jurisdiction="IAC"),
+        both.put("/api/admin/feature-flags/dictation_enabled", role=JUDGE, jurisdiction="IAC", json={"value": False}),
+    ):
+        assert response.status_code == 403 and response.json()["detail"]["code"] == "permission_denied"
+    assert both.get("/api/admin/feature-flags", role="SystemAdministrator").status_code == 200
 
 
 # --- audit --------------------------------------------------------------------------------------------------
@@ -166,16 +171,7 @@ def test_a_change_is_audited_with_from_to_and_the_roles_acted_as(world, cast):
     assert first.user_id == str(cast.sysadmin.user_id) and first.outcome == "success"
     assert first.detail == {"flag": "dictation_enabled", "from": True, "to": False, "acted_as": ["SystemAdministrator"]}
     assert second.detail["from"] is False and second.detail["to"] is True
-    assert first.active_role is None
-
-
-def test_the_active_role_is_in_the_audit_when_the_system_administrator_acts_as_one(world):
-    both = world.person("Sysadmin Judge", ("IAC", JUDGE), sysadmin=True)
-    both.put("/api/admin/feature-flags/dictation_enabled", role=JUDGE, jurisdiction="IAC", json={"value": False})
-
-    (row,) = world.audit("feature_flag.changed")
-    assert row.active_role == JUDGE and row.active_jurisdiction_id == world.iac.id
-    assert row.detail["acted_as"] == [JUDGE, "SystemAdministrator"]
+    assert first.active_role == "SystemAdministrator"
 
 
 def test_setting_the_value_it_already_has_is_audited_as_no_change_of_value(world, cast):

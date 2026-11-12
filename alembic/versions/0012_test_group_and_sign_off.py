@@ -14,8 +14,8 @@ recorded (jurisdictions_admin.set_stage):
 No row of jurisdiction or document_content is written, so live edits are kept
 (tests/unit/test_migrations.py).
 
-Revision ID: 0010
-Revises: 0009
+Revision ID: 0012
+Revises: 0011
 Create Date: 2026-11-12
 """
 
@@ -24,8 +24,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "0010"
-down_revision = "0009"
+revision = "0012"
+down_revision = "0011"
 branch_labels = None
 depends_on = None
 

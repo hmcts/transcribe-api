@@ -107,8 +107,8 @@ def test_a_caller_holding_none_is_refused_and_audited_with_what_they_hold_and_wh
     assert event.detail == {"reason": "permission_denied"}
 
 
-def test_no_context_is_context_required_unless_the_system_permissions_cover_the_route(audit_rows):
-    for permission in ("dictation.use", "jurisdictions.manage"):
+def test_no_context_is_context_required_for_everyone(audit_rows):
+    for permission in ("dictation.use", "jurisdictions.manage", "feature_flags.manage"):
         with pytest.raises(Exception) as refused:
             _run(require_permission(permission), _user(None, sysadmin=True))
         assert refused.value.detail["code"] == "context_required"
@@ -117,19 +117,26 @@ def test_no_context_is_context_required_unless_the_system_permissions_cover_the_
     assert nobody.value.detail["code"] == "context_required"
     assert audit_rows == []  # a missing context is not a refusal of a role
 
-    sysadmin = _user(None, sysadmin=True)
-    assert _run(require_permission("feature_flags.manage"), sysadmin) is sysadmin
 
-
-def test_the_system_administrators_permissions_apply_in_any_context(audit_rows):
+def test_the_system_administrators_permissions_apply_only_in_its_own_context(audit_rows):
+    """DIAAT-403: a SystemAdministrator acting as a Judge is a Judge, and nothing more."""
     sysadmin_judge = _user("Judge", sysadmin=True)
-    assert _run(require_permission("security.alert_test"), sysadmin_judge) is sysadmin_judge
     assert _run(require_permission("dictation.use"), sysadmin_judge) is sysadmin_judge
-    # ... and add nothing to what the stored role grants: the Entra role gives no jurisdiction permission.
+    for permission in ("security.alert_test", "feature_flags.manage", "admin.access", "jurisdiction_super_admin.assign"):
+        with pytest.raises(Exception) as refused:
+            _run(require_permission(permission), sysadmin_judge)
+        assert refused.value.detail["code"] == "permission_denied"
+    assert audit_rows[-1].held_roles == ["Judge"]
+
+    system = _user("SystemAdministrator", None, sysadmin=True)
+    assert _run(require_permission("security.alert_test"), system) is system
     with pytest.raises(Exception) as refused:
-        _run(require_permission("jurisdictions.manage"), sysadmin_judge)
+        _run(require_permission("dictation.use"), system)
     assert refused.value.detail["code"] == "permission_denied"
-    assert audit_rows[-1].held_roles == ["Judge", "SystemAdministrator"]
+    forged = _user("SystemAdministrator", None, sysadmin=False)
+    with pytest.raises(Exception) as refused:
+        _run(require_permission("security.alert_test"), forged)
+    assert refused.value.detail["code"] == "permission_denied"
 
 
 def test_permissions_are_those_of_the_active_role_only():

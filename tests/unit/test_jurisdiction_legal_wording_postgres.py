@@ -41,15 +41,17 @@ def pg(fresh_postgres, monkeypatch):
     content_loader.clear_cache()
 
 
-def _add_jurisdiction(engine, code: str) -> UUID:
+def _add_jurisdiction(engine, code: str, **columns) -> UUID:
     jurisdiction_id = uuid4()
+    names = "".join(f", {name}" for name in columns)
+    values = "".join(f", :{name}" for name in columns)
     with engine.begin() as connection:
         connection.execute(
             text(
-                "INSERT INTO jurisdiction (id, code, name, enabled, auto_enrol, settings, created_datetime,"
-                " updated_datetime) VALUES (:id, :code, :code, true, false, '{}', now(), now())"
+                f"INSERT INTO jurisdiction (id, code, name, enabled, settings, created_datetime, updated_datetime{names})"
+                f" VALUES (:id, :code, :code, true, '{{}}', now(), now(){values})"
             ),
-            {"id": jurisdiction_id, "code": code},
+            {"id": jurisdiction_id, "code": code, **columns},
         )
     return jurisdiction_id
 
@@ -246,7 +248,7 @@ def test_0006_keeps_the_iacs_row_unchanged_and_reverses():
 
         # Another jurisdiction's row goes with a downgrade; the IAC's is as it was.
         with engine.begin() as connection:
-            et = _add_jurisdiction(engine, "ET")
+            et = _add_jurisdiction(engine, "ET", auto_enrol=False)  # required until 0011 drops it
             connection.execute(
                 text("INSERT INTO document_content (jurisdiction_id, content, updated_at) VALUES (:j, '{}', now())"),
                 {"j": et},

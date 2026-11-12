@@ -1,4 +1,4 @@
-# Permissions: who may call what (DIAAT-373 Phase 3, DIAAT-376)
+# Permissions: who may call what (DIAAT-373 Phase 3, DIAAT-376, DIAAT-403)
 
 Every route of the API declares exactly one thing about who may call it, and a test generated from the
 application proves it: `tests/unit/test_permission_matrix.py`. Nothing decides access by a role name any more:
@@ -8,14 +8,15 @@ the role is turned into permissions in one place (`domain/auth/permissions.py`) 
 ## How a request is decided
 
 1. The BenchNotes token is verified locally (`docs/authz-token-and-context.md`); no database read.
-2. `require_permission(*permissions)` takes the permissions of the context the caller acts in (the token's `ctx.role`) plus,
-   for a SystemAdministrator (token claim `sysadmin`), the system-level ones, with or without a context. The route needs **one of**
+2. `require_permission(*permissions)` takes the permissions of the context the caller acts in (the token's `ctx.role`), and nothing
+   from the other roles the caller holds (DIAAT-403). A SystemAdministrator (token claim `sysadmin`) has the system-level ones only while
+   acting in the SystemAdministrator context (`{"jurisdiction": null, "role": "SystemAdministrator"}`). The route needs **one of**
    the permissions it lists.
 3. Refusals are 403 `{"detail": {"code", "message"}}`:
 
 | code | when | audited |
 |---|---|---|
-| `context_required` | no context is chosen and the SystemAdministrator's permissions do not cover the route | no (as before: a context is not a role) |
+| `context_required` | no context is chosen (nobody holds a permission without one) | no (as before: a context is not a role) |
 | `permission_denied` | the active role does not grant the permission | yes: `ACCESS_DENIED`, outcome `denied`, with the active jurisdiction and role, the role(s) held and the permissions asked for |
 | `dictation_disabled` | the caller holds `dictation.use` but dictation is switched off (DIAAT-388) | yes, as above |
 | `jurisdiction_not_in_scope` | a jurisdiction-scoped permission used on another jurisdiction than the one the caller acts in (a JurisdictionSuperAdministrator's apply everywhere) | yes |
@@ -27,7 +28,7 @@ legal-wording routes).
 
 ## The role map
 
-| Permission | Judge | LegalTextManager | JurisdictionAdministrator | JurisdictionSuperAdministrator | SystemAdministrator (token) |
+| Permission | Judge | LegalTextManager | JurisdictionAdministrator | JurisdictionSuperAdministrator | SystemAdministrator (context, needs the token's `sysadmin`) |
 |---|---|---|---|---|---|
 | app.access, context.switch, access.request | yes | yes | yes | yes | |
 | dictation.use, recording.upload, recording.own, documents.export, recording.audit.read | yes | | | | |
@@ -51,7 +52,7 @@ jurisdiction is in scope by construction. A route that needs a second permission
 ## Every route
 
 Roles: **LTM** LegalTextManager, **JA** JurisdictionAdministrator, **JSA** JurisdictionSuperAdministrator, **sysadmin** a
-SystemAdministrator (with no context, or on top of any role). "Who" is derived from the map: the roles whose permissions
+SystemAdministrator acting as SystemAdministrator (in no other context). "Who" is derived from the map: the roles whose permissions
 include one the route asks for. (`/api/v1` is the hearing-recording area, the rest of `/api` is the dictation product and
 the shared routes.)
 
@@ -196,8 +197,8 @@ the shared routes.)
   the permission everywhere but no active jurisdiction on these routes; editing any jurisdiction's wording by code is `GET/PUT /api/admin/jurisdictions/{code}/wording`.
 * **`/api/v1` uploads and job submission are `recording.upload`; everything else on a job is `recording.own`**, and a job is reachable only by its owner (404 as
   for an unknown job). There is no administrator or SystemAdministrator bypass; nothing lists or reads ownerless pre-migration jobs.
-* **`GET /api/admin/me` is `admin.access`**; its response is `{email, role, user_id}` where `role` is the stored role acted as, never SystemAdministrator (null for a
-  SystemAdministrator with no context); `is_admin` is gone.
+* **`GET /api/admin/me` is `admin.access`**; its response is `{email, role, user_id}` where `role` is the caller's own active role (SystemAdministrator for one acting as it);
+  `is_admin` is gone.
 * **`GET /api/admin/roles` returns `{"roles": [...]}`** (DIAAT-374), the roles the caller may assign by the contract's rules for the role they act as (JA: Judge,
   LegalTextManager; JSA: and JurisdictionAdministrator; sysadmin: JurisdictionAdministrator and JurisdictionSuperAdministrator), never SystemAdministrator. Any of
   `users.manage`, `jurisdiction_admin.assign`, `jurisdiction_super_admin.assign`. A pinned-shape test: `test_privileged_routes.py`.
@@ -211,8 +212,7 @@ the shared routes.)
   decided per request in `domain/user_admin.py` (403 `assignment_not_allowed`, or `jurisdiction_not_in_scope`), not by the route's declaration.
 * **The access request routes for the requester are exempt (`signed_in_endpoint`)**, not `access.request`: a user with no role has no context, and the
   contract says any signed-in user. Approving and listing are `access.approve`: a JurisdictionAdministrator sees and decides the requests of the jurisdiction it
-  acts in, a JurisdictionSuperAdministrator all of them; a SystemAdministrator is refused (a SystemAdministrator with no context: `context_required`; acting
-  as any role: `permission_denied`).
+  acts in, a JurisdictionSuperAdministrator all of them; acting as SystemAdministrator, it is refused (`permission_denied`); a SystemAdministrator who also holds an approving role has its rights only while acting in it, and with no context gets `context_required`.
 * **`GET /api/v1/jobs/{id}/history` is `recording.audit.read`** (Judge), and only the owner reads it: another Judge, or the owner in another jurisdiction, gets the
   404 of a recording they cannot see. A role without the permission (JurisdictionAdministrator, JurisdictionSuperAdministrator, LegalTextManager,
   SystemAdministrator) gets `permission_denied`, as on every other recording route.
@@ -222,12 +222,12 @@ the shared routes.)
   `jurisdiction.create` too, and so does **changing `name` or `enabled`** of an existing one (review finding S5): a JurisdictionAdministrator could otherwise
   disable its own jurisdiction (every member lost it at once, and only a JurisdictionSuperAdministrator could restore it). A JurisdictionAdministrator changes
   the template, features and wording (`settings`) of its own jurisdiction only.
-* **A SystemAdministrator acting in a stored role has that role's scope.** `jurisdiction_super_admin.assign` is a system permission, held whatever the context;
-  it is not read as "global administrator". The user list and deactivation take their scope from the role acted in (`jurisdiction_scope`): only an active
-  JurisdictionSuperAdministrator is global (review finding S4). The SystemAdministrator's own listed effects remain: assigning the two administrator roles, listing
-  users (with no context or in a role without `users.manage`) to find who to assign, the feature flags, the system routes.
-* **Nobody gives themselves a role, nor decides their own access request** (403 `assignment_not_allowed` / `own_request`), except the SystemAdministrator's
-  self-assignment of any stored role (contract section 1). At most five access requests are pending per user (409 `too_many_pending_requests`).
+* **A SystemAdministrator acting in a stored role has that role's permissions and scope, and nothing else (DIAAT-403).** The system permissions
+  (`jurisdiction_super_admin.assign` among them) are the SystemAdministrator context's alone, and are not read as "global administrator". The user list and
+  deactivation take their scope from the role acted in (`jurisdiction_scope`): only an active JurisdictionSuperAdministrator is global (review finding S4).
+  Acting as SystemAdministrator: assigning the two administrator roles, listing users to find who to assign, the feature flags, the system routes.
+* **Nobody gives themselves a role, nor decides their own access request** (403 `assignment_not_allowed` / `own_request`), except the self-assignment of any
+  stored role by someone acting as SystemAdministrator (contract section 1). At most five access requests are pending per user (409 `too_many_pending_requests`).
 * **`GET /api/healthcheck/azure-storage` is `system.settings`** (a SystemAdministrator). It was open, called storage on every request and answered with the
   container name and the exception text. Nothing in the repository or the chart calls it; `GET /api/health/dependencies` has the storage state for probes.
 * **`POST /api/security/alert-test` is `security.alert_test`** (unchanged in effect: SystemAdministrator, and 404 unless the test is enabled).

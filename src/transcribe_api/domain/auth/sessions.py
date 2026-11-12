@@ -10,8 +10,9 @@ Choosing the context (DIAAT-390): there is no default. Exactly one distinct
 context stays null until the user chooses (``PUT /api/me/context``); with none the user has
 "no access yet". A re-mint carries the session's context over (``X-Requested-Context``),
 but only if the user still holds it: otherwise it is null and they choose again.
-SystemAdministrator is never an assignment or a context: it is the ``sysadmin`` flag, copied
-from the Entra token at sign-in, and gives system-level permissions whatever the context.
+SystemAdministrator is never an assignment: it is the ``sysadmin`` flag, copied from the Entra
+token at sign-in. Its holder is offered it as one more context (no jurisdiction, after their
+assignments), and has the system-level permissions only while acting in it (DIAAT-403).
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ from transcribe_api.domain.auth.app_token import Context
 from transcribe_api.domain.auth.permissions import (
     ROLE_JURISDICTION_ADMIN,
     ROLE_JURISDICTION_SUPER_ADMIN,
+    ROLE_SYSTEM_ADMIN,
     permissions_for,
 )
 from transcribe_api.domain.auth.user_creation import insert_user_or_load_existing
@@ -79,8 +81,8 @@ class AccessRequestOut(BaseModel):
 
 class MeResponse(BaseModel):
     user: UserOut
-    # ready: acting in a context (or a SystemAdministrator with no assignments: system pages
-    # only); choose: has assignments but has not chosen; no_access: nothing to act as.
+    # ready: acting in a context; choose: has contexts but has not chosen; no_access: nothing
+    # to act as.
     status: Literal["ready", "choose", "no_access"]
     assignments: list[AssignmentOut]
     active: AssignmentOut | None
@@ -120,6 +122,20 @@ def sign_in(session: Session, *, azure_user_id: str, email: str, name: str) -> U
 
 
 # --- the context -----------------------------------------------------------------------
+
+SYSTEM_ADMIN_CONTEXT = Context(jurisdiction=None, role=ROLE_SYSTEM_ADMIN)
+
+
+def contexts_of(assignments: list[Assignment], sysadmin: bool) -> list[Context]:
+    """The contexts the user may act in: their assignments' pairs, then SystemAdministrator for
+    a holder of the Entra role."""
+    contexts = distinct_contexts(assignments)
+    return [*contexts, SYSTEM_ADMIN_CONTEXT] if sysadmin else contexts
+
+
+def _given_contexts(assignments: list[Assignment], sysadmin: bool) -> list[Context]:
+    given = stored_contexts(assignments)
+    return [*given, SYSTEM_ADMIN_CONTEXT] if sysadmin else given
 
 
 def select_context(
@@ -209,22 +225,24 @@ def build_me(
     ctx: Context | None,
     assignments: list[Assignment] | None = None,
 ) -> MeResponse:
-    """The ``MeResponse``: the user's assignments (read now), the context given (the token's),
-    and the permissions of that context's role plus the system ones for a SystemAdministrator."""
+    """The ``MeResponse``: the contexts the user may act in (their assignments, read now, and
+    SystemAdministrator for a holder of the Entra role), the context given (the token's), and the
+    permissions of that context's role only."""
     if assignments is None:
         assignments = load_assignments(session, user.id)
     if ctx is not None:
         status = "ready"
-    elif assignments:
+    elif assignments or sysadmin:
         status = "choose"
-    elif sysadmin:
-        status = "ready"  # system pages only
     else:
         status = "no_access"
+    listed = [_out(assignment) for assignment in assignments]
+    if sysadmin:
+        listed.append(AssignmentOut(jurisdiction=None, role=ROLE_SYSTEM_ADMIN))
     return MeResponse(
         user=UserOut(id=user.id, email=user.email, name=user.name or user.email),
         status=status,
-        assignments=[_out(assignment) for assignment in assignments],
+        assignments=listed,
         active=_active_out(ctx, assignments, session),
         permissions=permissions_for(ctx.role if ctx else None, sysadmin),
         pending_requests=pending_requests(session, user.id),
@@ -251,12 +269,12 @@ def mint_session(
     jurisdiction), to the presenting token's: the new token never outlives it (``app_token.mint``).
     Only a sign-in, which verified an Entra token, starts a new session."""
     assignments = load_assignments(session, user.id)
-    contexts = distinct_contexts(assignments)
+    contexts = contexts_of(assignments, sysadmin)
     ctx = (
         chosen
         if chosen is not None
         else select_context(
-            contexts, requested=requested, requested_given=requested_given, given=stored_contexts(assignments)
+            contexts, requested=requested, requested_given=requested_given, given=_given_contexts(assignments, sysadmin)
         )
     )
     token, expires_at = app_token.mint(

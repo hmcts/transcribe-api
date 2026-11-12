@@ -136,18 +136,28 @@ def every_user_is_an_iac_judge(request: pytest.FixtureRequest, monkeypatch: pyte
     def context_of(user):
         # An AuthenticatedUser says what its token says. A plain User a test injects stands for
         # someone in the IAC, as the role its fake ``app_roles`` name: a Judge unless they are a
-        # LegalTextManager, a JurisdictionAdministrator or a JurisdictionSuperAdministrator
-        # (what the tests of the admin routes mean).
+        # LegalTextManager, a JurisdictionAdministrator, a JurisdictionSuperAdministrator or (acting
+        # as one, with no jurisdiction) a SystemAdministrator (what the tests of the admin routes mean).
         if hasattr(user, "db_user"):
             return user.ctx
         roles = getattr(user, "__dict__", {}).get("app_roles", [])
-        role = next((r for r in ("JurisdictionSuperAdministrator", "JurisdictionAdministrator", "LegalTextManager") if r in roles), "Judge")
-        return Context(None if role == "JurisdictionSuperAdministrator" else "IAC", role)
+        role = next(
+            (
+                r
+                for r in ("JurisdictionSuperAdministrator", "JurisdictionAdministrator", "LegalTextManager", "SystemAdministrator")
+                if r in roles
+            ),
+            "Judge",
+        )
+        return Context(None if role in ("JurisdictionSuperAdministrator", "SystemAdministrator") else "IAC", role)
+
+    real_sysadmin_of = auth_context.sysadmin_of
 
     def sysadmin_of(user):
         if hasattr(user, "db_user"):
-            return user.sysadmin
-        return "SystemAdministrator" in getattr(user, "__dict__", {}).get("app_roles", [])
+            return real_sysadmin_of(user)
+        ctx = context_of(user)
+        return "SystemAdministrator" in getattr(user, "__dict__", {}).get("app_roles", []) and ctx.role == "SystemAdministrator"
 
     monkeypatch.setattr(auth_context, "context_of", context_of)
     monkeypatch.setattr(auth_context, "sysadmin_of", sysadmin_of)
