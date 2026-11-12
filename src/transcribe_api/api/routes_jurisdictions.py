@@ -8,11 +8,12 @@ change it are gone.
 ``GET /api/jurisdictions/current`` is the active jurisdiction's own setup: what the web app
 loads once a context is chosen (its template, its features and its wording).
 
-``/api/jurisdictions/wording`` is for a jurisdiction's own admins (DIAAT-356): the
-wording of the jurisdiction they are working in, and only that one. It needs
-``jurisdiction.wording.edit``, which a JurisdictionAdministrator holds in the jurisdiction it acts
-in (the jurisdiction is the token's context, so it is in scope by construction); the global
-JurisdictionSuperAdministrator has no active jurisdiction to edit here (403 ``no_jurisdiction``).
+``/api/jurisdictions/wording`` is the screen wording of the jurisdiction the caller works in
+(DIAAT-356). It needs ``jurisdiction.wording.edit``, which since DIAAT-406 only the global
+JurisdictionSuperAdministrator holds, and it has no active jurisdiction to edit here (403
+``no_jurisdiction``): it edits screen wording from the Jurisdictions screen
+(``/api/admin/jurisdictions/{code}/wording``). Who, if anyone, edits it from within a jurisdiction is
+still to be decided.
 """
 
 from __future__ import annotations

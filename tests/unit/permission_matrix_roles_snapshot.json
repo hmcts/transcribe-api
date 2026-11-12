@@ -1,0 +1,312 @@
+{
+  "DELETE /api/admin/assignments/{assignment_id}": [
+    "JurisdictionAdministrator",
+    "JurisdictionSuperAdministrator",
+    "SystemAdministrator"
+  ],
+  "DELETE /api/admin/document-content/hearing-types/{item_id}": [
+    "LegalTextManager"
+  ],
+  "DELETE /api/admin/document-content/legal-frameworks/{item_id}": [
+    "LegalTextManager"
+  ],
+  "DELETE /api/admin/jurisdictions/{code}/templates/{template_id}": [
+    "JurisdictionAdministrator"
+  ],
+  "DELETE /api/live-draft": [
+    "Judge"
+  ],
+  "DELETE /api/transcriptions/{transcription_id}": [
+    "Judge"
+  ],
+  "DELETE /api/transcriptions/{transcription_id}/tags/{tag_name}": [
+    "Judge"
+  ],
+  "DELETE /api/v1/jobs/{job_id}": [
+    "Judge"
+  ],
+  "GET /api/admin/access-requests": [
+    "JurisdictionAdministrator"
+  ],
+  "GET /api/admin/document-content": [
+    "LegalTextManager"
+  ],
+  "GET /api/admin/feature-flags": [
+    "SystemAdministrator"
+  ],
+  "GET /api/admin/jurisdictions": [
+    "JurisdictionSuperAdministrator"
+  ],
+  "GET /api/admin/jurisdictions/wording-keys": [
+    "JurisdictionSuperAdministrator"
+  ],
+  "GET /api/admin/jurisdictions/{code}/templates": [
+    "JurisdictionAdministrator"
+  ],
+  "GET /api/admin/jurisdictions/{code}/templates/{template_id}/form": [
+    "JurisdictionAdministrator"
+  ],
+  "GET /api/admin/jurisdictions/{code}/wording": [
+    "JurisdictionSuperAdministrator"
+  ],
+  "GET /api/admin/me": [
+    "LegalTextManager",
+    "JurisdictionAdministrator",
+    "JurisdictionSuperAdministrator",
+    "SystemAdministrator"
+  ],
+  "GET /api/admin/role-history": [
+    "JurisdictionAdministrator"
+  ],
+  "GET /api/admin/roles": [
+    "JurisdictionAdministrator",
+    "JurisdictionSuperAdministrator",
+    "SystemAdministrator"
+  ],
+  "GET /api/admin/users": [
+    "JurisdictionAdministrator",
+    "JurisdictionSuperAdministrator",
+    "SystemAdministrator"
+  ],
+  "GET /api/document-content": [
+    "Judge",
+    "LegalTextManager"
+  ],
+  "GET /api/download": [
+    "Judge"
+  ],
+  "GET /api/get-speech-token": [
+    "Judge"
+  ],
+  "GET /api/healthcheck/azure-storage": [
+    "SystemAdministrator"
+  ],
+  "GET /api/jurisdictions/current": [
+    "Judge",
+    "LegalTextManager",
+    "JurisdictionAdministrator",
+    "JurisdictionSuperAdministrator"
+  ],
+  "GET /api/jurisdictions/templates": [
+    "Judge"
+  ],
+  "GET /api/jurisdictions/wording": [
+    "JurisdictionSuperAdministrator"
+  ],
+  "GET /api/live-draft": [
+    "Judge"
+  ],
+  "GET /api/templates": [
+    "Judge",
+    "LegalTextManager"
+  ],
+  "GET /api/transcriptions-metadata": [
+    "Judge"
+  ],
+  "GET /api/transcriptions/{transcription_id}": [
+    "Judge"
+  ],
+  "GET /api/transcriptions/{transcription_id}/document-download": [
+    "Judge"
+  ],
+  "GET /api/transcriptions/{transcription_id}/jobs": [
+    "Judge"
+  ],
+  "GET /api/transcriptions/{transcription_id}/jobs/{job_id}/audio": [
+    "Judge"
+  ],
+  "GET /api/transcriptions/{transcription_id}/minute-versions": [
+    "Judge"
+  ],
+  "GET /api/transcriptions/{transcription_id}/minute-versions/{minute_version_id}": [
+    "Judge"
+  ],
+  "GET /api/transcriptions/{transcription_id}/sectioned-transcript": [
+    "Judge"
+  ],
+  "GET /api/transcriptions/{transcription_id}/tags": [
+    "Judge"
+  ],
+  "GET /api/user": [
+    "Judge",
+    "LegalTextManager",
+    "JurisdictionAdministrator",
+    "JurisdictionSuperAdministrator"
+  ],
+  "GET /api/user/onboarding-status": [
+    "Judge",
+    "LegalTextManager",
+    "JurisdictionAdministrator",
+    "JurisdictionSuperAdministrator"
+  ],
+  "GET /api/user/profile": [
+    "Judge",
+    "LegalTextManager",
+    "JurisdictionAdministrator",
+    "JurisdictionSuperAdministrator"
+  ],
+  "GET /api/users/me": [
+    "Judge",
+    "LegalTextManager",
+    "JurisdictionAdministrator",
+    "JurisdictionSuperAdministrator"
+  ],
+  "GET /api/v1/jobs": [
+    "Judge"
+  ],
+  "GET /api/v1/jobs/{job_id}": [
+    "Judge"
+  ],
+  "GET /api/v1/jobs/{job_id}/audio": [
+    "Judge"
+  ],
+  "GET /api/v1/jobs/{job_id}/history": [
+    "Judge"
+  ],
+  "PATCH /api/v1/jobs/{job_id}/segments/{segment}": [
+    "Judge"
+  ],
+  "PATCH /api/v1/jobs/{job_id}/segments/{segment}/speaker": [
+    "Judge"
+  ],
+  "PATCH /api/v1/jobs/{job_id}/segments/{segment}/words": [
+    "Judge"
+  ],
+  "POST /api/admin/access-requests/{request_id}/approve": [
+    "JurisdictionAdministrator"
+  ],
+  "POST /api/admin/access-requests/{request_id}/reject": [
+    "JurisdictionAdministrator"
+  ],
+  "POST /api/admin/assignments": [
+    "JurisdictionAdministrator",
+    "JurisdictionSuperAdministrator",
+    "SystemAdministrator"
+  ],
+  "POST /api/admin/document-content/hearing-types": [
+    "LegalTextManager"
+  ],
+  "POST /api/admin/document-content/legal-frameworks": [
+    "LegalTextManager"
+  ],
+  "POST /api/admin/jurisdictions/{code}/templates": [
+    "JurisdictionAdministrator"
+  ],
+  "POST /api/admin/jurisdictions/{code}/templates/{template_id}/preview": [
+    "JurisdictionAdministrator"
+  ],
+  "POST /api/admin/users/{user_id}/deactivate": [
+    "JurisdictionAdministrator"
+  ],
+  "POST /api/admin/users/{user_id}/reactivate": [
+    "JurisdictionAdministrator"
+  ],
+  "POST /api/generate-or-edit-minutes": [
+    "Judge"
+  ],
+  "POST /api/generate-realtime-summary": [
+    "Judge"
+  ],
+  "POST /api/get-upload-url": [
+    "Judge"
+  ],
+  "POST /api/langfuse/score": [
+    "Judge"
+  ],
+  "POST /api/langfuse/trace": [
+    "Judge"
+  ],
+  "POST /api/live-transcription/submission": [
+    "Judge"
+  ],
+  "POST /api/security/alert-test": [
+    "SystemAdministrator"
+  ],
+  "POST /api/telemetry": [
+    "Judge",
+    "LegalTextManager",
+    "JurisdictionAdministrator",
+    "JurisdictionSuperAdministrator"
+  ],
+  "POST /api/transcriptions": [
+    "Judge"
+  ],
+  "POST /api/transcriptions/{transcription_id}/jobs": [
+    "Judge"
+  ],
+  "POST /api/transcriptions/{transcription_id}/minute-versions": [
+    "Judge"
+  ],
+  "POST /api/transcriptions/{transcription_id}/tags": [
+    "Judge"
+  ],
+  "POST /api/user": [
+    "Judge",
+    "LegalTextManager",
+    "JurisdictionAdministrator",
+    "JurisdictionSuperAdministrator"
+  ],
+  "POST /api/user/complete-onboarding": [
+    "Judge",
+    "LegalTextManager",
+    "JurisdictionAdministrator",
+    "JurisdictionSuperAdministrator"
+  ],
+  "POST /api/user/reset-onboarding": [
+    "Judge",
+    "LegalTextManager",
+    "JurisdictionAdministrator",
+    "JurisdictionSuperAdministrator"
+  ],
+  "POST /api/v1/jobs": [
+    "Judge"
+  ],
+  "POST /api/v1/jobs/{job_id}/baseline": [
+    "Judge"
+  ],
+  "POST /api/v1/jobs/{job_id}/segments/{segment}/accept": [
+    "Judge"
+  ],
+  "POST /api/v1/jobs/{job_id}/segments/{segment}/history/{history_index}/rollback": [
+    "Judge"
+  ],
+  "POST /api/v1/jobs/{job_id}/segments/{segment}/merge-next": [
+    "Judge"
+  ],
+  "POST /api/v1/jobs/{job_id}/segments/{segment}/rollback": [
+    "Judge"
+  ],
+  "POST /api/v1/uploads": [
+    "Judge"
+  ],
+  "PUT /api/admin/document-content/anonymity-statuses/{item_id}": [
+    "LegalTextManager"
+  ],
+  "PUT /api/admin/document-content/hearing-types/{item_id}": [
+    "LegalTextManager"
+  ],
+  "PUT /api/admin/document-content/legal-frameworks/{item_id}": [
+    "LegalTextManager"
+  ],
+  "PUT /api/admin/feature-flags/{name}": [
+    "SystemAdministrator"
+  ],
+  "PUT /api/admin/jurisdictions/{code}": [
+    "JurisdictionSuperAdministrator"
+  ],
+  "PUT /api/admin/jurisdictions/{code}/templates/{template_id}": [
+    "JurisdictionAdministrator"
+  ],
+  "PUT /api/admin/jurisdictions/{code}/wording": [
+    "JurisdictionSuperAdministrator"
+  ],
+  "PUT /api/jurisdictions/wording": [
+    "JurisdictionSuperAdministrator"
+  ],
+  "PUT /api/live-draft": [
+    "Judge"
+  ],
+  "PUT /api/upload-audio": [
+    "Judge"
+  ]
+}

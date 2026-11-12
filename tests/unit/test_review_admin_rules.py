@@ -7,13 +7,16 @@ Real API, real tokens (tests/unit/admin_fixtures.py). Beside ``test_admin_assign
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 from sqlmodel import Session, select
 
 from tests.unit import auth_fixtures as af
 from tests.unit.admin_fixtures import ADMIN, JUDGE, LTM, SUPER, make_world
+from transcribe_api.domain import user_admin
 from transcribe_api.domain.assignments import add_assignment
+from transcribe_api.domain.auth.app_token import Context
 from transcribe_api.domain.models_dictation import Jurisdiction
 
 pytestmark = pytest.mark.real_jurisdictions
@@ -101,7 +104,9 @@ def test_a_pending_claim_when_another_user_has_the_address_is_made_first_match_a
         later = world.person("Later", email=email)
 
     assert world.assignments_of(later) == {("IAC", JUDGE)}  # first match: behaviour unchanged
-    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and "same email" in r.getMessage()]
+    warnings = [
+        r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and "same email" in r.getMessage()
+    ]
     assert len(warnings) == 1
     assert email not in warnings[0] and "@" not in warnings[0]
 
@@ -129,7 +134,9 @@ def sysadmin_as_jadmin(world, cast):
 def test_a_system_administrator_acting_as_a_jurisdiction_administrator_cannot_deactivate_a_super_administrator(
     world, cast, sysadmin_as_jadmin
 ):
-    response = sysadmin_as_jadmin.post(f"/api/admin/users/{cast.jsuper.user_id}/deactivate", role=ADMIN, jurisdiction="IAC")
+    response = sysadmin_as_jadmin.post(
+        f"/api/admin/users/{cast.jsuper.user_id}/deactivate", role=ADMIN, jurisdiction="IAC"
+    )
 
     assert response.status_code in (403, 404), response.text
     assert world.user(cast.jsuper).is_active is True
@@ -138,12 +145,19 @@ def test_a_system_administrator_acting_as_a_jurisdiction_administrator_cannot_de
 def test_a_system_administrator_acting_as_a_jurisdiction_administrator_cannot_deactivate_users_of_other_jurisdictions(
     world, cast, sysadmin_as_jadmin
 ):
-    response = sysadmin_as_jadmin.post(f"/api/admin/users/{cast.judge_et.user_id}/deactivate", role=ADMIN, jurisdiction="IAC")
+    response = sysadmin_as_jadmin.post(
+        f"/api/admin/users/{cast.judge_et.user_id}/deactivate", role=ADMIN, jurisdiction="IAC"
+    )
 
     assert response.status_code == 404
     assert world.user(cast.judge_et).is_active is True
     # Inside the jurisdiction the role acts in it can, as any JurisdictionAdministrator.
-    assert sysadmin_as_jadmin.post(f"/api/admin/users/{cast.judge_iac.user_id}/deactivate", role=ADMIN, jurisdiction="IAC").status_code == 204
+    assert (
+        sysadmin_as_jadmin.post(
+            f"/api/admin/users/{cast.judge_iac.user_id}/deactivate", role=ADMIN, jurisdiction="IAC"
+        ).status_code
+        == 204
+    )
 
 
 def test_a_system_administrator_acting_as_a_jurisdiction_administrator_lists_only_its_jurisdictions_users(
@@ -159,13 +173,17 @@ def test_a_system_administrator_acting_as_a_jurisdiction_administrator_lists_onl
 
 
 def test_a_system_administrator_acting_as_a_super_administrator_still_cannot_deactivate_another_one(world, cast):
-    assert cast.sysadmin.post(
-        "/api/admin/assignments", json=assign_body(user_id=str(cast.sysadmin.user_id), jurisdiction=None, role=SUPER)
-    ).status_code == 201
+    assert (
+        cast.sysadmin.post(
+            "/api/admin/assignments",
+            json=assign_body(user_id=str(cast.sysadmin.user_id), jurisdiction=None, role=SUPER),
+        ).status_code
+        == 201
+    )
 
     response = cast.sysadmin.post(f"/api/admin/users/{cast.jsuper.user_id}/deactivate", role=SUPER)
 
-    assert response.status_code == 403 and code(response) == "assignment_not_allowed"
+    assert response.status_code == 403 and code(response) == "permission_denied"
     assert world.user(cast.jsuper).is_active is True
 
 
@@ -187,21 +205,36 @@ def test_an_administrator_cannot_decide_their_own_request(world, cast, decision)
     assert asked.status_code == 201
     request_id = asked.json()["id"]
 
-    own = cast.jadmin_iac.post(f"/api/admin/access-requests/{request_id}/{decision}", role=ADMIN, jurisdiction="IAC", json={})
+    own = cast.jadmin_iac.post(
+        f"/api/admin/access-requests/{request_id}/{decision}", role=ADMIN, jurisdiction="IAC", json={}
+    )
 
     assert own.status_code == 403 and code(own) == "own_request"
     assert world.assignments_of(cast.jadmin_iac) == {("IAC", ADMIN)}
     assert cast.jadmin_iac.get("/api/access-requests/mine").json()[0]["status"] == "pending"
-    # Someone else decides it.
-    assert cast.jsuper.post(f"/api/admin/access-requests/{request_id}/approve", role=SUPER, json={}).status_code == 200
+    # Another administrator of the jurisdiction decides it.
+    other_admin = world.person("Admin IAC Two", ("IAC", ADMIN))
+    assert (
+        other_admin.post(
+            f"/api/admin/access-requests/{request_id}/approve", role=ADMIN, jurisdiction="IAC", json={}
+        ).status_code
+        == 200
+    )
     assert world.assignments_of(cast.jadmin_iac) == {("IAC", ADMIN), ("IAC", LTM)}
 
 
-def test_a_super_administrator_cannot_approve_their_own_request_either(world, cast):
+def test_a_super_administrator_may_ask_but_decides_no_request_not_even_its_own(world, cast):
     request_id = cast.jsuper.post("/api/access-requests", json={"jurisdiction": "ET", "roles": [JUDGE]}).json()["id"]
     own = cast.jsuper.post(f"/api/admin/access-requests/{request_id}/approve", role=SUPER, json={})
-    assert own.status_code == 403 and code(own) == "own_request"
+    assert own.status_code == 403 and code(own) == "permission_denied"
     assert world.assignments_of(cast.jsuper) == {(None, SUPER)}
+    assert (
+        cast.jadmin_et.post(
+            f"/api/admin/access-requests/{request_id}/approve", role=ADMIN, jurisdiction="ET", json={}
+        ).status_code
+        == 200
+    )
+    assert world.assignments_of(cast.jsuper) == {(None, SUPER), ("ET", JUDGE)}
 
 
 def test_a_system_administrator_still_gives_themselves_the_global_role_and_takes_it_away(world, cast):
@@ -230,17 +263,28 @@ def test_a_user_has_at_most_five_requests_pending_and_a_withdrawal_makes_room(wo
     assert sixth.status_code == 409 and code(sixth) == "too_many_pending_requests"
     assert len(cast.nobody.get("/api/access-requests/mine").json()) == 5
     # An identical one is still the duplicate, not the cap.
-    assert code(cast.nobody.post("/api/access-requests", json={"jurisdiction": "IAC", "roles": [JUDGE]})) == "duplicate_request"
+    assert (
+        code(cast.nobody.post("/api/access-requests", json={"jurisdiction": "IAC", "roles": [JUDGE]}))
+        == "duplicate_request"
+    )
     assert cast.nobody.post(f"/api/access-requests/{ids[0]}/withdraw").status_code == 200
-    assert cast.nobody.post("/api/access-requests", json={"jurisdiction": "ET", "roles": [JUDGE, LTM]}).status_code == 201
+    assert (
+        cast.nobody.post("/api/access-requests", json={"jurisdiction": "ET", "roles": [JUDGE, LTM]}).status_code == 201
+    )
 
 
 def test_the_cap_counts_pending_requests_only_and_only_the_requesters_own(world, cast):
+    approvers = {"IAC": cast.jadmin_iac, "ET": cast.jadmin_et}
     for where, roles in [("IAC", [JUDGE]), ("IAC", [LTM]), ("IAC", [JUDGE, LTM]), ("ET", [JUDGE]), ("ET", [LTM])]:
         request_id = cast.nobody.post("/api/access-requests", json={"jurisdiction": where, "roles": roles}).json()["id"]
         # decided ones do not count
-        assert cast.jsuper.post(f"/api/admin/access-requests/{request_id}/reject", role=SUPER, json={}).status_code == 200
-    assert cast.nobody.post("/api/access-requests", json={"jurisdiction": "ET", "roles": [JUDGE, LTM]}).status_code == 201
+        rejected = approvers[where].post(
+            f"/api/admin/access-requests/{request_id}/reject", role=ADMIN, jurisdiction=where, json={}
+        )
+        assert rejected.status_code == 200
+    assert (
+        cast.nobody.post("/api/access-requests", json={"jurisdiction": "ET", "roles": [JUDGE, LTM]}).status_code == 201
+    )
     other = world.person("Other Nobody")
     assert other.post("/api/access-requests", json={"jurisdiction": "ET", "roles": [JUDGE, LTM]}).status_code == 201
 
@@ -298,6 +342,7 @@ def _disable(world, code_: str) -> None:
 
 @pytest.mark.parametrize("by", ["user", "email"])
 def test_an_assignment_into_a_disabled_jurisdiction_is_409(world, cast, by):
+    token = cast.jadmin_et.headers(ADMIN, "ET")  # minted while ET was enabled
     _disable(world, "ET")
     body = (
         assign_body(user_id=str(cast.nobody.user_id), jurisdiction="ET")
@@ -305,7 +350,7 @@ def test_an_assignment_into_a_disabled_jurisdiction_is_409(world, cast, by):
         else assign_body(email="new@justice.gov.uk", jurisdiction="ET")
     )
 
-    refused = cast.jsuper.post("/api/admin/assignments", role=SUPER, json=body)
+    refused = world.client.post("/api/admin/assignments", headers=token, json=body)
 
     assert refused.status_code == 409 and code(refused) == "jurisdiction_disabled"
     assert world.assignments_of(cast.nobody) == set() and world.pending_for("new@justice.gov.uk") == set()
@@ -324,14 +369,15 @@ def test_a_super_administrator_cannot_assign_an_administrator_into_a_disabled_ju
 def test_a_request_for_a_jurisdiction_disabled_since_cannot_be_approved_but_can_be_rejected(world, cast):
     first = cast.nobody.post("/api/access-requests", json={"jurisdiction": "ET", "roles": [JUDGE]}).json()["id"]
     second = cast.nobody.post("/api/access-requests", json={"jurisdiction": "ET", "roles": [LTM]}).json()["id"]
+    token = cast.jadmin_et.headers(ADMIN, "ET")  # minted while ET was enabled
     _disable(world, "ET")
 
-    refused = cast.jsuper.post(f"/api/admin/access-requests/{first}/approve", role=SUPER, json={})
+    refused = world.client.post(f"/api/admin/access-requests/{first}/approve", headers=token, json={})
 
     assert refused.status_code == 409 and code(refused) == "jurisdiction_disabled"
     assert world.assignments_of(cast.nobody) == set()
     assert cast.nobody.get("/api/access-requests/mine").json()[-1]["status"] == "pending"
-    assert cast.jsuper.post(f"/api/admin/access-requests/{second}/reject", role=SUPER, json={}).status_code == 200
+    assert world.client.post(f"/api/admin/access-requests/{second}/reject", headers=token, json={}).status_code == 200
 
 
 # --- integration: X-Requested-Context matches the role without regard to case -----------------------------------------
@@ -371,24 +417,45 @@ def test_the_role_history_does_not_name_the_system_administrator_who_made_a_chan
         "/api/admin/assignments", json=assign_body(user_id=str(cast.nobody.user_id), jurisdiction=None, role=SUPER)
     )
     assert made.status_code == 201  # acting as SystemAdministrator, assigns the global role
-    cast.jsuper.post(
-        "/api/admin/assignments", role=SUPER, json=assign_body(user_id=str(cast.judge_iac.user_id), role=LTM)
+    assert (
+        cast.jsuper.post(
+            "/api/admin/assignments", role=SUPER, json=assign_body(user_id=str(cast.judge_iac.user_id), role=ADMIN)
+        ).status_code
+        == 201
+    )
+    assert (
+        cast.jadmin_iac.post(
+            "/api/admin/assignments",
+            role=ADMIN,
+            jurisdiction="IAC",
+            json=assign_body(user_id=str(cast.judge_et.user_id), role=LTM),
+        ).status_code
+        == 201
     )
 
-    history = cast.jsuper.get("/api/admin/role-history", role=SUPER).json()["items"]
-    system = next(item for item in history if item["role"] == SUPER and item["jurisdiction"] is None)
-    assert system["actor"] == {"id": None, "email": "system administrator"}
-    assert system["actor_context"] is None
+    # No reader of the history through the API sees global changes (role_audit.read is a
+    # JurisdictionAdministrator's, in its jurisdiction), so the global row is read through the domain.
+    with Session(world.engine) as session:
+        global_reader = SimpleNamespace(id=cast.jsuper.user_id, ctx=Context(None, SUPER), sysadmin=False)
+        everything = user_admin.role_history(session, global_reader, jurisdiction=None, page=1, page_size=50).items
+    system = next(item for item in everything if item.role == SUPER and item.jurisdiction is None)
+    assert (system.actor_id, system.actor_email) == (None, "system administrator")
+    assert system.actor_role is None and system.actor_jurisdiction is None
+    assert cast.sysadmin.email not in str(everything) and str(cast.sysadmin.user_id) not in str(everything)
+
+    history = cast.jadmin_iac.get("/api/admin/role-history", role=ADMIN, jurisdiction="IAC").json()["items"]
     assert cast.sysadmin.email not in str(history) and str(cast.sysadmin.user_id) not in str(history)
-    for reader, role, jurisdiction in ((cast.jadmin_iac, ADMIN, "IAC"), (cast.jsuper, SUPER, None)):
-        history = reader.get("/api/admin/role-history", role=role, jurisdiction=jurisdiction).json()["items"]
-        ordinary = next(item for item in history if item["role"] == LTM)
-        # An administrator's own changes are still attributed.
-        assert ordinary["actor"]["email"] == cast.jsuper.email and ordinary["actor"]["id"] == str(cast.jsuper.user_id)
-        assert ordinary["actor_context"] == {"jurisdiction": None, "role": SUPER}
+    # An administrator's own changes are still attributed.
+    by_role = {item["role"]: item for item in history}
+    assert by_role[ADMIN]["actor"] == {"id": str(cast.jsuper.user_id), "email": cast.jsuper.email}
+    assert by_role[ADMIN]["actor_context"] == {"jurisdiction": None, "role": SUPER}
+    assert by_role[LTM]["actor"] == {"id": str(cast.jadmin_iac.user_id), "email": cast.jadmin_iac.email}
+    assert by_role[LTM]["actor_context"] == {"jurisdiction": "IAC", "role": ADMIN}
 
 
-def test_a_system_administrator_acting_in_a_role_has_only_that_roles_rights_and_is_named_as_its_holder(world, cast, sysadmin_as_jadmin):
+def test_a_system_administrator_acting_in_a_role_has_only_that_roles_rights_and_is_named_as_its_holder(
+    world, cast, sysadmin_as_jadmin
+):
     """DIAAT-403: acting as a JurisdictionAdministrator, assigning the JurisdictionAdministrator role (not a
     JurisdictionAdministrator's right) is refused; assigning a Judge is the role's own right, shown as the role's holder."""
     refused = sysadmin_as_jadmin.post(
@@ -398,14 +465,17 @@ def test_a_system_administrator_acting_in_a_role_has_only_that_roles_rights_and_
         json=assign_body(user_id=str(cast.nobody.user_id), role=ADMIN),
     )
     assert refused.status_code == 403 and refused.json()["detail"]["code"] == "assignment_not_allowed"
-    assert sysadmin_as_jadmin.post(
-        "/api/admin/assignments",
-        role=ADMIN,
-        jurisdiction="IAC",
-        json=assign_body(user_id=str(cast.nobody.user_id), role=JUDGE),
-    ).status_code == 201
+    assert (
+        sysadmin_as_jadmin.post(
+            "/api/admin/assignments",
+            role=ADMIN,
+            jurisdiction="IAC",
+            json=assign_body(user_id=str(cast.nobody.user_id), role=JUDGE),
+        ).status_code
+        == 201
+    )
 
-    history = cast.jsuper.get("/api/admin/role-history", role=SUPER).json()["items"]
+    history = cast.jadmin_iac.get("/api/admin/role-history", role=ADMIN, jurisdiction="IAC").json()["items"]
     by_role = {item["role"]: item for item in history if item["target"]["id"] == str(cast.nobody.user_id)}
     assert ADMIN not in by_role
     assert by_role[JUDGE]["actor"]["id"] == str(cast.sysadmin.user_id)  # the role's own right: its holder
@@ -415,8 +485,15 @@ def test_a_system_administrator_acting_in_a_role_has_only_that_roles_rights_and_
 
 
 def test_the_total_of_a_jurisdiction_administrators_list_counts_only_its_jurisdictions_rows(world, cast):
-    for email, where in (("pend-et-1@justice.gov.uk", "ET"), ("pend-et-2@justice.gov.uk", "ET"), ("pend-iac@justice.gov.uk", "IAC")):
-        done = cast.jsuper.post("/api/admin/assignments", role=SUPER, json=assign_body(email=email, jurisdiction=where))
+    for email, where in (
+        ("pend-et-1@justice.gov.uk", "ET"),
+        ("pend-et-2@justice.gov.uk", "ET"),
+        ("pend-iac@justice.gov.uk", "IAC"),
+    ):
+        admin = cast.jadmin_et if where == "ET" else cast.jadmin_iac
+        done = admin.post(
+            "/api/admin/assignments", role=ADMIN, jurisdiction=where, json=assign_body(email=email, jurisdiction=where)
+        )
         assert done.status_code == 201
 
     page = cast.jadmin_iac.get("/api/admin/users", role=ADMIN, jurisdiction="IAC", params={"search": "pend"}).json()

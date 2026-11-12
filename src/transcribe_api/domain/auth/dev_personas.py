@@ -29,6 +29,7 @@ EMAIL_DOMAIN = "localhost.test"
 PERSONA_JURISDICTIONS: dict[str, str] = {
     "ET": "Employment Tribunal",
     "IAC": "Immigration and Asylum Chamber",
+    "SSCS": "Social Security and Child Support",
 }
 
 
@@ -60,6 +61,14 @@ PERSONAS: dict[str, Persona] = {
         _persona("judge-et", "Judge (ET)", ("ET", ROLE_JUDGE)),
         _persona("judge-iac", "Judge (IAC)", ("IAC", ROLE_JUDGE)),
         _persona("multi", "Judge (ET) and Administrator (IAC)", ("ET", ROLE_JUDGE), ("IAC", ROLE_JURISDICTION_ADMIN)),
+        _persona(
+            "many",
+            "Judge (IAC), Judge and Legal text manager (ET), Administrator (SSCS)",
+            ("IAC", ROLE_JUDGE),
+            ("ET", ROLE_JUDGE),
+            ("ET", ROLE_LEGAL_TEXT_MANAGER),
+            ("SSCS", ROLE_JURISDICTION_ADMIN),
+        ),
         _persona("jadmin-iac", "Jurisdiction administrator (IAC)", ("IAC", ROLE_JURISDICTION_ADMIN)),
         _persona("jadmin-et", "Jurisdiction administrator (ET)", ("ET", ROLE_JURISDICTION_ADMIN)),
         _persona("legal-iac", "Legal text manager (IAC)", ("IAC", ROLE_LEGAL_TEXT_MANAGER)),

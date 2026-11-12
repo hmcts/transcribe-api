@@ -2,7 +2,9 @@
 DIAAT-394), under ``/api/admin``.
 
 * ``GET /admin/users``: the users who have signed in (and those added by email who have not),
-  paged and searchable, with their assignments. ``users.manage`` or ``jurisdiction_super_admin.assign``.
+  paged and searchable, with their assignments. ``users.manage`` (a JurisdictionAdministrator: its
+  jurisdiction's users), or ``jurisdiction_admin.assign`` / ``jurisdiction_super_admin.assign`` (to find
+  whom to appoint: everyone, with only the role the caller appoints).
 * ``POST /admin/assignments``, ``DELETE /admin/assignments/{id}``: give and take away a role,
   by the rules in domain/user_admin.py (403 ``assignment_not_allowed``, 403
   ``jurisdiction_not_in_scope``). ``users.manage``, ``jurisdiction_admin.assign`` or
@@ -100,7 +102,7 @@ def list_admin_users(
     role: str | None = Query(default=None, max_length=64),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=200),
-    admin_user: User = Depends(require_permission("users.manage", "jurisdiction_super_admin.assign")),
+    admin_user: User = Depends(require_permission("users.manage", "jurisdiction_admin.assign", "jurisdiction_super_admin.assign")),
 ) -> AdminUsersResponse:
     """Users with their assignments, ordered by email, then the people added by email who have
     not signed in (``pending``). A JurisdictionAdministrator lists the jurisdiction it acts in; a
@@ -235,8 +237,8 @@ def get_role_history(
     admin_user: User = Depends(require_permission("role_audit.read")),
 ) -> RoleHistoryResponse:
     """Who changed whose roles, newest first: assignments added and removed, users deactivated and
-    reactivated, jurisdictions left, access requests decided. A JurisdictionAdministrator reads its
-    jurisdiction's; a JurisdictionSuperAdministrator everyone's (``jurisdiction=`` narrows it)."""
+    reactivated, jurisdictions left, access requests decided: those of the JurisdictionAdministrator's
+    jurisdiction."""
     response.headers["Cache-Control"] = "no-store"
     with Session(db_connection.get_engine()) as session:
         result = user_admin.role_history(session, admin_user, jurisdiction=jurisdiction, page=page, page_size=page_size)

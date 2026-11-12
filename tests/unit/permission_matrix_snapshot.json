@@ -11,7 +11,7 @@
     "legal_text.manage"
   ],
   "DELETE /api/admin/jurisdictions/{code}/templates/{template_id}": [
-    "jurisdictions.manage"
+    "templates.manage"
   ],
   "DELETE /api/live-draft": [
     "dictation.use"
@@ -47,10 +47,10 @@
     "jurisdictions.manage"
   ],
   "GET /api/admin/jurisdictions/{code}/templates": [
-    "jurisdictions.manage"
+    "templates.manage"
   ],
   "GET /api/admin/jurisdictions/{code}/templates/{template_id}/form": [
-    "jurisdictions.manage"
+    "templates.manage"
   ],
   "GET /api/admin/jurisdictions/{code}/wording": [
     "jurisdiction.wording.edit"
@@ -67,6 +67,7 @@
     "users.manage"
   ],
   "GET /api/admin/users": [
+    "jurisdiction_admin.assign",
     "jurisdiction_super_admin.assign",
     "users.manage"
   ],
@@ -212,10 +213,10 @@
     "legal_text.manage"
   ],
   "POST /api/admin/jurisdictions/{code}/templates": [
-    "jurisdictions.manage"
+    "templates.manage"
   ],
   "POST /api/admin/jurisdictions/{code}/templates/{template_id}/preview": [
-    "jurisdictions.manage"
+    "templates.manage"
   ],
   "POST /api/admin/users/{user_id}/deactivate": [
     "users.manage"
@@ -308,7 +309,7 @@
     "jurisdictions.manage"
   ],
   "PUT /api/admin/jurisdictions/{code}/templates/{template_id}": [
-    "jurisdictions.manage"
+    "templates.manage"
   ],
   "PUT /api/admin/jurisdictions/{code}/wording": [
     "jurisdiction.wording.edit"

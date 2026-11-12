@@ -1,7 +1,7 @@
 """Email notifications for access requests through GOV.UK Notify (DIAAT-398), with a fake client.
 
-Who is emailed when a request is made (the active JurisdictionAdministrators of its jurisdiction and
-the JurisdictionSuperAdministrators, once each), who when it is decided (the requester; never for a
+Who is emailed when a request is made (the active JurisdictionAdministrators of its jurisdiction, once
+each, who alone decide it: never a JurisdictionSuperAdministrator), who when it is decided (the requester; never for a
 withdrawal), what the email carries, and that nothing about sending can fail or hold up the request
 or the decision.
 """
@@ -83,20 +83,32 @@ def recipients(fake: FakeNotify, template: str) -> list[str]:
 # --- a new request: the approvers ---------------------------------------------------------------------------
 
 
-def test_a_new_request_emails_the_jurisdictions_administrators_and_every_super_administrator_once_each(world, cast, notify):
+def test_a_new_request_emails_the_jurisdictions_administrators_once_each(world, cast, notify):
     response = ask(cast.requester, roles=(JUDGE, LTM))
 
     assert response.status_code == 201
-    assert recipients(notify, "template-new-request") == [
-        "abe@justice.gov.uk",
-        "ada@justice.gov.uk",
-        "sam@justice.gov.uk",
-        "sue@justice.gov.uk",
-    ]
-    assert len(notify.sent) == 4  # and nothing to the ET's administrator, the judge or the requester
+    assert recipients(notify, "template-new-request") == ["abe@justice.gov.uk", "ada@justice.gov.uk"]
+    assert len(notify.sent) == 2  # and nothing to the ET's administrator, the judge or the requester
 
 
-def test_the_email_carries_the_requesters_name_the_jurisdiction_the_roles_and_a_link_and_nothing_else(world, cast, notify):
+def test_a_new_request_does_not_email_the_super_administrators(world, cast, notify):
+    assert ask(cast.requester).status_code == 201
+    assert ask(cast.requester, where="ET").status_code == 201
+
+    sent_to = recipients(notify, "template-new-request")
+    assert "sue@justice.gov.uk" not in sent_to and "sam@justice.gov.uk" not in sent_to
+    assert sent_to == ["abe@justice.gov.uk", "ada@justice.gov.uk", "eli@justice.gov.uk"]
+
+
+def test_a_super_administrator_who_administers_another_jurisdiction_is_not_emailed(world, cast, notify):
+    world.give(cast.super_1, "ET", ADMIN)
+    ask(cast.requester)
+    assert recipients(notify, "template-new-request") == ["abe@justice.gov.uk", "ada@justice.gov.uk"]
+
+
+def test_the_email_carries_the_requesters_name_the_jurisdiction_the_roles_and_a_link_and_nothing_else(
+    world, cast, notify
+):
     request_id = ask(cast.requester, roles=(LTM, JUDGE)).json()["id"]
 
     (mail, *_rest) = [m for m in notify.sent if m["to"] == "ada@justice.gov.uk"]
@@ -112,11 +124,13 @@ def test_the_email_carries_the_requesters_name_the_jurisdiction_the_roles_and_a_
         assert secret not in link, secret
 
 
-def test_a_user_who_is_both_an_administrator_and_a_super_administrator_is_emailed_once(world, cast, notify):
+def test_a_user_who_is_both_an_administrator_and_a_super_administrator_is_emailed_once_as_the_administrator(
+    world, cast, notify
+):
     world.give(cast.admin_iac, None, SUPER)
     ask(cast.requester)
     assert recipients(notify, "template-new-request").count("ada@justice.gov.uk") == 1
-    assert len(notify.sent) == 4
+    assert len(notify.sent) == 2
 
 
 def test_two_user_rows_with_one_address_get_one_email(world, cast, notify):
@@ -127,14 +141,13 @@ def test_two_user_rows_with_one_address_get_one_email(world, cast, notify):
 
 
 def test_a_deactivated_administrator_is_not_emailed(world, cast, notify):
-    assert cast.super_1.post(f"/api/admin/users/{cast.admin_iac_2.user_id}/deactivate", role=SUPER).status_code == 204
-    with Session(world.engine) as session:  # a super administrator is switched off by nobody in the app
-        other = session.get(User, cast.super_2.user_id)
+    with Session(world.engine) as session:  # no role in the app may deactivate a JurisdictionAdministrator
+        other = session.get(User, cast.admin_iac_2.user_id)
         other.is_active = False
         session.add(other)
         session.commit()
     ask(cast.requester)
-    assert recipients(notify, "template-new-request") == ["ada@justice.gov.uk", "sue@justice.gov.uk"]
+    assert recipients(notify, "template-new-request") == ["ada@justice.gov.uk"]
 
 
 def test_the_requester_is_not_emailed_about_their_own_request_even_as_an_administrator(world, cast, notify):
@@ -145,7 +158,7 @@ def test_the_requester_is_not_emailed_about_their_own_request_even_as_an_adminis
 
 def test_a_request_for_the_et_goes_to_the_ets_administrators(world, cast, notify):
     ask(cast.requester, where="ET")
-    assert recipients(notify, "template-new-request") == ["eli@justice.gov.uk", "sam@justice.gov.uk", "sue@justice.gov.uk"]
+    assert recipients(notify, "template-new-request") == ["eli@justice.gov.uk"]
 
 
 def test_a_refused_request_emails_nobody(world, cast, notify):
@@ -163,7 +176,7 @@ def test_the_domain_function_sends_nothing_the_route_does_it_after_the_response(
         created = access_requests.create_request(session, user, jurisdiction_code="IAC", roles=[JUDGE])
     assert notify.sent == []
     access_request_emails.notify_approvers(created.id)
-    assert len(notify.sent) == 4
+    assert len(notify.sent) == 2
 
 
 # --- a decision: the requester ----------------------------------------------------------------------------------
@@ -212,7 +225,10 @@ def test_the_requester_function_itself_sends_nothing_for_a_request_that_is_pendi
     assert notify.sent == []
     # A decided one is told, so the guard is not simply silent.
     decided = ask(cast.requester, roles=(LTM,)).json()["id"]
-    assert cast.admin_iac.post(f"/api/admin/access-requests/{decided}/reject", role=ADMIN, jurisdiction="IAC").status_code == 200
+    assert (
+        cast.admin_iac.post(f"/api/admin/access-requests/{decided}/reject", role=ADMIN, jurisdiction="IAC").status_code
+        == 200
+    )
     notify.sent.clear()
     access_request_emails.notify_requester(UUID(decided))
     assert len(notify.sent) == 1
@@ -222,10 +238,25 @@ def test_a_refused_decision_sends_no_email(world, cast, notify):
     request_id = ask(cast.requester).json()["id"]
     notify.sent.clear()
     # Another jurisdiction's administrator, and a request already decided.
-    assert cast.admin_et.post(f"/api/admin/access-requests/{request_id}/approve", role=ADMIN, jurisdiction="ET").status_code == 403
-    assert cast.admin_iac.post(f"/api/admin/access-requests/{request_id}/approve", role=ADMIN, jurisdiction="IAC").status_code == 200
+    assert (
+        cast.admin_et.post(
+            f"/api/admin/access-requests/{request_id}/approve", role=ADMIN, jurisdiction="ET"
+        ).status_code
+        == 403
+    )
+    assert (
+        cast.admin_iac.post(
+            f"/api/admin/access-requests/{request_id}/approve", role=ADMIN, jurisdiction="IAC"
+        ).status_code
+        == 200
+    )
     notify.sent.clear()
-    assert cast.admin_iac.post(f"/api/admin/access-requests/{request_id}/reject", role=ADMIN, jurisdiction="IAC").status_code == 409
+    assert (
+        cast.admin_iac.post(
+            f"/api/admin/access-requests/{request_id}/reject", role=ADMIN, jurisdiction="IAC"
+        ).status_code
+        == 409
+    )
     assert notify.sent == []
 
 
@@ -240,7 +271,9 @@ def test_if_notify_is_down_the_request_and_the_decision_are_still_saved(world, c
     with caplog.at_level(logging.INFO):
         created = ask(cast.requester)
         assert created.status_code == 201
-        decided = cast.admin_iac.post(f"/api/admin/access-requests/{created.json()['id']}/approve", role=ADMIN, jurisdiction="IAC")
+        decided = cast.admin_iac.post(
+            f"/api/admin/access-requests/{created.json()['id']}/approve", role=ADMIN, jurisdiction="IAC"
+        )
         assert decided.status_code == 200
 
     assert world.assignments_of(cast.requester) == {("IAC", JUDGE)}
@@ -258,7 +291,7 @@ def test_one_recipient_failing_does_not_stop_the_others(world, cast, monkeypatch
 
     assert ask(cast.requester).status_code == 201
 
-    assert recipients(flaky, "template-new-request") == ["abe@justice.gov.uk", "sam@justice.gov.uk", "sue@justice.gov.uk"]
+    assert recipients(flaky, "template-new-request") == ["abe@justice.gov.uk"]
 
 
 def test_a_failure_to_even_build_the_client_is_survived(world, cast, monkeypatch):
@@ -292,7 +325,7 @@ def test_with_no_notify_key_nothing_is_sent_and_the_log_says_what_would_have_bee
         request_id = ask(cast.requester).json()["id"]
         cast.admin_iac.post(f"/api/admin/access-requests/{request_id}/reject", role=ADMIN, jurisdiction="IAC")
 
-    assert "would send email=access_request template=template-new-request to 4 recipient(s)" in caplog.text
+    assert "would send email=access_request template=template-new-request to 2 recipient(s)" in caplog.text
     assert "would send email=access_request_decided template=template-decided to 1 recipient(s)" in caplog.text
     # The number of recipients, never an address (and no request content).
     assert "@" not in caplog.text.replace("localhost.test", "")

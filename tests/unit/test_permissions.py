@@ -11,28 +11,24 @@ CONTRACT_PERMISSIONS = ["app.access", "context.switch", "access.request", "acces
 
 COMMON = ["app.access", "context.switch", "access.request"]
 
+# DIAAT-406: each role manages one thing.
 CONTRACT_ROLE_MAP = {
     "Judge": COMMON
     + ["dictation.use", "recording.upload", "recording.own", "documents.export", "recording.audit.read"]
     + ["document_content.read"],
-    "LegalTextManager": COMMON
-    + ["admin.access", "legal_text.manage", "templates.manage", "document_content.read", "document_content.write"],
+    "LegalTextManager": COMMON + ["admin.access", "legal_text.manage", "document_content.read", "document_content.write"],
     "JurisdictionAdministrator": COMMON
+    + ["admin.access", "users.manage", "access.approve", "role_audit.read", "templates.manage"],
+    "JurisdictionSuperAdministrator": COMMON
     + [
         "admin.access",
-        "users.manage",
-        "access.approve",
-        "role_audit.read",
-        "templates.manage",
+        "jurisdiction.create",
         "jurisdictions.manage",
         "jurisdiction.wording.edit",
         "jurisdiction.features",
+        "jurisdiction_admin.assign",
     ],
 }
-CONTRACT_ROLE_MAP["JurisdictionSuperAdministrator"] = CONTRACT_ROLE_MAP["JurisdictionAdministrator"] + [
-    "jurisdiction.create",
-    "jurisdiction_admin.assign",
-]
 CONTRACT_SYSADMIN = [
     "admin.access",
     "feature_flags.manage",
@@ -138,3 +134,34 @@ def test_a_role_needs_a_jurisdiction_unless_it_is_global():
 
 def test_only_judge_and_legal_text_manager_can_be_requested():
     assert p.REQUESTABLE_ROLES == ("Judge", "LegalTextManager")
+
+
+def test_each_area_is_managed_by_one_role():
+    holders = {
+        permission: {role for role in p.STORED_ROLES if permission in p.permissions_for(role)}
+        for permission in (
+            "users.manage",
+            "access.approve",
+            "templates.manage",
+            "legal_text.manage",
+            "jurisdictions.manage",
+            "jurisdiction_admin.assign",
+        )
+    }
+    assert holders == {
+        "users.manage": {"JurisdictionAdministrator"},
+        "access.approve": {"JurisdictionAdministrator"},
+        "templates.manage": {"JurisdictionAdministrator"},
+        "legal_text.manage": {"LegalTextManager"},
+        "jurisdictions.manage": {"JurisdictionSuperAdministrator"},
+        "jurisdiction_admin.assign": {"JurisdictionSuperAdministrator"},
+    }
+
+
+def test_each_role_assigns_only_the_role_it_manages():
+    assert p.assignable_roles("Judge") == []
+    assert p.assignable_roles("LegalTextManager") == []
+    assert p.assignable_roles("JurisdictionAdministrator") == ["Judge", "LegalTextManager"]
+    assert p.assignable_roles("JurisdictionSuperAdministrator") == ["JurisdictionAdministrator"]
+    assert p.assignable_roles("SystemAdministrator", sysadmin=True) == ["JurisdictionSuperAdministrator"]
+    assert p.assignable_roles("SystemAdministrator", sysadmin=False) == []

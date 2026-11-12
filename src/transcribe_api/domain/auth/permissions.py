@@ -13,9 +13,13 @@ it as a context of its own (no jurisdiction), and has the system-level permissio
 acting in it (DIAAT-403): acting as any other role, they have that role's permissions and no
 more, like anyone else. It is invisible to everyone else (never assignable, never listed).
 
-A JurisdictionAdministrator is also offered ``Judge`` and ``LegalTextManager`` as contexts in their own
-jurisdiction (``ROLES_INCLUDED_WITH_ADMIN``): derived when assignments are read
-(domain/assignments.py), not stored.
+Responsibilities (DIAAT-406): the SystemAdministrator appoints JurisdictionSuperAdministrators; the
+JurisdictionSuperAdministrator manages only jurisdictions (their settings and screen wording) and appoints
+their JurisdictionAdministrators; a JurisdictionAdministrator manages its jurisdiction's users (Judge and
+LegalTextManager), templates and access requests; a LegalTextManager its Document Content (hearing types,
+legal frameworks, anonymity); a Judge dictates and transcribes. Every role a user acts in is one they were
+given: none is derived from another. A user holds any combination of roles in any number of jurisdictions,
+each assignment naming one jurisdiction (or none, for the global role).
 
 ``Normal`` is gone (merged into Judge).
 
@@ -45,11 +49,6 @@ STORED_ROLES: tuple[str, ...] = (
 CONTEXT_ROLES: tuple[str, ...] = (*STORED_ROLES, ROLE_SYSTEM_ADMIN)
 # Stored roles that apply to every jurisdiction: held with no jurisdiction.
 GLOBAL_ROLES: tuple[str, ...] = (ROLE_JURISDICTION_SUPER_ADMIN,)
-# Roles a JurisdictionAdministrator holds in their jurisdiction without being given them (DIAAT-373):
-# derived at read time from the administrator assignment, never stored, so removing the administrator
-# role (or leaving the jurisdiction) removes them too. Not for the global JurisdictionSuperAdministrator
-# or the SystemAdministrator, who are not tied to one jurisdiction.
-ROLES_INCLUDED_WITH_ADMIN: tuple[str, ...] = (ROLE_JUDGE, ROLE_LEGAL_TEXT_MANAGER)
 # Roles a user may ask for (access requests): never an administrator role.
 REQUESTABLE_ROLES: tuple[str, ...] = (ROLE_JUDGE, ROLE_LEGAL_TEXT_MANAGER)
 
@@ -88,17 +87,6 @@ PERMISSIONS: tuple[str, ...] = (
 
 _COMMON = {"app.access", "context.switch", "access.request"}
 
-_JURISDICTION_ADMIN = _COMMON | {
-    "admin.access",
-    "users.manage",
-    "access.approve",
-    "role_audit.read",
-    "templates.manage",
-    "jurisdictions.manage",
-    "jurisdiction.wording.edit",
-    "jurisdiction.features",
-}
-
 ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     ROLE_JUDGE: frozenset(
         _COMMON
@@ -116,13 +104,31 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
         | {
             "admin.access",
             "legal_text.manage",
-            "templates.manage",
             "document_content.read",
             "document_content.write",
         }
     ),
-    ROLE_JURISDICTION_ADMIN: frozenset(_JURISDICTION_ADMIN),
-    ROLE_JURISDICTION_SUPER_ADMIN: frozenset(_JURISDICTION_ADMIN | {"jurisdiction.create", "jurisdiction_admin.assign"}),
+    ROLE_JURISDICTION_ADMIN: frozenset(
+        _COMMON
+        | {
+            "admin.access",
+            "users.manage",
+            "access.approve",
+            "role_audit.read",
+            "templates.manage",
+        }
+    ),
+    ROLE_JURISDICTION_SUPER_ADMIN: frozenset(
+        _COMMON
+        | {
+            "admin.access",
+            "jurisdiction.create",
+            "jurisdictions.manage",
+            "jurisdiction.wording.edit",
+            "jurisdiction.features",
+            "jurisdiction_admin.assign",
+        }
+    ),
 }
 
 # The SystemAdministrator context's: only while acting as SystemAdministrator.
@@ -136,9 +142,8 @@ SYSTEM_ADMIN_PERMISSIONS: frozenset[str] = frozenset(
     }
 )
 
-# Permissions that apply to a jurisdiction (DIAAT-391, DIAAT-394): held by a
-# JurisdictionAdministrator (or a LegalTextManager, for templates and legal text) only in the
-# jurisdiction they are acting in, and by the JurisdictionSuperAdministrator in every one.
+# Permissions that apply to a jurisdiction (DIAAT-391, DIAAT-394): held by a role of a jurisdiction
+# only in the jurisdiction it is acting in, and by the global JurisdictionSuperAdministrator in every one.
 # Checked by ``authorisation.assert_jurisdiction_in_scope`` wherever a route names the
 # jurisdiction it works on.
 JURISDICTION_SCOPED_PERMISSIONS: frozenset[str] = frozenset(
@@ -176,12 +181,13 @@ def role_needs_jurisdiction(role: str) -> bool:
 
 
 # Who may assign which stored roles (contract s1, "Assignment rules"): the roles a caller
-# acting as ``role`` may give or take away, to others or to themselves: those strictly below it,
-# and for a caller acting as SystemAdministrator only JurisdictionSuperAdministrator (DIAAT-403).
+# acting as ``role`` may give or take away, to others or to themselves (DIAAT-406): a
+# JurisdictionAdministrator Judge and LegalTextManager, a JurisdictionSuperAdministrator
+# JurisdictionAdministrator, a SystemAdministrator JurisdictionSuperAdministrator.
 # Phase 4 enforces the rules per request; this is the list GET /admin/roles shows.
 _ASSIGNABLE_BY_ROLE: dict[str, tuple[str, ...]] = {
     ROLE_JURISDICTION_ADMIN: (ROLE_JUDGE, ROLE_LEGAL_TEXT_MANAGER),
-    ROLE_JURISDICTION_SUPER_ADMIN: (ROLE_JUDGE, ROLE_LEGAL_TEXT_MANAGER, ROLE_JURISDICTION_ADMIN),
+    ROLE_JURISDICTION_SUPER_ADMIN: (ROLE_JURISDICTION_ADMIN,),
 }
 _ASSIGNABLE_BY_SYSADMIN: tuple[str, ...] = (ROLE_JURISDICTION_SUPER_ADMIN,)
 

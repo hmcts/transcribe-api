@@ -216,13 +216,31 @@ def test_a_new_user_is_enrolled_nowhere_whatever_the_stage(jurisdiction_db):
     assert _codes(jurisdiction_db, newcomer) == []
 
 
-def test_an_admin_is_offered_judge_and_legal_text_manager_in_a_draft_too(jurisdiction_db, as_admin):
+def _et_roles(engine, user) -> set[str]:
+    with Session(engine) as session:
+        return {a.role for a in load_assignments(session, user.id) if a.jurisdiction_code == "ET"}
+
+
+def test_an_admin_holds_only_the_administrator_role_in_a_draft(jurisdiction_db, as_admin):
     as_admin.put("/api/admin/jurisdictions/ET", json=ET)
     _members(jurisdiction_db, ("lead@example.test", "admin", False))
     lead = sign_up(jurisdiction_db, "lead@example.test")
-    with Session(jurisdiction_db) as session:
-        roles = {a.role for a in load_assignments(session, lead.id) if a.jurisdiction_code == "ET"}
-    assert roles == {"Judge", "LegalTextManager", "JurisdictionAdministrator"}
+    assert _et_roles(jurisdiction_db, lead) == {"JurisdictionAdministrator"}
+
+
+def test_an_admin_sees_a_draft_in_every_role_it_holds_there(jurisdiction_db, as_admin):
+    as_admin.put("/api/admin/jurisdictions/ET", json=ET)
+    _members(
+        jurisdiction_db,
+        ("lead@example.test", "admin", False),
+        ("lead@example.test", "Judge", False),
+        ("lead@example.test", "LegalTextManager", False),
+        ("judge@example.test", "Judge", False),
+    )
+    lead = sign_up(jurisdiction_db, "lead@example.test")
+    judge = sign_up(jurisdiction_db, "judge@example.test")
+    assert _et_roles(jurisdiction_db, lead) == {"Judge", "LegalTextManager", "JurisdictionAdministrator"}
+    assert _et_roles(jurisdiction_db, judge) == set()
 
 
 # Switching on needs it to be ready -------------------------------------------------------
@@ -310,21 +328,29 @@ def test_an_unknown_stage_is_refused(as_admin, jurisdiction_db):
         admin.put_jurisdiction(session, "ET", "ET", {}, stage="beta")
 
 
-def test_only_a_super_administrator_changes_the_stage_name_or_service(jurisdiction_db, admin_app, as_admin):
-    """A JurisdictionAdministrator changes the settings of its own jurisdiction (wording, template, features): not
-    its name, whether it is on, which stage it is at, nor its display name or service."""
-    as_admin.put("/api/admin/jurisdictions/ET", json=ET)
+def _as_lead(jurisdiction_db, admin_app):
     _members(jurisdiction_db, ("lead@example.test", "admin", False))
     lead = sign_up(jurisdiction_db, "lead@example.test")
-    as_lead = client_as(admin_app, jurisdiction_db, lead, ctx=("ET", "JurisdictionAdministrator"))
+    return client_as(admin_app, jurisdiction_db, lead, ctx=("ET", "JurisdictionAdministrator"))
 
-    assert as_lead.put("/api/admin/jurisdictions/ET", json={**ET, "stage": "test"}).status_code == 403
-    assert as_lead.put("/api/admin/jurisdictions/ET", json={**ET, "display_name": "Mine"}).status_code == 403
-    assert as_lead.put("/api/admin/jurisdictions/ET", json={**ET, "service": "Mine"}).status_code == 403
-    # Sending what it has already is no change, and the settings are its own.
-    same = as_lead.put("/api/admin/jurisdictions/ET", json={**ET, "stage": "draft"})
-    assert same.status_code == 200, same.json()
-    assert _et(as_admin)["stage"] == "draft"
+
+def test_only_a_super_administrator_changes_a_jurisdiction(jurisdiction_db, admin_app, as_admin):
+    """DIAAT-406: a JurisdictionAdministrator changes nothing of its jurisdiction's own setup, not even to
+    what it is already."""
+    as_admin.put("/api/admin/jurisdictions/ET", json=ET)
+    as_lead = _as_lead(jurisdiction_db, admin_app)
+
+    for body in (
+        {**ET, "stage": "test"},
+        {**ET, "display_name": "Mine"},
+        {**ET, "service": "Mine"},
+        {**ET, "stage": "draft"},
+    ):
+        refused = as_lead.put("/api/admin/jurisdictions/ET", json=body)
+        assert refused.status_code == 403 and refused.json()["detail"]["code"] == "permission_denied"
+    with Session(jurisdiction_db) as session:
+        row = session.exec(select(Jurisdiction).where(Jurisdiction.code == "ET")).one()
+    assert (row.stage, row.display_name, row.service) == ("draft", None, None)
 
 
 # Display name, service and the test group -------------------------------------------------
@@ -355,30 +381,37 @@ def test_the_display_name_is_what_users_see_and_the_service_is_kept(jurisdiction
     assert (cleared["display_name"], cleared["service"]) == (None, None)
 
 
-def test_the_test_group_is_set_when_a_judge_or_legal_text_manager_is_given_their_role(jurisdiction_db, as_admin):
+def test_the_test_group_is_set_when_a_judge_or_legal_text_manager_is_given_their_role(
+    jurisdiction_db, admin_app, as_admin
+):
     as_admin.put("/api/admin/jurisdictions/ET", json=ET)
+    admin_role = as_admin.post(
+        "/api/admin/assignments",
+        json={
+            "email": "other.lead@example.test",
+            "jurisdiction": "ET",
+            "role": "JurisdictionAdministrator",
+            "tester": True,
+        },
+    )
+    assert admin_role.status_code == 400
+    assert admin_role.json()["detail"]["code"] == "invalid_assignment"
+    as_lead = _as_lead(jurisdiction_db, admin_app)
 
-    judge = as_admin.post(
+    judge = as_lead.post(
         "/api/admin/assignments",
         json={"email": "judge@example.test", "jurisdiction": "ET", "role": "Judge", "tester": True},
     )
     assert judge.status_code == 201, judge.json()
     assert judge.json()["tester"] is True
-    plain = as_admin.post(
+    plain = as_lead.post(
         "/api/admin/assignments", json={"email": "plain@example.test", "jurisdiction": "ET", "role": "Judge"}
     )
     assert plain.json()["tester"] is False
-    # Only those two roles are in a test group.
-    admin_role = as_admin.post(
-        "/api/admin/assignments",
-        json={"email": "lead@example.test", "jurisdiction": "ET", "role": "JurisdictionAdministrator", "tester": True},
-    )
-    assert admin_role.status_code == 400
-    assert admin_role.json()["detail"]["code"] == "invalid_assignment"
 
-    users = as_admin.get("/api/admin/users", params={"jurisdiction": "ET"}).json()["items"]
+    users = as_lead.get("/api/admin/users", params={"jurisdiction": "ET"}).json()["items"]
     flags = {u["email"]: [a["tester"] for a in u["assignments"]] for u in users}
-    assert flags == {"judge@example.test": [True], "plain@example.test": [False]}
+    assert flags == {"judge@example.test": [True], "plain@example.test": [False], "lead@example.test": [False]}
 
 
 def test_the_test_group_is_kept_when_a_pending_person_signs_in(jurisdiction_db, as_admin):
@@ -389,9 +422,9 @@ def test_the_test_group_is_kept_when_a_pending_person_signs_in(jurisdiction_db, 
     assert _codes(jurisdiction_db, sign_up(jurisdiction_db, "judge@example.test")) == ["ET"]
 
 
-def test_the_audit_records_the_stage_and_the_test_group(jurisdiction_db, as_admin):
+def test_the_audit_records_the_stage_and_the_test_group(jurisdiction_db, admin_app, as_admin):
     as_admin.put("/api/admin/jurisdictions/ET", json={**ET, "display_name": "ET"})
-    as_admin.post(
+    _as_lead(jurisdiction_db, admin_app).post(
         "/api/admin/assignments",
         json={"email": "judge@example.test", "jurisdiction": "ET", "role": "Judge", "tester": True},
     )

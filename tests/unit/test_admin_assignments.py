@@ -44,8 +44,15 @@ def cast(world):
     )
 
 
-def assign(actor: Person, target: Person | None, jurisdiction: str | None, role: str, *, as_role=None, at=None, **extra):
-    body = {"user_id": str(target.user_id) if target else None, "email": None, "jurisdiction": jurisdiction, "role": role}
+def assign(
+    actor: Person, target: Person | None, jurisdiction: str | None, role: str, *, as_role=None, at=None, **extra
+):
+    body = {
+        "user_id": str(target.user_id) if target else None,
+        "email": None,
+        "jurisdiction": jurisdiction,
+        "role": role,
+    }
     body.update(extra)
     return actor.post("/api/admin/assignments", role=as_role, jurisdiction=at, json=body)
 
@@ -95,18 +102,65 @@ def test_a_jurisdiction_administrator_never_assigns_super_administrator_or_syste
     assert world.assignments_of(cast.bob) == set()
 
 
-# --- JurisdictionSuperAdministrator: any jurisdiction, and JurisdictionAdministrator ------------------
+def test_a_jurisdiction_administrator_gives_judge_and_legal_text_manager_to_another_and_to_itself(world, cast):
+    for target in (cast.bob, cast.jadmin_iac):
+        for role in (JUDGE, LTM):
+            response = assign(cast.jadmin_iac, target, "IAC", role, as_role=ADMIN, at="IAC")
+            assert response.status_code == 201, (target.name, role, response.text)
+
+    assert world.assignments_of(cast.bob) == {("IAC", JUDGE), ("IAC", LTM)}
+    assert world.assignments_of(cast.jadmin_iac) == {("IAC", ADMIN), ("IAC", JUDGE), ("IAC", LTM)}
+    me = cast.jadmin_iac.sign_in().json()["me"]
+    assert sorted(a["role"] for a in me["assignments"]) == sorted([ADMIN, JUDGE, LTM])
+    for role in (JUDGE, LTM):
+        assert cast.jadmin_iac.get("/api/admin/roles", role=role, jurisdiction="IAC").status_code == 403
+
+
+# --- JurisdictionSuperAdministrator: JurisdictionAdministrator in any jurisdiction, nothing else ---------
 
 
 @pytest.mark.parametrize("jurisdiction", ["IAC", "ET"])
-@pytest.mark.parametrize("role", [JUDGE, LTM, ADMIN])
-def test_a_super_administrator_assigns_judge_legal_text_manager_and_administrator_in_any_jurisdiction(
-    world, cast, jurisdiction, role
-):
-    response = assign(cast.jsuper, cast.bob, jurisdiction, role, as_role=SUPER)
+def test_a_super_administrator_assigns_jurisdiction_administrator_in_any_jurisdiction(world, cast, jurisdiction):
+    response = assign(cast.jsuper, cast.bob, jurisdiction, ADMIN, as_role=SUPER)
 
     assert response.status_code == 201, response.text
-    assert world.assignments_of(cast.bob) == {(jurisdiction, role)}
+    assert world.assignments_of(cast.bob) == {(jurisdiction, ADMIN)}
+
+
+def test_a_super_administrator_gives_jurisdiction_administrator_in_two_jurisdictions_to_another_and_to_itself(
+    world, cast
+):
+    for target in (cast.bob, cast.jsuper):
+        for jurisdiction in ("IAC", "ET"):
+            response = assign(cast.jsuper, target, jurisdiction, ADMIN, as_role=SUPER)
+            assert response.status_code == 201, (target.name, jurisdiction, response.text)
+
+    assert world.assignments_of(cast.bob) == {("IAC", ADMIN), ("ET", ADMIN)}
+    assert world.assignments_of(cast.jsuper) == {(None, SUPER), ("IAC", ADMIN), ("ET", ADMIN)}
+    assert cast.jsuper.get("/api/admin/users", role=ADMIN, jurisdiction="ET").status_code == 200
+
+
+def test_a_super_administrator_removes_its_own_jurisdiction_administrator_role(world, cast):
+    given = assign(cast.jsuper, cast.jsuper, "IAC", ADMIN, as_role=SUPER)
+    assert given.status_code == 201
+
+    removed = cast.jsuper.delete(f"/api/admin/assignments/{given.json()['id']}", role=SUPER)
+
+    assert removed.status_code == 204
+    assert world.assignments_of(cast.jsuper) == {(None, SUPER)}
+
+
+@pytest.mark.parametrize("target", ["bob", "jsuper"])
+@pytest.mark.parametrize("role", [JUDGE, LTM])
+@pytest.mark.parametrize("jurisdiction", ["IAC", "ET"])
+def test_a_super_administrator_is_refused_judge_and_legal_text_manager(world, cast, target, role, jurisdiction):
+    person = getattr(cast, target)
+    before = world.assignments_of(person)
+
+    response = assign(cast.jsuper, person, jurisdiction, role, as_role=SUPER)
+
+    assert response.status_code == 403 and code(response) == "assignment_not_allowed"
+    assert world.assignments_of(person) == before
 
 
 def test_only_a_system_administrator_assigns_the_super_administrator_role(world, cast):
@@ -162,37 +216,48 @@ def test_a_system_administrator_can_give_themselves_super_administrator_and_take
     assert world.assignments_of(cast.sysadmin) == set()
 
 
-# --- nobody else takes away their own administrator role -----------------------------------------------
+# --- nobody takes away the role they are acting in ------------------------------------------------------
 
 
-def test_a_jurisdiction_administrator_cannot_remove_their_own_administrator_role(world, cast):
-    listed = cast.jsuper.get("/api/admin/users", params={"search": cast.jadmin_iac.email}, role=SUPER).json()["items"]
-    assignment_id = listed[0]["assignments"][0]["id"]
+def test_a_jurisdiction_administrator_cannot_remove_the_administrator_role_it_acts_in(world, cast):
+    assignment_id = _assignment_id(world, cast.jadmin_iac, "IAC", ADMIN)
     removal = cast.jadmin_iac.delete(f"/api/admin/assignments/{assignment_id}", role=ADMIN, jurisdiction="IAC")
     assert removal.status_code == 403 and code(removal) == "assignment_not_allowed"
+    assert removal.json()["detail"]["message"] == "You cannot remove the role you are acting in."
     assert world.assignments_of(cast.jadmin_iac) == {("IAC", ADMIN)}
 
 
-def test_a_super_administrator_cannot_remove_their_own_administrator_role(world, cast):
-    listed = cast.jsuper.get("/api/admin/users", params={"search": cast.jsuper.email}, role=SUPER).json()["items"]
-    removal = cast.jsuper.delete(f"/api/admin/assignments/{listed[0]['assignments'][0]['id']}", role=SUPER)
+def test_a_super_administrator_cannot_remove_the_super_administrator_role_it_acts_in(world, cast):
+    assignment_id = _assignment_id(world, cast.jsuper, None, SUPER)
+    removal = cast.jsuper.delete(f"/api/admin/assignments/{assignment_id}", role=SUPER)
     assert removal.status_code == 403 and code(removal) == "assignment_not_allowed"
+    assert removal.json()["detail"]["message"] == "You cannot remove the role you are acting in."
     assert world.assignments_of(cast.jsuper) == {(None, SUPER)}
 
 
-# --- giving yourself a role: the same rules as giving it to anyone else (DIAAT-403) ----------------------
+@pytest.mark.parametrize("role", [JUDGE, LTM])
+def test_a_jurisdiction_administrator_removes_its_own_judge_or_legal_text_manager_role(world, cast, role):
+    given = assign(cast.jadmin_iac, cast.jadmin_iac, "IAC", role, as_role=ADMIN, at="IAC")
+    assert given.status_code == 201
+    removed = cast.jadmin_iac.delete(f"/api/admin/assignments/{given.json()['id']}", role=ADMIN, jurisdiction="IAC")
+    assert removed.status_code == 204
+    assert world.assignments_of(cast.jadmin_iac) == {("IAC", ADMIN)}
 
 
-@pytest.mark.parametrize("role", [ADMIN, JUDGE, LTM])
-def test_a_super_administrator_gives_themselves_any_role_below_its_own_in_any_jurisdiction(world, cast, role):
+# --- giving yourself a role: the same rules as giving it to anyone else (DIAAT-406) ----------------------
+
+
+def test_a_super_administrator_gives_itself_jurisdiction_administrator_in_any_jurisdiction(world, cast):
     for jurisdiction in ("IAC", "ET"):
-        response = assign(cast.jsuper, cast.jsuper, jurisdiction, role, as_role=SUPER)
+        response = assign(cast.jsuper, cast.jsuper, jurisdiction, ADMIN, as_role=SUPER)
         assert response.status_code == 201, (jurisdiction, response.text)
-    assert world.assignments_of(cast.jsuper) == {(None, SUPER), ("IAC", role), ("ET", role)}
+    assert world.assignments_of(cast.jsuper) == {(None, SUPER), ("IAC", ADMIN), ("ET", ADMIN)}
 
 
 @pytest.mark.parametrize("role", [JUDGE, LTM])
-def test_a_jurisdiction_administrator_gives_themselves_a_role_below_its_own_in_its_jurisdiction_only(world, cast, role):
+def test_a_jurisdiction_administrator_gives_itself_judge_or_legal_text_manager_in_its_jurisdiction_only(
+    world, cast, role
+):
     response = assign(cast.jadmin_iac, cast.jadmin_iac, "IAC", role, as_role=ADMIN, at="IAC")
     assert response.status_code == 201, response.text
     elsewhere = assign(cast.jadmin_iac, cast.jadmin_iac, "ET", role, as_role=ADMIN, at="IAC")
@@ -206,9 +271,11 @@ def test_a_jurisdiction_administrator_gives_themselves_a_role_below_its_own_in_i
         ("jadmin_iac", ADMIN, "IAC", ADMIN, "IAC"),
         ("jadmin_iac", ADMIN, "IAC", SUPER, None),
         ("jsuper", SUPER, None, SUPER, None),
+        ("jsuper", SUPER, None, JUDGE, "IAC"),
+        ("jsuper", SUPER, None, LTM, "ET"),
     ],
 )
-def test_nobody_gives_themselves_a_role_equal_to_or_above_the_one_they_act_in(world, cast, who, as_role, at, given, jurisdiction):
+def test_nobody_gives_themselves_a_role_they_may_not_give_others(world, cast, who, as_role, at, given, jurisdiction):
     person = getattr(cast, who)
     before = world.assignments_of(person)
     response = assign(person, person, jurisdiction, given, as_role=as_role, at=at)
@@ -265,7 +332,7 @@ def test_the_target_is_a_user_or_an_email_not_both_and_not_neither(world, cast):
 
 
 def test_a_role_in_a_jurisdiction_needs_the_jurisdiction_and_the_global_role_has_none(world, cast):
-    no_jurisdiction = assign(cast.jsuper, cast.bob, None, JUDGE, as_role=SUPER)
+    no_jurisdiction = assign(cast.jadmin_iac, cast.bob, None, JUDGE, as_role=ADMIN, at="IAC")
     assert no_jurisdiction.status_code == 400 and code(no_jurisdiction) == "invalid_assignment"
     admin_without = assign(cast.jsuper, cast.bob, None, ADMIN, as_role=SUPER)
     assert admin_without.status_code == 400 and code(admin_without) == "invalid_assignment"
@@ -276,7 +343,9 @@ def test_a_role_in_a_jurisdiction_needs_the_jurisdiction_and_the_global_role_has
 def test_a_jurisdiction_administrator_is_given_one_jurisdiction_per_assignment(world, cast):
     """DIAAT-403: never several jurisdictions at once; several separate assignments are fine."""
     several = cast.jsuper.post(
-        "/api/admin/assignments", role=SUPER, json={"user_id": str(cast.bob.user_id), "jurisdiction": ["IAC", "ET"], "role": ADMIN}
+        "/api/admin/assignments",
+        role=SUPER,
+        json={"user_id": str(cast.bob.user_id), "jurisdiction": ["IAC", "ET"], "role": ADMIN},
     )
     assert several.status_code == 422
     for jurisdiction in ("IAC", "ET"):
@@ -285,13 +354,14 @@ def test_a_jurisdiction_administrator_is_given_one_jurisdiction_per_assignment(w
 
 
 def test_an_unknown_user_or_jurisdiction_is_a_404(world, cast):
-    response = cast.jsuper.post(
+    response = cast.jadmin_iac.post(
         "/api/admin/assignments",
-        role=SUPER,
+        role=ADMIN,
+        jurisdiction="IAC",
         json={"user_id": str(uuid4()), "jurisdiction": "IAC", "role": JUDGE},
     )
     assert response.status_code == 404 and code(response) == "user_not_found"
-    response = assign(cast.jsuper, cast.bob, "NOPE", JUDGE, as_role=SUPER)
+    response = assign(cast.jsuper, cast.bob, "NOPE", ADMIN, as_role=SUPER)
     assert response.status_code == 404 and code(response) == "jurisdiction_not_found"
 
 
@@ -303,15 +373,19 @@ def test_a_malformed_email_is_a_400(world, cast):
 
 
 def test_assigning_what_they_already_hold_is_a_409(world, cast):
-    assert assign(cast.jsuper, cast.bob, "IAC", JUDGE, as_role=SUPER).status_code == 201
-    again = assign(cast.jsuper, cast.bob, "IAC", JUDGE, as_role=SUPER)
+    assert assign(cast.jadmin_iac, cast.bob, "IAC", JUDGE, as_role=ADMIN, at="IAC").status_code == 201
+    again = assign(cast.jadmin_iac, cast.bob, "IAC", JUDGE, as_role=ADMIN, at="IAC")
     assert again.status_code == 409 and code(again) == "already_assigned"
     assert world.assignments_of(cast.bob) == {("IAC", JUDGE)}
 
 
 def test_the_same_person_holds_several_roles_and_several_jurisdictions(world, cast):
-    for jurisdiction, role in (("IAC", JUDGE), ("IAC", LTM), ("ET", JUDGE)):
-        assert assign(cast.jsuper, cast.bob, jurisdiction, role, as_role=SUPER).status_code == 201
+    for admin, jurisdiction, role in (
+        (cast.jadmin_iac, "IAC", JUDGE),
+        (cast.jadmin_iac, "IAC", LTM),
+        (cast.jadmin_et, "ET", JUDGE),
+    ):
+        assert assign(admin, cast.bob, jurisdiction, role, as_role=ADMIN, at=jurisdiction).status_code == 201
     assert world.assignments_of(cast.bob) == {("IAC", JUDGE), ("IAC", LTM), ("ET", JUDGE)}
 
 
@@ -330,7 +404,12 @@ def test_an_assignment_is_audited_with_actor_active_context_target_and_change(wo
     # No contact details of someone who has signed in.
     assert cast.bob.email not in str(row.detail)
 
-    assert cast.jadmin_iac.delete(f"/api/admin/assignments/{response.json()['id']}", role=ADMIN, jurisdiction="IAC").status_code == 204
+    assert (
+        cast.jadmin_iac.delete(
+            f"/api/admin/assignments/{response.json()['id']}", role=ADMIN, jurisdiction="IAC"
+        ).status_code
+        == 204
+    )
     (removed,) = world.audit("assignment.removed")
     assert removed.active_role == ADMIN and removed.detail["role"] == JUDGE
     assert removed.detail["target_user_id"] == str(cast.bob.user_id)
@@ -381,16 +460,21 @@ def test_removing_follows_the_same_rules_as_assigning(world, cast):
     admin = cast.jadmin_iac.delete(f"/api/admin/assignments/{iac_admin}", role=ADMIN, jurisdiction="IAC")
     assert admin.status_code == 403 and code(admin) == "assignment_not_allowed"
     assert world.assignments_of(cast.bob) == {("IAC", JUDGE), ("ET", JUDGE), ("IAC", ADMIN)}
-    assert cast.jadmin_iac.delete(f"/api/admin/assignments/{iac_judge}", role=ADMIN, jurisdiction="IAC").status_code == 204
+    assert (
+        cast.jadmin_iac.delete(f"/api/admin/assignments/{iac_judge}", role=ADMIN, jurisdiction="IAC").status_code == 204
+    )
 
     # A system administrator removes only the global role: no judges, no jurisdiction administrators.
     for assignment_id in (et_judge, iac_admin):
         refused = cast.sysadmin.delete(f"/api/admin/assignments/{assignment_id}")
         assert refused.status_code == 403 and code(refused) == "assignment_not_allowed"
 
-    # A super administrator removes judges and jurisdiction administrators anywhere.
-    assert cast.jsuper.delete(f"/api/admin/assignments/{et_judge}", role=SUPER).status_code == 204
+    # A super administrator removes jurisdiction administrators anywhere, and no judge.
+    judge = cast.jsuper.delete(f"/api/admin/assignments/{et_judge}", role=SUPER)
+    assert judge.status_code == 403 and code(judge) == "assignment_not_allowed"
     assert cast.jsuper.delete(f"/api/admin/assignments/{iac_admin}", role=SUPER).status_code == 204
+
+    assert cast.jadmin_et.delete(f"/api/admin/assignments/{et_judge}", role=ADMIN, jurisdiction="ET").status_code == 204
     assert world.assignments_of(cast.bob) == set()
 
 
@@ -415,7 +499,7 @@ def test_removing_an_unknown_assignment_is_a_404(world, cast):
     ("who", "as_role", "at", "offered"),
     [
         ("jadmin_iac", ADMIN, "IAC", [JUDGE, LTM]),
-        ("jsuper", SUPER, None, [JUDGE, LTM, ADMIN]),
+        ("jsuper", SUPER, None, [ADMIN]),
         ("sysadmin", None, None, [SUPER]),
     ],
 )
@@ -482,7 +566,10 @@ def test_an_assignment_by_email_is_pending_and_claimed_at_the_first_sign_in(worl
 
 
 def test_the_rules_apply_to_a_pending_assignment_too(world, cast):
-    for jurisdiction, role, want in (("ET", JUDGE, "jurisdiction_not_in_scope"), ("IAC", ADMIN, "assignment_not_allowed")):
+    for jurisdiction, role, want in (
+        ("ET", JUDGE, "jurisdiction_not_in_scope"),
+        ("IAC", ADMIN, "assignment_not_allowed"),
+    ):
         response = cast.jadmin_iac.post(
             "/api/admin/assignments",
             role=ADMIN,
@@ -520,8 +607,14 @@ def test_a_pending_assignments_id_works_with_delete_and_nothing_is_claimed_after
     (row,) = [item for item in listed["items"] if item["email"] == email]
     assert row["pending"] is True and [a["id"] for a in row["assignments"]] == [created["id"]]
 
-    assert cast.jadmin_et.delete(f"/api/admin/assignments/{created['id']}", role=ADMIN, jurisdiction="ET").status_code == 403
-    assert cast.jadmin_iac.delete(f"/api/admin/assignments/{created['id']}", role=ADMIN, jurisdiction="IAC").status_code == 204
+    assert (
+        cast.jadmin_et.delete(f"/api/admin/assignments/{created['id']}", role=ADMIN, jurisdiction="ET").status_code
+        == 403
+    )
+    assert (
+        cast.jadmin_iac.delete(f"/api/admin/assignments/{created['id']}", role=ADMIN, jurisdiction="IAC").status_code
+        == 204
+    )
     assert world.pending_for(email) == set()
     (removed,) = world.audit("assignment.removed")
     assert removed.detail["target_email"] == email and removed.detail["target_user_id"] is None
@@ -529,11 +622,14 @@ def test_a_pending_assignments_id_works_with_delete_and_nothing_is_claimed_after
     # They sign in later and get nothing.
     me = Person(world, "Never", email=email).sign_in().json()["me"]
     assert me["status"] == "no_access" and me["assignments"] == []
-    assert cast.jadmin_iac.delete(f"/api/admin/assignments/{created['id']}", role=ADMIN, jurisdiction="IAC").status_code == 404
+    assert (
+        cast.jadmin_iac.delete(f"/api/admin/assignments/{created['id']}", role=ADMIN, jurisdiction="IAC").status_code
+        == 404
+    )
 
 
 def test_assigning_the_same_email_twice_is_a_409(world, cast):
     body = {"email": "twice@justice.gov.uk", "jurisdiction": "IAC", "role": JUDGE}
-    assert cast.jsuper.post("/api/admin/assignments", role=SUPER, json=body).status_code == 201
-    again = cast.jsuper.post("/api/admin/assignments", role=SUPER, json=body)
+    assert cast.jadmin_iac.post("/api/admin/assignments", role=ADMIN, jurisdiction="IAC", json=body).status_code == 201
+    again = cast.jadmin_iac.post("/api/admin/assignments", role=ADMIN, jurisdiction="IAC", json=body)
     assert again.status_code == 409 and code(again) == "already_assigned"

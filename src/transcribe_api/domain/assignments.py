@@ -27,7 +27,6 @@ from transcribe_api.domain.auth.app_token import Context
 from transcribe_api.domain.auth.permissions import (
     GLOBAL_ROLES,
     ROLE_JURISDICTION_ADMIN,
-    ROLES_INCLUDED_WITH_ADMIN,
     STORED_ROLES,
 )
 from transcribe_api.domain.jurisdiction_stages import sees
@@ -47,15 +46,13 @@ class DuplicateAssignmentError(AssignmentError):
 
 @dataclass(frozen=True)
 class Assignment:
-    """One assignment, with its jurisdiction (None: global). ``derived``: not a row of its own but
-    included with a JurisdictionAdministrator assignment in the same jurisdiction (``id`` is None)."""
+    """One assignment, with its jurisdiction (None: global)."""
 
-    id: UUID | None
+    id: UUID
     role: str
     jurisdiction_id: UUID | None
     jurisdiction_code: str | None
     jurisdiction_name: str | None
-    derived: bool = False
     # The jurisdiction's stage (draft, test or live: DIAAT-345), so a screen can mark one that is not live.
     jurisdiction_stage: str | None = None
 
@@ -79,13 +76,17 @@ def load_assignments(session: Session, user_id: UUID) -> list[Assignment]:
     An assignment in a disabled jurisdiction is left out, as if the user had none there
     (a disabled jurisdiction is invisible to its members), and so is one in a jurisdiction
     whose stage does not let them see it (DIAAT-345: a draft only its administrators, one in
-    test its testers and administrators). Global ones are always there.
+    test its testers and administrators). Global ones are always there. Whoever administers a
+    jurisdiction sees it in every role they hold there, so they can try it as a judge before it is live.
     """
     rows = session.exec(
         select(RoleAssignment, Jurisdiction)
         .join(Jurisdiction, Jurisdiction.id == RoleAssignment.jurisdiction_id, isouter=True)
         .where(RoleAssignment.user_id == user_id)
     ).all()
+    administered = {
+        row.jurisdiction_id for row, _jurisdiction in rows if row.role == ROLE_JURISDICTION_ADMIN
+    }
     assignments = [
         Assignment(
             id=row.id,
@@ -97,43 +98,18 @@ def load_assignments(session: Session, user_id: UUID) -> list[Assignment]:
         )
         for row, jurisdiction in rows
         if row.role in STORED_ROLES
-        and (jurisdiction is None or (jurisdiction.enabled and sees(jurisdiction.stage, row.role, row.tester)))
-    ]
-    return sorted([*assignments, *_included_with_admin(assignments)], key=_sort_key)
-
-
-def _included_with_admin(assignments: list[Assignment]) -> list[Assignment]:
-    """The roles a JurisdictionAdministrator holds in their jurisdiction without being given them
-    (``ROLES_INCLUDED_WITH_ADMIN``), except those they also hold as a row of their own. Derived
-    from ``assignments`` (already without disabled jurisdictions), never stored."""
-    held = {assignment.context for assignment in assignments}
-    included: list[Assignment] = []
-    for admin in assignments:
-        if admin.role != ROLE_JURISDICTION_ADMIN or admin.jurisdiction_code is None:
-            continue
-        for role in ROLES_INCLUDED_WITH_ADMIN:
-            context = Context(jurisdiction=admin.jurisdiction_code, role=role)
-            if context in held:
-                continue
-            held.add(context)
-            included.append(
-                Assignment(
-                    id=None,
-                    role=role,
-                    jurisdiction_id=admin.jurisdiction_id,
-                    jurisdiction_code=admin.jurisdiction_code,
-                    jurisdiction_name=admin.jurisdiction_name,
-                    derived=True,
-                    jurisdiction_stage=admin.jurisdiction_stage,
+        and (
+            jurisdiction is None
+            or (
+                jurisdiction.enabled
+                and (
+                    jurisdiction.id in administered
+                    or sees(jurisdiction.stage, row.role, row.tester)
                 )
             )
-    return included
-
-
-def stored_contexts(assignments: list[Assignment]) -> list[Context]:
-    """The (jurisdiction, role) pairs the user was given (not those included with an administrator
-    role), once each: what they land in when they have not chosen (``sessions.select_context``)."""
-    return distinct_contexts([assignment for assignment in assignments if not assignment.derived])
+        )
+    ]
+    return sorted(assignments, key=_sort_key)
 
 
 def distinct_contexts(assignments: list[Assignment]) -> list[Context]:

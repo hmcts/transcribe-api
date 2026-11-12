@@ -3,23 +3,22 @@
 Who may assign what is decided here, in one place, from what the caller's BenchNotes token
 says they hold (the permissions of the role they act in only, domain/auth/authorisation.py): the rules of the contract's section 1.
 
-* **Judge, LegalTextManager** in a jurisdiction: whoever holds ``users.manage`` there. A
-  JurisdictionAdministrator holds it in the jurisdiction it acts in (403
-  ``jurisdiction_not_in_scope`` for another), a JurisdictionSuperAdministrator in every one.
+* **Judge, LegalTextManager** in a jurisdiction: whoever holds ``users.manage`` there: a
+  JurisdictionAdministrator, in the jurisdiction it acts in (403 ``jurisdiction_not_in_scope`` for another).
 * **JurisdictionAdministrator**: whoever holds ``jurisdiction_admin.assign``: the
-  JurisdictionSuperAdministrator only. Never a JurisdictionAdministrator or a SystemAdministrator.
+  JurisdictionSuperAdministrator only, in any jurisdiction (from the Jurisdictions screen).
 * **JurisdictionSuperAdministrator** (global): whoever holds ``jurisdiction_super_admin.assign``,
-  which only the SystemAdministrator does. It is the only role a SystemAdministrator gives (DIAAT-403).
+  which only the SystemAdministrator does.
 * **SystemAdministrator**: nobody. It is not a stored role.
-* Giving a role to **yourself** follows the same rules as giving it to anyone else (DIAAT-403): a
-  JurisdictionSuperAdministrator may give themselves JurisdictionAdministrator, Judge or
-  LegalTextManager, a JurisdictionAdministrator Judge or LegalTextManager in its jurisdiction; a Judge
-  or LegalTextManager gives nobody a role (they raise an access request). Nobody gives a role equal to
-  or above the one they act in.
-* Acting as SystemAdministrator, a holder may give **themselves** JurisdictionSuperAdministrator (that is
-  how the first one is set up) and take it away again.
-* Nobody else takes away their own administrator role (JurisdictionAdministrator,
-  JurisdictionSuperAdministrator), and nobody deactivates themselves.
+* Giving a role to, or taking it from, **yourself** follows the same rules as for anyone else
+  (DIAAT-406): a JurisdictionAdministrator may give itself Judge or LegalTextManager in its jurisdiction,
+  a JurisdictionSuperAdministrator JurisdictionAdministrator anywhere, a SystemAdministrator
+  JurisdictionSuperAdministrator. A Judge or LegalTextManager gives nobody a role (they raise an access
+  request, which a JurisdictionAdministrator decides).
+* Nobody takes away the role they are acting in, and nobody deactivates themselves.
+
+A user holds any combination of roles in any number of jurisdictions. A JurisdictionAdministrator sees and
+changes only the assignments in its own jurisdiction of a user who also holds roles elsewhere.
 
 Every refusal is 403 ``assignment_not_allowed`` (or ``jurisdiction_not_in_scope``), audited as
 ``ACCESS_DENIED``. Every change is audited (``assignment.added``, ``assignment.removed``,
@@ -147,12 +146,13 @@ def check_may_change_assignment(
         raise refuse(actor, ASSIGNMENT_NOT_ALLOWED, "SystemAdministrator cannot be assigned.", detail={"role": role})
     me = getattr(actor, "id", None)
     is_self = target_user_id is not None and target_user_id == me
-    sysadmin = auth_context.sysadmin_of(actor)
 
-    # Nobody but a SystemAdministrator takes away their own administrator role.
-    if is_self and not adding and not sysadmin and role in (ROLE_JURISDICTION_ADMIN, ROLE_JURISDICTION_SUPER_ADMIN):
+    ctx = auth_context.context_of(actor)
+    if is_self and not adding and ctx is not None and ctx.role == role and (
+        role in GLOBAL_ROLES or (ctx.jurisdiction or "").upper() == (jurisdiction_code or "")
+    ):
         raise refuse(
-            actor, ASSIGNMENT_NOT_ALLOWED, "You cannot remove your own administrator role.", detail={"role": role}
+            actor, ASSIGNMENT_NOT_ALLOWED, "You cannot remove the role you are acting in.", detail={"role": role}
         )
 
     if role == ROLE_JURISDICTION_SUPER_ADMIN:
@@ -176,7 +176,10 @@ def check_may_change_assignment(
     # Judge and LegalTextManager: users.manage, in the jurisdiction.
     if not has_permission(actor, "users.manage"):
         raise refuse(
-            actor, ASSIGNMENT_NOT_ALLOWED, "Your role does not allow you to assign that role.", detail={"role": role}
+            actor,
+            ASSIGNMENT_NOT_ALLOWED,
+            "Only a JurisdictionAdministrator assigns the Judge and LegalTextManager roles.",
+            detail={"role": role},
         )
     # (With no jurisdiction there is nothing to be in scope of: the caller says it is invalid.)
     if jurisdiction_code is not None and not jurisdiction_in_scope(actor, jurisdiction_code):
@@ -498,15 +501,22 @@ def _like(text: str) -> str:
 def visible_scope(actor: object) -> frozenset[str] | None:
     """The jurisdictions whose users the actor lists: None for all, else the one they act in.
 
-    Global only for a JurisdictionSuperAdministrator (the role it acts in), and for a
-    SystemAdministrator reaching the list through its own permission, ``jurisdiction_super_admin.assign``
-    (they need to find who to make a JurisdictionSuperAdministrator: the actor holds no
-    ``users.manage``, so no role is acting). A SystemAdministrator acting in a stored role that
-    has ``users.manage`` (they gave themselves one) has that role's scope: a JurisdictionAdministrator's
-    is its jurisdiction."""
+    A JurisdictionAdministrator (``users.manage``) lists its jurisdiction's. Whoever reaches the list only
+    to appoint (a JurisdictionSuperAdministrator choosing a JurisdictionAdministrator, a SystemAdministrator a
+    JurisdictionSuperAdministrator) searches everyone, but sees only the roles they appoint
+    (``visible_roles``)."""
     if has_permission(actor, "users.manage"):
         return jurisdiction_scope(actor)
     return None
+
+
+def visible_roles(actor: object) -> list[str] | None:
+    """The roles whose assignments the actor sees in the list: None for every role (a
+    JurisdictionAdministrator, in its jurisdiction), else only those it may assign."""
+    if has_permission(actor, "users.manage"):
+        return None
+    ctx = auth_context.context_of(actor)
+    return assignable_roles(ctx.role if ctx else None, auth_context.sysadmin_of(actor))
 
 
 def list_users(
@@ -521,13 +531,17 @@ def list_users(
 ) -> UserPage:
     """Users who have signed in, then the pending (email-only) assignments grouped by email.
 
-    A JurisdictionSuperAdministrator or SystemAdministrator lists everyone (``jurisdiction=`` and
-    ``role=`` narrow it to those holding a role there). A JurisdictionAdministrator lists the
+    A JurisdictionSuperAdministrator or SystemAdministrator lists everyone, with only the assignments of
+    the role they appoint (``jurisdiction=`` and ``role=`` narrow it to those holding a role there; a
+    ``role=`` they do not appoint is 403). A JurisdictionAdministrator lists the
     users with a role in the jurisdiction it acts in; but a ``search`` of at least
     ``WIDE_SEARCH_MIN_LENGTH`` characters (and no ``jurisdiction=`` or ``role=``) matches the email
     of any user who has signed in, so someone can be added to the jurisdiction, and shows them with
     only their assignments there. ``jurisdiction=`` for one it does not act in is 403."""
     scope = visible_scope(actor)
+    roles_shown = visible_roles(actor)
+    if role is not None and roles_shown is not None and role not in roles_shown:
+        raise refuse(actor, ASSIGNMENT_NOT_ALLOWED, "You cannot list the holders of that role.", detail={"role": role})
     needle = (search or "").strip().lower()
     explicit: Jurisdiction | None = None
     if jurisdiction:
@@ -558,6 +572,8 @@ def list_users(
             held = held.where(RoleAssignment.jurisdiction_id.in_(filter_ids))  # type: ignore[union-attr]
         if role is not None:
             held = held.where(RoleAssignment.role == role)
+        elif roles_shown is not None:
+            held = held.where(RoleAssignment.role.in_(roles_shown))  # type: ignore[attr-defined]
         conditions.append(User.id.in_(held))  # type: ignore[attr-defined]
     for condition in conditions:
         users_q = users_q.where(condition)
@@ -570,6 +586,8 @@ def list_users(
         pending_conditions.append(RoleAssignment.jurisdiction_id.in_(filter_ids))  # type: ignore[union-attr]
     if role is not None:
         pending_conditions.append(RoleAssignment.role == role)
+    elif roles_shown is not None:
+        pending_conditions.append(RoleAssignment.role.in_(roles_shown))  # type: ignore[attr-defined]
     if needle:
         pending_conditions.append(RoleAssignment.pending_email.like(_like(needle), escape="\\"))  # type: ignore[union-attr]
     pending_emails_q = select(RoleAssignment.pending_email).where(*pending_conditions)
@@ -602,6 +620,8 @@ def list_users(
     def visible(query):
         if scope_ids is not None:
             query = query.where(RoleAssignment.jurisdiction_id.in_(scope_ids))  # type: ignore[union-attr]
+        if roles_shown is not None:
+            query = query.where(RoleAssignment.role.in_(roles_shown))  # type: ignore[attr-defined]
         return query
 
     by_user: dict[UUID, list[AssignmentView]] = {u.id: [] for u in users}
@@ -697,9 +717,8 @@ def _uuid(value: object) -> UUID | None:
 def role_history(
     session: Session, actor: object, *, jurisdiction: str | None, page: int, page_size: int
 ) -> HistoryPage:
-    """The role changes (``ROLE_CHANGE_ACTIONS``), newest first. A JurisdictionAdministrator reads
-    those of the jurisdiction it acts in (403 for another via ``jurisdiction=``); a
-    JurisdictionSuperAdministrator all of them, or one jurisdiction's with ``jurisdiction=``."""
+    """The role changes (``ROLE_CHANGE_ACTIONS``), newest first: a JurisdictionAdministrator
+    (``role_audit.read``) reads those of the jurisdiction it acts in (403 for another via ``jurisdiction=``)."""
     scope = jurisdiction_scope(actor)
     query = select(AuditLog).where(AuditLog.event_type.in_(ROLE_CHANGE_ACTIONS))  # type: ignore[attr-defined]
     count_query = select(func.count(AuditLog.id)).where(AuditLog.event_type.in_(ROLE_CHANGE_ACTIONS))  # type: ignore[attr-defined,arg-type]
