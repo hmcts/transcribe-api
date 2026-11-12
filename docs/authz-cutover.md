@@ -41,10 +41,12 @@ memberships any more. In one transaction:
    lower case and trimmed, so `New.Judge@Example.com ` and `new.judge@example.com` are one), and a membership the old code claimed for a
    user at their first sign-in (the user's assignment). It then removes the pending assignments 0009 made for a pending membership that the
    old code has since claimed for a user who now holds the role, and puts in the test group the assignments whose membership the old code
-   put there after 0009.
+   put there after 0009. A membership pending by email whose person has since signed in (the only user with that email) is treated as
+   theirs: what they claimed is not offered again, and a missing role is given to the user directly. One whose email more than one user
+   has is left alone. 0009's pending copies are trimmed first (it only lowered them).
 2. **It does not give back what was taken away in the new code.** By the time 0010 runs, administrators have been removing roles in the
    new screens, and the memberships those roles came from are still there. Every removal is audited in the same transaction as the change
-   (`assignment.removed` by an administrator, by user or pending email; `membership.leave` by the user), filed against the jurisdiction. A
+   (`assignment.removed` by an administrator, by user or pending email, compared normalised; `membership.leave` by the user), filed against the jurisdiction. A
    membership whose person has such an audit row in that jurisdiction is left alone: someone has decided about their access there since 0009.
 3. It sets `jurisdiction.auto_enrol` false everywhere and gives the column a default (the code no longer maps it).
 4. It renames `jurisdiction_membership` to `jurisdiction_membership_legacy`: nothing reads it, and nothing can grant access from it again.

@@ -280,3 +280,80 @@ def test_0010_on_a_database_with_nothing_to_catch_up(engine, caplog):
     assert "0 membership(s)" in caplog.text
     assert "memberships with no assignment" not in caplog.text
     assert "jurisdiction_membership_legacy" in tables(engine)
+
+
+def claim_at_first_sign_in(engine, user: str, email: str) -> None:
+    """What the new code does at a first sign-in (assignments.claim_pending_assignments)."""
+    run(
+        engine,
+        "UPDATE role_assignment SET user_id = :uid, pending_email = NULL WHERE pending_email = :email",
+        uid=user,
+        email=email,
+    )
+
+
+def test_0010_follows_a_pending_membership_to_the_user_who_signed_in_since(engine, caplog):
+    """A pending membership whose person has since signed in with the new code is theirs: what they claimed
+    is not offered again by email, what was taken from them after the claim is not given back, and a gap
+    membership is given to them directly (they will not sign in for the first time again)."""
+    migrate(engine, "0008")
+    run(
+        engine,
+        "INSERT INTO jurisdiction (id, code, name, enabled, auto_enrol, settings, created_datetime, updated_datetime)"
+        " VALUES (gen_random_uuid(), 'ET', 'Employment Tribunal', true, false, '{}', now(), now())",
+    )
+    admin = add_user(engine, "admin")
+    membership(engine, "ET", "judge", email="Ivy@Example.TEST")
+    membership(engine, "ET", "judge", email="Jack@Example.TEST")
+    membership(engine, "ET", "judge", email="kate@example.test")
+    membership(engine, "ET", "judge", email="  Mia@Example.TEST", tester=True)
+    membership(engine, "ET", "judge", email=" nora@example.test")
+
+    migrate(engine, "0009")
+
+    ivy, jack, kate = (add_user(engine, name) for name in ("ivy", "jack", "kate"))
+    claim_at_first_sign_in(engine, ivy, "ivy@example.test")
+    claim_at_first_sign_in(engine, jack, "jack@example.test")
+    claim_at_first_sign_in(engine, kate, "kate@example.test")
+    remove_assignment(engine, admin, "ET", "Judge", user=ivy)
+    leave(engine, jack, "ET")
+    remove_assignment(engine, admin, "ET", "Judge", email=" nora@example.test")  # as 0009 stored it
+    liam = add_user(engine, "liam")  # signed in through the new code: nothing to claim yet
+    membership(engine, "IAC", "judge", email="Liam@Example.TEST")  # ... then an old pod added him by email
+    add_user(engine, "olga")
+    run(
+        engine,
+        'INSERT INTO "user" (id, created_datetime, email, azure_user_id, has_completed_onboarding, role)'
+        " VALUES (gen_random_uuid(), now(), 'OLGA@example.test', 'oid-olga-2', true, 'Judge')",
+    )
+    membership(engine, "IAC", "judge", email="olga@example.test")  # two accounts with that email
+    assert liam
+
+    with caplog.at_level(logging.INFO, logger="alembic.runtime.migration"):
+        migrate(engine, "0010")
+
+    assert assignments(engine) == [
+        ("kate@example.test", "ET", "Judge", False, False),  # claimed: no second, pending, copy
+        ("liam@example.test", "IAC", "Judge", False, False),  # his directly
+        ("mia@example.test", "ET", "Judge", True, True),  # trimmed, so it can be claimed
+    ]
+    log = caplog.text
+    assert "pending emails trimmed: 1" in log
+    assert "assignments added for users: 1" in log and "assignments added pending by email: 0" in log
+    assert "left unmatched: 3 whose role was removed since 0009, 1 other" in log  # ivy, jack, nora; olga
+
+
+def test_0010_merges_pending_copies_that_differ_only_in_padding(engine):
+    migrate(engine, "0009")
+    for email, tester in (("pat@example.test", False), (" pat@example.test", True), ("pat@example.test  ", False)):
+        run(
+            engine,
+            "INSERT INTO role_assignment (id, pending_email, jurisdiction_id, role, granted_at, tester)"
+            " SELECT gen_random_uuid(), :email, id, 'Judge', now(), :tester FROM jurisdiction WHERE code = 'IAC'",
+            email=email,
+            tester=tester,
+        )
+
+    migrate(engine, "0010")
+
+    assert assignments(engine) == [("pat@example.test", "IAC", "Judge", True, True)]

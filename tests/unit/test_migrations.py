@@ -1024,7 +1024,8 @@ def test_0010_catches_up_the_memberships_then_retires_them(monkeypatch):
     assert "DELETE FROM role_assignment p" in sql  # the pending copies the old release claimed
     assert "UPDATE role_assignment a SET tester = true" in sql
     # What was removed in the new code since 0009 is not given back.
-    assert "l.event_type = 'assignment.removed'" in sql and "l.event_type = 'membership.leave'" in sql
+    assert "e.event_type = 'assignment.removed'" in sql and "e.event_type = 'membership.leave'" in sql
+    assert "UPDATE role_assignment SET pending_email = btrim(pending_email)" in sql  # 0009 only lowered them
     assert "UPDATE jurisdiction SET auto_enrol = false WHERE auto_enrol" in sql
     assert "ALTER TABLE jurisdiction ALTER COLUMN auto_enrol SET DEFAULT false" in sql
     assert "ALTER TABLE jurisdiction_membership RENAME TO jurisdiction_membership_legacy" in sql

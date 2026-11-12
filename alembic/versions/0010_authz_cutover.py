@@ -4,24 +4,29 @@
 release before it went on writing memberships until they were replaced (an administrator added a judge
 or an administrator, changed a role or the test group; a first sign-in claimed a pending membership or
 auto-enrolled the user in the IAC), and none of those reached an assignment. Every environment now runs
-the 0009 release only, so nothing writes memberships any more and this catches up the gap once:
+the 0009 release only, so nothing writes memberships any more and this catches up the gap once.
 
-1. An assignment for every membership that has none, with 0009's mapping (``admin`` is
-   JurisdictionAdministrator, anything else Judge; a membership pending by email stays pending, the
-   email lower case and trimmed). Pending memberships whose emails differ only in case or padding are
-   one assignment, in the test group if any of them was.
-2. The pending assignment 0009 copied from a pending membership that the old release then claimed for
-   a user, once that user holds the role (the new code claims pending assignments only at a user's
-   first sign-in, which has happened).
-3. The test group flag of a membership the old release put in the group after 0009 copied it.
+Each membership is first resolved to its person: its user, or for one pending by email (lower case and
+trimmed, as domain/assignments.normalise_email stores it) the one user who has since signed in with that
+email, else the email itself. A pending membership whose email belongs to more than one user is left
+alone (the new code refuses such an email too: ``ambiguous_email``). Then:
+
+1. 0009's pending copies are trimmed (it only lowered them, so a padded one could never be claimed); two
+   that become the same are one, in the test group if either was.
+2. An assignment for every person who holds none for their membership, with 0009's mapping (``admin`` is
+   JurisdictionAdministrator, anything else Judge): to the user, or pending by email. Memberships of the
+   same person are one assignment, in the test group if any of them was.
+3. The pending assignment 0009 copied for a person who is now a user holding the role (the old release
+   claimed the membership; the new code claims pending assignments only at a first sign-in).
+4. The test group flag of a membership the old release put in the group after 0009 copied it.
 
 A membership with no assignment is not always the gap: administrators have been removing roles in the
 new screens since 0009, and those memberships are still there. Every removal is audited in the same
-transaction as the change (``assignment.removed`` by an administrator, ``membership.leave`` by the user;
-``audit.stage_audit`` is fail-closed), filed against the jurisdiction. Steps 1 and 3 leave alone any
-membership whose person has such an audit row in that jurisdiction: someone has decided about their
-access there since, and the old data must not override it. The counts go to the log, with what is left
-unmatched.
+transaction as the change (``assignment.removed`` by an administrator, naming the user or the pending
+email; ``membership.leave`` by the user; ``audit.stage_audit`` is fail-closed), filed against the
+jurisdiction. Steps 2 and 4 leave alone any person with such an audit row in that jurisdiction, by
+user or by email: someone has decided about their access there since, and the old data must not
+override it. The counts go to the log, with what is left unmatched.
 
 Then the old data is retired, so nothing can grant access from it again:
 
@@ -32,8 +37,8 @@ Then the old data is retired, so nothing can grant access from it again:
   serve during this rollout, and any rollback to them.
 
 Downgrade restores the table name and removes the default. The assignments it added and the pending
-copies it removed stay: they are what the 0009 release expects to find. auto_enrol stays false: the 0009
-release never reads it.
+copies it removed or trimmed stay: they are what the 0009 release expects to find. auto_enrol stays
+false: the 0009 release never reads it.
 
 Revision ID: 0010
 Revises: 0009
@@ -57,93 +62,117 @@ logger = logging.getLogger("alembic.runtime.migration")
 
 LEGACY_TABLE = "jurisdiction_membership_legacy"
 
-_ROLE = "CASE m.role WHEN 'admin' THEN 'JurisdictionAdministrator' ELSE 'Judge' END"
-# What a pending email is stored and matched as (domain/assignments.normalise_email).
-_PENDING_EMAIL = "lower(btrim(m.email))"
+# Every membership as (person, jurisdiction, role): user_id is its user, or the one user with its pending
+# email; email is the person's, normalised; ambiguous: a pending email more than one user has.
+_LEGACY = """WITH legacy AS (
+  SELECT m.id, m.jurisdiction_id, m.tester, m.created_datetime,
+         CASE m.role WHEN 'admin' THEN 'JurisdictionAdministrator' ELSE 'Judge' END AS role,
+         coalesce(m.user_id, s.user_id) AS user_id,
+         lower(btrim(coalesce(u.email, m.email))) AS email,
+         m.user_id IS NULL AND coalesce(s.users, 0) > 1 AS ambiguous
+  FROM jurisdiction_membership m
+  LEFT JOIN "user" u ON u.id = m.user_id
+  LEFT JOIN LATERAL (
+    SELECT count(*) AS users, (array_agg(o.id))[1] AS user_id FROM "user" o
+    WHERE m.user_id IS NULL AND lower(btrim(o.email)) = lower(btrim(m.email))
+  ) s ON true
+)
+"""
 
-# Someone removed a role of this member in this jurisdiction after 0009 (user_admin.delete_assignment,
-# routes_session.leave). A claimed membership's 0009 copy was pending, so its removal names the email.
-_DECIDED_FOR_USER = """EXISTS (
-    SELECT 1 FROM audit_log l JOIN "user" u ON u.id = m.user_id
-    WHERE l.object_id = m.jurisdiction_id::text
+# Someone removed a role of this person in this jurisdiction after 0009 (user_admin.delete_assignment,
+# routes_session.leave). 0009's copy of a pending membership was pending, so its removal names the email.
+_DECIDED = """EXISTS (
+    SELECT 1 FROM audit_log e
+    WHERE e.object_id = l.jurisdiction_id::text
       AND (
-        (l.event_type = 'assignment.removed'
-         AND (l.detail->>'target_user_id' = u.id::text OR l.detail->>'target_email' = lower(btrim(u.email))))
-        OR (l.event_type = 'membership.leave' AND l.user_id = u.id::text)
+        (e.event_type = 'assignment.removed'
+         AND (e.detail->>'target_user_id' = l.user_id::text OR lower(btrim(e.detail->>'target_email')) = l.email))
+        OR (e.event_type = 'membership.leave' AND e.user_id = l.user_id::text)
       )
   )"""
-_DECIDED_FOR_EMAIL = f"""EXISTS (
-    SELECT 1 FROM audit_log l
-    WHERE l.object_id = m.jurisdiction_id::text
-      AND l.event_type = 'assignment.removed' AND l.detail->>'target_email' = {_PENDING_EMAIL}
+
+_HELD = """EXISTS (
+    SELECT 1 FROM role_assignment a
+    WHERE a.jurisdiction_id = l.jurisdiction_id AND a.role = l.role
+      AND CASE WHEN l.user_id IS NOT NULL THEN a.user_id = l.user_id
+          ELSE a.user_id IS NULL AND a.pending_email = l.email END
   )"""
 
-_HAS_USER_ASSIGNMENT = f"""EXISTS (
-    SELECT 1 FROM role_assignment a
-    WHERE a.user_id = m.user_id AND a.jurisdiction_id = m.jurisdiction_id AND a.role = {_ROLE}
-  )"""
-_HAS_PENDING_ASSIGNMENT = f"""EXISTS (
-    SELECT 1 FROM role_assignment a
-    WHERE a.user_id IS NULL AND a.pending_email = {_PENDING_EMAIL}
-      AND a.jurisdiction_id = m.jurisdiction_id AND a.role = {_ROLE}
-  )"""
+_GRANTABLE = f"NOT l.ambiguous AND (l.user_id IS NOT NULL OR l.email <> '') AND NOT {_HELD} AND NOT {_DECIDED}"
 
-ADD_FOR_USERS = f"""
+MERGE_PADDED_TESTER = """
+UPDATE role_assignment k SET tester = true
+FROM role_assignment d
+WHERE k.user_id IS NULL AND d.user_id IS NULL AND k.id <> d.id AND d.tester AND NOT k.tester
+  AND btrim(k.pending_email) = btrim(d.pending_email) AND d.pending_email <> btrim(d.pending_email)
+  AND k.jurisdiction_id IS NOT DISTINCT FROM d.jurisdiction_id AND k.role = d.role
+"""
+
+DELETE_PADDED_DUPLICATES = """
+DELETE FROM role_assignment d
+WHERE d.user_id IS NULL AND d.pending_email <> btrim(d.pending_email)
+  AND EXISTS (
+    SELECT 1 FROM role_assignment k
+    WHERE k.user_id IS NULL AND k.id <> d.id AND btrim(k.pending_email) = btrim(d.pending_email)
+      AND k.jurisdiction_id IS NOT DISTINCT FROM d.jurisdiction_id AND k.role = d.role
+      AND (k.pending_email = btrim(k.pending_email) OR k.id < d.id)
+  )
+"""
+
+TRIM_PENDING = """
+UPDATE role_assignment SET pending_email = btrim(pending_email)
+WHERE user_id IS NULL AND pending_email <> btrim(pending_email)
+"""
+
+ADD_FOR_USERS = f"""{_LEGACY}
 INSERT INTO role_assignment (id, user_id, pending_email, jurisdiction_id, role, granted_by, granted_at, tester)
-SELECT gen_random_uuid(), m.user_id, NULL, m.jurisdiction_id, {_ROLE}, NULL, m.created_datetime, m.tester
-FROM jurisdiction_membership m
-WHERE m.user_id IS NOT NULL AND NOT {_HAS_USER_ASSIGNMENT} AND NOT {_DECIDED_FOR_USER}
+SELECT gen_random_uuid(), l.user_id, NULL, l.jurisdiction_id, l.role, NULL, min(l.created_datetime), bool_or(l.tester)
+FROM legacy l
+WHERE l.user_id IS NOT NULL AND {_GRANTABLE}
+GROUP BY l.user_id, l.jurisdiction_id, l.role
 ON CONFLICT DO NOTHING
 """
 
-ADD_PENDING = f"""
+ADD_PENDING = f"""{_LEGACY}
 INSERT INTO role_assignment (id, user_id, pending_email, jurisdiction_id, role, granted_by, granted_at, tester)
-SELECT gen_random_uuid(), NULL, s.email, s.jurisdiction_id, s.role, NULL, s.created, s.tester
-FROM (
-  SELECT {_PENDING_EMAIL} AS email, m.jurisdiction_id, {_ROLE} AS role,
-         min(m.created_datetime) AS created, bool_or(m.tester) AS tester
-  FROM jurisdiction_membership m
-  WHERE m.user_id IS NULL AND m.email IS NOT NULL AND btrim(m.email) <> ''
-    AND NOT {_HAS_PENDING_ASSIGNMENT} AND NOT {_DECIDED_FOR_EMAIL}
-  GROUP BY {_PENDING_EMAIL}, m.jurisdiction_id, {_ROLE}
-) s
+SELECT gen_random_uuid(), NULL, l.email, l.jurisdiction_id, l.role, NULL, min(l.created_datetime), bool_or(l.tester)
+FROM legacy l
+WHERE l.user_id IS NULL AND l.email IS NOT NULL AND {_GRANTABLE}
+GROUP BY l.email, l.jurisdiction_id, l.role
 ON CONFLICT DO NOTHING
 """
 
-REMOVE_CLAIMED_PENDING = f"""
+REMOVE_CLAIMED_PENDING = f"""{_LEGACY}
 DELETE FROM role_assignment p
-USING "user" u, jurisdiction_membership m
-WHERE p.user_id IS NULL AND p.pending_email IS NOT NULL
-  AND lower(btrim(u.email)) = p.pending_email
-  AND m.user_id = u.id AND m.jurisdiction_id = p.jurisdiction_id AND p.role = {_ROLE}
+USING legacy l
+WHERE p.user_id IS NULL AND l.user_id IS NOT NULL
+  AND p.pending_email = l.email AND p.jurisdiction_id = l.jurisdiction_id AND p.role = l.role
   AND EXISTS (
     SELECT 1 FROM role_assignment a
-    WHERE a.user_id = u.id AND a.jurisdiction_id = p.jurisdiction_id AND a.role = p.role
+    WHERE a.user_id = l.user_id AND a.jurisdiction_id = l.jurisdiction_id AND a.role = l.role
   )
 """
 
-SYNC_TESTER = f"""
+SYNC_TESTER = f"""{_LEGACY}
 UPDATE role_assignment a SET tester = true
-FROM jurisdiction_membership m
-WHERE m.tester AND NOT a.tester
-  AND a.jurisdiction_id = m.jurisdiction_id AND a.role = {_ROLE}
-  AND (
-    (a.user_id IS NOT NULL AND a.user_id = m.user_id AND NOT {_DECIDED_FOR_USER})
-    OR (a.user_id IS NULL AND m.user_id IS NULL AND a.pending_email = {_PENDING_EMAIL} AND NOT {_DECIDED_FOR_EMAIL})
-  )
+FROM legacy l
+WHERE l.tester AND NOT a.tester AND NOT l.ambiguous
+  AND a.jurisdiction_id = l.jurisdiction_id AND a.role = l.role
+  AND CASE WHEN l.user_id IS NOT NULL THEN a.user_id = l.user_id
+      ELSE a.user_id IS NULL AND a.pending_email = l.email END
+  AND NOT {_DECIDED}
 """
 
-UNMATCHED = f"""
-SELECT m.id, CASE WHEN m.user_id IS NOT NULL THEN {_DECIDED_FOR_USER} ELSE {_DECIDED_FOR_EMAIL} END
-FROM jurisdiction_membership m
-WHERE CASE WHEN m.user_id IS NOT NULL THEN NOT {_HAS_USER_ASSIGNMENT}
-      ELSE NOT {_HAS_PENDING_ASSIGNMENT} END
-ORDER BY m.id
+UNMATCHED = f"""{_LEGACY}
+SELECT l.id, {_DECIDED} FROM legacy l WHERE NOT {_HELD} ORDER BY l.id
 """
 
 AUTO_ENROL_OFF = "UPDATE jurisdiction SET auto_enrol = false WHERE auto_enrol"
 
 CATCH_UP = (
+    ("padded pending assignments merged", MERGE_PADDED_TESTER),
+    ("padded pending duplicates removed", DELETE_PADDED_DUPLICATES),
+    ("pending emails trimmed", TRIM_PENDING),
     ("assignments added for users", ADD_FOR_USERS),
     ("assignments added pending by email", ADD_PENDING),
     ("claimed pending assignments removed", REMOVE_CLAIMED_PENDING),
