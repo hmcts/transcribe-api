@@ -194,12 +194,13 @@ def template_forms(rows: list[JurisdictionTemplate], jurisdiction_id: UUID) -> l
 
 @router.get("/jurisdictions/templates", response_model=list[AvailableTemplate])
 def available_templates(
-    _user=Depends(require_permission("recording.own", "dictation.use")),
+    user=Depends(require_permission("recording.own", "dictation.use")),
     active: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> list[AvailableTemplate]:
-    """The templates the jurisdiction's judges can choose, with the fields each asks for.
-    For a judge, in the jurisdiction they are working in."""
+    """The templates the user can choose in the jurisdiction they are working in, with the
+    fields each asks for: live ones, and those in test for its test group and
+    administrators (DIAAT-347)."""
     with Session(get_engine()) as session:
-        rows = jurisdiction_templates.available_templates(session, active.id)
+        rows = jurisdiction_templates.available_templates(session, active.id, user.id)
     # Outside the session: the legal frameworks are read in their own.
     return template_forms(rows, active.id)

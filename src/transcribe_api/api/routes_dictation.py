@@ -1439,7 +1439,7 @@ async def save_live_transcription_submission(
         _require_decision_template(jurisdiction)
         plan = None
     else:
-        plan = await asyncio.to_thread(_uploaded_template_plan, request, jurisdiction)
+        plan = await asyncio.to_thread(_uploaded_template_plan, request, jurisdiction, current_user.id)
     # DIAAT-276: the submission is a journey; the transcription it creates is related
     # on the transcript.available event.
     submission_id = uuid.uuid4()
@@ -1519,14 +1519,14 @@ def _render_uploaded_template(*, content: bytes, texts: dict[str, str], output_d
 
 
 def _uploaded_template_plan(
-    request: LiveTranscriptionSubmissionRequest, jurisdiction: ActiveJurisdiction
+    request: LiveTranscriptionSubmissionRequest, jurisdiction: ActiveJurisdiction, user_id: UUID
 ) -> _DocumentPlan:
-    """The judge's chosen template, filled with their values: 404 when the jurisdiction's
-    judges cannot choose it, 400 (``template_values_invalid``, ``problems``) for values
-    that do not fit its fields."""
+    """The judge's chosen template, filled with their values: 404 when they cannot
+    choose it (a draft, or in test and they are not in the test group: DIAAT-347),
+    400 (``template_values_invalid``, ``problems``) for values that do not fit its fields."""
     assert request.template_id is not None
     with Session(get_engine()) as session:
-        row = jurisdiction_templates.available_template(session, jurisdiction.id, request.template_id)
+        row = jurisdiction_templates.available_template(session, jurisdiction.id, request.template_id, user_id)
         if row is None:
             raise HTTPException(status_code=404, detail="This template is not available in this jurisdiction.")
         fields = jurisdiction_templates.fields_of(row)

@@ -5,6 +5,9 @@ are in api/routes_dictation_privileged.py (SystemAdministrator: managing them an
 DIAAT-346, previewing them) and api/routes_jurisdictions.py (the judges' list). Errors
 are jurisdictions_admin's, so the admin routes map them the same way: a refusal 400,
 an unknown template 404, a change made meanwhile 409.
+
+DIAAT-347: a template goes from draft to the jurisdiction's test group to all its
+judges (``stage``), live only with the service lead's sign-off (set_stage).
 """
 
 from __future__ import annotations
@@ -35,8 +38,19 @@ from transcribe_api.documents.uploaded_templates import (
     normalise_fields,
     propose_field,
 )
-from transcribe_api.domain.models_dictation import Jurisdiction, JurisdictionTemplate
-from transcribe_api.jurisdictions_admin import AdminError, ConflictError, NotFoundError, _jurisdiction, version
+from transcribe_api.domain.auth.permissions import ROLE_JURISDICTION_ADMIN
+from transcribe_api.domain.jurisdiction_stages import STAGE_DRAFT, STAGE_LIVE, STAGE_TEST, STAGES, sees_template
+from transcribe_api.domain.models_dictation import Jurisdiction, JurisdictionTemplate, RoleAssignment
+from transcribe_api.jurisdictions_admin import (
+    AdminError,
+    ConflictError,
+    NotFoundError,
+    SignOff,
+    _jurisdiction,
+    set_stage,
+    sign_off_record,
+    version,
+)
 from transcribe_api.runtime.logger import logger
 
 MAX_NAME_LENGTH = 200
@@ -120,8 +134,8 @@ def _default_name(file_name: str) -> str:
 
 
 def add_template(session: Session, code: str, file_name: str, data: bytes) -> JurisdictionTemplate:
-    """A new template from an upload, with a proposed field for each box. Not
-    available to judges until the admin has checked its fields and enabled it."""
+    """A new template from an upload, with a proposed field for each box: a draft, not
+    available to judges until the admin has checked its fields and moved it on."""
     jurisdiction = _jurisdiction(session, code)
     boxes = _read_file(data)
     name = _default_name(file_name)
@@ -143,6 +157,7 @@ def add_template(session: Session, code: str, file_name: str, data: bytes) -> Ju
         sha256=hashlib.sha256(data).hexdigest(),
         boxes=[b.to_record() for b in boxes],
         fields=[propose_field(b).model_dump() for b in boxes],
+        stage=STAGE_DRAFT,
         enabled=False,
     )
     session.add(row)
@@ -155,7 +170,8 @@ def replace_file(
     session: Session, code: str, template_id: UUID, file_name: str, data: bytes, expected_version: str
 ) -> JurisdictionTemplate:
     """A new file for a template: fields kept for the boxes it still has; a new box
-    has no field until the admin links one. Judges stop seeing it until it is complete."""
+    has no field until the admin links one. Until it is complete it is a draft again,
+    which judges do not see, and goes live again only with a new sign-off."""
     boxes = _read_file(data)
     row = _template(session, code, template_id, lock=True)
     _check_version(row, expected_version)
@@ -166,7 +182,7 @@ def replace_file(
     row.boxes = [b.to_record() for b in boxes]
     row.fields = [f.model_dump() for f in fields]
     if field_problems(boxes, fields):
-        row.enabled = False
+        _move(row, STAGE_DRAFT, None)
     row.updated_datetime = datetime.now(UTC)
     session.add(row)
     _commit(session, row.name)
@@ -180,6 +196,12 @@ def _check_version(row: JurisdictionTemplate, expected_version: str) -> None:
         raise ConflictError(msg)
 
 
+def _move(row: JurisdictionTemplate, stage: str, sign_off: SignOff | None) -> None:
+    set_stage(row, stage, sign_off)
+    # For the previous release's pods while this one rolls out: they read ``enabled``.
+    row.enabled = row.stage == STAGE_LIVE
+
+
 def update_template(
     session: Session,
     code: str,
@@ -188,11 +210,13 @@ def update_template(
     name: str,
     service: str | None,
     fields: list[TemplateField],
-    enabled: bool,
+    stage: str,
     expected_version: str,
+    sign_off: SignOff | None = None,
 ) -> JurisdictionTemplate:
-    """Save the admin's fields: every box linked and every field complete, or nothing
-    is saved (TemplateProblemsError names what is missing)."""
+    """Save the admin's fields and who can choose it (``stage``): every box linked and
+    every field complete, or nothing is saved (TemplateProblemsError names what is
+    missing). It goes live only with ``sign_off`` (NotSignedOffError)."""
     row = _template(session, code, template_id, lock=True)
     _check_version(row, expected_version)
     problems = field_problems(boxes_of(row), fields)
@@ -201,7 +225,10 @@ def update_template(
     row.name = _name(name)
     row.service = (service or "").strip()[:MAX_NAME_LENGTH] or None
     row.fields = [f.model_dump() for f in normalise_fields(fields)]
-    row.enabled = enabled
+    if stage not in STAGES:
+        msg = f"The stage must be one of {', '.join(STAGES)}"
+        raise AdminError(msg)
+    _move(row, stage, sign_off)
     row.updated_datetime = datetime.now(UTC)
     session.add(row)
     _commit(session, row.name)
@@ -235,7 +262,10 @@ def template_record(row: JurisdictionTemplate) -> dict[str, Any]:
         "name": row.name,
         "service": row.service,
         "file_name": row.file_name,
-        "enabled": row.enabled,
+        "stage": row.stage,
+        "sign_off": sign_off_record(row),
+        # Live; what the previous web release shows (DIAAT-344).
+        "enabled": row.stage == STAGE_LIVE,
         "boxes": row.boxes,
         "fields": row.fields,
         "problems": problems_of(row),
@@ -243,25 +273,43 @@ def template_record(row: JurisdictionTemplate) -> dict[str, Any]:
     }
 
 
-def available_templates(session: Session, jurisdiction_id: UUID) -> list[JurisdictionTemplate]:
-    """What the jurisdiction's judges can choose: enabled, every box linked."""
+def in_test_group(session: Session, user_id: UUID, jurisdiction_id: UUID) -> bool:
+    """Whether the user is in the jurisdiction's test group (DIAAT-347): one of their
+    assignments there is marked tester, or they are its administrator. Whatever role
+    they work as now: an administrator also works there as a Judge (DIAAT-373)."""
+    rows = session.exec(
+        select(RoleAssignment.role, RoleAssignment.tester).where(
+            RoleAssignment.user_id == user_id, RoleAssignment.jurisdiction_id == jurisdiction_id
+        )
+    ).all()
+    return any(tester or role == ROLE_JURISDICTION_ADMIN for role, tester in rows)
+
+
+def available_templates(session: Session, jurisdiction_id: UUID, user_id: UUID) -> list[JurisdictionTemplate]:
+    """What the user can choose in the jurisdiction (DIAAT-347): live ones, and those in
+    test when they are in its test group, with every box linked."""
     rows = session.exec(
         select(JurisdictionTemplate)
-        .where(JurisdictionTemplate.jurisdiction_id == jurisdiction_id, JurisdictionTemplate.enabled.is_(True))  # type: ignore[union-attr,attr-defined]
+        .where(JurisdictionTemplate.jurisdiction_id == jurisdiction_id, JurisdictionTemplate.stage != STAGE_DRAFT)
         .order_by(JurisdictionTemplate.name)
     ).all()
-    return [row for row in rows if not problems_of(row)]
+    testing = any(row.stage == STAGE_TEST for row in rows) and in_test_group(session, user_id, jurisdiction_id)
+    return [row for row in rows if sees_template(row.stage, testing) and not problems_of(row)]
 
 
-def available_template(session: Session, jurisdiction_id: UUID, template_id: UUID) -> JurisdictionTemplate | None:
+def available_template(
+    session: Session, jurisdiction_id: UUID, template_id: UUID, user_id: UUID
+) -> JurisdictionTemplate | None:
     row = session.exec(
         select(JurisdictionTemplate).where(
             JurisdictionTemplate.id == template_id,
             JurisdictionTemplate.jurisdiction_id == jurisdiction_id,
-            JurisdictionTemplate.enabled.is_(True),  # type: ignore[union-attr,attr-defined]
         )
     ).first()
-    return row if row is not None and not problems_of(row) else None
+    if row is None or problems_of(row):
+        return None
+    testing = row.stage == STAGE_TEST and in_test_group(session, user_id, jurisdiction_id)
+    return row if sees_template(row.stage, testing) else None
 
 
 def judge_fields(row: JurisdictionTemplate) -> list[TemplateField]:

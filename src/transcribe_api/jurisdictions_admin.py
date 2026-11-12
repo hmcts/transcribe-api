@@ -6,12 +6,17 @@ can be reached, the same from the command line:
 
     python -m transcribe_api.jurisdictions_admin list
     python -m transcribe_api.jurisdictions_admin put ET --name "Employment Tribunal" < et.json
+    python -m transcribe_api.jurisdictions_admin put ET --name "Employment Tribunal" --stage live \
+        --signed-off-by "Service lead's name" < et.json
 
 ``put`` creates or updates a jurisdiction; its settings (wording, template, features:
 domain/jurisdictions.JurisdictionSettings) are validated first. It reads the settings from
 standard input only: the tool opens no file named on its command line. Who holds a role in a
 jurisdiction is a ``role_assignment`` row (DIAAT-382), given and taken away through the
 assignment endpoints (api/routes_admin_users.py, DIAAT-383); the command line no longer does it.
+
+DIAAT-347: a jurisdiction is switched on for everyone (``live``) only with the service lead's
+sign-off recorded (``--signed-off-by``): set_stage, which templates use too.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ import json
 import sys
 from datetime import UTC, datetime
 from typing import NamedTuple
+from uuid import UUID
 
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
@@ -29,12 +35,13 @@ from sqlmodel import Session, select
 from transcribe_api.domain.auth.permissions import ROLE_JURISDICTION_ADMIN as ASSIGNED_ADMIN
 from transcribe_api.domain.jurisdictions import (
     STAGE_DRAFT,
+    STAGE_LIVE,
     STAGES,
     JurisdictionSettings,
     parse_settings,
     readiness_problems,
 )
-from transcribe_api.domain.models_dictation import Jurisdiction, RoleAssignment
+from transcribe_api.domain.models_dictation import Jurisdiction, JurisdictionTemplate, RoleAssignment
 
 
 class AdminError(Exception):
@@ -66,6 +73,51 @@ def _admin_counts(session: Session) -> dict:
             .group_by(RoleAssignment.jurisdiction_id)
         ).all()
     )
+class NotSignedOffError(AdminError):
+    """Switched on for everyone without the service lead's sign-off (DIAAT-347)."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Record the service lead's sign-off before switching it on for everyone: "
+            "their name, and that they have signed it off."
+        )
+
+
+MAX_SIGN_OFF_NAME = 200
+
+
+class SignOff(NamedTuple):
+    """The service lead's sign-off for going live (DIAAT-347): who signed it off, and
+    the admin who recorded it (None from the command line)."""
+
+    service_lead: str
+    recorded_by: UUID | None = None
+
+
+def set_stage(row: Jurisdiction | JurisdictionTemplate, stage: str, sign_off: SignOff | None) -> None:
+    """Move a jurisdiction or template to ``stage``. Going live needs ``sign_off``
+    (NotSignedOffError), which is recorded with the time; one already live keeps the
+    sign-off it went live with. Leaving live clears it: it is asked for again."""
+    if stage == STAGE_LIVE and row.stage != STAGE_LIVE:
+        name = " ".join((sign_off.service_lead if sign_off else "").split())
+        if not name:
+            raise NotSignedOffError
+        row.signed_off_by = name[:MAX_SIGN_OFF_NAME]
+        row.signed_off_at = datetime.now(UTC)
+        row.signed_off_recorded_by = sign_off.recorded_by if sign_off else None
+    elif stage != STAGE_LIVE:
+        row.signed_off_by = None
+        row.signed_off_at = None
+        row.signed_off_recorded_by = None
+    row.stage = stage
+
+
+def sign_off_record(row: Jurisdiction | JurisdictionTemplate) -> dict | None:
+    """The sign-off it went live with, for the admin area: the service lead and when."""
+    if row.signed_off_by is None:
+        return None
+    at = row.signed_off_at
+    return {"service_lead": row.signed_off_by, "signed_off_at": at.isoformat() if at else None}
 
 
 def _admin_count(session: Session, jurisdiction_id) -> int:
@@ -120,13 +172,15 @@ def put_jurisdiction(
     stage: str | None = None,
     display_name: str | None = None,
     service: str | None = None,
+    sign_off: SignOff | None = None,
 ) -> str:
     """Create or update a jurisdiction. ``enabled`` left as None keeps its current value (a
     new jurisdiction: enabled, a draft), so updating the wording cannot re-enable a disabled
     jurisdiction. So are the stage, the display name and the service (blank: none).
 
     It leaves draft only when it is ready (NotReadyError): its required screen wording set,
-    and an administrator assigned.
+    and an administrator assigned. It goes live only with ``sign_off`` (NotSignedOffError,
+    set_stage).
 
     ``expected_version``: the version the caller edited ("" for a new one). If the
     jurisdiction has changed since (or exists already), nothing is written."""
@@ -174,7 +228,11 @@ def put_jurisdiction(
     if enabled is not None:
         row.enabled = enabled
     if stage is not None:
-        row.stage = stage
+        try:
+            set_stage(row, stage, sign_off)
+        except NotSignedOffError:
+            session.rollback()  # the lock
+            raise
     row.updated_datetime = datetime.now(UTC)
     session.add(row)
     try:
@@ -249,6 +307,7 @@ def jurisdictions_overview(session: Session) -> list[dict]:
             "display_name": row.display_name,
             "service": row.service,
             "stage": row.stage,
+            "sign_off": sign_off_record(row),
             "enabled": row.enabled,
             "settings": row.settings,
             "member_count": counts.get(row.id, 0),
@@ -291,6 +350,7 @@ def run(argv: list[str], session: Session) -> str:
     put.add_argument("--stage", choices=STAGES, help="who sees it (unchanged if not given; new: draft)")
     put.add_argument("--display-name", help="what users see (unchanged if not given; blank: the name)")
     put.add_argument("--service", help="the service it is for (unchanged if not given; blank: none)")
+    put.add_argument("--signed-off-by", help="the service lead who signed it off: needed to make it live")
     args = parser.parse_args(argv)
 
     if args.command == "list":
@@ -305,6 +365,7 @@ def run(argv: list[str], session: Session) -> str:
             stage=args.stage,
             display_name=args.display_name,
             service=args.service,
+            sign_off=SignOff(args.signed_off_by) if args.signed_off_by else None,
         )
     msg = f"unknown command {args.command}"
     raise AdminError(msg)

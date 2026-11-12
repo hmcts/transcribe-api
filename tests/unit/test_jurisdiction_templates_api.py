@@ -91,6 +91,9 @@ def upload(client, data=TEMPLATE, name="ET judgment.docx", **params):
     )
 
 
+SIGN_OFF = {"service_lead": "A Lead", "confirmed": True}
+
+
 def complete(template: dict, **changes) -> dict:
     """The admin's save: the proposed fields, Party 2 optional, with ``changes``."""
     fields = [{**f, "required": False} if f["tag"] in OPTIONAL else f for f in template["fields"]]
@@ -98,7 +101,8 @@ def complete(template: dict, **changes) -> dict:
         "name": template["name"],
         "service": None,
         "fields": fields,
-        "enabled": True,
+        "stage": "live",
+        "sign_off": SIGN_OFF,
         "version": template["version"],
         **changes,
     }
@@ -446,6 +450,79 @@ def test_a_template_judges_cannot_choose_is_not_used(as_admin, as_et_judge, stor
     assert stored == {}
 
 
+def _judge(jurisdiction_db, judge_app, et, email: str, **membership):
+    """Another member of the ET working as a Judge there (an administrator does so without
+    being given it: DIAAT-373), signed in on an app of their own: signing in on judge_app
+    would make every client of it this member."""
+    user = add_user(jurisdiction_db, email)
+    add_member(jurisdiction_db, user, et, **membership)
+    client = client_as(jurisdiction_route_app(), jurisdiction_db, user, ctx=("ET", "Judge"))
+    client.headers["X-Jurisdiction"] = "ET"
+    return client
+
+
+def test_a_template_in_test_is_only_for_the_test_group_and_admins(
+    jurisdiction_db, judge_app, et, as_admin, as_et_judge, stored
+):
+    """DIAAT-347: a judge outside the test group does not see it, nor can they submit
+    with it; a tester and the jurisdiction's administrator (working as a Judge) do; once
+    it is live, every judge of the jurisdiction does."""
+    template = _enabled_template(as_admin, stage="test")
+    tester = _judge(jurisdiction_db, judge_app, et, "tester@example.test", tester=True)
+    lead = _judge(jurisdiction_db, judge_app, et, "lead@example.test", role="admin")
+
+    assert as_et_judge.get("/api/jurisdictions/templates").json() == []
+    refused = as_et_judge.post("/api/live-transcription/submission", json=_submission(template["id"], VALUES))
+    assert refused.status_code == 404
+    assert stored == {}
+    for member in (tester, lead):
+        assert [t["id"] for t in member.get("/api/jurisdictions/templates").json()] == [template["id"]]
+    assert (
+        tester.post("/api/live-transcription/submission", json=_submission(template["id"], VALUES)).status_code == 200
+    )
+
+    as_admin.put(
+        f"/api/admin/jurisdictions/ET/templates/{template['id']}", json=complete(template, version=template["version"])
+    )
+    assert [t["id"] for t in as_et_judge.get("/api/jurisdictions/templates").json()] == [template["id"]]
+
+
+def test_a_template_goes_live_only_with_the_service_leads_sign_off(jurisdiction_db, as_admin):
+    template = upload(as_admin).json()
+    path = f"/api/admin/jurisdictions/ET/templates/{template['id']}"
+
+    refused = as_admin.put(path, json={**complete(template), "sign_off": None})
+    assert (refused.status_code, refused.json()["detail"]["code"]) == (400, "sign_off_required")
+    # The previous web release's switch is live too, so it needs the sign-off as well.
+    legacy = {k: v for k, v in complete(template).items() if k not in ("stage", "sign_off")}
+    assert as_admin.put(path, json={**legacy, "enabled": True}).json()["detail"]["code"] == "sign_off_required"
+
+    live = as_admin.put(path, json=complete(template)).json()
+    assert (live["stage"], live["enabled"], live["sign_off"]["service_lead"]) == ("live", True, "A Lead")
+    kept = as_admin.put(path, json={**complete(live, name="Renamed"), "sign_off": None}).json()
+    assert kept["sign_off"] == live["sign_off"]  # already live: not asked again
+
+    back = as_admin.put(path, json=complete(kept, stage="test")).json()
+    assert (back["stage"], back["enabled"], back["sign_off"]) == ("test", False, None)
+    with Session(jurisdiction_db) as session:
+        edits = [r.detail for r in session.exec(select(AuditLog)).all() if r.event_type == "template.edit"]
+    assert [(e["stage"], (e["sign_off"] or {}).get("service_lead")) for e in edits] == [
+        ("live", "A Lead"),
+        ("live", "A Lead"),
+        ("test", None),
+    ]
+
+
+def test_a_new_file_that_leaves_a_box_unlinked_takes_a_live_template_back_to_draft(as_admin, as_et_judge):
+    template = _enabled_template(as_admin)
+    new_file = make_template([*JUDGMENT, ["Costs: ", Sdt("Costs")]])
+
+    replaced = upload(as_admin, new_file, "v2.docx", replace=template["id"], version=template["version"]).json()
+
+    assert (replaced["stage"], replaced["sign_off"]) == ("draft", None)
+    assert as_et_judge.get("/api/jurisdictions/templates").json() == []
+
+
 def test_a_submission_is_either_the_decision_form_or_a_template(as_admin, as_et_judge, stored):
     template = _enabled_template(as_admin)
     body = {**_submission(template["id"], VALUES), "form_data": {"location": "x"}}
@@ -470,7 +547,7 @@ def test_a_template_is_previewed_as_a_judge_would_get_it_before_judges_see_it(as
     folders = mocker.spy(tempfile, "mkdtemp")
     template = upload(as_admin).json()
     saved = as_admin.put(
-        f"/api/admin/jurisdictions/ET/templates/{template['id']}", json=complete(template, enabled=False)
+        f"/api/admin/jurisdictions/ET/templates/{template['id']}", json=complete(template, stage="draft")
     ).json()
     assert as_et_judge.get("/api/jurisdictions/templates").json() == []  # judges cannot choose it yet
 
@@ -501,7 +578,7 @@ def test_a_template_is_previewed_as_a_judge_would_get_it_before_judges_see_it(as
 def test_the_sample_details_form_is_the_judges_before_judges_can_choose_it(as_admin, et):
     save_document_content(et.id, {"legal_frameworks": [{"id": "unfair", "title": "Unfair dismissal", "rank": 1}]})
     template = upload(as_admin).json()
-    body = complete(template, enabled=False)
+    body = complete(template, stage="draft")
     body["fields"] = [{**f, "type": "legal_issues"} if f["tag"] == "Party2Rep" else f for f in body["fields"]]
     as_admin.put(f"/api/admin/jurisdictions/ET/templates/{template['id']}", json=body)
 

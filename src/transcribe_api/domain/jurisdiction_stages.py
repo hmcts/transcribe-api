@@ -27,3 +27,12 @@ def sees(stage: str, role: str, tester: bool) -> bool:
     if stage == STAGE_TEST:
         return tester or role in _ADMIN_ROLES
     return stage == STAGE_DRAFT and role in _ADMIN_ROLES
+
+
+def sees_template(stage: str, in_test_group: bool) -> bool:
+    """Whether a member sees a template at ``stage`` on the recording page (DIAAT-347):
+    live, everyone; test, the jurisdiction's test group (its testers and administrators).
+    A draft is seen by no one there; the admin area previews it (DIAAT-346)."""
+    if stage == STAGE_LIVE:
+        return True
+    return stage == STAGE_TEST and in_test_group
