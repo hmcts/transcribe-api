@@ -10,7 +10,6 @@ an unknown template 404, a change made meanwhile 409.
 from __future__ import annotations
 
 import hashlib
-import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -342,12 +341,12 @@ def preview_source(
 
 
 def preview_template(
-    row: JurisdictionTemplate, jurisdiction: Jurisdiction, values: dict[str, Value]
-) -> tuple[str, bytes]:
+    row: JurisdictionTemplate, jurisdiction: Jurisdiction, values: dict[str, Value], directory: Path
+) -> Path:
     """The template filled with the admin's sample values as a judge's submission fills
-    it (its name, the .docx), outside the session that read it, as the submission does.
-    Refused in plain words: TemplateValuesError for values that do not fit, AdminError
-    when the file cannot be filled."""
+    it: the .docx, saved in ``directory`` (the caller's to remove), outside the session
+    that read it, as the submission does. Refused in plain words: TemplateValuesError
+    for values that do not fit, AdminError when the file cannot be filled."""
     _, texts = template_texts(
         fields_of(row),
         values,
@@ -355,14 +354,12 @@ def preview_template(
         jurisdiction_name=jurisdiction.display_name or jurisdiction.name,
         dictated=PREVIEW_DICTATED_TEXT,
     )
-    with tempfile.TemporaryDirectory() as directory:
-        try:
-            path = fill_template(row.content, texts, Path(directory) / "preview.docx")
-        except Exception:
-            logger.exception("Template preview could not be filled")
-            msg = (
-                "BenchNotes could not fill this Word file, so judges would not get a document "
-                "from it either. Check that it opens in Word, then upload it again."
-            )
-            raise AdminError(msg) from None
-        return row.name, path.read_bytes()
+    try:
+        return fill_template(row.content, texts, directory / "preview.docx")
+    except Exception:
+        logger.exception("Template preview could not be filled")
+        msg = (
+            "BenchNotes could not fill this Word file, so judges would not get a document "
+            "from it either. Check that it opens in Word, then upload it again."
+        )
+        raise AdminError(msg) from None

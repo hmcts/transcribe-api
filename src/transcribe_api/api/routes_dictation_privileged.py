@@ -9,6 +9,8 @@ import asyncio
 import copy
 import hashlib
 import logging
+import shutil
+import tempfile
 import urllib.parse
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -18,10 +20,12 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse
 from hmcts_azure_auth.audit import AuditEvent, AuditEventType
 from pydantic import BaseModel, StringConstraints
 from pydantic import Field as PydanticField
 from sqlmodel import Field, Session
+from starlette.background import BackgroundTask
 
 from transcribe_api import jurisdiction_templates, jurisdictions_admin
 from transcribe_api.api.document_content_models import (
@@ -1179,7 +1183,7 @@ def admin_preview_template(
     template_id: UUID,
     body: TemplatePreviewRequest,
     admin_user: User = Depends(_SYSTEM_ADMINISTRATOR),
-) -> Response:
+) -> FileResponse:
     """DIAAT-346: the template filled with sample hearing details, as a judge would get
     it (a .docx), before judges can choose it. Refused in plain words (400, with
     ``problems``): ``template_not_ready`` while a box has no complete field,
@@ -1188,14 +1192,25 @@ def admin_preview_template(
     row, jurisdiction = _admin_session_run(
         lambda s: jurisdiction_templates.preview_source(s, code, template_id, body.version)
     )
-    # Filled once the session is closed, as a judge's submission is.
-    with _admin_errors():
-        name, document = jurisdiction_templates.preview_template(row, jurisdiction, body.values)
-    file_name = urllib.parse.quote(f"Preview - {name}.docx")
-    return Response(
-        content=document,
+    # Filled once the session is closed, as a judge's submission is, and sent from the
+    # file, whose folder is removed once it has been sent.
+    directory = Path(tempfile.mkdtemp(prefix="template-preview-"))
+    try:
+        with _admin_errors():
+            path = jurisdiction_templates.preview_template(row, jurisdiction, body.values, directory)
+    except BaseException:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
+    file_name = urllib.parse.quote(f"Preview - {row.name}.docx")
+    return FileResponse(
+        path,
         media_type=DOCX_MEDIA_TYPE,
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{file_name}", "Cache-Control": "no-store"},
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{file_name}",
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+        background=BackgroundTask(shutil.rmtree, directory, ignore_errors=True),
     )
 
 

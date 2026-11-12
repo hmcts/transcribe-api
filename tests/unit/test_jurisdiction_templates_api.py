@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 import urllib.parse
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -443,7 +444,8 @@ def preview(client, template: dict, values: dict, version: str | None = None):
     )
 
 
-def test_a_template_is_previewed_as_a_judge_would_get_it_before_judges_see_it(as_admin, as_et_judge):
+def test_a_template_is_previewed_as_a_judge_would_get_it_before_judges_see_it(as_admin, as_et_judge, mocker):
+    folders = mocker.spy(tempfile, "mkdtemp")
     template = upload(as_admin).json()
     saved = as_admin.put(
         f"/api/admin/jurisdictions/ET/templates/{template['id']}", json=complete(template, enabled=False)
@@ -457,6 +459,8 @@ def test_a_template_is_previewed_as_a_judge_would_get_it_before_judges_see_it(as
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
     assert response.headers["content-disposition"] == "attachment; filename*=UTF-8''Preview%20-%20ET%20judgment.docx"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert not Path(folders.spy_return).exists()  # removed once sent
     # The judge's document (test_a_judge_gets_a_document_from_the_template_with_no_release),
     # with sample text where the dictation goes.
     assert document_text(response.content) == [
@@ -531,6 +535,7 @@ def test_a_preview_of_a_template_changed_meanwhile_is_refused(as_admin):
 def test_a_file_that_cannot_be_filled_is_explained(as_admin, mocker):
     template = _enabled_template(as_admin)
     mocker.patch("transcribe_api.jurisdiction_templates.fill_template", side_effect=KeyError("rId9"))
+    folders = mocker.spy(tempfile, "mkdtemp")
 
     response = preview(as_admin, template, VALUES)
 
@@ -541,6 +546,7 @@ def test_a_file_that_cannot_be_filled_is_explained(as_admin, mocker):
             "Check that it opens in Word, then upload it again."
         ),
     )
+    assert not Path(folders.spy_return).exists()
 
 
 def test_a_local_web_app_may_send_the_files_name(monkeypatch):
