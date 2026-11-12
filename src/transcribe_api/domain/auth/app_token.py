@@ -24,13 +24,13 @@ Claims::
                  ``sess_exp`` and expires no later than it, so re-minting never extends the
                  ``sysadmin`` claim beyond one lifetime after the last Entra verification
     sysadmin     true when the Entra ``roles`` claim held SystemAdministrator at mint
-                 time; never read from the database
+                 time; never read from the database. Needed for a SystemAdministrator context
     assignments  [{"jurisdiction": "ET" | null, "role": "Judge"}, ...]
     ctx          {"jurisdiction": "ET" | null, "role": "Judge"}, or null until chosen
     name         display name (informational; never used to authorise)
 
-Permissions are not in the token: they are derived from ``ctx.role`` and ``sysadmin``
-(domain/auth/permissions.py).
+Permissions are not in the token: they are derived from ``ctx.role`` (and, for a
+SystemAdministrator context, ``sysadmin``: domain/auth/permissions.py).
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ from uuid import UUID
 
 import jwt
 
-from transcribe_api.domain.auth.permissions import STORED_ROLES
+from transcribe_api.domain.auth.permissions import CONTEXT_ROLES, ROLE_SYSTEM_ADMIN
 from transcribe_api.runtime.settings_dictation import get_settings
 
 logger = logging.getLogger(__name__)
@@ -82,7 +82,7 @@ class AppTokenError(Exception):
 @dataclass(frozen=True)
 class Context:
     """A (jurisdiction code, role) pair: an assignment, or the context a user acts in.
-    ``jurisdiction`` is None for the global JurisdictionSuperAdministrator."""
+    ``jurisdiction`` is None for the global JurisdictionSuperAdministrator and for SystemAdministrator."""
 
     jurisdiction: str | None
     role: str
@@ -99,8 +99,11 @@ class Context:
         if jurisdiction is not None and not isinstance(jurisdiction, str):
             msg = "context.jurisdiction must be a string or null"
             raise AppTokenError(msg)
-        if role not in STORED_ROLES:
-            msg = "context.role is not a stored role"
+        if role not in CONTEXT_ROLES:
+            msg = "context.role is not a context role"
+            raise AppTokenError(msg)
+        if role == ROLE_SYSTEM_ADMIN and jurisdiction is not None:
+            msg = "the SystemAdministrator context has no jurisdiction"
             raise AppTokenError(msg)
         return cls(jurisdiction=jurisdiction, role=role)
 
@@ -232,6 +235,9 @@ def verify(token: str) -> AppPrincipal:
         assignments = tuple(Context.from_claim(item) for item in raw_assignments)
         raw_ctx = claims.get("ctx")
         ctx = Context.from_claim(raw_ctx) if raw_ctx is not None else None
+        if not sysadmin and any(c.role == ROLE_SYSTEM_ADMIN for c in (*assignments, ctx) if c is not None):
+            msg = "a SystemAdministrator context needs the sysadmin claim"
+            raise AppTokenError(msg)
         name = claims.get("name") or ""
         expires = int(claims["exp"])
         # A token without it (minted before it existed) is its own session: never longer than itself.

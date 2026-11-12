@@ -1,12 +1,13 @@
-"""The permission matrix, generated from the application (DIAAT-376, DIAAT-389).
+"""The permission matrix, generated from the application (DIAAT-376, DIAAT-389, DIAAT-403).
 
 Nothing here lists routes or who may call them: the routes come from the FastAPI application, the
 permission each declares comes from its ``require_permission`` dependency, and who holds it comes
 from the contract's role map (tests/unit/test_permissions.py has the contract's copy). For every
 route and every kind of caller:
 
-* the route is allowed exactly when the caller's permissions (the active role's, plus the
-  SystemAdministrator's system ones, with or without a context) include one the route asks for;
+* the route is allowed exactly when the permissions of the caller's active role, and of nothing
+  else they hold, include one the route asks for (a SystemAdministrator's system ones only while
+  acting as SystemAdministrator);
 * otherwise it is refused with a 403, ``context_required`` with no context and
   ``permission_denied`` in one, before the handler runs (over HTTP, on the real application).
 
@@ -314,9 +315,12 @@ class Persona:
 
 
 def _persona(name: str, ctx: Context | None, sysadmin: bool) -> Persona:
-    held: set[str] = set(CONTRACT_ROLE_MAP[ctx.role]) if ctx else set()
-    if sysadmin:
-        held |= set(CONTRACT_SYSADMIN)
+    if ctx is None:
+        held: set[str] = set()
+    elif ctx.role == "SystemAdministrator":
+        held = set(CONTRACT_SYSADMIN) if sysadmin else set()
+    else:
+        held = set(CONTRACT_ROLE_MAP[ctx.role])
     return Persona(name, ctx, sysadmin, frozenset(held))
 
 
@@ -326,25 +330,39 @@ _ROLE_CONTEXTS = {
     "JurisdictionAdministrator": Context("IAC", "JurisdictionAdministrator"),
     "JurisdictionSuperAdministrator": Context(None, "JurisdictionSuperAdministrator"),
 }
+SYSTEM_ADMIN_CONTEXT = Context(None, "SystemAdministrator")
 PERSONAS: dict[str, Persona] = {
     **{role: _persona(role, ctx, False) for role, ctx in _ROLE_CONTEXTS.items()},
-    "sysadmin-only": _persona("sysadmin-only", None, True),
+    "SystemAdministrator": _persona("SystemAdministrator", SYSTEM_ADMIN_CONTEXT, True),
+    # A token cannot carry it (app_token.verify), and the check does not rely on that.
+    "SystemAdministrator context without the Entra role": _persona(
+        "SystemAdministrator context without the Entra role", SYSTEM_ADMIN_CONTEXT, False
+    ),
+    "sysadmin with no context": _persona("sysadmin with no context", None, True),
     "no-role": _persona("no-role", None, False),
-    **{f"sysadmin+{role}": _persona(f"sysadmin+{role}", ctx, True) for role, ctx in _ROLE_CONTEXTS.items()},
+    **{f"sysadmin acting as {role}": _persona(f"sysadmin acting as {role}", ctx, True) for role, ctx in _ROLE_CONTEXTS.items()},
 }
 
-# A user who holds two roles acts in one at a time: the matrix runs for each context.
+# A user who holds several roles acts in one at a time: the matrix runs for each context. The second
+# holds every role and the Entra SystemAdministrator role (DIAAT-403: what they see as a Judge is a Judge's).
 TWO_ROLES = (Context("ET", "Judge"), Context("IAC", "JurisdictionAdministrator"))
+EVERY_ROLE = (*_ROLE_CONTEXTS.values(), SYSTEM_ADMIN_CONTEXT)
+HELD_BY = {"two-roles": TWO_ROLES, "every-role": EVERY_ROLE}
 for _ctx in TWO_ROLES:
     PERSONAS[f"two-roles acting as {_ctx.role}@{_ctx.jurisdiction}"] = _persona(
         f"two-roles acting as {_ctx.role}@{_ctx.jurisdiction}", _ctx, False
+    )
+for _ctx in EVERY_ROLE:
+    PERSONAS[f"every-role acting as {_ctx.role}@{_ctx.jurisdiction}"] = _persona(
+        f"every-role acting as {_ctx.role}@{_ctx.jurisdiction}", _ctx, True
     )
 
 
 def user_for(persona: Persona, area: str):
     """The authenticated user the auth dependency would hand the route for this caller."""
     cls = DictationUser if area == "dictation" else RecordingUser
-    held = TWO_ROLES if persona.name.startswith("two-roles") else ((persona.ctx,) if persona.ctx else ())
+    group = persona.name.split(" ", 1)[0]
+    held = HELD_BY.get(group) or ((persona.ctx,) if persona.ctx else ())
     db_user = DbUser(id=uuid4(), email=f"{persona.name}@example.test", azure_user_id=str(uuid4()))
     return cls(db_user=db_user, ctx=persona.ctx, sysadmin=persona.sysadmin, assignments=tuple(held))
 
@@ -424,7 +442,7 @@ def test_a_denial_in_a_context_is_audited_with_the_context_and_one_with_no_conte
 
     audit_rows.clear()
     with pytest.raises(Exception) as no_context:
-        call_dependency(route, user_for(PERSONAS["sysadmin-only"], "dictation"))
+        call_dependency(route, user_for(PERSONAS["sysadmin with no context"], "dictation"))
     assert no_context.value.detail["code"] == "context_required"
     assert audit_rows == []
 
@@ -512,7 +530,7 @@ def test_legal_text_managers_reach_only_legal_text_templates_and_the_admin_landi
 
 
 def test_a_system_administrator_has_only_the_system_routes_and_the_admin_landing_page(routes):
-    system = PERSONAS["sysadmin-only"]
+    system = PERSONAS["SystemAdministrator"]
     reached = {r.key for r in guarded(routes) if allowed(system, r)}
     assert reached == {
         ("POST", "/api/security/alert-test"),  # security.alert_test
@@ -534,7 +552,7 @@ def test_the_matrix_is_printed(routes, capsys):
         print()
         for route in guarded(routes):
             (wanted,) = route.permission_sets()
-            who = [n for n in names if allowed(PERSONAS[n], route) and not n.startswith(("sysadmin+", "two-roles"))]
+            who = [n for n in names if allowed(PERSONAS[n], route) and not n.startswith(("sysadmin ", "two-roles", "every-role"))]
             print(f"{route.method:6} {route.path:75} {'|'.join(sorted(wanted)):45} {', '.join(who)}")
 
 
@@ -577,7 +595,7 @@ def test_the_removed_interim_routes_are_gone(routes):
 
 def test_a_system_administrator_is_refused_the_approvals_and_every_jurisdiction_route(routes):
     """DIAAT-389 and DIAAT-396: no access.approve, no jurisdiction management, no wording."""
-    system = PERSONAS["sysadmin-only"]
+    system = PERSONAS["SystemAdministrator"]
     for key in (
         ("GET", "/api/admin/access-requests"),
         ("POST", "/api/admin/access-requests/{request_id}/approve"),
@@ -591,3 +609,22 @@ def test_a_system_administrator_is_refused_the_approvals_and_every_jurisdiction_
     ):
         route = next(r for r in routes if r.key == key)
         assert not allowed(system, route), key
+
+
+def test_a_user_holding_every_role_reaches_in_each_context_exactly_what_that_role_alone_reaches(routes):
+    """DIAAT-403: the effective permissions are the active context's, never the union of what the user
+    holds. Someone holding every role and the Entra SystemAdministrator role, acting as Judge, reaches the
+    routes a plain Judge reaches and nothing more (no admin, user, role or feature flag route)."""
+    for ctx in EVERY_ROLE:
+        alone = PERSONAS["SystemAdministrator" if ctx.role == "SystemAdministrator" else ctx.role]
+        holder = PERSONAS[f"every-role acting as {ctx.role}@{ctx.jurisdiction}"]
+        assert {r.key for r in guarded(routes) if allowed(holder, r)} == {r.key for r in guarded(routes) if allowed(alone, r)}
+    judge = PERSONAS["every-role acting as Judge@IAC"]
+    assert not [r.key for r in guarded(routes) if r.path.startswith("/api/admin") and allowed(judge, r)]
+
+
+def test_the_system_permissions_never_leak_into_another_context(routes):
+    system_only = {"feature_flags.manage", "system.settings", "security.alert_test", "jurisdiction_super_admin.assign"}
+    for persona in PERSONAS.values():
+        acting_as_system = persona.ctx == SYSTEM_ADMIN_CONTEXT and persona.sysadmin
+        assert bool(persona.permissions & system_only) is acting_as_system, persona.name

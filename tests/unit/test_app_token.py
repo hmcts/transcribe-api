@@ -166,9 +166,19 @@ def test_malformed_claims_are_rejected_even_when_signed(claims):
         app_token.verify(_forge(claims))
 
 
-def test_system_administrator_is_never_a_context_or_an_assignment():
+def test_system_administrator_is_a_context_with_no_jurisdiction_only():
+    assert Context.from_claim({"jurisdiction": None, "role": "SystemAdministrator"}) == Context(None, "SystemAdministrator")
     with pytest.raises(AppTokenError):
-        Context.from_claim({"jurisdiction": None, "role": "SystemAdministrator"})
+        Context.from_claim({"jurisdiction": "IAC", "role": "SystemAdministrator"})
+
+
+def test_a_system_administrator_context_without_the_sysadmin_claim_is_refused():
+    system = {"jurisdiction": None, "role": "SystemAdministrator"}
+    for overrides in ({"ctx": system}, {"assignments": [system]}):
+        with pytest.raises(AppTokenError):
+            app_token.verify(_forge({"sysadmin": False, **overrides}))
+    held = app_token.verify(_forge({"sysadmin": True, "ctx": system, "assignments": [system]}))
+    assert held.ctx == Context(None, "SystemAdministrator")
 
 
 def test_a_token_without_a_context_has_a_null_ctx():

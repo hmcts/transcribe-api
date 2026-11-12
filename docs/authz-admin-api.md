@@ -140,12 +140,12 @@ is one of `assignment.added`, `assignment.removed`, `user.deactivated`, `user.re
  "total": 7}
 ```
 
-`actor_context` is null when the actor had no context (a SystemAdministrator with none); `target.id` is null, and `target.email` the address,
+`actor_context` is null when the actor acted as SystemAdministrator; `target.id` is null, and `target.email` the address,
 for a person who has not signed in. (The audit log keeps an email only for such a target: there is no user to name.)
 
-A SystemAdministrator is not named: an assignment added or removed through the SystemAdministrator's own permissions (no context, or a role
-that could not have made it: the audit row carries `by_system`) shows `"actor": {"id": null, "email": "system administrator"}` to every reader (and `actor_context`
-is null with no context). One acting in a stored role and using that role's own rights is stamped with the role and shown as its holder: the row cannot tell them apart.
+A SystemAdministrator is not named: a change made acting as SystemAdministrator (the audit row carries `by_system`, or that context) shows
+`"actor": {"id": null, "email": "system administrator"}` and a null `actor_context` to every reader. One acting in a stored role has only that role's rights
+(DIAAT-403), and is stamped with the role and shown as its holder.
 
 Every role change, access request and feature flag change is written to the audit log **in the same transaction** as the change (`audit.stage_audit`,
 fail-closed): if the row cannot be written the change is not made (500), so a committed change always has its history row. The audit of everything
@@ -195,8 +195,8 @@ A send that fails is logged with the exception's type only. Seeding the key in K
 
 ## Feature flags
 
-`GET /api/admin/feature-flags` and `PUT /api/admin/feature-flags/{name}` body `{"value": true|false}` (`feature_flags.manage`: the SystemAdministrator's,
-in any context or none). Both answer `{"flags": [{name, value, description, updated_at, updated_by}]}`; `updated_by` is the email of whoever set it
+`GET /api/admin/feature-flags` and `PUT /api/admin/feature-flags/{name}` body `{"value": true|false}` (`feature_flags.manage`: acting as SystemAdministrator
+only). Both answer `{"flags": [{name, value, description, updated_at, updated_by}]}`; `updated_by` is the email of whoever set it
 last (null while it has its default, which comes from configuration: `DICTATION_ENABLED`). The first flag is `dictation_enabled`. 404 `flag_not_found`;
 a value that is not a JSON boolean is 422. Audited as `feature_flag.changed` with `flag`, `from`, `to` and `acted_as`.
 

@@ -4,8 +4,8 @@ Every route of the API declares exactly one of:
 
 * ``require_permission(*permissions)``: the caller must hold at least one of them. What a
   caller holds is derived, with no database read, from the verified BenchNotes token: the
-  role of the context they act in plus, for a SystemAdministrator, the system-level
-  permissions (``permissions.permissions_for``). The dependency returns the authenticated
+  role of the context they act in, and nothing else (``permissions.permissions_for``): a
+  SystemAdministrator has the system-level permissions only in the SystemAdministrator context. The dependency returns the authenticated
   user, as ``get_current_user`` does, so a route takes ``current_user = Depends(require_
   permission("dictation.use"))`` and needs nothing else;
 * an explicit exemption (``public_endpoint``, ``sign_in_endpoint``, ``signed_in_endpoint``,
@@ -15,8 +15,7 @@ Every route of the API declares exactly one of:
 Refusals (``{"detail": {"code": ..., "message": ...}}``, 403):
 
 ``context_required``
-    no (jurisdiction, role) context is chosen and what the caller holds without one (the
-    SystemAdministrator's permissions) does not cover the route.
+    no (jurisdiction, role) context is chosen: nobody holds a permission without one.
 ``permission_denied``
     the context's role does not grant any of the permissions. Audited: an ``ACCESS_DENIED`` row
     (outcome ``denied``, the active context stamped on it) with the caller, the role held and the
@@ -54,7 +53,6 @@ from transcribe_api.domain.auth.context import context_required, error
 from transcribe_api.domain.auth.permissions import (
     GLOBAL_ROLES,
     PERMISSIONS,
-    ROLE_SYSTEM_ADMIN,
     permissions_for,
 )
 from transcribe_api.runtime.log_sanitization import sanitize_for_log
@@ -117,8 +115,8 @@ mark_exempt(signed_url_endpoint, EXEMPT_SIGNED_URL)
 
 
 def permissions_of(user: object) -> list[str]:
-    """The permissions of the user's token: those of the role they act in, plus the system ones
-    for a SystemAdministrator. With no context only the latter (none for anyone else)."""
+    """The permissions of the user's token: those of the role they act in only (none with no
+    context). The SystemAdministrator context's need the token's ``sysadmin`` claim too."""
     ctx = auth_context.context_of(user)
     return permissions_for(ctx.role if ctx else None, auth_context.sysadmin_of(user))
 
@@ -127,11 +125,8 @@ def has_permission(user: object, permission: str) -> bool:
     return permission in permissions_of(user)
 
 
-def _held_roles(ctx: Context | None, sysadmin: bool) -> list[str]:
-    roles = [ctx.role] if ctx else []
-    if sysadmin:
-        roles.append(ROLE_SYSTEM_ADMIN)
-    return roles
+def _held_roles(ctx: Context | None) -> list[str]:
+    return [ctx.role] if ctx else []
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +154,7 @@ async def _audit_denial(
         event_type=AuditEventType.ACCESS_DENIED,
         user_id=str(getattr(user, "id", "unknown")),
         email=str(getattr(user, "email", "") or ""),
-        held_roles=_held_roles(ctx, auth_context.sysadmin_of(user)),
+        held_roles=_held_roles(ctx),
         required_roles=list(wanted),  # the permissions asked for (the column's name is historical)
         resource=sanitize_for_log(f"{request.method} {request.url.path}"),
         detail={"reason": reason},
@@ -187,8 +182,8 @@ async def enforce_permission(request: Request, user: object, wanted: tuple[str, 
 
 def build_require_permission(current_user_dep: Callable) -> Callable[..., Callable]:
     """``require_permission`` for one area: the dependency it returns resolves the caller with
-    ``current_user_dep`` (which also refuses a request with no context from anyone but a
-    SystemAdministrator, and a stale tab's X-Jurisdiction / X-Role), then checks the permission."""
+    ``current_user_dep`` (which also refuses a request with no context, and a stale tab's
+    X-Jurisdiction / X-Role), then checks the permission."""
 
     @functools.cache
     def build(permissions: tuple[str, ...]) -> Callable:

@@ -135,18 +135,30 @@ def test_admin_me_returns_200_for_the_administrator_roles(client, as_user, role)
     assert client.get("/api/admin/me").status_code == 200
 
 
-def test_admin_me_returns_200_for_a_system_administrator_and_never_names_the_role(client, as_user):
-    # The system pages need admin.access, which the Entra role adds; the role itself is never shown.
+def test_admin_me_returns_200_for_a_system_administrator_acting_as_one(client, as_user):
+    from transcribe_api.domain.auth.app_token import Context
     from transcribe_api.domain.auth.auth_models_dictation import AuthenticatedUser
     from transcribe_api.domain.auth.dependencies_dictation import get_current_user
 
     client.app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(
-        db_user=_make_user(), ctx=None, sysadmin=True
+        db_user=_make_user(), ctx=Context(None, "SystemAdministrator"), sysadmin=True
     )
     response = client.get("/api/admin/me")
     assert response.status_code == 200
-    assert response.json()["role"] is None
-    assert "SystemAdministrator" not in response.text
+    assert response.json()["role"] == "SystemAdministrator"
+
+
+def test_admin_me_returns_403_for_a_system_administrator_acting_as_a_judge(client, as_user):
+    from transcribe_api.domain.auth.app_token import Context
+    from transcribe_api.domain.auth.auth_models_dictation import AuthenticatedUser
+    from transcribe_api.domain.auth.dependencies_dictation import get_current_user
+
+    client.app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(
+        db_user=_make_user(), ctx=Context("IAC", "Judge"), sysadmin=True
+    )
+    response = client.get("/api/admin/me")
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "permission_denied"
 
 
 def test_admin_me_returns_403_for_judge_only(client, as_user):
@@ -165,8 +177,8 @@ def test_admin_me_returns_403_for_judge_only(client, as_user):
     [
         ("JurisdictionAdministrator", False, ["Judge", "LegalTextManager"]),
         ("JurisdictionSuperAdministrator", False, ["Judge", "LegalTextManager", "JurisdictionAdministrator"]),
-        (None, True, ["JurisdictionAdministrator", "JurisdictionSuperAdministrator"]),
-        ("JurisdictionSuperAdministrator", True, ["Judge", "LegalTextManager", "JurisdictionAdministrator", "JurisdictionSuperAdministrator"]),
+        ("SystemAdministrator", True, ["JurisdictionAdministrator", "JurisdictionSuperAdministrator"]),
+        ("JurisdictionSuperAdministrator", True, ["Judge", "LegalTextManager", "JurisdictionAdministrator"]),
     ],
 )
 def test_admin_roles_is_an_object_with_the_roles_the_caller_may_assign(client, app, role, sysadmin, expected):
@@ -174,7 +186,7 @@ def test_admin_roles_is_an_object_with_the_roles_the_caller_may_assign(client, a
     from transcribe_api.domain.auth.auth_models_dictation import AuthenticatedUser
     from transcribe_api.domain.auth.dependencies_dictation import get_current_user
 
-    ctx = None if role is None else Context(None if "Super" in role else "IAC", role)
+    ctx = Context(None if role in ("JurisdictionSuperAdministrator", "SystemAdministrator") else "IAC", role)
     app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(db_user=_make_user(), ctx=ctx, sysadmin=sysadmin)
 
     response = client.get("/api/admin/roles")

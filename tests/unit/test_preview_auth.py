@@ -223,7 +223,14 @@ def test_the_preview_user_signs_in_with_no_token_and_holds_every_role(session_cl
     )
     assert pick.status_code == 200
     assert "dictation.use" in pick.json()["me"]["permissions"]
-    assert "feature_flags.manage" in pick.json()["me"]["permissions"]  # the SystemAdministrator role too
+    assert "feature_flags.manage" not in pick.json()["me"]["permissions"]  # a Judge's, and no more
+    assert (None, "SystemAdministrator") in roles  # the SystemAdministrator role too, as a context of its own
+    system = session_client.put(
+        "/api/me/context",
+        json={"jurisdiction": None, "role": "SystemAdministrator"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert "feature_flags.manage" in system.json()["me"]["permissions"]
 
     # Signing in again changes nothing and duplicates nothing.
     again = session_client.post("/api/auth/session")

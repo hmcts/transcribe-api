@@ -368,7 +368,7 @@ def test_a_global_context_is_matched_without_regard_to_case_too(world):
 
 def test_the_role_history_does_not_name_the_system_administrator_who_made_a_change(world, cast):
     made = cast.sysadmin.post("/api/admin/assignments", json=assign_body(user_id=str(cast.nobody.user_id), role=ADMIN))
-    assert made.status_code == 201  # a SystemAdministrator with no context assigns the JurisdictionAdministrator role
+    assert made.status_code == 201  # acting as SystemAdministrator, assigns the JurisdictionAdministrator role
     cast.jsuper.post(
         "/api/admin/assignments", role=SUPER, json=assign_body(user_id=str(cast.judge_iac.user_id), role=LTM)
     )
@@ -385,15 +385,16 @@ def test_the_role_history_does_not_name_the_system_administrator_who_made_a_chan
         assert ordinary["actor_context"] == {"jurisdiction": None, "role": SUPER}
 
 
-def test_a_system_administrator_acting_in_a_role_is_named_only_when_it_used_the_roles_own_rights(world, cast, sysadmin_as_jadmin):
-    """Acting as a JurisdictionAdministrator: assigning the JurisdictionAdministrator role needs the system permission
-    (not named); assigning a Judge is the role's own right (shown as the role's holder)."""
-    assert sysadmin_as_jadmin.post(
+def test_a_system_administrator_acting_in_a_role_has_only_that_roles_rights_and_is_named_as_its_holder(world, cast, sysadmin_as_jadmin):
+    """DIAAT-403: acting as a JurisdictionAdministrator, assigning the JurisdictionAdministrator role (a system
+    permission) is refused; assigning a Judge is the role's own right, shown as the role's holder."""
+    refused = sysadmin_as_jadmin.post(
         "/api/admin/assignments",
         role=ADMIN,
         jurisdiction="IAC",
         json=assign_body(user_id=str(cast.nobody.user_id), role=ADMIN),
-    ).status_code == 201
+    )
+    assert refused.status_code == 403 and refused.json()["detail"]["code"] == "assignment_not_allowed"
     assert sysadmin_as_jadmin.post(
         "/api/admin/assignments",
         role=ADMIN,
@@ -403,7 +404,7 @@ def test_a_system_administrator_acting_in_a_role_is_named_only_when_it_used_the_
 
     history = cast.jsuper.get("/api/admin/role-history", role=SUPER).json()["items"]
     by_role = {item["role"]: item for item in history if item["target"]["id"] == str(cast.nobody.user_id)}
-    assert by_role[ADMIN]["actor"] == {"id": None, "email": "system administrator"}
+    assert ADMIN not in by_role
     assert by_role[JUDGE]["actor"]["id"] == str(cast.sysadmin.user_id)  # the role's own right: its holder
 
 

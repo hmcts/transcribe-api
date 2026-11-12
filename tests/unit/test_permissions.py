@@ -82,37 +82,47 @@ def test_nobody_has_the_any_permissions():
             assert not anyone & set(p.permissions_for(role, sysadmin))
 
 
-def test_a_system_administrator_adds_the_system_permissions_to_any_context_or_none():
-    assert set(p.permissions_for(None, True)) == set(CONTRACT_SYSADMIN)
+def test_the_system_permissions_apply_only_while_acting_as_system_administrator():
+    assert set(p.permissions_for("SystemAdministrator", True)) == set(CONTRACT_SYSADMIN)
     for role in p.STORED_ROLES:
-        assert set(p.permissions_for(role, True)) == set(CONTRACT_ROLE_MAP[role]) | set(CONTRACT_SYSADMIN)
+        assert set(p.permissions_for(role, True)) == set(CONTRACT_ROLE_MAP[role])
+    assert p.permissions_for(None, True) == []
     assert p.permissions_for(None, False) == []
 
 
-def test_a_system_administrator_gets_no_recording_or_dictation_permission_from_the_flag():
-    held = set(p.permissions_for(None, True))
+def test_acting_as_system_administrator_needs_the_entra_role():
+    assert p.permissions_for("SystemAdministrator", False) == []
+
+
+def test_a_system_administrator_gets_no_recording_or_dictation_permission():
+    held = set(p.permissions_for("SystemAdministrator", True))
     assert not held & {"dictation.use", "recording.own", "recording.upload", "documents.export", "app.access"}
 
 
 def test_only_a_super_administrator_creates_jurisdictions_and_only_system_administrators_assign_them():
     for role in p.STORED_ROLES:
-        held = set(p.permissions_for(role))
-        assert ("jurisdiction.create" in held) is (role == "JurisdictionSuperAdministrator")
-        assert "jurisdiction_super_admin.assign" not in held
-        assert ("jurisdiction_admin.assign" in held) is (role == "JurisdictionSuperAdministrator")
-    assert "jurisdiction_super_admin.assign" in p.permissions_for(None, True)
+        for sysadmin in (False, True):
+            held = set(p.permissions_for(role, sysadmin))
+            assert ("jurisdiction.create" in held) is (role == "JurisdictionSuperAdministrator")
+            assert "jurisdiction_super_admin.assign" not in held
+            assert ("jurisdiction_admin.assign" in held) is (role == "JurisdictionSuperAdministrator")
+    assert "jurisdiction_super_admin.assign" in p.permissions_for("SystemAdministrator", True)
 
 
-def test_a_role_that_is_not_stored_has_no_permissions_not_even_with_the_flag_missing():
-    for role in ("Normal", "SystemAdministrator", "Admin", "judge", ""):
-        assert p.permissions_for(role) == []
-    # With the flag, the system permissions only: a made-up role adds nothing.
-    assert set(p.permissions_for("Normal", True)) == set(CONTRACT_SYSADMIN)
+def test_a_role_that_is_not_a_context_role_has_no_permissions_with_or_without_the_flag():
+    for role in ("Normal", "Admin", "judge", "systemadministrator", ""):
+        for sysadmin in (False, True):
+            assert p.permissions_for(role, sysadmin) == []
+
+
+def test_system_administrator_is_a_context_role_but_never_a_stored_one():
+    assert p.CONTEXT_ROLES == (*p.STORED_ROLES, "SystemAdministrator")
 
 
 def test_permissions_come_in_the_order_of_the_list():
-    held = p.permissions_for("JurisdictionSuperAdministrator", True)
-    assert held == [permission for permission in p.PERMISSIONS if permission in held]
+    for role in ("JurisdictionSuperAdministrator", "SystemAdministrator"):
+        held = p.permissions_for(role, True)
+        assert held == [permission for permission in p.PERMISSIONS if permission in held]
 
 
 def test_every_role_map_entry_is_a_listed_permission():

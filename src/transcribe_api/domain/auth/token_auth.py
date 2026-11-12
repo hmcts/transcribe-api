@@ -208,16 +208,15 @@ def build_token_user_dep(
     not block the event loop.
 
     ``require_context``: the route needs the user to be acting in a context, so with none
-    chosen it is 403 ``context_required`` (a SystemAdministrator is let through: their
-    system-level permissions do not depend on a context, and what else they may do is the
-    route's own check). And a tab's advisory X-Jurisdiction and X-Role that differ from the
+    chosen it is 403 ``context_required``, for a SystemAdministrator too (their permissions
+    are those of the SystemAdministrator context, DIAAT-403). And a tab's advisory X-Jurisdiction and X-Role that differ from the
     token's context are 409 ``context_changed``. The no-context endpoints (domain/auth/
     dependencies_session.py) do not require one.
     """
 
     async def _dep(request: Request, principal: Annotated[AppPrincipal, Depends(get_token_auth_user)]) -> Any:
         if require_context:
-            if principal.ctx is None and not principal.sysadmin:
+            if principal.ctx is None:
                 raise context_required()
             check_advisory_headers(request, principal.ctx)
         if inspect.iscoroutinefunction(user_resolver):

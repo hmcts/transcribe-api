@@ -1,7 +1,7 @@
 """The system feature flags, for a SystemAdministrator (DIAAT-392), under ``/api/admin``.
 
 ``GET /api/admin/feature-flags`` lists them and ``PUT /api/admin/feature-flags/{name}`` sets one;
-both need ``feature_flags.manage`` (the SystemAdministrator's, whatever the context). The first
+both need ``feature_flags.manage`` (acting as SystemAdministrator). The first
 flag is ``dictation_enabled``. A change is audited as ``feature_flag.changed`` with the flag, the
 value it had, the value it has now and the roles the caller acted as; the process that took the
 change clears its flag cache, so ``GET /api/flags`` and the dictation off-switch see it at once
@@ -21,7 +21,6 @@ from transcribe_api.domain import feature_flags
 from transcribe_api.domain.auth import context as auth_context
 from transcribe_api.domain.auth.context import error
 from transcribe_api.domain.auth.dependencies_dictation import require_permission
-from transcribe_api.domain.auth.permissions import ROLE_SYSTEM_ADMIN
 from transcribe_api.domain.models_dictation import User
 from transcribe_api.runtime import db_connection
 
@@ -88,11 +87,7 @@ def set_feature_flag(
         raise error(404, "flag_not_found", "There is no such feature flag.")
     ctx = auth_context.context_of(user)
     with Session(db_connection.get_engine()) as session:
-        acted_as = [
-            role
-            for role in (ctx.role if ctx else None, ROLE_SYSTEM_ADMIN if auth_context.sysadmin_of(user) else None)
-            if role
-        ]
+        acted_as = [ctx.role] if ctx else []
         # Audited in the same transaction as the change (fail-closed: domain/feature_flags.set_flag).
         feature_flags.set_flag(session, name, body.value, updated_by=user.id, acted_as=acted_as)
         return _flags(session)

@@ -92,7 +92,10 @@ class Person:
 
     def headers(self, role: str | None = None, jurisdiction: str | None = None) -> dict[str, str]:
         """A bearer for acting as ``role`` in ``jurisdiction`` (None for the global role), or with
-        no context when ``role`` is None. They must hold it: the token has what they hold now."""
+        no context when ``role`` is None (a SystemAdministrator: acting as SystemAdministrator).
+        They must hold it: the token has what they hold now."""
+        if role is None and self.sysadmin:
+            role, jurisdiction = SYSTEM, None
         response = self.sign_in((jurisdiction, role) if role else None)
         assert response.status_code == 200, response.text
         if role:
