@@ -15,8 +15,8 @@ import httpx
 import pytest
 
 TEST_URL = os.environ.get("TEST_URL", "http://localhost:8000").rstrip("/")
-# Jenkinsfile_CNP sets false for PR previews, where token-less requests are the
-# preview user (AUTH_PREVIEW_USER_ENABLED).
+# Jenkinsfile_CNP sets false for PR previews, where a token-less sign-in is the preview
+# user (AUTH_PREVIEW_USER_ENABLED).
 AUTH_EXPECTED = os.environ.get("AUTH_EXPECTED", "true").lower() != "false"
 
 PREVIEW_USER_EMAIL = "preview-user@preview.platform.hmcts.net"
@@ -32,12 +32,20 @@ def test_unauthenticated_request_is_rejected() -> None:
 
 
 @pytest.mark.skipif(AUTH_EXPECTED, reason="only PR previews have the preview user")
-def test_preview_serves_token_less_requests_as_the_preview_user() -> None:
-    jobs = httpx.get(f"{TEST_URL}/api/v1/jobs", timeout=30.0)
-    assert jobs.status_code == 200, f"/api/v1/jobs returned {jobs.status_code}"
-    me = httpx.get(f"{TEST_URL}/api/users/me", timeout=30.0)
-    assert me.status_code == 200, f"/api/users/me returned {me.status_code}"
-    assert me.json()["email"] == PREVIEW_USER_EMAIL
+def test_preview_signs_a_token_less_sign_in_in_as_the_preview_user() -> None:
+    session = httpx.post(f"{TEST_URL}/api/auth/session", timeout=30.0)
+    assert session.status_code == 200, f"/api/auth/session returned {session.status_code}"
+    assert session.json()["me"]["user"]["email"] == PREVIEW_USER_EMAIL
+    headers = {"Authorization": f"Bearer {session.json()['token']}"}
+    me = httpx.get(f"{TEST_URL}/api/me/permissions", headers=headers, timeout=30.0)
+    assert me.status_code == 200, f"/api/me/permissions returned {me.status_code}"
+    assert me.json()["user"]["email"] == PREVIEW_USER_EMAIL
+
+
+@pytest.mark.skipif(AUTH_EXPECTED, reason="only PR previews have the preview user")
+def test_preview_rejects_token_less_requests_other_than_sign_in() -> None:
+    response = httpx.get(f"{TEST_URL}/api/v1/jobs", timeout=30.0)
+    assert response.status_code == 401, f"expected 401 without a token, got {response.status_code}"
 
 
 @pytest.mark.skipif(AUTH_EXPECTED, reason="only PR previews have the preview user")

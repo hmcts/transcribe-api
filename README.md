@@ -70,14 +70,18 @@ Every PR build deploys the API to the CFT preview cluster at `https://transcribe
 ## Local development
 
 ```bash
-docker-compose up -d          # postgres + azurite
+docker compose up -d          # postgres + azurite
 cp .env.example .env
 uv sync --extra dev
 ./run-local.sh                # http://127.0.0.1:8000/docs
 ```
 
-`ENVIRONMENT=local` activates the shared auth library's local-dev bypass, which
-injects a mock identity with **all** roles. Never deploy with it.
+`ENVIRONMENT=local` lets `POST /api/auth/session` sign in as a **dev persona**
+(`X-Dev-Persona: judge-et`, `multi`, `sysadmin`, `no-role`, ...) instead of an Entra token. Create
+them with `.venv/bin/python scripts-seed-personas.py`; the token the API returns is what every other
+route then requires. See [`docs/authz-token-and-context.md`](docs/authz-token-and-context.md). Put an
+`APP_JWT_SIGNING_KEY` in `.env` (`.env.example` says how to generate one); deployed
+environments must set it (the API refuses to start without it). Never deploy with `ENVIRONMENT=local`.
 
 Background pollers do not run in the API process. Set `RUN_WORKERS=true`, or
 run `python -m transcribe_api.worker` as a separate workload.

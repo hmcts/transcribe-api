@@ -2,6 +2,7 @@
 
 import asyncio
 import sys
+import time
 import uuid
 from contextlib import contextmanager
 from unittest.mock import MagicMock
@@ -11,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from tests.unit.jurisdiction_fixtures import IAC_JURISDICTION_ID
 from transcribe_api.api.app import create_app
+from transcribe_api.domain.auth.app_token import Context
 from transcribe_api.domain.models_recording import JobStatus, SpeechBatchJob, User
 from transcribe_api.runtime.settings_recording import get_settings
 
@@ -57,7 +59,7 @@ def _make_user() -> User:
         id=uuid.UUID("00000000-0000-0000-0000-000000000002"),
         azure_user_id="test-azure-user",
         email="test@example.com",
-        role="Normal",
+        role="Judge",
         created_datetime=datetime(2026, 1, 1, tzinfo=UTC),
     )
 
@@ -68,11 +70,23 @@ def as_current_user(client):
     from transcribe_api.domain.auth.dependencies_recording import get_current_user
 
     user = _make_user()
-    current_user = AuthenticatedUser(db_user=user, app_roles=["Normal"])
+    current_user = AuthenticatedUser(db_user=user, ctx=Context("IAC", "Judge"))
     app = client.app
     app.dependency_overrides[get_current_user] = lambda: current_user
     yield current_user
     app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.fixture
+def as_sysadmin_only(client):
+    """A SystemAdministrator who has chosen no context (system pages only)."""
+    from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
+    from transcribe_api.domain.auth.dependencies_recording import get_current_user
+
+    current_user = AuthenticatedUser(db_user=_make_user(), ctx=None, sysadmin=True)
+    client.app.dependency_overrides[get_current_user] = lambda: current_user
+    yield current_user
+    client.app.dependency_overrides.pop(get_current_user, None)
 
 
 @pytest.fixture
@@ -81,7 +95,8 @@ def as_admin_user(client):
     from transcribe_api.domain.auth.dependencies_recording import get_current_user
 
     user = _make_user()
-    current_user = AuthenticatedUser(db_user=user, app_roles=["SystemAdministrator"])
+    # A SystemAdministrator who is also acting as a Judge: the Entra role adds nothing over their own recordings.
+    current_user = AuthenticatedUser(db_user=user, ctx=Context("IAC", "Judge"), sysadmin=True)
     app = client.app
     app.dependency_overrides[get_current_user] = lambda: current_user
     yield current_user
@@ -324,6 +339,8 @@ class TestUploadAudioLocalBackend:
         body = response.json()
         assert body["audio_url"].startswith("https://abc123.ngrok-free.app/api/v1/local-audio/")
 
+        # The URL is signed: the tunnel can fetch it with no bearer token.
+        assert "?expires=" in body["audio_url"] and "&sig=" in body["audio_url"]
         get_response = client.get(body["audio_url"].replace("https://abc123.ngrok-free.app", ""))
         assert get_response.status_code == 200
         # The stored/served bytes are the transcoded WAV, not the raw upload.
@@ -342,21 +359,92 @@ class TestUploadAudioLocalBackend:
 
 
 class TestLocalAudio:
+    """The one route with no bearer token (Azure Speech cannot send ours): its URL is signed and
+    expires (DIAAT-376), and it 404s unless the local backend is on."""
+
+    @pytest.fixture
+    def local_backend(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
+        monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path))
+        monkeypatch.setenv("LOCAL_AUDIO_BASE_URL", "https://abc123.ngrok-free.app")
+        get_settings.cache_clear()
+        yield tmp_path
+        get_settings.cache_clear()
+
+    def _signed(self, blob_name):
+        from transcribe_api.stt import local_storage
+
+        local_storage.save(b"WAVDATA", blob_name)
+        return local_storage.build_url(blob_name).replace("https://abc123.ngrok-free.app", "")
+
     def test_404_when_backend_is_not_local(self, client):
         response = client.get("/api/v1/local-audio/uploads/x/hearing.wav")
         assert response.status_code == 404
 
-    def test_404_for_path_traversal(self, tmp_path, monkeypatch, client):
-        from transcribe_api.runtime.settings_recording import get_settings
-
-        monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
-        monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path))
+    def test_404_when_backend_is_not_local_even_with_a_signature(self, client, local_backend, monkeypatch):
+        url = self._signed("uploads/x/hearing.wav")
+        monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "azure")
         get_settings.cache_clear()
+        assert client.get(url).status_code == 404
 
-        response = client.get("/api/v1/local-audio/../../etc/passwd")
+    def test_serves_the_file_with_a_valid_signature_and_needs_no_bearer_token(self, client, local_backend):
+        response = client.get(self._signed("uploads/x/hearing.wav"))
+        assert response.status_code == 200
+        assert response.content == b"WAVDATA"
 
-        get_settings.cache_clear()
+    def test_404_without_a_signature(self, client, local_backend):
+        self._signed("uploads/x/hearing.wav")
+        assert client.get("/api/v1/local-audio/uploads/x/hearing.wav").status_code == 404
+
+    def test_404_for_a_wrong_signature_or_another_files_signature(self, client, local_backend):
+        from transcribe_api.stt import local_storage
+
+        url = self._signed("uploads/x/hearing.wav")
+        path, _, query = url.partition("?")
+        assert client.get(f"{path}?{query[:-4]}0000").status_code == 404
+        local_storage.save(b"OTHER", "uploads/x/other.wav")
+        assert client.get(f"/api/v1/local-audio/uploads/x/other.wav?{query}").status_code == 404
+
+    def test_404_not_500_for_a_signature_with_non_ascii_characters(self, client, local_backend):
+        """Review finding S-low (d): ``hmac.compare_digest`` raises TypeError for a non-ASCII str."""
+        from transcribe_api.stt import local_storage
+
+        url = self._signed("uploads/x/hearing.wav")
+        path, _, query = url.partition("?")
+        expires = query.split("&")[0]
+        assert client.get(f"{path}?{expires}&sig=%C3%A9%E2%82%AC%F0%9F%98%80").status_code == 404
+        assert client.get(f"{path}?{expires}&sig=%ED%B2%80").status_code == 404  # a lone surrogate
+        assert local_storage.signature_is_valid("uploads/x/hearing.wav", int(time.time()) + 60, "é€") is False
+
+    def test_404_when_the_url_has_expired(self, client, local_backend):
+        from transcribe_api.stt import local_storage
+
+        local_storage.save(b"WAVDATA", "uploads/x/hearing.wav")
+        expired = int(time.time()) - 10
+        sig = local_storage.sign("uploads/x/hearing.wav", expired)
+        assert client.get(f"/api/v1/local-audio/uploads/x/hearing.wav?expires={expired}&sig={sig}").status_code == 404
+
+    def test_404_for_path_traversal_even_when_signed(self, client, local_backend):
+        from transcribe_api.stt import local_storage
+
+        expires = int(time.time()) + 60
+        sig = local_storage.sign("../../etc/passwd", expires)
+        response = client.get(f"/api/v1/local-audio/../../etc/passwd?expires={expires}&sig={sig}")
         assert response.status_code == 404
+
+    def test_404_for_path_traversal(self, local_backend, client):
+        response = client.get("/api/v1/local-audio/../../etc/passwd")
+        assert response.status_code == 404
+
+    def test_the_signature_is_not_the_token_key_and_changes_with_it(self, local_backend, monkeypatch):
+        from transcribe_api.stt import local_storage
+
+        before = local_storage.sign("uploads/x/hearing.wav", 4102444800)
+        monkeypatch.setenv("APP_JWT_SIGNING_KEY", "another-signing-key-0123456789abcdefghij")
+        from transcribe_api.runtime import settings_dictation
+
+        settings_dictation.get_settings.cache_clear()
+        assert local_storage.sign("uploads/x/hearing.wav", 4102444800) != before
 
 
 class TestGetJobAudio:
@@ -1026,21 +1114,35 @@ class TestGetJob:
         response = client.get(f"/api/v1/jobs/{job.id}")
         assert response.status_code == 404
 
-    def test_legacy_job_returns_404_for_normal_user(self, client, as_current_user, mocker):
-        # Pre-migration jobs (user_id=None) may contain sensitive hearing content;
-        # both reads and writes are restricted to SystemAdministrator.
+    def test_legacy_job_returns_404_for_a_judge(self, client, as_current_user, mocker):
+        # Pre-migration jobs (user_id=None) may contain sensitive hearing content: nobody
+        # owns them, so nobody can read or write them (DIAAT-389; DIAAT-397 decides their fate).
         job = _make_job(user_id=None)
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
         response = client.get(f"/api/v1/jobs/{job.id}")
         assert response.status_code == 404
 
-    def test_legacy_job_readable_by_system_administrator(self, client, as_admin_user, mocker):
+    def test_legacy_job_is_not_readable_by_a_system_administrator(self, client, as_admin_user, mocker):
         job = _make_job(user_id=None)
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
         response = client.get(f"/api/v1/jobs/{job.id}")
-        assert response.status_code == 200
+        assert response.status_code == 404
+
+    def test_another_users_job_is_not_readable_by_a_system_administrator(self, client, as_admin_user, mocker):
+        job = _make_job()
+        job.user_id = uuid.uuid4()
+        mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
+
+        response = client.get(f"/api/v1/jobs/{job.id}")
+        assert response.status_code == 404
+
+    def test_a_system_administrator_with_no_context_reaches_no_recording_route(self, client, as_sysadmin_only):
+        for method, path in (("get", "/api/v1/jobs"), ("get", f"/api/v1/jobs/{uuid.uuid4()}"), ("delete", f"/api/v1/jobs/{uuid.uuid4()}")):
+            response = getattr(client, method)(path)
+            assert response.status_code == 403, path
+            assert response.json()["detail"]["code"] == "context_required"
 
     def test_includes_accuracy_and_needs_review_for_succeeded_job(
         self, client, as_current_user, mocker
@@ -1247,9 +1349,8 @@ class TestUploadBaselineTranscript:
         )
         assert response.status_code == 404
 
-    def test_legacy_job_returns_404_for_normal_user(self, client, as_current_user, mocker):
-        # Pre-migration jobs (user_id=None) are restricted to SystemAdministrator
-        # for both reads and writes.
+    def test_legacy_job_returns_404_for_a_judge(self, client, as_current_user, mocker):
+        # Pre-migration jobs (user_id=None) have no owner: nobody can write them (DIAAT-389).
         job = _make_job(status=JobStatus.SUCCEEDED, user_id=None)
         job.dialogue_entries = [{"speaker": "0", "text": "hi", "start_time": 0, "end_time": 1}]
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
@@ -1260,8 +1361,8 @@ class TestUploadBaselineTranscript:
         )
         assert response.status_code == 404
 
-    def test_legacy_job_accessible_to_system_administrator(self, client, as_admin_user, mocker):
-        # SystemAdministrators may mutate legacy (user_id=None) jobs.
+    def test_legacy_job_is_not_writable_by_a_system_administrator(self, client, as_admin_user, mocker):
+        # A SystemAdministrator no longer mutates legacy (user_id=None) jobs (DIAAT-389).
         from transcribe_api.runtime.db_recording import get_session
 
         self._patch_session(client, mocker)
@@ -1277,7 +1378,7 @@ class TestUploadBaselineTranscript:
         finally:
             client.app.dependency_overrides.pop(get_session, None)
 
-        assert response.status_code == 200
+        assert response.status_code == 404
 
     def test_returns_422_when_job_not_succeeded(self, client, as_current_user, mocker):
         job = _make_job(status=JobStatus.SUBMITTED)
@@ -3066,15 +3167,15 @@ class TestDeleteJob:
         mock_session.delete.assert_called_once_with(job)
         mock_session.commit.assert_called_once()
 
-    def test_legacy_job_returns_404_for_normal_user(self, client, as_current_user, mocker):
-        # Pre-migration jobs (user_id=None) are restricted to SystemAdministrator.
+    def test_legacy_job_returns_404_for_a_judge(self, client, as_current_user, mocker):
+        # Pre-migration jobs (user_id=None) have no owner: nobody can delete them (DIAAT-389).
         job = _make_job(user_id=None)
         mocker.patch("transcribe_api.api.routes_recording.get_job_by_id", return_value=job)
 
         response = client.delete(f"/api/v1/jobs/{job.id}")
         assert response.status_code == 404
 
-    def test_legacy_job_deletable_by_system_administrator(self, client, as_admin_user, mocker):
+    def test_legacy_job_is_not_deletable_by_a_system_administrator(self, client, as_admin_user, mocker):
         from transcribe_api.runtime.db_recording import get_session
 
         job = _make_job(user_id=None)
@@ -3088,8 +3189,8 @@ class TestDeleteJob:
         finally:
             client.app.dependency_overrides.pop(get_session, None)
 
-        assert response.status_code == 204
-        mock_session.delete.assert_called_once_with(job)
+        assert response.status_code == 404
+        mock_session.delete.assert_not_called()
 
     def test_deletes_local_audio_blob(self, client, as_current_user, mocker, tmp_path, monkeypatch):
         from transcribe_api.runtime.db_recording import get_session

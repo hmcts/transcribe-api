@@ -46,6 +46,10 @@ AUDIT_ACTIONS_APP = (
     "transcript.view",
     "transcript.export",
     "transcript.edit",
+    # DIAAT-395: what else a Judge does to a recording's transcript (its history, GET /jobs/{id}/history).
+    "transcript.rename_speaker",
+    "transcript.rollback",
+    "transcript.accept",
     "transcript.delete",
     "job.submit",
     "job.delete",
@@ -59,6 +63,20 @@ AUDIT_ACTIONS_APP = (
     "template.add",
     "template.edit",
     "template.delete",
+    # DIAAT-390: a user leaving a jurisdiction (their roles there are removed).
+    "membership.leave",
+    # DIAAT-383: role assignments and users (the role-change history reads these).
+    "assignment.added",
+    "assignment.removed",
+    "user.deactivated",
+    "user.reactivated",
+    # DIAAT-396: access requests (approved and rejected are in the role-change history).
+    "access_request.created",
+    "access_request.approved",
+    "access_request.rejected",
+    "access_request.withdrawn",
+    # DIAAT-392: a system feature flag was set (from, to, and the role acted as).
+    "feature_flag.changed",
 )
 AUDIT_ACTIONS = AUDIT_ACTIONS_AUTH_LIBRARY + AUDIT_ACTIONS_APP
 

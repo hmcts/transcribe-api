@@ -332,6 +332,7 @@ def engine():
 @pytest.fixture
 def service(tel, engine, monkeypatch) -> Iterator[Service]:
     from transcribe_api.api.app import create_app
+    from transcribe_api.domain.auth.app_token import Context
     from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
     from transcribe_api.domain.auth.dependencies_recording import get_current_user
     from transcribe_api.runtime.db_recording import get_session
@@ -361,7 +362,7 @@ def service(tel, engine, monkeypatch) -> Iterator[Service]:
         id=USER_ID,
         email=USER_EMAIL,
         azure_user_id="clerk-azure-oid",
-        role="Normal",
+        role="Judge",
         created_datetime=datetime(2026, 1, 1, tzinfo=UTC),
     )
     with Session(engine) as session:
@@ -380,7 +381,7 @@ def service(tel, engine, monkeypatch) -> Iterator[Service]:
 
     settings_dictation.get_settings.cache_clear()
     app = create_app()
-    current = AuthenticatedUser(db_user=user, app_roles=["Normal"])
+    current = AuthenticatedUser(db_user=user, ctx=Context("IAC", "Judge"))
     app.dependency_overrides[get_current_user] = lambda: current
     app.dependency_overrides[get_session] = session_override
     client = TestClient(

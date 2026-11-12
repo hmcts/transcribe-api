@@ -16,25 +16,29 @@ therefore always one the user belongs to, and the response says which it is.
 
 ## Who may edit (`/api/admin/document-content...`)
 
-| Active jurisdiction | Who | Read | Write |
-|---|---|---|---|
-| any | an **admin** member of it (membership role `admin`, any BenchNotes app role) | yes | yes |
-| IAC only | holder of the global **LegalTextManager** app role (as before DIAAT-342) | yes | yes |
-| IAC only | holder of **SystemAdministrator** (as before: read only) | yes | no |
-| any | everyone else (judges, an admin of another jurisdiction, LegalTextManager outside the IAC, SystemAdministrator outside the IAC) | no | no |
+From DIAAT-373 the role is the one the user is **acting as** in the active jurisdiction (the
+`ctx` of their BenchNotes token: `docs/authz-token-and-context.md`), not an Entra role.
 
-So existing IAC admins (LegalTextManager) see no change. SystemAdministrator has no
-special access to other jurisdictions' legal wording: to edit one it must be made an
-admin member of that jurisdiction (an audited step in the admin area).
+| Active jurisdiction | Acting as | Read | Write |
+|---|---|---|---|
+| any | **LegalTextManager** in it (`legal_text.manage`) | yes | yes |
+| any | everyone else: a Judge, a JurisdictionAdministrator, a JurisdictionSuperAdministrator, a LegalTextManager of another jurisdiction | no | no |
+
+Since DIAAT-376 the permission is `legal_text.manage`, which only the LegalTextManager holds. A
+JurisdictionAdministrator (who could edit it under DIAAT-342) edits the *screen* wording of its
+jurisdiction (`jurisdiction.wording.edit`), not its legal text; and a SystemAdministrator no longer reads
+the IAC's legal wording either (DIAAT-389: system-level work only). The LegalTextManager is held in a
+jurisdiction (it was one global Entra role that meant the IAC).
 
 Errors (same shapes as the screen wording editor):
 
-- `403 {"detail": {"code": "jurisdiction_not_available", ...}}`: the header names a
-  jurisdiction the user does not belong to (or that is disabled). Read and write alike.
-- `403 {"detail": {"code": "jurisdiction_admin_required", "message": ...}}`: a member
-  who may not edit this jurisdiction's legal wording. The refusal is audited
+- `409 {"detail": {"code": "context_changed", ...}}`: the header names a jurisdiction that is
+  not the one the user's token acts in (a stale tab). `403 jurisdiction_not_available`: the
+  token's jurisdiction has been disabled since. Read and write alike.
+- `403 {"detail": {"code": "permission_denied", "message": ...}}`: someone acting as a role that
+  may not edit legal wording (was `jurisdiction_admin_required`). The refusal is audited
   (`ACCESS_DENIED`).
-- `403 no_jurisdiction` / `409 jurisdiction_choice_required`: as everywhere else.
+- `403 context_required` (no context chosen) / `403 no_jurisdiction` (a global role): as everywhere else.
 - `404 {"detail": "Not available in this jurisdiction"}`: the jurisdiction does not use
   the `iac_decision` template (it has no legal wording, as for its judges' form).
 
@@ -42,10 +46,9 @@ Responses are `Cache-Control: no-store`.
 
 ## How the UI learns what to show
 
-- `GET /api/jurisdictions/me` (unchanged): `current.role == "admin"` means the user is an
-  admin of the active jurisdiction, and `current.template == "iac_decision"` that it has
-  legal wording at all. Show the legal wording editor when both hold. The global
-  LegalTextManager (IAC) already reaches the admin area through `GET /api/admin/me`.
+- `GET /api/me/permissions` says what the user is acting as (`active.role`), and
+  `GET /api/jurisdictions/current` that the jurisdiction's `template == "iac_decision"`, which means
+  it has legal wording at all. Show the legal wording editor for a LegalTextManager (`legal_text.manage`) when it does.
 - The editor's own `GET /api/admin/document-content` says which jurisdiction it edits
   (`jurisdiction`) and whether it has legal wording (`has_legal_wording`).
 

@@ -127,6 +127,7 @@ pythonpath = ["src", "."]
 addopts = "--cov=transcribe_api"
 markers = [
     "real_jurisdictions: use the real jurisdiction lookup, not every user an IAC judge (tests/unit/conftest.py)",
+    "real_feature_flags: read the system_feature_flag table, not assume no flag has a row (tests/unit/conftest.py)",
 ]
 
 [tool.ruff]
@@ -140,4 +141,15 @@ extend-select = ["E4", "E7", "E9", "F"]
 ignore = ["BLE001"]
 
 [tool.ruff.lint.flake8-bugbear]
-extend-immutable-calls = ["fastapi.Depends", "fastapi.File", "fastapi.Form", "fastapi.Query", "fastapi.Header", "fastapi.Security"]
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Query",
+    "fastapi.Header",
+    "fastapi.Security",
+    # DIAAT-376: build a dependency once, from the permissions a route needs; a frozen context.
+    "transcribe_api.domain.auth.dependencies_dictation.require_permission",
+    "transcribe_api.domain.auth.dependencies_recording.require_permission",
+    "transcribe_api.domain.auth.app_token.Context",
+]

@@ -114,6 +114,10 @@ class CorrectionEntry(SQLModel):
     # rollback_to_history_entry restores from them.
     previous_phrase: str | None = None
     new_phrase: str | None = None
+    # DIAAT-395: who made the change (the internal user id) and acting as which role. None on
+    # entries made before it was recorded. Never sent to the browser with the transcript.
+    actor_id: str | None = None
+    actor_role: str | None = None
 
 
 def new_segment_id() -> str:
@@ -547,7 +551,8 @@ class CorrectionDatasetEntry(BaseTable, table=True):
 # models_dictation, and re-exported here so recording-side imports keep working.
 #
 # Behaviour change to note: recording had `role: str | None = None`; the merged
-# model uses dictation's `role: str = "Normal"` (indexed).
+# model has dictation's `role` column (indexed; nullable since 0009, and no longer read:
+# what a user may do is their role assignments, DIAAT-382).
 from transcribe_api.domain.models_dictation import User  # noqa: E402,F401  (re-export)
 
 

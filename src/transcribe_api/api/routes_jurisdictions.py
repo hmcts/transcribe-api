@@ -1,46 +1,38 @@
-"""The user's jurisdictions (DIAAT-322): what the web app loads before anything else.
+"""The jurisdiction a user is working in (DIAAT-322, DIAAT-390).
 
-``GET /api/jurisdictions/me`` never fails for a signed-in user: it says whether they
-are ready to work (and in which jurisdiction, with its wording), have no jurisdiction
-(the web app shows how to ask for access) or must choose one.
+Which jurisdiction (and role) a user works as is chosen after sign-in and carried in their
+BenchNotes token (api/routes_session.py: ``PUT /api/me/context``, ``GET /api/me/permissions``);
+``GET /api/jurisdictions/me`` and ``PUT /api/jurisdictions/active`` that used to say and
+change it are gone.
 
-``PUT /api/jurisdictions/active`` records the one a judge in several chose to work in
-(DIAAT-332): requests that name none use it, and so does their next sign-in.
+``GET /api/jurisdictions/current`` is the active jurisdiction's own setup: what the web app
+loads once a context is chosen (its template, its features and its wording).
 
 ``/api/jurisdictions/wording`` is for a jurisdiction's own admins (DIAAT-356): the
-wording of the jurisdiction they are working in, and only that one.
+wording of the jurisdiction they are working in, and only that one. It needs
+``jurisdiction.wording.edit``, which a JurisdictionAdministrator holds in the jurisdiction it acts
+in (the jurisdiction is the token's context, so it is in scope by construction); the global
+JurisdictionSuperAdministrator has no active jurisdiction to edit here (403 ``no_jurisdiction``).
 """
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, StringConstraints
+from fastapi import APIRouter, Depends, HTTPException, Response
+from pydantic import BaseModel
 from sqlmodel import Session
 
 from transcribe_api import jurisdiction_templates, jurisdictions_admin
 from transcribe_api.domain.audit import record_audit
-from transcribe_api.domain.auth.approles_dictation import get_role
 from transcribe_api.domain.auth.dependencies_dictation import (
     get_active_jurisdiction,
-    get_allowlisted_user,
-    get_current_user,
+    require_permission,
 )
 from transcribe_api.domain.jurisdictions import (
-    HEADER,
-    NOT_AVAILABLE,
-    ROLE_ADMIN,
     WORDING_KEYS,
     ActiveJurisdiction,
     JurisdictionFeatures,
-    Membership,
-    choose,
-    load_memberships,
-    not_available,
-    remember_choice,
-    resolve,
 )
 from transcribe_api.domain.models_dictation import JurisdictionTemplate, User
 from transcribe_api.runtime.db_connection import get_engine
@@ -48,105 +40,34 @@ from transcribe_api.runtime.db_connection import get_engine
 router = APIRouter(tags=["jurisdictions"])
 
 
-class JurisdictionSummary(BaseModel):
+class CurrentJurisdiction(BaseModel):
     code: str
     # What users see: the display name, else the name (DIAAT-345).
     name: str
-    role: str
-    # draft or test: seen only by its admins (and, in test, its testers) (DIAAT-345).
-    stage: str
-
-
-class CurrentJurisdiction(JurisdictionSummary):
     template: str | None
     features: JurisdictionFeatures
     wording: dict[str, str]
 
 
-class MyJurisdictionsResponse(BaseModel):
-    # ready: working in ``current``; no_jurisdiction: none at all; choose: several and
-    # no choice yet.
-    status: Literal["ready", "no_jurisdiction", "choose"]
-    current: CurrentJurisdiction | None
-    jurisdictions: list[JurisdictionSummary]
-
-
-class ChooseJurisdictionRequest(BaseModel):
-    # Stripped before the length check, as the code is matched (choose).
-    code: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=16)]
-
-
-def _summary(membership: Membership) -> JurisdictionSummary:
-    return JurisdictionSummary(
-        code=membership.code, name=membership.shown_name, role=membership.role, stage=membership.stage
-    )
-
-
-def _current(membership: Membership) -> CurrentJurisdiction:
-    settings = membership.settings
+# A plain def: FastAPI runs it in the threadpool, as the lookup is synchronous.
+@router.get("/jurisdictions/current", response_model=CurrentJurisdiction)
+def current_jurisdiction(
+    response: Response,
+    _user=Depends(require_permission("app.access")),
+    active: ActiveJurisdiction = Depends(get_active_jurisdiction),
+) -> CurrentJurisdiction:
+    """The jurisdiction the user is acting in: its template, features and wording. 403
+    ``context_required`` before a context is chosen, and ``no_jurisdiction`` for a role
+    that has none (the global one)."""
+    response.headers["Cache-Control"] = "no-store"
+    settings = active.settings
     return CurrentJurisdiction(
-        **_summary(membership).model_dump(),
+        code=active.code,
+        name=active.current.shown_name,
         template=settings.template,
         features=settings.features,
         wording=settings.wording,
     )
-
-
-# A plain def: FastAPI runs it in the threadpool, as the query is synchronous.
-@router.get("/jurisdictions/me", response_model=MyJurisdictionsResponse)
-def my_jurisdictions(
-    request: Request,
-    response: Response,
-    current_user: User = Depends(get_current_user),
-) -> MyJurisdictionsResponse:
-    """The signed-in user's jurisdictions and the one this tab works in.
-
-    A header naming a jurisdiction the user no longer has is ignored: the answer is
-    then what they would get without it, so the web app can move the tab on.
-    """
-    response.headers["Cache-Control"] = "no-store"
-    memberships = tuple(load_memberships(current_user.id))
-    if not memberships:
-        return MyJurisdictionsResponse(status="no_jurisdiction", current=None, jurisdictions=[])
-    requested = request.headers.get(HEADER)
-    try:
-        try:
-            active = choose(memberships, current_user.active_jurisdiction_id, requested)
-        except HTTPException as error:
-            if not requested or error.detail["code"] != NOT_AVAILABLE:
-                raise
-            active = choose(memberships, current_user.active_jurisdiction_id, None)
-    except HTTPException:
-        # With memberships, the only refusal left is "choose one".
-        return MyJurisdictionsResponse(
-            status="choose", current=None, jurisdictions=[_summary(m) for m in memberships]
-        )
-    return _ready(active)
-
-
-def _ready(active: ActiveJurisdiction) -> MyJurisdictionsResponse:
-    return MyJurisdictionsResponse(
-        status="ready", current=_current(active.current), jurisdictions=[_summary(m) for m in active.memberships]
-    )
-
-
-# A plain def, as above.
-@router.put("/jurisdictions/active", response_model=MyJurisdictionsResponse)
-def choose_jurisdiction(
-    body: ChooseJurisdictionRequest,
-    response: Response,
-    current_user: User = Depends(get_current_user),
-) -> MyJurisdictionsResponse:
-    """Work in ``code``, one of the user's jurisdictions, from now on (DIAAT-332).
-
-    403 ``no_jurisdiction`` or ``jurisdiction_not_available`` as for any request: a
-    user cannot choose a jurisdiction they do not belong to.
-    """
-    response.headers["Cache-Control"] = "no-store"
-    active = resolve(current_user.id, None, body.code)
-    if not remember_choice(current_user.id, active.id):
-        raise not_available()  # the user is gone
-    return _ready(active)
 
 
 class JurisdictionWording(BaseModel):
@@ -164,29 +85,16 @@ class WordingUpdate(BaseModel):
     version: str | None = None
 
 
-ADMIN_REQUIRED = "jurisdiction_admin_required"
-
-# A BenchNotes app role as well, as for dictation (routes_dictation.py): a membership
-# alone does not let someone in.
-_ANY_APP_ROLE = get_allowlisted_user(
-    required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")]
-)
-
-
-def _as_its_admin(
+def _wording_scope(
     response: Response,
-    _user: User = Depends(_ANY_APP_ROLE),
+    _user=Depends(require_permission("jurisdiction.wording.edit")),
     active: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> ActiveJurisdiction:
-    """The request's jurisdiction, if the user is one of its admins. Being an admin in
-    one jurisdiction gives nothing in another: the jurisdiction is the one they are
-    working in, which is always one of their own."""
+    """The request's jurisdiction, for someone who may edit its wording (``jurisdiction.wording.edit``).
+    The permission is the active role's, and applies to the jurisdiction they are working in (the
+    token's context, which is always one of their own): holding it in one jurisdiction gives
+    nothing in another."""
     response.headers["Cache-Control"] = "no-store"
-    if active.current.role != ROLE_ADMIN:
-        raise HTTPException(
-            status_code=403,
-            detail={"code": ADMIN_REQUIRED, "message": f"Only an admin for {active.code} can change its wording."},
-        )
     return active
 
 
@@ -198,7 +106,7 @@ def _wording(active: ActiveJurisdiction, wording: dict[str, str], version: str) 
 
 # Plain defs, as above.
 @router.get("/jurisdictions/wording", response_model=JurisdictionWording)
-def jurisdiction_wording(active: ActiveJurisdiction = Depends(_as_its_admin)) -> JurisdictionWording:
+def jurisdiction_wording(active: ActiveJurisdiction = Depends(_wording_scope)) -> JurisdictionWording:
     """The wording of the jurisdiction the admin is working in."""
     with Session(get_engine()) as session:
         wording, version = jurisdictions_admin.wording_and_version(session, active.code)
@@ -208,8 +116,8 @@ def jurisdiction_wording(active: ActiveJurisdiction = Depends(_as_its_admin)) ->
 @router.put("/jurisdictions/wording", response_model=JurisdictionWording)
 def update_jurisdiction_wording(
     body: WordingUpdate,
-    current_user: User = Depends(get_current_user),
-    active: ActiveJurisdiction = Depends(_as_its_admin),
+    active: ActiveJurisdiction = Depends(_wording_scope),
+    current_user: User = Depends(require_permission("jurisdiction.wording.edit")),
 ) -> JurisdictionWording:
     """Replace that jurisdiction's wording; blank text means the default. 400 for an
     unknown key or text that is too long, 409 if it changed since ``version``."""
@@ -286,10 +194,11 @@ def template_forms(rows: list[JurisdictionTemplate], jurisdiction_id: UUID) -> l
 
 @router.get("/jurisdictions/templates", response_model=list[AvailableTemplate])
 def available_templates(
-    _user: User = Depends(_ANY_APP_ROLE),
+    _user=Depends(require_permission("recording.own", "dictation.use")),
     active: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> list[AvailableTemplate]:
-    """The templates the jurisdiction's judges can choose, with the fields each asks for."""
+    """The templates the jurisdiction's judges can choose, with the fields each asks for.
+    For a judge, in the jurisdiction they are working in."""
     with Session(get_engine()) as session:
         rows = jurisdiction_templates.available_templates(session, active.id)
     # Outside the session: the legal frameworks are read in their own.

@@ -1,9 +1,10 @@
-"""FastAPI authentication and RBAC dependencies for courtstranscribe.
+"""FastAPI authentication and permission dependencies for the dictation routes.
 
-Authentication and role enforcement are provided by the hmcts-fastapi-azure-auth
-library. This module wires the library's factories to the application's User DB
-model, exposing the same get_current_user / get_allowlisted_user interface that
-all route files already import.
+Authentication is the BenchNotes access token (domain/auth/token_auth.py); what the caller
+may do is the central permission model's (domain/auth/authorisation.py, DIAAT-376). This
+module wires them to the application's User DB model: ``get_current_user`` (a user acting in
+a context), ``signed_in_endpoint`` (any signed-in user) and ``require_permission``, which every
+dictation route declares.
 """
 
 from __future__ import annotations
@@ -11,16 +12,15 @@ from __future__ import annotations
 import logging
 import re
 
-from hmcts_azure_auth import get_allowlisted_user as _lib_get_allowlisted_user
-from hmcts_azure_auth.audit import AuditWriter
-from hmcts_azure_auth.roles import get_valid_roles
-from sqlmodel import Session, select
+from fastapi import Depends
+from sqlmodel import Session
 
+from transcribe_api.domain.auth.app_token import AppPrincipal
 from transcribe_api.domain.auth.auth_models_dictation import AuthenticatedUser
+from transcribe_api.domain.auth.authorisation import EXEMPT_SIGNED_IN, build_require_permission, mark_exempt
 from transcribe_api.domain.auth.token_auth import build_token_user_dep
-from transcribe_api.domain.auth.user_creation import insert_user_or_load_existing
+from transcribe_api.domain.auth.user_loading import load_user
 from transcribe_api.domain.jurisdictions import jurisdiction_dependency
-from transcribe_api.domain.models_dictation import User
 from transcribe_api.runtime.db_connection import get_engine
 
 logger = logging.getLogger(__name__)
@@ -81,73 +81,47 @@ for _logger_name in list(logging.root.manager.loggerDict):
         setattr(_logger, _marker_attr, True)
 
 
-# Highest privilege is listed first; the first match wins.
-_ROLE_PRIORITY = ("SystemAdministrator", "LegalTextManager", "Judge", "Normal")
+def _resolve_user(principal: AppPrincipal) -> AuthenticatedUser:
+    """The application User the BenchNotes token names, with what it says about them.
 
-
-def _resolve_user(azure_user_id: str, email: str, roles: list[str]) -> AuthenticatedUser:
-    """Fetch or create the application User from the database.
-
-    Called by the library after identity and roles have been verified.
-    Opens its own session so it is independent of request-scoped sessions.
+    Opens its own session so it is independent of request-scoped sessions. A user is
+    created at sign-in (domain/auth/sessions.py), never here: a token for a user who is
+    not in the database is refused, so a deleted or deactivated user is not brought back
+    by a request.
     """
-    valid_roles = get_valid_roles()
-    roles_set = set(roles)
-    primary_role = next(
-        (valid_roles[key] for key in _ROLE_PRIORITY if valid_roles.get(key) in roles_set),
-        None,
+    with Session(get_engine()) as session:
+        user = load_user(session, principal)
+    logger.info("Found existing user id=%s", user.id)
+    return AuthenticatedUser(
+        db_user=user,
+        ctx=principal.ctx,
+        sysadmin=principal.sysadmin,
+        assignments=principal.assignments,
+        session_expires_at=principal.session_expires_at,
     )
 
-    with Session(get_engine()) as session:
-        statement = select(User).where(User.azure_user_id == azure_user_id)
-        user = session.exec(statement).first()
 
-        if not user:
-            user = insert_user_or_load_existing(
-                session, User(email=email, azure_user_id=azure_user_id, role=primary_role or "Normal")
-            )
-        elif primary_role and user.role != primary_role:
-            logger.info(
-                "Syncing User.role from Azure AD for user_id=%s: %s -> %s",
-                user.id, user.role, primary_role,
-            )
-            user.role = primary_role
-            session.add(user)
-            session.commit()
-            session.refresh(user)
-        else:
-            logger.info("Found existing user id=%s", user.id)
-
-    return AuthenticatedUser(db_user=user, app_roles=roles)
-
-
-# FastAPI dependency that resolves the current authenticated User from a
-# verified bearer token only — see domain/auth/token_auth.py for why this is not
-# the library's Easy Auth based dependency.
+# FastAPI dependency that resolves the current authenticated User from a verified
+# BenchNotes access token only, acting in a chosen context (403 context_required without
+# one) — see domain/auth/token_auth.py.
 get_current_user = build_token_user_dep(_resolve_user)
+
+# The same for the no-context endpoints (who am I, choose a context, leave a jurisdiction,
+# the public jurisdictions): any signed-in user, with or without a context.
+get_signed_in_user = build_token_user_dep(_resolve_user, require_context=False)
 
 # The request's jurisdiction (DIAAT-322): domain/jurisdictions.py.
 get_active_jurisdiction = jurisdiction_dependency(get_current_user)
 
 
-def get_allowlisted_user(
-    required_roles_all: list[str] | None = None,
-    required_roles_any: list[str] | None = None,
-    audit_writer: AuditWriter | None = None,
-):
-    """Factory returning a FastAPI dependency that enforces role requirements.
+# The permission every dictation route declares (domain/auth/authorisation.py).
+require_permission = build_require_permission(get_current_user)
 
-    Thin wrapper around the library's get_allowlisted_user, binding it to this
-    application's get_current_user so route files need no import changes.
 
-    With no role arguments, any authenticated user is permitted.
-    required_roles_all: user must hold every listed role.
-    required_roles_any: user must hold at least one of the listed roles.
-    audit_writer: optional callback fired with an AuditEvent on every 403.
-    """
-    return _lib_get_allowlisted_user(
-        required_roles_all=required_roles_all,
-        required_roles_any=required_roles_any,
-        audit_writer=audit_writer,
-        current_user_dep=get_current_user,
-    )
+def signed_in_endpoint(user=Depends(get_signed_in_user)):
+    """Any signed-in user, with or without a context or a role: the no-context endpoints of
+    contract section 3. A route using it declares that explicitly: it needs no permission."""
+    return user
+
+
+mark_exempt(signed_in_endpoint, EXEMPT_SIGNED_IN)

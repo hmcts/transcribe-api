@@ -61,11 +61,10 @@ from transcribe_api.domain.audit import (
     audited,
     deferred_audit,
 )
-from transcribe_api.domain.auth.approles_dictation import get_role, has_any_role
+from transcribe_api.domain.auth.authorisation import public_endpoint
 from transcribe_api.domain.auth.dependencies_dictation import (
     get_active_jurisdiction,
-    get_allowlisted_user,
-    get_current_user,
+    require_permission,
 )
 from transcribe_api.domain.blob_ownership import (
     USER_UPLOADS_PREFIX,
@@ -138,28 +137,18 @@ from transcribe_api.stt.utils import (
     get_file_blob_path,
 )
 
-# The app roles nearly every route requires. One dependency, so FastAPI resolves it
-# once a request, and the jurisdiction check (DIAAT-334), which depends on it, runs
-# after it: a caller without a role is refused as before, not recorded.
-_ANY_APP_ROLE = get_allowlisted_user(
-    required_roles_any=[get_role("Normal"), get_role("Judge"), get_role("LegalTextManager"), get_role("SystemAdministrator")]
-)
-
+# Every route here declares its permission (DIAAT-376: domain/auth/authorisation.py,
+# docs/authz-permissions.md): ``dictation.use`` for the dictation product (and, with it, the
+# DIAAT-388 off-switch), ``documents.export`` for downloading a document, ``app.access`` for the
+# signed-in user's own profile and onboarding. The jurisdiction check (DIAAT-334) depends on the
+# permission dependency, so it runs after it: a caller without the permission is refused as such,
+# not recorded as a jurisdiction violation.
 
 router = APIRouter()
 
-# OBS-4: browser telemetry relay, POST /api/telemetry (same roles as dictation). A
-# router of its own: every page sends to it, so it has no hmcts.area (shared).
-telemetry_router = telemetry_relay_router(
-    get_allowlisted_user(
-        required_roles_any=[
-            get_role("Normal"),
-            get_role("Judge"),
-            get_role("LegalTextManager"),
-            get_role("SystemAdministrator"),
-        ]
-    )
-)
+# OBS-4: browser telemetry relay, POST /api/telemetry. Every page sends to it, so any role that
+# can use the app (``app.access``); a router of its own, with no hmcts.area (shared).
+telemetry_router = telemetry_relay_router(require_permission("app.access"))
 
 
 def _validate_blob_ownership(
@@ -216,16 +205,17 @@ def _refuse_other_jurisdiction(
         raise HTTPException(status_code=404, detail="Transcription not found")
 
 
-def _in_jurisdiction(resource_type: str):
+def _in_jurisdiction(resource_type: str, permission: str = "dictation.use"):
     """A route dependency for a route naming a transcription (path or query): its
     material is reachable only in its own jurisdiction (DIAAT-334). ``resource_type``
-    is the route's, stated, not read from the URL. A plain def: the lookup is
+    is the route's, stated, not read from the URL; ``permission`` is the route's own
+    (checked first, so that a caller without it is refused as such). A plain def: the lookup is
     synchronous, so FastAPI runs it in the threadpool."""
 
     def check(
         request: Request,
         transcription_id: UUID,
-        current_user: User = Depends(_ANY_APP_ROLE),
+        current_user: User = Depends(require_permission(permission)),
         jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
     ) -> None:
         _refuse_other_jurisdiction(
@@ -260,12 +250,12 @@ def _assert_owned(transcription: Transcription, current_user: User, resource_typ
 
 UK_TIMEZONE = pytz.timezone("Europe/London")
 
-@router.get("/health")
+@router.get("/health", dependencies=[Depends(public_endpoint)])
 async def health_check():
     return JSONResponse(status_code=200, content={"status": "ok", "version": APP_VERSION})
 
 
-@router.get("/health/dependencies")
+@router.get("/health/dependencies", dependencies=[Depends(public_endpoint)])
 async def dependency_health_check():
     """Last known health of each dependency (DIAAT-277), from the background checker.
 
@@ -295,12 +285,13 @@ def security_alert_test_allowed() -> bool:
 
 @router.post("/security/alert-test", status_code=202)
 async def security_alert_test(
-    current_user: User = Depends(get_allowlisted_user(required_roles_any=[get_role("SystemAdministrator")])),  # noqa: B008
+    current_user: User = Depends(require_permission("security.alert_test")),
 ) -> dict:
     """Controlled test of the Security alert route (DIAAT-285 AC2, ALERTS.md).
 
     Records one synthetic security.ownership_violation with outcome "test": no record
-    is touched, nothing about the caller is recorded. SystemAdministrator only, and
+    is touched, nothing about the caller is recorded. SystemAdministrator only
+    (``security.alert_test``), and
     404 (as for an unknown path) unless security_alert_test_allowed().
     """
     if not security_alert_test_allowed():
@@ -309,7 +300,7 @@ async def security_alert_test(
     return {"event": "security.ownership_violation", "outcome": "test"}
 
 
-@router.get("/healthcheck")
+@router.get("/healthcheck", dependencies=[Depends(public_endpoint)])
 async def health_check_legacy():
     """Legacy endpoint for backwards compatibility"""
     return JSONResponse(status_code=200, content={"status": "ok", "version": APP_VERSION})
@@ -330,7 +321,7 @@ def _require_decision_template(jurisdiction: ActiveJurisdiction) -> None:
 @router.get("/document-content", response_model=DocumentContentResponse)
 async def get_document_content_route(
     response: Response,
-    current_user: User = Depends(get_allowlisted_user()),  # noqa: B008
+    current_user: User = Depends(require_permission("document_content.read")),
     jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> DocumentContentResponse:
     """Return editable document content for allowlisted recorder users.
@@ -353,7 +344,7 @@ async def get_document_content_route(
 
 @router.get("/user/onboarding-status", response_model=OnboardingStatusResponse)
 async def get_onboarding_status(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("app.access")),
 ) -> OnboardingStatusResponse:
     """
     Get user's onboarding status and allowlist check.
@@ -384,16 +375,10 @@ async def get_onboarding_status(
         "dev",
     ]
 
-    # Check whether the user holds any valid app role
-    roles: list[str] = current_user.__dict__.get("app_roles", [])
-    is_allowlisted = settings.ENVIRONMENT == "local" or has_any_role(roles)
-    safe_roles = [_sanitize_for_log(r) for r in roles]
-    logger.info(
-        "App role check for user %s: roles=%s, is_allowlisted=%s",
-        _sanitize_for_log(current_user.id),
-        safe_roles,
-        is_allowlisted,
-    )
+    # A user who reaches this route holds a role in a jurisdiction (``app.access``, checked
+    # above): the "allowlist" is the role assignment now, and a user with none gets "no access
+    # yet" from GET /api/me/permissions instead. The fields stay for the web app's sake.
+    is_allowlisted = True
 
     return OnboardingStatusResponse(
         has_completed_onboarding=current_user.has_completed_onboarding,
@@ -408,7 +393,7 @@ async def get_onboarding_status(
 
 @router.post("/user/complete-onboarding")
 async def complete_onboarding(
-    current_user: User = Depends(get_allowlisted_user()),  # noqa: B008
+    current_user: User = Depends(require_permission("app.access")),
 ):
     """Mark user's onboarding as complete"""
 
@@ -431,7 +416,7 @@ async def complete_onboarding(
 
 @router.post("/user/reset-onboarding")
 async def reset_onboarding(
-    current_user: User = Depends(get_allowlisted_user()),  # noqa: B008
+    current_user: User = Depends(require_permission("app.access")),
 ):
     """Reset user's onboarding status (dev only)"""
 
@@ -456,9 +441,12 @@ async def reset_onboarding(
 
 
 @router.get("/healthcheck/azure-storage")
-async def azure_storage_health_check():
+async def azure_storage_health_check(
+    _user: User = Depends(require_permission("system.settings")),
+):
     """
-    Health check endpoint to validate Azure Storage access using Managed Identity.
+    System check (``system.settings``, a SystemAdministrator; it was open before DIAAT-376: it
+    calls storage on every request and names the container and the error) to validate Azure Storage access using Managed Identity.
     This verifies that DefaultAzureCredential can authenticate and access the storage account.
     """
     try:
@@ -500,7 +488,7 @@ async def azure_storage_health_check():
 @router.post("/get-upload-url", response_model=UploadUrlResponse)
 async def get_upload_url(
     request: UploadUrlRequest,
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("dictation.use")),
     jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> UploadUrlResponse:
     """Generate an upload URL for the client.
@@ -570,7 +558,7 @@ async def _verified_upload_transcription_id(key: str, current_user: User) -> str
 async def upload_audio_proxy(
     key: str,
     request: Request,
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("dictation.use")),
     jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ):
     """Receive a raw audio upload and write it to blob storage.
@@ -674,7 +662,7 @@ def _validate_transcription_for_minutes(transcription_id: UUID, user_id: UUID) -
 @router.post("/generate-or-edit-minutes")
 async def generate_or_edit_minutes(
     request: GenerateMinutesRequest,
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("dictation.use")),
     jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ):
     """
@@ -753,7 +741,7 @@ async def generate_or_edit_minutes(
 
 @router.get("/templates", response_model=TemplateResponse)
 async def get_templates(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("document_content.read")),
 ):
     """Get all template categories (auth only, used during onboarding)."""
     templates = get_all_templates()
@@ -762,11 +750,13 @@ async def get_templates(
 
 @router.get("/transcriptions-metadata", response_model=list[TranscriptionMetadata])
 async def get_transcriptions_metadata(
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("dictation.use")),
     jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
     timezone: str = "Europe/London",  # Optional parameter with UK default
 ):
-    """Get metadata for all transcriptions. Requires Judge, LegalTextManager, or SystemAdministrator role."""
+    """Get metadata for the caller's own transcriptions in the jurisdiction they are working
+    in. Requires ``dictation.use``: a Judge acting as one (DIAAT-376; the docstring used to list
+    Judge, LegalTextManager and SystemAdministrator, which the check did not match)."""
     logger.info("getting transcription metadata for user %s", _sanitize_for_log(current_user.id))
 
     # Get timezone (fallback to UK if invalid)
@@ -781,7 +771,7 @@ async def get_transcriptions_metadata(
 @router.get("/transcriptions/{transcription_id}", dependencies=[_in_jurisdiction(TRANSCRIPTION)], response_model=Transcription)
 async def get_transcription(
     transcription_id: UUID,
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("dictation.use")),
     timezone: str = "Europe/London",  # Optional parameter with UK default
 ):
     """Get a specific transcription by ID."""
@@ -802,7 +792,7 @@ async def get_transcription(
 @router.post("/transcriptions", response_model=Transcription)
 async def save_transcription_route(
     transcription_data: Transcription,
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("dictation.use")),
     jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ):
     """Save or update a transcription."""
@@ -821,10 +811,10 @@ async def save_transcription_route(
         raise HTTPException(status_code=404, detail="Transcription not found") from None
 
 
-@router.get("/transcriptions/{transcription_id}/document-download", dependencies=[_in_jurisdiction(DOCUMENT)])
+@router.get("/transcriptions/{transcription_id}/document-download", dependencies=[_in_jurisdiction(DOCUMENT, "documents.export")])
 async def get_document_download_url(
     transcription_id: UUID,
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("documents.export")),
 ):
     """Generate a fresh, time-limited download URL for a hearing document.
 
@@ -900,11 +890,11 @@ async def _document_download_url(transcription_id: UUID, current_user: User, aud
     return {"download_url": download_url}
 
 
-@router.get("/download", dependencies=[_in_jurisdiction(DOCUMENT)])
+@router.get("/download", dependencies=[_in_jurisdiction(DOCUMENT, "documents.export")])
 async def download_document(
     transcription_id: UUID,
     request: Request,
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("documents.export")),
 ):
     """Stream a transcript document from blob storage, verifying ownership before serving."""
     async with audited(
@@ -990,7 +980,7 @@ async def _stream_document(
 @router.delete("/transcriptions/{transcription_id}", dependencies=[_in_jurisdiction(TRANSCRIPTION)], status_code=204)
 async def delete_transcription(
     transcription_id: UUID,
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("dictation.use")),
 ):
     """Delete a specific transcription by ID. Audited (DIAAT-286); a refusal (404:
     unknown or another user's) is ``denied``, an error ``failed``."""
@@ -1005,7 +995,7 @@ async def delete_transcription(
 async def get_minute_version_by_id_route(
     transcription_id: UUID,
     minute_version_id: UUID,
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("dictation.use")),
 ):
     """Get a specific minute version by its ID for a given transcription."""
     # Verify user has access to the associated transcription
@@ -1022,7 +1012,7 @@ async def get_minute_version_by_id_route(
 )
 async def get_minute_versions_route(
     transcription_id: UUID,
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("dictation.use")),
 ):
     """Get all minute versions for a specific transcription."""
     # Verify user has access to this transcription
@@ -1035,7 +1025,7 @@ async def get_minute_versions_route(
 async def save_minute_version_route(
     transcription_id: UUID,
     minute_data: MinuteVersion,
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("dictation.use")),
 ):
     """Create or update a minute version for a transcription."""
     transcription = get_transcription_by_id(transcription_id, current_user.id, UK_TIMEZONE)
@@ -1061,7 +1051,7 @@ async def save_minute_version_route(
 async def save_transcription_job_route(
     transcription_id: UUID,
     job_data: TranscriptionJob,
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("dictation.use")),
 ) -> TranscriptionJob:
     """Create a new transcription job for a transcription."""
     # Verify user has access to this transcription
@@ -1088,7 +1078,7 @@ async def save_transcription_job_route(
 @router.get("/transcriptions/{transcription_id}/jobs", dependencies=[_in_jurisdiction(TRANSCRIPTION_JOB)], response_model=list[TranscriptionJob])
 async def get_transcription_jobs_route(
     transcription_id: UUID,
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("dictation.use")),
 ) -> list[TranscriptionJob]:
     """Get all transcription jobs for a specific transcription: the transcript text,
     so audited as a view of the transcript (DIAAT-286)."""
@@ -1104,7 +1094,7 @@ async def stream_audio(
     transcription_id: UUID,
     job_id: UUID,
     request: Request,
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("dictation.use")),
 ):
     """Stream audio from blob storage with HTTP Range support for seekable playback.
 
@@ -1336,7 +1326,7 @@ class LiveDraftResponse(BaseModel):
 )
 async def get_sectioned_transcript_route(
     transcription_id: UUID,
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("dictation.use")),
 ) -> TranscriptViewerResponse:
     """Get the recorder-style sectioned transcript for a hearing if available.
 
@@ -1437,7 +1427,7 @@ async def _render_hearing_document_off_loop(**kwargs) -> Path:
 @router.post("/live-transcription/submission", response_model=LiveTranscriptionSubmissionResponse)
 async def save_live_transcription_submission(
     request: LiveTranscriptionSubmissionRequest,
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("dictation.use")),
     jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
     dictation_session_id: str | None = Header(default=None, alias="X-Dictation-Session-Id"),
 ) -> LiveTranscriptionSubmissionResponse:
@@ -1799,7 +1789,7 @@ class AddTagRequest(BaseModel):
 @router.get("/transcriptions/{transcription_id}/tags", dependencies=[_in_jurisdiction(TRANSCRIPTION)], response_model=list[Tag])
 async def get_transcription_tags_route(
     transcription_id: UUID,
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("dictation.use")),
 ) -> list[Tag]:
     """Get all tags for a specific transcription."""
     return get_tags_for_transcription(transcription_id, current_user.id)
@@ -1809,7 +1799,7 @@ async def get_transcription_tags_route(
 async def add_tag_to_transcription_route(
     transcription_id: UUID,
     tag_request: AddTagRequest,
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("dictation.use")),
 ) -> Tag:
     """Add a tag to a transcription."""
     return add_tag_to_transcription(transcription_id, tag_request.name, current_user.id)
@@ -1819,7 +1809,7 @@ async def add_tag_to_transcription_route(
 async def remove_tag_from_transcription_route(
     transcription_id: UUID,
     tag_name: str,
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("dictation.use")),
 ):
     """Remove a tag from a transcription."""
     remove_tag_from_transcription(transcription_id, tag_name, current_user.id)
@@ -1827,7 +1817,7 @@ async def remove_tag_from_transcription_route(
 
 @router.get("/user", response_model=User)
 async def get_current_user_route(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("app.access")),
 ):
     """Get the current user's details (auth only, no allowlist check)."""
     return get_user_by_id(current_user.id)
@@ -1836,7 +1826,7 @@ async def get_current_user_route(
 # Add missing routes that frontend expects
 @router.get("/users/me", response_model=User)
 async def get_current_user_me_route(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("app.access")),
 ):
     """Get the current user's details (auth only, no allowlist check)."""
     return get_user_by_id(current_user.id)
@@ -1844,7 +1834,7 @@ async def get_current_user_me_route(
 
 @router.get("/user/profile", response_model=User)
 async def get_user_profile_route(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("app.access")),
 ):
     """Get the current user's profile (auth only, no allowlist check)."""
     return get_user_by_id(current_user.id)
@@ -1853,7 +1843,7 @@ async def get_user_profile_route(
 @router.post("/user", response_model=User)  # changed from .patch to .post
 async def update_current_user_route(
     request: UpdateUserRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("app.access")),
 ):
     """Update the current user's details (auth only, used during onboarding)."""
     update_fields = request.model_dump(exclude_unset=True)
@@ -1863,7 +1853,7 @@ async def update_current_user_route(
 @router.post("/langfuse/trace")
 async def submit_langfuse_trace(
     request: LangfuseTraceRequest,
-    current_user: User = Depends(get_allowlisted_user()),  # noqa: B008
+    current_user: User = Depends(require_permission("dictation.use")),
 ):
     """Submit a trace to Langfuse via backend proxy for security."""
     trace_id = langfuse_trace_id(request.trace_id)
@@ -1900,7 +1890,7 @@ async def submit_langfuse_trace(
 @router.post("/langfuse/score")
 async def submit_langfuse_score(
     request: LangfuseScoreRequest,
-    current_user: User = Depends(get_allowlisted_user()),  # noqa: B008
+    current_user: User = Depends(require_permission("dictation.use")),
 ):
     """Submit a score to Langfuse via backend proxy for security."""
     try:
@@ -1928,7 +1918,7 @@ async def submit_langfuse_score(
 
 @router.get("/get-speech-token")
 async def get_speech_token(
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("dictation.use")),
 ):
     """
     Get Azure Speech Services token for real-time transcription.
@@ -1984,7 +1974,7 @@ async def get_speech_token(
 @router.post("/generate-realtime-summary")
 async def generate_realtime_summary_endpoint(
     request: GenerateSummaryRequest,
-    current_user: User = Depends(_ANY_APP_ROLE),
+    current_user: User = Depends(require_permission("dictation.use")),
 ) -> GenerateSummaryResponse:
     """
     Generate a real-time summary of conversation transcript entries.
@@ -2024,7 +2014,7 @@ async def generate_realtime_summary_endpoint(
 
 @router.get("/live-draft", response_model=LiveDraftResponse)
 async def get_live_draft_route(
-    current_user: User = Depends(get_allowlisted_user()),  # noqa: B008
+    current_user: User = Depends(require_permission("dictation.use")),
     jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> LiveDraftResponse:
     """Return the current user's in-progress draft in this jurisdiction, or 404 if none or expired."""
@@ -2044,7 +2034,7 @@ async def get_live_draft_route(
 @router.put("/live-draft", status_code=204)
 async def upsert_live_draft_route(
     payload: LiveDraftPayload,
-    current_user: User = Depends(get_allowlisted_user()),  # noqa: B008
+    current_user: User = Depends(require_permission("dictation.use")),
     jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> None:
     """Create or overwrite the current user's in-progress draft in this jurisdiction."""
@@ -2053,7 +2043,7 @@ async def upsert_live_draft_route(
 
 @router.delete("/live-draft", status_code=204)
 async def delete_live_draft_route(
-    current_user: User = Depends(get_allowlisted_user()),  # noqa: B008
+    current_user: User = Depends(require_permission("dictation.use")),
     jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> None:
     """Delete the current user's in-progress draft in this jurisdiction (on restore, discard, or submit)."""

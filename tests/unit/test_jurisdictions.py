@@ -1,7 +1,7 @@
-"""DIAAT-330: each user works in their own jurisdiction, with its wording.
+"""DIAAT-330, DIAAT-390: each user works in their context's jurisdiction, with its wording.
 
 Runs the real lookups against an in-memory SQLite database (JSONB rendered as JSON),
-so membership, the choice of jurisdiction and first sign-in are tested with real SQL.
+so assignments, the context's jurisdiction and first sign-in are tested with real SQL.
 """
 
 from __future__ import annotations
@@ -17,21 +17,20 @@ from sqlmodel import Session, select
 from tests.unit.jurisdiction_fixtures import add_jurisdiction, add_member, add_user, client_as, sign_up
 from transcribe_api.api.routes_dictation import TEMPLATE_NOT_AVAILABLE
 from transcribe_api.domain import interface_dictation, jurisdictions
+from transcribe_api.domain.assignments import load_assignments
+from transcribe_api.domain.auth.app_token import Context
+from transcribe_api.domain.auth.auth_models_dictation import AuthenticatedUser
 from transcribe_api.domain.exceptions import JurisdictionConflictError
 from transcribe_api.domain.jurisdictions import (
-    CHOICE_REQUIRED,
     NO_JURISDICTION,
     NOT_AVAILABLE,
     JurisdictionSettings,
-    choose,
+    active_jurisdiction,
     default_jurisdiction_id,
-    load_memberships,
     parse_settings,
-    resolve,
 )
 from transcribe_api.domain.models_dictation import (
-    Jurisdiction,
-    JurisdictionMembership,
+    RoleAssignment,
     Transcription,
     User,
 )
@@ -47,14 +46,14 @@ def engine(jurisdiction_db):
     return jurisdiction_db
 
 
-def _memberships(engine, user: User) -> list[tuple[str, str]]:
+def _assignments(engine, user: User) -> list[tuple[str, str]]:
     with Session(engine) as session:
-        rows = session.exec(
-            select(Jurisdiction.code, JurisdictionMembership.role)
-            .join(JurisdictionMembership, JurisdictionMembership.jurisdiction_id == Jurisdiction.id)
-            .where(JurisdictionMembership.user_id == user.id)
-        ).all()
-    return sorted(tuple(r) for r in rows)
+        return sorted((a.jurisdiction_code, a.role) for a in load_assignments(session, user.id))
+
+
+def _acting_as(user: User, code: str | None, role: str = "Judge") -> AuthenticatedUser:
+    """What the auth dependency makes of a token whose context is (code, role)."""
+    return AuthenticatedUser(db_user=user, ctx=Context(code, role) if code or role else None)
 
 
 # Settings ---------------------------------------------------------------------------
@@ -96,7 +95,7 @@ def test_a_stored_row_with_an_unknown_template_has_none():
 # Which jurisdiction a request works in -----------------------------------------------
 
 
-def test_memberships_are_the_users_enabled_jurisdictions_only(engine):
+def test_assignments_are_the_users_enabled_jurisdictions_only(engine):
     iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET", settings={"wording": ET_WORDING})
     off = add_jurisdiction(engine, "OFF", enabled=False)
     user, other = add_user(engine, roles=()), add_user(engine, roles=())
@@ -105,114 +104,123 @@ def test_memberships_are_the_users_enabled_jurisdictions_only(engine):
     add_member(engine, user, off)
     add_member(engine, other, iac)
 
-    memberships = load_memberships(user.id)
-
-    assert [(m.code, m.role) for m in memberships] == [("ET", "admin"), ("IAC", "judge")]
-    assert memberships[0].settings.wording == ET_WORDING
+    # The administrator role in ET brings Judge and LegalTextManager there; OFF is disabled and left out.
+    assert _assignments(engine, user) == [
+        ("ET", "Judge"),
+        ("ET", "JurisdictionAdministrator"),
+        ("ET", "LegalTextManager"),
+        ("IAC", "Judge"),
+    ]
 
 
 def _error_code(excinfo) -> tuple[int, str]:
     return excinfo.value.status_code, excinfo.value.detail["code"]
 
 
-def test_a_user_with_no_jurisdiction_is_refused(engine):
+def test_a_request_with_no_context_works_in_no_jurisdiction(engine):
     user = add_user(engine, roles=())
     with pytest.raises(HTTPException) as excinfo:
-        resolve(user.id, None, None)
+        active_jurisdiction(AuthenticatedUser(db_user=user))
+    assert _error_code(excinfo) == (403, "context_required")
+
+
+def test_a_context_works_in_its_jurisdiction_with_that_jurisdictions_settings(engine):
+    add_jurisdiction(engine, "IAC")
+    et = add_jurisdiction(engine, "ET", settings={"wording": ET_WORDING})
+    user = add_user(engine, roles=())
+
+    active = active_jurisdiction(_acting_as(user, "ET", "JurisdictionAdministrator"))
+
+    assert (active.code, active.id) == ("ET", et.id)
+    assert active.current.role == "JurisdictionAdministrator"
+    assert active.settings.wording == ET_WORDING
+    # Nothing about the user's assignments is read: the token's context is trusted.
+    assert _assignments(engine, user) == []
+
+
+def test_a_global_role_has_no_jurisdiction_to_work_in(engine):
+    user = add_user(engine, roles=())
+    with pytest.raises(HTTPException) as excinfo:
+        active_jurisdiction(_acting_as(user, None, "JurisdictionSuperAdministrator"))
     assert _error_code(excinfo) == (403, NO_JURISDICTION)
 
 
-def test_a_user_with_one_jurisdiction_works_in_it(engine):
-    iac = add_jurisdiction(engine, "IAC")
+def test_a_context_in_a_disabled_or_missing_jurisdiction_is_refused(engine):
+    add_jurisdiction(engine, "OFF", enabled=False)
     user = add_user(engine, roles=())
-    add_member(engine, user, iac)
-    assert resolve(user.id, None, None).code == "IAC"
+    for code in ("OFF", "NOPE"):
+        with pytest.raises(HTTPException) as excinfo:
+            active_jurisdiction(_acting_as(user, code))
+        assert _error_code(excinfo) == (403, NOT_AVAILABLE)
 
 
-def test_a_user_with_several_must_choose_unless_they_have(engine):
-    iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
+def test_the_header_does_not_choose_the_jurisdiction(engine):
+    """DIAAT-390: X-Jurisdiction is advisory (409 context_changed on a mismatch, tests/unit/
+    test_session_api.py): the jurisdiction is the context's, whatever a header says."""
+    from starlette.requests import Request
+
+    add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
     user = add_user(engine, roles=())
-    add_member(engine, user, iac)
-    add_member(engine, user, et)
-
-    with pytest.raises(HTTPException) as excinfo:
-        resolve(user.id, None, None)
-    assert _error_code(excinfo) == (409, CHOICE_REQUIRED)
-    assert resolve(user.id, et.id, None).code == "ET"
+    request = Request({"type": "http", "headers": [(b"x-jurisdiction", b"ET")]})
+    assert request.headers["x-jurisdiction"] == "ET"
+    assert active_jurisdiction(_acting_as(user, "IAC")).code == "IAC"
 
 
-def test_the_header_names_the_jurisdiction_and_must_be_one_of_the_users(engine):
-    iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
-    user = add_user(engine, roles=())
-    add_member(engine, user, iac)
-    add_member(engine, user, et)
-
-    assert resolve(user.id, iac.id, " et ").code == "ET"  # the header wins over the remembered choice
-    with pytest.raises(HTTPException) as excinfo:
-        resolve(user.id, iac.id, "SSCS")
-    assert _error_code(excinfo) == (403, NOT_AVAILABLE)
-
-
-def test_a_remembered_choice_the_user_no_longer_has_is_ignored(engine):
-    iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
-    user = add_user(engine, roles=())
-    add_member(engine, user, iac)
-    assert resolve(user.id, et.id, None).code == "IAC"  # removed from the ET: their only one
-
-
-def test_choose_needs_no_database():
-    with pytest.raises(HTTPException) as excinfo:
-        choose((), None, None)
-    assert _error_code(excinfo) == (403, NO_JURISDICTION)
-
-
-def test_work_without_a_request_goes_in_the_users_remembered_or_only_jurisdiction(engine):
+def test_work_without_a_request_goes_in_the_users_only_jurisdiction(engine):
     iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
     single, several, none = add_user(engine, roles=()), add_user(engine, roles=()), add_user(engine, roles=())
     add_member(engine, single, iac)
     add_member(engine, several, iac)
     add_member(engine, several, et)
+    # Two roles in one jurisdiction are still one jurisdiction.
+    add_member(engine, single, iac, role="LegalTextManager")
 
     assert default_jurisdiction_id(single.id) == iac.id
-    assert default_jurisdiction_id(several.id) is None  # no choice: in no jurisdiction
+    assert default_jurisdiction_id(several.id) is None  # no choice to go by: in no jurisdiction
     assert default_jurisdiction_id(none.id) is None
+    # A remembered choice is no longer a thing (the context is the session's, not stored): ignored.
     with Session(engine) as session:
         row = session.get(User, several.id)
         row.active_jurisdiction_id = et.id
         session.add(row)
         session.commit()
-    assert default_jurisdiction_id(several.id) == et.id
+    assert default_jurisdiction_id(several.id) is None
 
 
 # First sign-in ----------------------------------------------------------------------
 
 
-def test_a_new_user_claims_memberships_added_for_their_email(engine):
-    add_jurisdiction(engine, "IAC", auto_enrol=True)
+def test_a_new_user_claims_assignments_added_for_their_email(engine):
+    add_jurisdiction(engine, "IAC")
     et = add_jurisdiction(engine, "ET")
     add_member(engine, None, et, role="admin", email="et.judge@example.test")
 
     user = sign_up(engine, "ET.Judge@Example.test")
 
-    # Claimed, and not also put in the IAC: an ET test judge sees the ET only.
-    assert _memberships(engine, user) == [("ET", "admin")]
+    # Claimed, and nothing else: an ET test judge sees the ET only.
+    assert _assignments(engine, user) == [
+        ("ET", "Judge"),
+        ("ET", "JurisdictionAdministrator"),
+        ("ET", "LegalTextManager"),
+    ]
     with Session(engine) as session:
-        assert session.exec(select(JurisdictionMembership.email)).all() == [None]
+        assert session.exec(select(RoleAssignment.pending_email)).all() == [None]
 
 
-def test_a_new_user_with_nothing_pending_joins_the_auto_enrol_jurisdictions(engine):
+def test_a_new_user_with_nothing_pending_gets_nothing_even_from_an_auto_enrol_jurisdiction(engine):
+    """DIAAT-373: no auto-enrol. The column stays, and is not read."""
     add_jurisdiction(engine, "IAC", auto_enrol=True)
     add_jurisdiction(engine, "ET")
     add_jurisdiction(engine, "OLD", auto_enrol=True, enabled=False)
 
     user = sign_up(engine, "new.judge@example.test")
 
-    assert _memberships(engine, user) == [("IAC", "judge")]
+    assert _assignments(engine, user) == []
 
 
 def test_without_an_auto_enrol_jurisdiction_a_new_user_has_none(engine):
     add_jurisdiction(engine, "ET")
-    assert _memberships(engine, sign_up(engine, "someone@example.test")) == []
+    assert _assignments(engine, sign_up(engine, "someone@example.test")) == []
 
 
 # Records are made in, and listed from, one jurisdiction ---------------------------------
@@ -255,10 +263,10 @@ def test_the_list_shows_the_current_jurisdictions_transcriptions_only(engine):
     assert titles(et) == ["ET claim"]
 
 
-# GET /api/jurisdictions/me ------------------------------------------------------------
+# GET /api/jurisdictions/current ---------------------------------------------------------
 
 
-def test_me_gives_the_current_jurisdiction_with_its_wording(engine, jurisdiction_app):
+def test_current_gives_the_jurisdiction_the_user_acts_in_with_its_wording(engine, jurisdiction_app):
     iac = add_jurisdiction(
         engine,
         "IAC",
@@ -268,54 +276,29 @@ def test_me_gives_the_current_jurisdiction_with_its_wording(engine, jurisdiction
     user = add_user(engine, roles=())
     add_member(engine, user, iac)
 
-    response = client_as(jurisdiction_app, engine, user).get("/api/jurisdictions/me")
+    response = client_as(jurisdiction_app, engine, user).get("/api/jurisdictions/current")
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
     assert response.json() == {
-        "status": "ready",
-        "current": {
-            "code": "IAC",
-            "name": "IAC name",
-            "role": "judge",
-            "stage": "live",
-            "template": "iac_decision",
-            "features": {"hearing_recordings": True},
-            "wording": {"records.column_title": "Hearing"},
-        },
-        "jurisdictions": [{"code": "IAC", "name": "IAC name", "role": "judge", "stage": "live"}],
+        "code": "IAC",
+        "name": "IAC name",
+        "template": "iac_decision",
+        "features": {"hearing_recordings": True},
+        "wording": {"records.column_title": "Hearing"},
     }
 
 
-def test_me_says_when_the_user_has_no_jurisdiction(engine, jurisdiction_app):
-    response = client_as(jurisdiction_app, engine, add_user(engine, roles=())).get("/api/jurisdictions/me")
-    assert response.json() == {"status": "no_jurisdiction", "current": None, "jurisdictions": []}
-
-
-def test_me_asks_a_user_with_several_to_choose(engine, jurisdiction_app):
-    iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET")
-    user = add_user(engine, roles=())
-    add_member(engine, user, iac)
-    add_member(engine, user, et)
-
-    body = client_as(jurisdiction_app, engine, user).get("/api/jurisdictions/me").json()
-
-    assert body["status"] == "choose"
-    assert body["current"] is None
-    assert [j["code"] for j in body["jurisdictions"]] == ["ET", "IAC"]
-
-
-def test_me_follows_the_tabs_header_and_ignores_one_the_user_no_longer_has(engine, jurisdiction_app):
+def test_current_follows_the_context_not_the_tabs_header(engine, jurisdiction_app):
     iac, et = add_jurisdiction(engine, "IAC"), add_jurisdiction(engine, "ET", settings={"wording": ET_WORDING})
     user = add_user(engine, roles=())
     add_member(engine, user, iac)
     add_member(engine, user, et)
-    tab = client_as(jurisdiction_app, engine, user)
 
-    et_tab = tab.get("/api/jurisdictions/me", headers={"X-Jurisdiction": "ET"}).json()
-    assert et_tab["current"]["code"] == "ET"
-    assert et_tab["current"]["wording"] == ET_WORDING
-    assert tab.get("/api/jurisdictions/me", headers={"X-Jurisdiction": "SSCS"}).json()["status"] == "choose"
+    in_et = client_as(jurisdiction_app, engine, user, ctx=("ET", "Judge"))
+    assert in_et.get("/api/jurisdictions/current").json()["wording"] == ET_WORDING
+    # A tab that says IAC while the session acts in the ET is out of step.
+    assert in_et.get("/api/jurisdictions/current", headers={"X-Jurisdiction": "IAC"}).status_code == 409
 
 
 # Routes work in the request's jurisdiction ----------------------------------------------
@@ -331,10 +314,10 @@ def test_the_list_route_lists_the_jurisdiction_named_by_the_header(engine, juris
 
     assert client.get("/api/transcriptions-metadata", headers={"X-Jurisdiction": "ET"}).status_code == 200
     assert fetch.call_args.args[2] == et.id
-    # No header and no choice: the user is asked to choose, nothing is listed.
-    response = client.get("/api/transcriptions-metadata")
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == CHOICE_REQUIRED
+    # No context chosen: the user is asked to choose, nothing is listed.
+    response = client_as(jurisdiction_app, engine, user, ctx=None).get("/api/transcriptions-metadata")
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "context_required"
     assert fetch.call_count == 1
 
 
@@ -342,8 +325,21 @@ def test_routes_refuse_a_user_with_no_jurisdiction(engine, jurisdiction_app, moc
     fetch = mocker.patch("transcribe_api.api.routes_dictation.fetch_transcriptions_metadata", return_value=[])
     response = client_as(jurisdiction_app, engine, add_user(engine)).get("/api/transcriptions-metadata")
     assert response.status_code == 403
-    assert response.json()["detail"]["code"] == NO_JURISDICTION
+    assert response.json()["detail"]["code"] == "context_required"  # no assignment, so no context
     fetch.assert_not_called()
+
+
+def test_routes_refuse_a_global_role_which_has_no_jurisdiction(engine, jurisdiction_app, mocker):
+    fetch = mocker.patch("transcribe_api.api.routes_dictation.fetch_transcriptions_metadata", return_value=[])
+    user = add_user(engine)
+    client = client_as(jurisdiction_app, engine, user, ctx=(None, "JurisdictionSuperAdministrator"))
+    # Refused before anything is listed: by the role check (the global role is not a dictation role) ...
+    assert client.get("/api/transcriptions-metadata").status_code == 403
+    fetch.assert_not_called()
+    # ... and, where only the jurisdiction is asked for, by it.
+    response = client.get("/api/jurisdictions/current")
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == NO_JURISDICTION
 
 
 def test_document_content_is_the_iac_templates_only(engine, jurisdiction_app, mocker):
@@ -377,17 +373,6 @@ def test_the_live_draft_is_the_jurisdictions_own(engine, jurisdiction_app, mocke
     assert upsert.call_args.args[:2] == (user.id, et.id)
     assert client.get("/api/live-draft", headers={"X-Jurisdiction": "IAC"}).status_code == 404
     assert get.call_args.args == (user.id, iac.id)
-
-
-def test_first_login_through_the_resolver_enrols_the_user(engine, monkeypatch):
-    from transcribe_api.domain.auth import dependencies_dictation
-
-    add_jurisdiction(engine, "IAC", auto_enrol=True)
-    monkeypatch.setattr(dependencies_dictation, "get_engine", lambda: engine)
-
-    resolved = dependencies_dictation._resolve_user(str(uuid4()), "first.time@example.test", ["Judge"])
-
-    assert _memberships(engine, resolved.db_user) == [("IAC", "judge")]
 
 
 # An upload's transcription is made in the tab's jurisdiction ---------------------------
@@ -487,12 +472,14 @@ def test_a_cross_origin_page_may_send_the_jurisdiction_header(monkeypatch):
     monkeypatch.setenv("ENVIRONMENT", "local")
     client = TestClient(create_app())
     response = client.options(
-        "/api/jurisdictions/me",
+        "/api/jurisdictions/current",
         headers={
             "Origin": "http://localhost:3000",
             "Access-Control-Request-Method": "GET",
-            "Access-Control-Request-Headers": "x-jurisdiction",
+            "Access-Control-Request-Headers": "x-jurisdiction,x-role,x-requested-context,x-dev-persona",
         },
     )
     assert response.status_code == 200
-    assert "x-jurisdiction" in response.headers["access-control-allow-headers"].lower()
+    allowed = response.headers["access-control-allow-headers"].lower()
+    for header in ("x-jurisdiction", "x-role", "x-requested-context", "x-dev-persona"):
+        assert header in allowed

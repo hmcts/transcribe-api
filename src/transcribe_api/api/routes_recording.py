@@ -47,15 +47,19 @@ from transcribe_api.domain.audit_recording import (
     denied,
     write_audit,
 )
-from transcribe_api.domain.auth.approles_recording import get_valid_roles
+from transcribe_api.domain.auth import app_token
+from transcribe_api.domain.auth.app_token import AppTokenError
 from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
-from transcribe_api.domain.auth.dependencies_recording import get_active_jurisdiction, get_current_user
+from transcribe_api.domain.auth.authorisation import public_endpoint, signed_url_endpoint
+from transcribe_api.domain.auth.context import context_of
+from transcribe_api.domain.auth.dependencies_recording import get_active_jurisdiction, require_permission
 from transcribe_api.domain.interface_recording import (
     get_job_by_id,
     get_job_by_idempotency_key_for_user,
     list_jobs_paginated,
     record_correction_dataset_entry,
 )
+from transcribe_api.domain.job_history import job_history
 from transcribe_api.domain.jurisdictions import (
     ActiveJurisdiction,
     job_owner_and_jurisdiction,
@@ -131,11 +135,18 @@ def _sanitize_filename(filename: str) -> str:
     return _UNSAFE_FILENAME_CHARS_RE.sub("_", name)
 
 
-# Rate limiter — keyed on the bearer token so limits are per-caller, not per-IP.
-# Falls back to remote address for unauthenticated requests.
+# Rate limiter — keyed on the verified user (the token's ``sub``) so limits are per-caller, not
+# per-IP and not per-token: a BenchNotes token is replaced every few minutes (and on demand by
+# PUT /api/me/context), so a key on the raw token would give every new token an empty bucket.
+# Falls back to the remote address when the request carries no valid token.
 def _caller_key(request: Request) -> str:
     auth = request.headers.get("Authorization", "")
-    return auth[7:] if auth.startswith("Bearer ") else get_remote_address(request)
+    if auth.startswith("Bearer "):
+        try:
+            return f"user:{app_token.verify(auth[7:].strip()).user_id}"
+        except AppTokenError:
+            pass
+    return get_remote_address(request)
 
 
 limiter = Limiter(key_func=_caller_key)
@@ -617,21 +628,22 @@ def _recording_jurisdiction(
     return jurisdiction
 
 
-def _job_in_jurisdiction(resource_type: str):
-    """A route dependency for a route naming a job: a job the caller may reach (theirs,
-    or any, for an administrator) but of another jurisdiction is refused with the 404
-    of an unknown job, and recorded (DIAAT-334); others are left to _check_job_access.
+def _job_in_jurisdiction(resource_type: str, permission: str = "recording.own"):
+    """A route dependency for a route naming a job: a job of the caller's but of another
+    jurisdiction is refused with the 404 of an unknown job, and recorded (DIAAT-334); a job
+    that is not theirs is left to _check_job_access. The caller holds ``permission`` (the route's
+    own, ``recording.own`` unless it says otherwise; checked first, as this depends on it).
     ``resource_type`` is the route's, as it passes to _check_job_access. A plain def:
     the lookup is synchronous, so FastAPI runs it in the threadpool."""
 
     def check(
         request: Request,
         job_id: UUID,
-        current_user: AuthenticatedUser = Depends(get_current_user),
+        current_user: AuthenticatedUser = Depends(require_permission(permission)),
         jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),
     ) -> None:
         exists, owner_id, job_jurisdiction = job_owner_and_jurisdiction(job_id)
-        if not exists or not (_is_admin(current_user) or owner_id == current_user.id):
+        if not exists or owner_id != current_user.id:
             return
         if job_jurisdiction != jurisdiction.id:
             record_jurisdiction_blocked(
@@ -642,12 +654,12 @@ def _job_in_jurisdiction(resource_type: str):
     return Depends(check)
 
 
-@router.get("/health")
+@router.get("/health", dependencies=[Depends(public_endpoint)])
 async def health() -> dict:
     return {"status": "ok"}
 
 
-@router.get("/version")
+@router.get("/version", dependencies=[Depends(public_endpoint)])
 async def version() -> dict:
     """Return the build version (see runtime/version.py), as /api/health does."""
     return {"version": APP_VERSION}
@@ -753,7 +765,7 @@ def _reject(upload_stage: StageHandle, error_code: str) -> None:
 async def upload_audio(
     request: Request,
     file: UploadFile = File(...),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_permission("recording.upload")),
     jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),
     x_hearing_id: Annotated[str | None, Header()] = None,
     x_hearing_file_count: Annotated[str | None, Header()] = None,
@@ -859,18 +871,21 @@ async def _upload_audio(
     return UploadResponse(audio_url=audio_url, blob_name=blob_name)
 
 
-@router.get("/local-audio/{blob_name:path}")
-async def get_local_audio(blob_name: str) -> Response:
+@router.get("/local-audio/{blob_name:path}", dependencies=[Depends(signed_url_endpoint)])
+async def get_local_audio(blob_name: str, expires: int | None = None, sig: str | None = None) -> Response:
     """Serve locally-stored audio — only active in AUDIO_STORAGE_BACKEND=local.
 
-    Deliberately unauthenticated: Azure Speech Batch fetches contentUrls
-    directly and cannot send our bearer token. Safe because (a) this route
-    404s outright unless a developer has explicitly opted into local storage,
-    which never happens in a deployed environment, and (b) blob names embed
-    an unguessable UUID.
+    Not behind a bearer token: Azure Speech Batch fetches contentUrls directly and cannot
+    send ours. It is protected by the URL itself, which ``local_storage.build_url`` signs
+    (HMAC over the blob name and an expiry, keyed from APP_JWT_SIGNING_KEY): without a valid,
+    unexpired signature it is the 404 of a file that is not there (DIAAT-376: it was open
+    on the secrecy of the blob name alone). It also 404s outright unless a developer has
+    explicitly opted into local storage, which never happens in a deployed environment.
     """
     if get_settings().AUDIO_STORAGE_BACKEND != "local":
         raise HTTPException(status_code=404)
+    if not local_storage.signature_is_valid(blob_name, expires, sig):
+        raise HTTPException(status_code=404, detail="Audio file not found")
 
     try:
         content = local_storage.read(blob_name)
@@ -891,7 +906,7 @@ async def submit_job(
     request: Request,
     body: Annotated[SubmitJobRequest, Body()],
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_permission("recording.upload")),
     jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),
 ) -> JobResponse:
     # DIAAT-286: "did X submit Y". An idempotent replay is recorded too (detail.replayed).
@@ -1001,7 +1016,7 @@ async def _submit_job(
 @router.get("/jobs", response_model=ListJobsResponse)
 async def list_jobs(
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
     jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),
     status: str | None = Query(default=None, description="Filter by job status"),
     limit: int = Query(default=20, ge=1, le=100),
@@ -1017,27 +1032,23 @@ async def list_jobs(
                 status_code=400, detail=f"Invalid status '{status}'. Valid values: {valid}"
             ) from None
 
-    # SystemAdministrators see all jobs (including pre-migration jobs with
-    # user_id=NULL). Regular users see only their own JWT-created jobs;
-    # pre-migration jobs are restricted to SystemAdministrator everywhere.
-    is_admin = get_valid_roles()["SystemAdministrator"] in current_user.app_roles
-    filter_user_id = None if is_admin else current_user.id
-    # DIAAT-334: administrators too see only the jurisdiction they are working in.
+    # Only the caller's own jobs, in the jurisdiction they are working in (DIAAT-334). Nobody
+    # sees anyone else's, a SystemAdministrator included (DIAAT-389); pre-migration jobs with
+    # no owner (user_id NULL) are seen by nobody now (DIAAT-397).
     jobs, total = list_jobs_paginated(
-        session, filter_user_id, parsed_status, limit, offset, jurisdiction_id=jurisdiction.id
+        session, current_user.id, parsed_status, limit, offset, jurisdiction_id=jurisdiction.id
     )
     audit_records: list[AuditRecord] = []
-    if not is_admin:
-        # DIAAT-285: defence in depth. The query is already filtered by user, so a
-        # foreign row here is a defect: drop it rather than return its transcript.
-        owned = []
-        for job in jobs:
-            refusal = _ownership_refusal(job, current_user, "transcript", "read")
-            if refusal is None:
-                owned.append(job)
-            else:
-                audit_records.append(refusal)
-        jobs = owned
+    # DIAAT-285: defence in depth. The query is already filtered by user, so a
+    # foreign row here is a defect: drop it rather than return its transcript.
+    owned = []
+    for job in jobs:
+        refusal = _ownership_refusal(job, current_user, "transcript", "read")
+        if refusal is None:
+            owned.append(job)
+        else:
+            audit_records.append(refusal)
+    jobs = owned
     response = ListJobsResponse(
         jobs=[_to_response(j) for j in jobs],
         total=total,
@@ -1055,7 +1066,7 @@ async def list_jobs(
 async def get_job(
     job_id: UUID,
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> JobResponse:
     job = get_job_by_id(session, job_id)
     if not job:
@@ -1075,7 +1086,7 @@ async def upload_baseline_transcript(
     job_id: UUID,
     file: UploadFile = File(...),
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> JobResponse:
     """Store a clerk-supplied reference transcript to compute a real WER against.
 
@@ -1125,16 +1136,14 @@ async def upload_baseline_transcript(
     if not text.strip():
         raise HTTPException(status_code=422, detail="Baseline transcript file is empty")
 
-    job.baseline_transcript = text
-    job.updated_datetime = datetime.now(UTC)
-    session.add(job)
-    session.commit()
-    session.refresh(job)
+    with audited("transcript.edit", current_user.id, job.id) as audit:
+        audit.detail.update({"kind": "baseline"})
+        job.baseline_transcript = text
+        job.updated_datetime = datetime.now(UTC)
+        session.add(job)
+        session.commit()
+        session.refresh(job)
     return _to_response(job)
-
-
-def _is_admin(current_user: AuthenticatedUser) -> bool:
-    return get_valid_roles()["SystemAdministrator"] in current_user.app_roles
 
 
 def _job_journey(job: SpeechBatchJob) -> Journey | None:
@@ -1168,25 +1177,23 @@ def _check_job_access(
     resource_type: str,
     action: str,
 ) -> None:
-    """Raise 404 if current_user neither owns the job nor is a SystemAdministrator.
+    """Raise 404 unless current_user owns the job. Nobody else can reach it: not a
+    SystemAdministrator, an administrator or a LegalTextManager (DIAAT-389).
 
     404 is intentional: returning 403 would reveal that a job with this UUID
     exists, allowing enumeration. Callers already raised 404 for a missing job,
     so both cases look identical to the requester.
 
     Pre-migration jobs (user_id is None) were created by API-key callers before
-    per-user auth existed. Both reads and writes on legacy jobs are restricted to
-    SystemAdministrator — legacy jobs may contain sensitive hearing content, and
-    any authenticated user who can obtain or guess a UUID should not be able to
-    access that content.
+    per-user auth existed. They have no owner, so nobody can reach them now: the
+    SystemAdministrator's access to them went with the bypass (DIAAT-389). What becomes
+    of them (assign an owner, or delete) is DIAAT-397; nothing is changed in the data here.
 
     DIAAT-285: a refusal of an existing job is a security event
     (security.ownership_violation, outcome "blocked"). The job was already loaded
     by ID, so telling "not yours" from "not found" costs no extra query, and the
     response (404 "Job not found") is unchanged.
     """
-    if _is_admin(current_user):
-        return
     if job.user_id is None or job.user_id != current_user.id:
         reason: DenialReason = "legacy_job" if job.user_id is None else "not_owner"
         write_audit(_violation(job, current_user, resource_type, action, "blocked", reason))
@@ -1223,7 +1230,7 @@ def _ownership_refusal(
     is broken: record outcome "detected" (logged at ERROR) and return the audit
     record of the refusal (DIAAT-286) for the caller to write.
     """
-    if _is_admin(current_user) or (job.user_id is not None and job.user_id == current_user.id):
+    if job.user_id is not None and job.user_id == current_user.id:
         return None
     return _violation(
         job, current_user, resource_type, action, "detected", "ownership_assertion_failed"
@@ -1286,13 +1293,19 @@ def _save_entries(session: Session, job: SpeechBatchJob, entries: list) -> None:
     session.refresh(job)
 
 
+def _actor_fields(current_user: AuthenticatedUser) -> dict[str, str | None]:
+    """Who made a change and acting as which role, for the correction history entry (DIAAT-395)."""
+    ctx = context_of(current_user)
+    return {"actor_id": str(current_user.id), "actor_role": ctx.role if ctx else None}
+
+
 @router.patch("/jobs/{job_id}/segments/{segment}", dependencies=[_job_in_jurisdiction(TRANSCRIPT)], response_model=JobResponse)
 async def correct_segment(
     job_id: UUID,
     segment: str,
     body: CorrectSegmentRequest,
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> JobResponse:
     """Record a clerk's whole-segment correction.
 
@@ -1313,6 +1326,7 @@ async def correct_segment(
         *(entry.correction_history or []),
         CorrectionEntry(
             timestamp=datetime.now(UTC).isoformat(),
+            **_actor_fields(current_user),
             kind="segment",
             previous_text=previous_text,
             new_text=body.corrected_text,
@@ -1335,7 +1349,9 @@ async def correct_segment(
         speaker=entry.speaker,
     )
 
-    _save_corrected_entry(session, job, index, entry)
+    with audited("transcript.edit", current_user.id, job.id) as audit:
+        audit.detail.update({"kind": "segment", "segment": segment})
+        _save_corrected_entry(session, job, index, entry)
     return _to_response(job)
 
 
@@ -1345,7 +1361,7 @@ async def correct_word_range(
     segment: str,
     body: CorrectWordRangeRequest,
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> JobResponse:
     """Record a clerk's correction for just a run of words within a segment.
 
@@ -1409,6 +1425,7 @@ async def correct_word_range(
         *(entry.correction_history or []),
         CorrectionEntry(
             timestamp=datetime.now(UTC).isoformat(),
+            **_actor_fields(current_user),
             kind="word_range",
             previous_text=previous_text,
             new_text=entry.effective_text(),
@@ -1449,7 +1466,16 @@ async def correct_word_range(
         end_word_index=body.end_word_index,
     )
 
-    _save_corrected_entry(session, job, index, entry)
+    with audited("transcript.edit", current_user.id, job.id) as audit:
+        audit.detail.update(
+            {
+                "kind": "word_range",
+                "segment": segment,
+                "start_word_index": body.start_word_index,
+                "end_word_index": body.end_word_index,
+            }
+        )
+        _save_corrected_entry(session, job, index, entry)
     return _to_response(job)
 
 
@@ -1462,7 +1488,7 @@ async def merge_segment_with_next(
     segment: str,
     body: MergeNextRequest | None = None,
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> JobResponse:
     """Combine a segment with the one after it, e.g. to rejoin a sentence split across two.
 
@@ -1485,7 +1511,9 @@ async def merge_segment_with_next(
     merged = merge_dialogue_entries(entry, _to_dialogue_entry(next_raw))
     entries = list(job.dialogue_entries)
     entries[index : index + 2] = [merged.model_dump()]
-    _save_entries(session, job, entries)
+    with audited("transcript.edit", current_user.id, job.id) as audit:
+        audit.detail.update({"kind": "merge", "segment": segment})
+        _save_entries(session, job, entries)
     return _to_response(job)
 
 
@@ -1494,7 +1522,7 @@ async def rollback_segment(
     job_id: UUID,
     segment: str,
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> JobResponse:
     """Revert a segment entirely back to its original Speech Batch output.
 
@@ -1523,7 +1551,9 @@ async def rollback_segment(
     if entry.merged:
         entry.unreviewed_confidence = entry.confidence
 
-    _save_corrected_entry(session, job, index, entry)
+    with audited("transcript.rollback", current_user.id, job.id) as audit:
+        audit.detail.update({"kind": "reset", "segment": segment})
+        _save_corrected_entry(session, job, index, entry)
     return _to_response(job)
 
 
@@ -1532,7 +1562,7 @@ async def accept_segment(
     job_id: UUID,
     segment: str,
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> JobResponse:
     """Mark a segment as reviewed/accepted without editing its text.
 
@@ -1561,13 +1591,16 @@ async def accept_segment(
         *(entry.correction_history or []),
         CorrectionEntry(
             timestamp=datetime.now(UTC).isoformat(),
+            **_actor_fields(current_user),
             kind="accept_all",
             previous_text=current_text,
             new_text=current_text,
         ),
     ]
 
-    _save_corrected_entry(session, job, index, entry)
+    with audited("transcript.accept", current_user.id, job.id) as audit:
+        audit.detail.update({"segment": segment})
+        _save_corrected_entry(session, job, index, entry)
     return _to_response(job)
 
 
@@ -1581,7 +1614,7 @@ async def rename_speaker(
     segment: str,
     body: RenameSpeakerRequest,
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> JobResponse:
     """Rename the speaker of one segment, or of every segment that shares its speaker.
 
@@ -1607,7 +1640,9 @@ async def rename_speaker(
         updated["speaker"] = body.speaker
         entries[i] = updated
 
-    _save_entries(session, job, entries)
+    with audited("transcript.rename_speaker", current_user.id, job.id) as audit:
+        audit.detail.update({"segment": segment, "apply_to_all": body.apply_to_all, "segments_changed": len(targets)})
+        _save_entries(session, job, entries)
     return _to_response(job)
 
 
@@ -1620,7 +1655,7 @@ async def rollback_to_history_entry(
     segment: str,
     history_index: int,
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> JobResponse:
     """Revert a segment to how it looked immediately before one specific past edit.
 
@@ -1704,6 +1739,7 @@ async def rollback_to_history_entry(
             *history,
             CorrectionEntry(
                 timestamp=datetime.now(UTC).isoformat(),
+                **_actor_fields(current_user),
                 kind="rollback",
                 previous_text=previous_text,
                 new_text=entry.effective_text(),
@@ -1722,14 +1758,58 @@ async def rollback_to_history_entry(
             *history,
             CorrectionEntry(
                 timestamp=datetime.now(UTC).isoformat(),
+                **_actor_fields(current_user),
                 kind="rollback",
                 previous_text=previous_text,
                 new_text=restored_text,
             ),
         ]
 
-    _save_corrected_entry(session, job, index, entry)
+    with audited("transcript.rollback", current_user.id, job.id) as audit:
+        audit.detail.update({"kind": "history_entry", "segment": segment, "history_index": history_index})
+        _save_corrected_entry(session, job, index, entry)
     return _to_response(job)
+
+
+class HistoryItemResponse(BaseModel):
+    id: UUID
+    timestamp: datetime
+    action: str
+    # The owner's name for their own actions; "Another user" (and no role) for anyone else's.
+    actor_label: str
+    actor_role: str | None
+    outcome: str
+
+
+class JobHistoryResponse(BaseModel):
+    items: list[HistoryItemResponse]
+    total: int
+
+
+@router.get(
+    "/jobs/{job_id}/history",
+    dependencies=[_job_in_jurisdiction(TRANSCRIPT, "recording.audit.read")],
+    response_model=JobHistoryResponse,
+)
+async def get_job_history(
+    job_id: UUID,
+    session: Session = Depends(get_session),
+    current_user: AuthenticatedUser = Depends(require_permission("recording.audit.read")),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+) -> JobHistoryResponse:
+    """The recording's audit history (DIAAT-395), newest first and paged: what was done to it
+    (viewed, edited, rolled back, accepted, speaker renamed, audio played, deleted), when, by whom
+    and how it ended. For its owner acting as a Judge only (``recording.audit.read``): anyone else
+    gets the 404 of a recording they cannot see. No transcript text is in the answer."""
+    job = get_job_by_id(session, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    _check_job_access(job, current_user, "transcript", "read")
+    items, total = job_history(
+        session, job.id, current_user.id, current_user.name or current_user.email, page=page, page_size=page_size
+    )
+    return JobHistoryResponse(items=[HistoryItemResponse(**item.__dict__) for item in items], total=total)
 
 
 @router.get("/jobs/{job_id}/audio", dependencies=[_job_in_jurisdiction(AUDIO)])
@@ -1737,7 +1817,7 @@ async def get_job_audio(
     job_id: UUID,
     request: Request,
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> Response:
     """Stream a job's source audio back for playback.
 
@@ -1835,12 +1915,11 @@ async def _stream_blob_range(blob_name: str, start: int, length: int) -> AsyncGe
 async def delete_job(
     job_id: UUID,
     session: Session = Depends(get_session),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
 ) -> Response:
     """Permanently delete a job: its transcript (the DB row) and audio blob.
 
-    Ownership is enforced by _check_job_access (404 for a non-owner who is
-    not a SystemAdministrator). The audio blob is removed before the row so a
+    Ownership is enforced by _check_job_access (404 for anyone but the owner). The audio blob is removed before the row so a
     genuine storage failure surfaces as a 502 with the record left intact,
     rather than orphaning audio behind a deleted row. A blob that's already
     gone is treated as success (idempotent). An in-flight Azure batch job is

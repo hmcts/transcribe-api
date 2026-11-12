@@ -42,8 +42,26 @@ class Settings(BaseSettings):
     # (domain/auth/token_auth.py). Refused unless ENVIRONMENT is "preview".
     AUTH_PREVIEW_USER_ENABLED: bool = False
     AUTH_PREVIEW_USER_ROLES: str | None = None
+    # DIAAT-388: whether dictation is on. The default, used when the system_feature_flag row
+    # ``dictation_enabled`` (set by a SystemAdministrator, DIAAT-392) does not exist. Off in
+    # prod through the chart; hearing recordings are not affected (domain/feature_flags.py).
+    DICTATION_ENABLED: bool = True
+    # DIAAT-373: signs the BenchNotes access token (domain/auth/app_token.py). Required
+    # outside local and test (the API refuses to start without it): at least 32 characters.
+    # Generate: python -c "import secrets; print(secrets.token_urlsafe(48))"
+    APP_JWT_SIGNING_KEY: str | None = None
+    # How long a BenchNotes token lives. A change to a user's assignments, and a
+    # deactivation, reaches them at their next token (the web app mints a new one shortly
+    # before expiry).
+    APP_JWT_TTL_SECONDS: int = 300
     GOOGLE_APPLICATION_CREDENTIALS_JSON_OBJECT: str | None = None
     GOV_NOTIFY_API_KEY: str | None = None
+    # DIAAT-398: the GOV.UK Notify templates of the access request emails (ids, not secrets).
+    # "new access request" goes to the people who can approve it; "access request decided" to
+    # the requester. Without a key nothing is sent (what would be is logged); a key with no
+    # template id sends nothing for that email and says so in the log (domain/notify/access_request_emails.py).
+    GOV_NOTIFY_TEMPLATE_ACCESS_REQUEST: str | None = None
+    GOV_NOTIFY_TEMPLATE_ACCESS_DECIDED: str | None = None
     # JWT Verification Settings - Strict by default
     JWT_ENABLE_VERIFICATION: bool = True
     JWT_VERIFICATION_STRICT: bool = True
@@ -65,6 +83,18 @@ class Settings(BaseSettings):
     # CORS configuration from infrastructure
     CORS_ALLOWED_ORIGINS: str | None = None
     # Transcription polling service configuration
+
+    @field_validator("ENVIRONMENT", mode="before")
+    @classmethod
+    def normalise_environment(cls, v):
+        """``Local``, ``LOCAL `` and ``local`` are one environment (the persona check
+        normalises it the same way: they must not disagree)."""
+        return v.strip().lower() if isinstance(v, str) else v
+
+    def environment_is_set(self) -> bool:
+        """Whether ENVIRONMENT came from the environment (or .env) and not from the default
+        (``local``). A deployed process that lost its ENVIRONMENT must not be taken for a local one."""
+        return "ENVIRONMENT" in self.model_fields_set
 
     @field_validator("LANGFUSE_HOST")
     @classmethod
@@ -114,7 +144,7 @@ def get_settings(environment: str | None = None):
         Settings: Configured settings instance.
     """
     # Handle None case for lru_cache compatibility
-    env_key = environment if environment is not None else os.getenv("ENVIRONMENT", "local")
+    env_key = (environment if environment is not None else os.getenv("ENVIRONMENT", "local")).strip().lower()
 
     # Choose the appropriate settings class based on environment
     # Use LocalSettings for local and test environments (allows .env file and mocked values)

@@ -6,7 +6,6 @@ is mocked so tests don't touch the filesystem.
 
 import uuid
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -116,34 +115,82 @@ def mock_content(mocker):
 
 
 # ---------------------------------------------------------------------------
-# GET /api/admin/me — role guard
+# GET /api/admin/me — admin.access
 # ---------------------------------------------------------------------------
 
 def test_admin_me_returns_200_for_legal_text_manager(client, as_user):
     as_user(_make_user(roles=["LegalTextManager"]))
     response = client.get("/api/admin/me")
     assert response.status_code == 200
-    body = response.json()
-    assert body["email"] == "admin@justice.gov.uk"
-    assert body["is_admin"] is True
+    assert response.json() == {
+        "email": "admin@justice.gov.uk",
+        "role": "LegalTextManager",
+        "user_id": response.json()["user_id"],
+    }
 
 
-def test_admin_me_returns_200_for_system_administrator(client, as_user):
-    as_user(_make_user(roles=["SystemAdministrator"]))
+@pytest.mark.parametrize("role", ["JurisdictionAdministrator", "JurisdictionSuperAdministrator"])
+def test_admin_me_returns_200_for_the_administrator_roles(client, as_user, role):
+    as_user(_make_user(roles=[role]))
+    assert client.get("/api/admin/me").status_code == 200
+
+
+def test_admin_me_returns_200_for_a_system_administrator_and_never_names_the_role(client, as_user):
+    # The system pages need admin.access, which the Entra role adds; the role itself is never shown.
+    from transcribe_api.domain.auth.auth_models_dictation import AuthenticatedUser
+    from transcribe_api.domain.auth.dependencies_dictation import get_current_user
+
+    client.app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(
+        db_user=_make_user(), ctx=None, sysadmin=True
+    )
     response = client.get("/api/admin/me")
     assert response.status_code == 200
+    assert response.json()["role"] is None
+    assert "SystemAdministrator" not in response.text
 
 
 def test_admin_me_returns_403_for_judge_only(client, as_user):
     as_user(_make_user(roles=["Judge"]))
     response = client.get("/api/admin/me")
     assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "permission_denied"
 
 
-def test_admin_me_returns_403_for_unauthenticated_user(client, as_user):
-    as_user(_make_user(roles=[]))
-    response = client.get("/api/admin/me")
-    assert response.status_code == 403
+# ---------------------------------------------------------------------------
+# GET /api/admin/roles — {"roles": [...]} (DIAAT-374)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    ("role", "sysadmin", "expected"),
+    [
+        ("JurisdictionAdministrator", False, ["Judge", "LegalTextManager"]),
+        ("JurisdictionSuperAdministrator", False, ["Judge", "LegalTextManager", "JurisdictionAdministrator"]),
+        (None, True, ["JurisdictionAdministrator", "JurisdictionSuperAdministrator"]),
+        ("JurisdictionSuperAdministrator", True, ["Judge", "LegalTextManager", "JurisdictionAdministrator", "JurisdictionSuperAdministrator"]),
+    ],
+)
+def test_admin_roles_is_an_object_with_the_roles_the_caller_may_assign(client, app, role, sysadmin, expected):
+    from transcribe_api.domain.auth.app_token import Context
+    from transcribe_api.domain.auth.auth_models_dictation import AuthenticatedUser
+    from transcribe_api.domain.auth.dependencies_dictation import get_current_user
+
+    ctx = None if role is None else Context(None if "Super" in role else "IAC", role)
+    app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(db_user=_make_user(), ctx=ctx, sysadmin=sysadmin)
+
+    response = client.get("/api/admin/roles")
+
+    assert response.status_code == 200
+    # The shape the web app reads (DIAAT-374): an object, not a bare array.
+    assert list(response.json()) == ["roles"]
+    assert response.json()["roles"] == expected
+    assert "SystemAdministrator" not in response.json()["roles"]
+    assert "Normal" not in response.json()["roles"]
+
+
+@pytest.mark.parametrize("role", ["Judge", "LegalTextManager"])
+def test_admin_roles_is_refused_to_those_who_assign_nothing(client, as_user, role):
+    as_user(_make_user(roles=[role]))
+    assert client.get("/api/admin/roles").status_code == 403
 
 
 # ---------------------------------------------------------------------------
@@ -159,8 +206,10 @@ def test_get_document_content_returns_full_payload(client, as_user, mock_content
     assert body["legal_frameworks"][0]["id"] == "eea_deportation"
 
 
-def test_get_document_content_returns_403_for_judge(client, as_user, mock_content):
-    as_user(_make_user(roles=["Judge"]))
+@pytest.mark.parametrize("role", ["Judge", "JurisdictionAdministrator", "JurisdictionSuperAdministrator", "SystemAdministrator"])
+def test_get_document_content_returns_403_for_everyone_but_the_legal_text_manager(client, as_user, mock_content, role):
+    # legal_text.manage is the LegalTextManager's alone (DIAAT-376, DIAAT-389): not an administrator's, not the Entra role's.
+    as_user(_make_user(roles=[role]))
     response = client.get("/api/admin/document-content")
     assert response.status_code == 403
 
@@ -365,292 +414,25 @@ def test_update_anonymity_status_returns_404_when_not_found(client, as_user, moc
 
 
 # ---------------------------------------------------------------------------
-# GET /api/admin/transcriptions
+# DIAAT-389: /api/admin/transcriptions* are gone: no role needs another user's dictation records
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def mock_admin_list(mocker):
-    owner = _make_user(roles=["Judge"], email="judge@justice.gov.uk")
-    transcription = _make_transcription(owner)
-    mocker.patch(
-        "transcribe_api.api.routes_dictation_privileged.admin_fetch_all_transcriptions",
-        return_value=([transcription], 1),
-    )
-    return transcription
+@pytest.mark.parametrize("roles", [["SystemAdministrator"], ["LegalTextManager"], ["Judge"]])
+def test_the_admin_transcription_endpoints_no_longer_exist(client, as_user, roles):
+    as_user(_make_user(roles=roles))
+    some_id = uuid.uuid4()
+    for path in (
+        "/api/admin/transcriptions",
+        f"/api/admin/transcriptions/{some_id}",
+        f"/api/admin/transcriptions/{some_id}/document-download",
+    ):
+        assert client.get(path).status_code == 404, path
 
 
-def test_admin_list_transcriptions_returns_200_for_system_administrator(client, as_user, mock_admin_list):
+def test_the_admin_user_role_and_delete_endpoints_no_longer_exist(client, as_user):
     as_user(_make_user(roles=["SystemAdministrator"]))
-    response = client.get("/api/admin/transcriptions")
-    assert response.status_code == 200
-    body = response.json()
-    assert body["total"] == 1
-    assert body["page"] == 1
-    assert body["page_size"] == 50
-    assert len(body["items"]) == 1
-    item = body["items"][0]
-    assert item["owner_email"] == "judge@justice.gov.uk"
-    assert item["title"] == "Test Hearing"
-
-
-def test_admin_list_transcriptions_returns_403_for_judge(client, as_user, mock_admin_list):
-    as_user(_make_user(roles=["Judge"]))
-    response = client.get("/api/admin/transcriptions")
-    assert response.status_code == 403
-
-
-def test_admin_list_transcriptions_returns_403_for_legal_text_manager(client, as_user, mock_admin_list):
-    as_user(_make_user(roles=["LegalTextManager"]))
-    response = client.get("/api/admin/transcriptions")
-    assert response.status_code == 403
-
-
-def test_admin_list_transcriptions_writes_audit_log(client, as_user, mock_admin_list, mocker):
-    as_user(_make_user(roles=["SystemAdministrator"]))
-    mock_log = mocker.patch("transcribe_api.api.routes_dictation_privileged._log_admin_transcript_access")
-    client.get("/api/admin/transcriptions")
-    mock_log.assert_called_once()
-    assert mock_log.call_args.kwargs["action"] == "LIST_TRANSCRIPTIONS"
-
-
-# ---------------------------------------------------------------------------
-# GET /api/admin/transcriptions/{id}
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def mock_admin_get(mocker):
-    owner = _make_user(roles=["Judge"], email="judge@justice.gov.uk")
-    transcription = _make_transcription(owner)
-    mocker.patch(
-        "transcribe_api.api.routes_dictation_privileged.admin_get_transcription_by_id",
-        return_value=transcription,
-    )
-    mocker.patch("transcribe_api.api.routes_dictation_privileged.get_user_by_id", return_value=owner)
-    return transcription, owner
-
-
-def test_admin_get_transcription_returns_200_for_system_administrator(client, as_user, mock_admin_get):
-    as_user(_make_user(roles=["SystemAdministrator"]))
-    transcription, _ = mock_admin_get
-    response = client.get(f"/api/admin/transcriptions/{transcription.id}")
-    assert response.status_code == 200
-    assert response.json()["title"] == "Test Hearing"
-
-
-def test_admin_get_transcription_returns_403_for_judge(client, as_user, mock_admin_get):
-    as_user(_make_user(roles=["Judge"]))
-    transcription, _ = mock_admin_get
-    response = client.get(f"/api/admin/transcriptions/{transcription.id}")
-    assert response.status_code == 403
-
-
-def test_admin_get_transcription_returns_404_when_not_found(client, as_user, mocker):
-    as_user(_make_user(roles=["SystemAdministrator"]))
-    from fastapi import HTTPException
-    mocker.patch(
-        "transcribe_api.api.routes_dictation_privileged.admin_get_transcription_by_id",
-        side_effect=HTTPException(status_code=404, detail="Transcription not found"),
-    )
-    response = client.get(f"/api/admin/transcriptions/{uuid.uuid4()}")
-    assert response.status_code == 404
-
-
-def test_admin_get_transcription_writes_audit_log(client, as_user, mock_admin_get, mocker):
-    as_user(_make_user(roles=["SystemAdministrator"]))
-    transcription, _ = mock_admin_get
-    mock_log = mocker.patch("transcribe_api.api.routes_dictation_privileged._log_admin_transcript_access")
-    client.get(f"/api/admin/transcriptions/{transcription.id}")
-    mock_log.assert_called_once()
-    call_kwargs = mock_log.call_args.kwargs
-    assert call_kwargs["action"] == "VIEW_TRANSCRIPTION"
-    assert call_kwargs["target_transcription_id"] == str(transcription.id)
-
-
-def test_admin_get_transcription_keeps_its_pre_provenance_shape(client, as_user, mock_admin_get):
-    """Golden shape: the response before DIAAT-286 (response_model=Transcription),
-    serialised from the same record, is contained unchanged in today's response, which
-    only adds "provenance". response_model=Transcription serialised the model's
-    fields only: never the transcription_jobs or tags relationships, loaded or not."""
-    from fastapi import FastAPI
-
-    from transcribe_api.domain.models_dictation import DialogueEntry, Tag
-
-    as_user(_make_user(roles=["SystemAdministrator"]))
-    transcription, _ = mock_admin_get
-    job = TranscriptionJob(
-        id=uuid.uuid4(),
-        transcription_id=transcription.id,
-        dialogue_entries=[DialogueEntry(speaker="A", text="words", start_time=0.0, end_time=1.0)],
-        s3_audio_url="user-uploads/judge@justice.gov.uk/a.mp3",
-        error_message="Transcription failed",
-        provenance={"output": "transcript"},
-    )
-    transcription.transcription_jobs = [job]
-    transcription.tags = [Tag(name="urgent")]
-    transcription.updated_datetime = datetime(2026, 1, 16, 9, 30, 0, tzinfo=UTC)
-
-    before = FastAPI()  # the route's contract before 5946944
-
-    @before.get("/t", response_model=Transcription)
-    def old_route() -> Transcription:
-        return transcription
-
-    old = TestClient(before).get("/t").json()
-    new = client.get(f"/api/admin/transcriptions/{transcription.id}").json()
-
-    assert set(old) == set(Transcription.model_fields)  # what the old contract carried
-    assert {k: new[k] for k in old} == old  # every old field, same name and value
-    assert set(new) - set(old) == {"provenance"}  # additive only
-    assert new["provenance"] == [{"job_id": str(job.id), "provenance": {"output": "transcript"}}]
-
-
-def test_admin_transcription_schema_keeps_the_pre_provenance_field_types():
-    """The OpenAPI schema too: each field the Transcription response declared keeps its
-    type and nullability (a generated client is typed from it); provenance is added."""
-    from fastapi import FastAPI
-
-    from transcribe_api.api.routes_dictation_privileged import AdminTranscriptionDetail
-
-    def schema(model):
-        app = FastAPI()
-
-        @app.get("/t", response_model=model)
-        def route(): ...
-
-        components = app.openapi()["components"]["schemas"]
-        return components[model.__name__]
-
-    old, new = schema(Transcription), schema(AdminTranscriptionDetail)
-    added = set(new["properties"]) - set(old["properties"])
-    assert added == {"provenance"}
-    assert {k: new["properties"][k] for k in old["properties"]} == old["properties"]
-    assert new.get("required", []) == old.get("required", [])
-
-
-# ---------------------------------------------------------------------------
-# GET /api/admin/transcriptions/{id}/document-download
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def mock_admin_download(mocker):
-    owner = _make_user(roles=["Judge"], email="judge@justice.gov.uk")
-    transcription = _make_transcription_with_doc(owner)
-    mocker.patch(
-        "transcribe_api.api.routes_dictation_privileged.admin_get_transcription_by_id",
-        return_value=transcription,
-    )
-    mocker.patch("transcribe_api.api.routes_dictation_privileged.get_user_by_id", return_value=owner)
-    mocker.patch(
-        "transcribe_api.api.routes_dictation_privileged.generate_blob_download_url",
-        new=AsyncMock(return_value="https://storage.example.com/doc.docx?sas=token"),
-    )
-    settings_mock = mocker.patch("transcribe_api.api.routes_dictation_privileged.get_settings")
-    settings_mock.return_value.AZURE_STORAGE_CONTAINER_NAME = "application-data"
-    return transcription, owner
-
-
-def test_admin_document_download_returns_200_for_system_administrator(client, as_user, mock_admin_download):
-    as_user(_make_user(roles=["SystemAdministrator"]))
-    transcription, _ = mock_admin_download
-    response = client.get(f"/api/admin/transcriptions/{transcription.id}/document-download")
-    assert response.status_code == 200
-    assert "download_url" in response.json()
-    assert response.json()["download_url"] == "https://storage.example.com/doc.docx?sas=token"
-
-
-def test_admin_document_download_returns_403_for_judge(client, as_user, mock_admin_download):
-    as_user(_make_user(roles=["Judge"]))
-    transcription, _ = mock_admin_download
-    response = client.get(f"/api/admin/transcriptions/{transcription.id}/document-download")
-    assert response.status_code == 403
-
-
-def test_admin_document_download_returns_404_when_no_document(client, as_user, mocker):
-    as_user(_make_user(roles=["SystemAdministrator"]))
-    owner = _make_user(roles=["Judge"], email="judge@justice.gov.uk")
-    transcription = _make_transcription(owner)  # no transcription_jobs → no blob_path
-    mocker.patch("transcribe_api.api.routes_dictation_privileged.admin_get_transcription_by_id", return_value=transcription)
-    mocker.patch("transcribe_api.api.routes_dictation_privileged.get_user_by_id", return_value=owner)
-    response = client.get(f"/api/admin/transcriptions/{transcription.id}/document-download")
-    assert response.status_code == 404
-
-
-def test_admin_document_download_writes_audit_log(client, as_user, mock_admin_download, mocker):
-    as_user(_make_user(roles=["SystemAdministrator"]))
-    transcription, _ = mock_admin_download
-    mock_log = mocker.patch("transcribe_api.api.routes_dictation_privileged._log_admin_transcript_access")
-    client.get(f"/api/admin/transcriptions/{transcription.id}/document-download")
-    mock_log.assert_called_once()
-    call_kwargs = mock_log.call_args.kwargs
-    assert call_kwargs["action"] == "DOWNLOAD_DOCUMENT"
-
-
-# ---------------------------------------------------------------------------
-# TTL enforcement — ST-J6
-# ---------------------------------------------------------------------------
-
-def test_admin_document_download_uses_configured_ttl(client, as_user, mock_admin_download, mocker):
-    as_user(_make_user(roles=["SystemAdministrator"]))
-    transcription, _ = mock_admin_download
-    mocker.patch("transcribe_api.api.routes_dictation_privileged._log_admin_transcript_access")
-    mock_generate = mocker.patch(
-        "transcribe_api.api.routes_dictation_privileged.generate_blob_download_url",
-        new_callable=AsyncMock,
-        return_value="https://blob/url",
-    )
-    mocker.patch("transcribe_api.api.routes_dictation_privileged.get_settings", return_value=mocker.MagicMock(
-        AZURE_STORAGE_CONTAINER_NAME="container",
-        DOWNLOAD_URL_TTL_MINUTES=30,
-    ))
-    client.get(f"/api/admin/transcriptions/{transcription.id}/document-download")
-    _, kwargs = mock_generate.call_args
-    assert kwargs["expiry_hours"] == pytest.approx(30 / 60)
-
-
-# ---------------------------------------------------------------------------
-# DIAAT-286: privileged access is audited in the database (audit_log)
-# ---------------------------------------------------------------------------
-
-def test_an_administrator_viewing_a_record_is_audited_as_privileged(client, as_user, mock_admin_get, audit_log):
-    admin = _make_user(roles=["SystemAdministrator"])
-    as_user(admin)
-    transcription, _ = mock_admin_get
-    assert client.get(f"/api/admin/transcriptions/{transcription.id}").status_code == 200
-    (row,) = audit_log.rows()
-    assert (row.event_type, row.outcome, row.user_id, row.object_id, row.detail) == (
-        "transcript.view",
-        "success",
-        str(admin.id),
-        str(transcription.id),
-        {"privileged": True},
-    )
-
-
-def test_an_administrator_viewing_an_unknown_record_is_audited_as_denied(client, as_user, mocker, audit_log):
-    as_user(_make_user(roles=["SystemAdministrator"]))
-    from fastapi import HTTPException
-    mocker.patch(
-        "transcribe_api.api.routes_dictation_privileged.admin_get_transcription_by_id",
-        side_effect=HTTPException(status_code=404, detail="Transcription not found"),
-    )
-    assert client.get(f"/api/admin/transcriptions/{uuid.uuid4()}").status_code == 404
-    (row,) = audit_log.rows()
-    assert row.outcome == "denied"
-
-
-def test_an_administrator_document_link_is_audited_as_a_privileged_export(
-    client, as_user, mock_admin_download, audit_log
-):
-    admin = _make_user(roles=["SystemAdministrator"])
-    as_user(admin)
-    transcription, _ = mock_admin_download
-    assert client.get(f"/api/admin/transcriptions/{transcription.id}/document-download").status_code == 200
-    (row,) = audit_log.rows()
-    assert (row.event_type, row.outcome, row.user_id, row.object_type, row.detail) == (
-        "transcript.export",
-        "success",
-        str(admin.id),
-        "document",
-        {"via": "link", "privileged": True},
-    )
-
+    user_id = uuid.uuid4()
+    assert client.put(f"/api/admin/users/{user_id}/role", json={"role": "Judge"}).status_code == 404
+    # Nor is there a path by a user's id any more (users are listed with their assignments: DIAAT-383).
+    assert client.delete(f"/api/admin/users/{user_id}").status_code == 404
+    assert client.get(f"/api/admin/users/{user_id}").status_code == 404

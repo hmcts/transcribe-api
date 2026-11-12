@@ -59,8 +59,14 @@ TEST_ENV: dict[str, str] = {
     "LANGFUSE_SECRET_KEY": "sk-lf-test-secret-key-123456",
     "LANGFUSE_HOST": "https://langfuse-ai.justice.gov.uk",
     "JWT_SECRET_KEY": "test-jwt-secret",
+    # DIAAT-373: signs the BenchNotes access token. A fixed key for the tests only.
+    "APP_JWT_SIGNING_KEY": "test-benchnotes-signing-key-0123456789abcdef",  # pragma: allowlist secret
+    "APP_JWT_TTL_SECONDS": "300",
     "DISABLE_FASTAPI_INSTRUMENTATION": "true",
     "RUN_WORKERS": "false",
+    # The fallback when no feature flag row is stored: pinned so a runner's
+    # DICTATION_ENABLED=false cannot turn dictation off for the whole suite.
+    "DICTATION_ENABLED": "true",
 }
 
 
@@ -115,22 +121,66 @@ def isolate_test_environment(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture(autouse=True)
 def every_user_is_an_iac_judge(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
-    """DIAAT-322: every user belongs to the IAC alone, without a database: the
-    jurisdiction lookup is replaced. Tests of jurisdictions themselves mark themselves
-    ``real_jurisdictions`` and keep the real one."""
+    """DIAAT-322, DIAAT-390: every request acts in the IAC (as a Judge, or as the admin role a fake
+    user holds), without a database:
+    the context the auth dependency would carry from the BenchNotes token, and the jurisdiction
+    lookup behind it, are replaced. Tests of jurisdictions and contexts themselves mark
+    themselves ``real_jurisdictions`` and keep the real ones."""
     if request.node.get_closest_marker("real_jurisdictions"):
         return
-    from tests.unit.jurisdiction_fixtures import iac_membership
+    from tests.unit.jurisdiction_fixtures import IAC_JURISDICTION_ID, iac_membership
     from transcribe_api.domain import jurisdictions
+    from transcribe_api.domain.auth import context as auth_context
+    from transcribe_api.domain.auth.app_token import Context
 
-    monkeypatch.setattr(jurisdictions, "_load_memberships", lambda user_id: [iac_membership()])
-    monkeypatch.setattr(jurisdictions, "_remembered_jurisdiction_id", lambda user_id: None)
+    def context_of(user):
+        # An AuthenticatedUser says what its token says. A plain User a test injects stands for
+        # someone in the IAC, as the role its fake ``app_roles`` name: a Judge unless they are a
+        # LegalTextManager, a JurisdictionAdministrator or a JurisdictionSuperAdministrator
+        # (what the tests of the admin routes mean).
+        if hasattr(user, "db_user"):
+            return user.ctx
+        roles = getattr(user, "__dict__", {}).get("app_roles", [])
+        role = next((r for r in ("JurisdictionSuperAdministrator", "JurisdictionAdministrator", "LegalTextManager") if r in roles), "Judge")
+        return Context(None if role == "JurisdictionSuperAdministrator" else "IAC", role)
+
+    def sysadmin_of(user):
+        if hasattr(user, "db_user"):
+            return user.sysadmin
+        return "SystemAdministrator" in getattr(user, "__dict__", {}).get("app_roles", [])
+
+    monkeypatch.setattr(auth_context, "context_of", context_of)
+    monkeypatch.setattr(auth_context, "sysadmin_of", sysadmin_of)
+    monkeypatch.setattr(
+        jurisdictions, "_load_membership", lambda code, role: iac_membership(role) if code == "IAC" else None
+    )
+    monkeypatch.setattr(jurisdictions, "_assigned_jurisdiction_ids", lambda user_id: [IAC_JURISDICTION_ID])
     # Every record is in the IAC too (DIAAT-334): left to the ownership checks.
     monkeypatch.setattr(jurisdictions, "_owned_transcription_jurisdiction", lambda transcription_id, user_id: (False, None))
     monkeypatch.setattr(jurisdictions, "_job_owner_and_jurisdiction", lambda job_id: (False, None, None))
     # And every upload was made in the IAC.
     monkeypatch.setattr(jurisdictions, "_record_upload_jurisdiction", lambda upload_id, jurisdiction_id: None)
     monkeypatch.setattr(jurisdictions, "_recorded_upload_jurisdiction", lambda upload_id: iac_membership().jurisdiction_id)
+
+
+@pytest.fixture(autouse=True)
+def feature_flags_are_not_stored(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """DIAAT-388: no test reads the system_feature_flag table (and so connects to a database)
+    from every dictation request: no flag has a row, so each has its default (the
+    DICTATION_ENABLED setting). Tests of the flag layer itself mark themselves ``real_feature_flags``."""
+    from transcribe_api.domain import feature_flags
+
+    # The in-process cache (DIAAT-392) must not carry a value from one test to the next; the
+    # tests run with a TTL of 0 (every read goes through) unless they test the cache itself.
+    feature_flags.invalidate_cache()
+    monkeypatch.setattr(feature_flags, "CACHE_TTL_SECONDS", 0.0)
+    if request.node.get_closest_marker("real_feature_flags"):
+        yield
+        feature_flags.invalidate_cache()
+        return
+    monkeypatch.setattr(feature_flags, "_stored_value", lambda name: (None, True))
+    yield
+    feature_flags.invalidate_cache()
 
 
 @pytest.fixture
@@ -158,8 +208,10 @@ def jurisdiction_db(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(dependencies_dictation, "get_engine", lambda: engine)
     monkeypatch.setattr(audit, "get_engine", lambda: engine)  # audit rows land here too
     content_loader.clear_cache()
+    jurisdictions._jurisdiction_ids.clear()  # code -> ID, looked up once a process: not across databases
     yield engine
     content_loader.clear_cache()
+    jurisdictions._jurisdiction_ids.clear()
     engine.dispose()
 
 

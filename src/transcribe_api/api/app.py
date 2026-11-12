@@ -23,7 +23,7 @@ from collections.abc import Callable, Coroutine
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from fastapi.exceptions import RequestValidationError
@@ -211,14 +211,15 @@ async def stop_background_workers(tasks: list[asyncio.Task]) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from hmcts_azure_auth.roles import validate_approles_config
-
     settings = get_settings()
 
-    # Fail fast on bad AUTH_APPROLES. Both upstream services did this; the
-    # dictation service skipped it locally so developers are not blocked.
-    if settings.ENVIRONMENT not in ("local", "test"):
-        validate_approles_config()
+    # DIAAT-373: without the key no request after sign-in can be authenticated.
+    from transcribe_api.domain.auth.app_token import effective_environment, signing_key_problem
+
+    key_problem = signing_key_problem(effective_environment(settings), settings.APP_JWT_SIGNING_KEY)
+    if key_problem:
+        log.error(key_problem)
+        raise RuntimeError(key_problem)
 
     # Before serving: without these every recording upload fails.
     await ensure_ffmpeg_tools(settings.ENVIRONMENT)
@@ -256,13 +257,14 @@ async def lifespan(app: FastAPI):
     if settings.ENVIRONMENT != "test" and _run_workers_in_web_process():
         tasks += await start_background_workers()
 
-    yield
+    try:
+        yield
+    finally:
+        await stop_background_workers(tasks)
+        # Audit rows handed to worker threads from the event loop (DIAAT-286): not lost.
+        from transcribe_api.domain.audit import drain_pending_writes
 
-    await stop_background_workers(tasks)
-    # Audit rows handed to worker threads from the event loop (DIAAT-286): not lost.
-    from transcribe_api.domain.audit import drain_pending_writes
-
-    await drain_pending_writes()
+        await drain_pending_writes()
 
 
 def create_app() -> FastAPI:
@@ -314,9 +316,20 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
         # The headers the web app sends, for local development, which calls the API
-        # cross-origin: X-Jurisdiction (the tab's, DIAAT-322), X-Dictation-Session-Id,
+        # cross-origin: X-Jurisdiction and X-Role (the tab's context, advisory: a mismatch with
+        # the token's is 409 context_changed), X-Requested-Context (the context to keep when
+        # a new token is minted), X-Dev-Persona (local only), X-Dictation-Session-Id,
         # X-Upload-Filename (a template's, DIAAT-344).
-        allow_headers=["Authorization", "Content-Type", "X-Jurisdiction", "X-Dictation-Session-Id", "X-Upload-Filename"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "X-Jurisdiction",
+            "X-Role",
+            "X-Requested-Context",
+            "X-Dev-Persona",
+            "X-Dictation-Session-Id",
+            "X-Upload-Filename",
+        ],
     )
 
     # hmcts.area from the path, before routing and body parsing (AreaMiddleware).
@@ -367,12 +380,19 @@ def create_app() -> FastAPI:
     app.add_exception_handler(RequestValidationError, _validation_exception_handler)
 
     # --- routers ---
+    from transcribe_api.api.routes_access_requests import admin_router as access_requests_admin_router
+    from transcribe_api.api.routes_access_requests import router as access_requests_router
+    from transcribe_api.api.routes_admin_flags import router as admin_flags_router
+    from transcribe_api.api.routes_admin_users import router as admin_users_router
     from transcribe_api.api.routes_dictation import router as dictation_router
     from transcribe_api.api.routes_dictation import telemetry_router
     from transcribe_api.api.routes_dictation_privileged import router as dictation_admin_router
+    from transcribe_api.api.routes_flags import router as flags_router
     from transcribe_api.api.routes_jurisdictions import router as jurisdictions_router
     from transcribe_api.api.routes_recording import limiter
     from transcribe_api.api.routes_recording import router as recording_router
+    from transcribe_api.api.routes_session import router as session_router
+    from transcribe_api.domain.auth.authorisation import public_endpoint
 
     # Prefixes matter and differ between the two upstream apps:
     #   recording router declares its own prefix="/api/v1"  -> mount bare
@@ -389,10 +409,16 @@ def create_app() -> FastAPI:
     app.include_router(dictation_admin_router, prefix="/api")
     app.include_router(telemetry_router, prefix="/api")
     app.include_router(jurisdictions_router, prefix="/api")
+    app.include_router(session_router, prefix="/api")
+    app.include_router(flags_router, prefix="/api")
+    app.include_router(admin_users_router, prefix="/api")
+    app.include_router(admin_flags_router, prefix="/api")
+    app.include_router(access_requests_router, prefix="/api")
+    app.include_router(access_requests_admin_router, prefix="/api")
     app.include_router(recording_router)
 
     # Polled by the CNP pipeline's startup check.
-    @app.get("/health", include_in_schema=False)
+    @app.get("/health", include_in_schema=False, dependencies=[Depends(public_endpoint)])
     async def root_health() -> dict[str, str]:
         return {"status": "ok"}
 

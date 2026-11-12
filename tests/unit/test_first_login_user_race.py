@@ -1,13 +1,15 @@
 """Concurrent first logins for one user must both resolve to the same User (DIAAT-289).
 
 AAT, 2026-10-28: two first-login requests for the same user both missed the
-lookup in _resolve_user and both inserted; the loser's UniqueViolation on
-ix_user_azure_user_id surfaced as a 500 from GET /api/user/onboarding-status.
+lookup and both inserted; the loser's UniqueViolation on ix_user_azure_user_id
+surfaced as a 500 from GET /api/user/onboarding-status.
 
-Both resolvers run against a real database, so the unique index, the rollback
-and the re-select are exercised rather than mocked. The SQLite tests always
-run; the Postgres test races two threads for real and needs TEST_POSTGRES_URL
-(a throwaway Postgres), like tests/unit/test_migrations.py.
+Since DIAAT-373 a user is created at sign-in (domain/auth/sessions.sign_in), not by a
+request's resolver (which only loads the user a BenchNotes token names: tested here too).
+Sign-in runs against a real database, so the unique index, the rollback and the re-select
+are exercised rather than mocked. The SQLite tests always run; the Postgres test races two
+threads for real and needs TEST_POSTGRES_URL (a throwaway Postgres), like
+tests/unit/test_migrations.py.
 """
 
 from __future__ import annotations
@@ -25,7 +27,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.compiler import compiles
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from transcribe_api.domain.models_dictation import Jurisdiction, JurisdictionMembership, User
+from transcribe_api.domain.auth.sessions import sign_in
+from transcribe_api.domain.models_dictation import Jurisdiction, RoleAssignment, User
 
 RESOLVERS = [
     pytest.param("transcribe_api.domain.auth.dependencies_dictation", id="dictation"),
@@ -42,7 +45,7 @@ def _jsonb_as_json(element, compiler, **kw):
 
 
 # The user and, since DIAAT-322, the jurisdiction tables a first login writes to.
-FIRST_LOGIN_TABLES = [User.__table__, Jurisdiction.__table__, JurisdictionMembership.__table__]
+FIRST_LOGIN_TABLES = [User.__table__, Jurisdiction.__table__, RoleAssignment.__table__]
 
 
 @pytest.fixture
@@ -56,7 +59,7 @@ def sqlite_engine(tmp_path):
 
 def _commit_user(engine) -> User:
     with Session(engine) as session:
-        user = User(email=EMAIL, azure_user_id=AZURE_USER_ID, role="Normal")
+        user = User(email=EMAIL, azure_user_id=AZURE_USER_ID)
         session.add(user)
         session.commit()
         session.refresh(user)
@@ -94,57 +97,142 @@ def _losing_session(engine) -> type[Session]:
     return LosingSession
 
 
-@pytest.mark.parametrize("module_name", RESOLVERS)
-def test_a_first_login_creates_the_user(module_name, sqlite_engine):
-    deps = importlib.import_module(module_name)
+def _sign_in(session_class, engine, email=EMAIL):
+    with session_class(engine) as session:
+        return sign_in(session, azure_user_id=AZURE_USER_ID, email=email, name="Judge Real")
 
-    with patch.object(deps, "get_engine", return_value=sqlite_engine):
-        result = deps._resolve_user(AZURE_USER_ID, EMAIL, ["Judge"])
+
+def test_a_first_login_creates_the_user_with_no_role(sqlite_engine):
+    result = _sign_in(Session, sqlite_engine)
 
     [stored] = _users(sqlite_engine)
-    assert result.db_user.id == stored.id
-    assert (stored.email, stored.azure_user_id, stored.role) == (EMAIL, AZURE_USER_ID, "Judge")
+    assert result.id == stored.id
+    assert (stored.email, stored.azure_user_id, stored.name) == (EMAIL, AZURE_USER_ID, "Judge Real")
+    # Nothing of the old default role: a new user has no role (DIAAT-382), and is active.
+    assert stored.role is None and stored.is_active is True
     assert stored.has_completed_onboarding is False
-    assert result.app_roles == ["Judge"]
 
 
-@pytest.mark.parametrize("module_name", RESOLVERS)
-def test_the_request_that_loses_the_insert_gets_the_winners_row(module_name, sqlite_engine):
-    deps = importlib.import_module(module_name)
+def test_the_request_that_loses_the_insert_gets_the_winners_row(sqlite_engine):
     losing_session = _losing_session(sqlite_engine)
 
-    with (
-        patch.object(deps, "get_engine", return_value=sqlite_engine),
-        patch.object(deps, "Session", losing_session),
-    ):
-        result = deps._resolve_user(AZURE_USER_ID, EMAIL, ["Normal"])
+    result = _sign_in(losing_session, sqlite_engine)
 
     # The race really happened: this request's insert failed and it recovered.
     assert losing_session.rolled_back
-    assert result.db_user.id == losing_session.winner.id
-    assert result.db_user.azure_user_id == AZURE_USER_ID
+    assert result.id == losing_session.winner.id
+    assert result.azure_user_id == AZURE_USER_ID
     assert len(_users(sqlite_engine)) == 1
 
 
-@pytest.mark.parametrize("module_name", RESOLVERS)
-def test_an_unrelated_integrity_error_is_not_mistaken_for_the_race(module_name, sqlite_engine):
-    # A role outside ck_user_role_valid fails the INSERT with no row to fall back on.
-    deps = importlib.import_module(module_name)
-
-    with (
-        patch.object(deps, "get_engine", return_value=sqlite_engine),
-        patch.object(deps, "get_valid_roles", return_value={"Normal": "Clerk"}),
-        pytest.raises(IntegrityError, match="ck_user_role_valid"),
-    ):
-        deps._resolve_user(AZURE_USER_ID, EMAIL, ["Clerk"])
+def test_an_unrelated_integrity_error_is_not_mistaken_for_the_race(sqlite_engine):
+    # An email of None fails the INSERT (NOT NULL) with no row to fall back on.
+    with pytest.raises(IntegrityError):
+        _sign_in(Session, sqlite_engine, email=None)
 
     assert _users(sqlite_engine) == []
 
 
-@pytest.mark.skipif(not os.getenv("TEST_POSTGRES_URL"), reason="needs TEST_POSTGRES_URL (a throwaway Postgres)")
+# --- the resolver of a request: loads, never creates ----------------------------------------
+
+
+def _principal(user_id, role="Judge", sysadmin=False):
+    from datetime import UTC, datetime
+
+    from transcribe_api.domain.auth.app_token import AppPrincipal, Context
+
+    ctx = Context("IAC", role)
+    return AppPrincipal(
+        user_id=user_id,
+        sysadmin=sysadmin,
+        assignments=(ctx,),
+        ctx=ctx,
+        issued_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC),
+    )
+
+
 @pytest.mark.parametrize("module_name", RESOLVERS)
-def test_concurrent_first_logins_on_postgres_resolve_to_one_user(module_name):
+def test_the_resolver_loads_the_user_the_token_names_and_derives_the_context_and_sysadmin(module_name, sqlite_engine):
     deps = importlib.import_module(module_name)
+    user = _commit_user(sqlite_engine)
+
+    with patch.object(deps, "get_engine", return_value=sqlite_engine):
+        result = deps._resolve_user(_principal(user.id, "LegalTextManager", sysadmin=True))
+
+    assert result.db_user.id == user.id
+    assert result.ctx.role == "LegalTextManager" and result.sysadmin is True
+
+
+@pytest.mark.parametrize("module_name", RESOLVERS)
+def test_the_resolver_never_rewrites_user_role_from_the_token(module_name, sqlite_engine):
+    """DIAAT-375: the Users tab's change of role had no lasting effect because every request put
+    the Entra role back. User.role is not read or written by a request any more."""
+    deps = importlib.import_module(module_name)
+    user = _commit_user(sqlite_engine)
+    with Session(sqlite_engine) as session:
+        stored = session.get(User, user.id)
+        stored.role = "LegalTextManager"
+        session.add(stored)
+        session.commit()
+
+    with patch.object(deps, "get_engine", return_value=sqlite_engine):
+        deps._resolve_user(_principal(user.id, "Judge", sysadmin=True))
+
+    [after] = _users(sqlite_engine)
+    assert after.role == "LegalTextManager"
+
+
+@pytest.mark.parametrize("module_name", RESOLVERS)
+def test_the_resolver_does_not_create_a_user_a_token_names_but_the_database_lacks(module_name, sqlite_engine):
+    from uuid import uuid4
+
+    from fastapi import HTTPException
+
+    deps = importlib.import_module(module_name)
+    with patch.object(deps, "get_engine", return_value=sqlite_engine), pytest.raises(HTTPException) as refused:
+        deps._resolve_user(_principal(uuid4()))
+    assert refused.value.status_code == 401
+    assert _users(sqlite_engine) == []
+
+
+@pytest.mark.parametrize("module_name", RESOLVERS)
+def test_the_resolver_refuses_a_deactivated_user_and_does_not_reenable_them(module_name, sqlite_engine):
+    from fastapi import HTTPException
+
+    deps = importlib.import_module(module_name)
+    user = _commit_user(sqlite_engine)
+    with Session(sqlite_engine) as session:
+        stored = session.get(User, user.id)
+        stored.is_active = False
+        session.add(stored)
+        session.commit()
+
+    with patch.object(deps, "get_engine", return_value=sqlite_engine), pytest.raises(HTTPException) as refused:
+        deps._resolve_user(_principal(user.id))
+    assert refused.value.status_code == 403 and refused.value.detail["code"] == "user_deactivated"
+    assert [u.is_active for u in _users(sqlite_engine)] == [False]
+
+
+def test_sign_in_refuses_a_deactivated_user_and_does_not_reenable_or_recreate_them(sqlite_engine):
+    from fastapi import HTTPException
+
+    user = _commit_user(sqlite_engine)
+    with Session(sqlite_engine) as session:
+        stored = session.get(User, user.id)
+        stored.is_active = False
+        session.add(stored)
+        session.commit()
+
+    with pytest.raises(HTTPException) as refused:
+        _sign_in(Session, sqlite_engine)
+    assert refused.value.status_code == 403
+    [after] = _users(sqlite_engine)
+    assert after.id == user.id and after.is_active is False
+
+
+@pytest.mark.skipif(not os.getenv("TEST_POSTGRES_URL"), reason="needs TEST_POSTGRES_URL (a throwaway Postgres)")
+def test_concurrent_first_logins_on_postgres_resolve_to_one_user():
     engine = create_engine(os.environ["TEST_POSTGRES_URL"])
     with engine.begin() as connection:
         connection.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public"))
@@ -171,15 +259,11 @@ def test_concurrent_first_logins_on_postgres_resolve_to_one_user(module_name):
             super().rollback()
 
     try:
-        with (
-            patch.object(deps, "get_engine", return_value=engine),
-            patch.object(deps, "Session", RacingSession),
-            ThreadPoolExecutor(max_workers=2) as pool,
-        ):
-            futures = [pool.submit(deps._resolve_user, AZURE_USER_ID, EMAIL, ["Normal"]) for _ in range(2)]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(_sign_in, RacingSession, engine) for _ in range(2)]
             first, second = (future.result() for future in futures)
 
-        assert first.db_user.id == second.db_user.id
+        assert first.id == second.id
         assert len(_users(engine)) == 1
         # The race really happened: one insert failed and that request recovered.
         assert len(rollbacks) == 1

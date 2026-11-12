@@ -131,22 +131,3 @@ class GenerateSummaryResponse(BaseModel):
     """Response model for generated summaries."""
 
     summary: str
-
-
-class AdminTranscriptionRecord(BaseModel):
-    id: uuid.UUID
-    title: str | None = None
-    created_datetime: datetime | None = None
-    owner_id: uuid.UUID
-    owner_email: str
-
-    @field_serializer("created_datetime")
-    def serialize_admin_datetime(self, value: datetime | None) -> str | None:
-        return value.isoformat() if value else None
-
-
-class AdminTranscriptionListResponse(BaseModel):
-    items: list[AdminTranscriptionRecord]
-    total: int
-    page: int
-    page_size: int

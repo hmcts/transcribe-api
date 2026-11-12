@@ -20,6 +20,8 @@ from transcribe_api.runtime import migrations
 POSTGRES_URL = "postgresql://user@localhost/db"
 
 EXPECTED_TABLES = {
+    "access_request",
+    "access_request_role",
     "audit_log",
     "caller",
     "correction_dataset_entry",
@@ -29,6 +31,8 @@ EXPECTED_TABLES = {
     "jurisdiction_template",
     "live_transcript_draft",
     "minuteversion",
+    "role_assignment",
+    "system_feature_flag",
     "tag",
     "transcription",
     "transcription_job",
@@ -58,6 +62,9 @@ ADDED_AWARE_TIMESTAMP_COLUMNS = {
     "jurisdiction_membership": ["created_datetime"],  # 0004
     "upload_jurisdiction": ["created_datetime"],  # 0004
     "jurisdiction_template": ["created_datetime", "updated_datetime"],  # 0008
+    "role_assignment": ["granted_at"],  # 0009
+    "access_request": ["decided_at", "created_at"],  # 0009
+    "system_feature_flag": ["updated_at"],  # 0009
 }
 
 # Dictation migration a8f2c9d5e1b3 (fix for 15-20s p95 latency); 0001 lost them.
@@ -92,7 +99,7 @@ def _alter_type_sql(table: str, column: str, type_sql: str) -> re.Pattern[str]:
 def test_there_is_one_history_with_one_head():
     script = ScriptDirectory.from_config(migrations.alembic_config())
     assert script.get_bases() == ["0001"]
-    assert script.get_heads() == ["0008"]
+    assert script.get_heads() == ["0009"]
 
 
 def test_baseline_creates_every_table(monkeypatch):
@@ -350,6 +357,8 @@ def _truncates_a_live_table(statement: str) -> bool:
 # DIAAT-342 adds document_content.jurisdiction_id in 0006 and backfills that column
 # alone: it may set jurisdiction_id (one assignment, optionally with a WHERE) and
 # nothing else, so the admin's wording in `content` is never touched.
+# (0009 writes no live-edited table: jurisdiction.auto_enrol is set false by scripts-cutover-authz.py at
+# cutover, not by the migration, which ships first and must not change what the previous release does.)
 ALLOWED_LIVE_WRITES = {
     "0006": re.compile(
         r'^\s*UPDATE\s+"?document_content"?\s+SET\s+"?jurisdiction_id"?\s*=\s*[^,]+?(?:\s+WHERE\s.+)?$', re.IGNORECASE | re.DOTALL
@@ -467,7 +476,7 @@ def test_the_live_write_guard_ignores_other_tables_and_schema_changes(statement)
 def test_only_the_revision_that_backfills_a_new_jurisdiction_column_may_write_document_content():
     backfill = "UPDATE document_content SET jurisdiction_id = '6a1c0f3e-3b7d-4c2a-9e51-1ac000000001'::uuid WHERE id = 1"
     assert _forbidden_live_writes("0006", f"{backfill};\n") == []
-    assert _forbidden_live_writes("0007", f"{backfill};\n") == [backfill]
+    assert _forbidden_live_writes("0009", f"{backfill};\n") == [backfill]
     assert _forbidden_live_writes("0006", "UPDATE jurisdiction SET settings = '{}';\n") != []
     subquery = "UPDATE document_content SET jurisdiction_id = (SELECT id FROM jurisdiction WHERE code = 'IAC')"
     assert _forbidden_live_writes("0006", f"{subquery};\n") == []
@@ -879,7 +888,7 @@ def test_0004_and_0005_keep_every_existing_value_unchanged():
                 connection.execute(text(statement), ids)
 
         # Whole rows, as JSON, without the columns 0004 adds.
-        added = {"user": ["active_jurisdiction_id"]}
+        added = {"user": ["active_jurisdiction_id", "name", "is_active"]}  # 0004, then 0009
         tables = (
             "user",
             "transcription",
@@ -905,5 +914,432 @@ def test_0004_and_0005_keep_every_existing_value_unchanged():
         assert snapshot() == before
         migrate("head")
         assert snapshot() == before
+    finally:
+        engine.dispose()
+
+
+# 0009: DIAAT-373 role assignments, access requests, feature flags ----------------------
+
+STORED_ROLES = ("Judge", "LegalTextManager", "JurisdictionAdministrator", "JurisdictionSuperAdministrator")
+
+
+def test_0009_creates_the_assignment_tables_with_their_rules(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0008:0009")
+    for table in ("role_assignment", "access_request", "access_request_role", "system_feature_flag"):
+        assert f"CREATE TABLE {table} (" in sql, table
+    # Only the four stored roles: SystemAdministrator (Entra only) and Normal (gone) cannot be stored.
+    assert (
+        "CONSTRAINT ck_role_assignment_role CHECK (role IN ('Judge', 'LegalTextManager', "
+        "'JurisdictionAdministrator', 'JurisdictionSuperAdministrator'))"
+    ) in sql
+    assert "SystemAdministrator" not in sql
+    assert "'Normal'" not in sql.split("downgrade")[0].replace("UPDATE \"user\" SET role = 'Normal'", "")
+    # A jurisdiction for all but the global role, none for it.
+    assert "CONSTRAINT ck_role_assignment_jurisdiction CHECK ((role = 'JurisdictionSuperAdministrator' AND jurisdiction_id IS NULL)" in sql
+    assert "CONSTRAINT ck_role_assignment_who CHECK (user_id IS NOT NULL OR pending_email IS NOT NULL)" in sql
+    assert "pending_email = lower(pending_email)" in sql
+    # A NULL jurisdiction is never equal to another in a unique index: partial indexes cover it.
+    for name in (
+        "uq_role_assignment_user_jurisdiction_role",
+        "uq_role_assignment_user_global_role",
+        "uq_role_assignment_pending_jurisdiction_role",
+        "uq_role_assignment_pending_global_role",
+    ):
+        assert f"CREATE UNIQUE INDEX {name} ON role_assignment" in sql, name
+    assert "WHERE user_id IS NOT NULL AND jurisdiction_id IS NULL" in sql
+    assert "status IN ('pending', 'approved', 'rejected', 'withdrawn')" in sql
+    assert "CHECK (role IN ('Judge', 'LegalTextManager'))" in sql  # access_request_role: never an admin role
+
+
+def test_0009_adds_the_user_and_audit_columns_without_breaking_the_previous_release(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0008:0009")
+    # A default, so the previous release's inserts (which do not name it) still work.
+    assert 'ALTER TABLE "user" ADD COLUMN is_active BOOLEAN DEFAULT true NOT NULL;' in sql
+    assert 'ALTER TABLE "user" ADD COLUMN name VARCHAR;' in sql
+    assert 'ALTER TABLE "user" ALTER COLUMN role DROP NOT NULL;' in sql
+    assert "ALTER TABLE audit_log ADD COLUMN active_jurisdiction_id UUID;" in sql
+    assert "ALTER TABLE audit_log ADD COLUMN active_role VARCHAR(32);" in sql
+    # Additive: nothing is dropped or renamed, and the old tables are not rewritten.
+    assert not re.search(r"DROP (TABLE|COLUMN|INDEX|CONSTRAINT)", sql)
+    assert "RENAME" not in sql
+    assert "jurisdiction_membership" not in re.sub(r"INSERT INTO role_assignment.*?ON CONFLICT DO NOTHING", "", sql, flags=re.DOTALL)
+
+
+def test_0009_backfills_the_assignments_from_the_memberships_and_leaves_auto_enrol_alone(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0008:0009")
+    assert "CASE m.role WHEN 'admin' THEN 'JurisdictionAdministrator' ELSE 'Judge' END" in sql
+    assert "CASE WHEN m.user_id IS NULL THEN lower(m.email) END" in sql  # pending stays pending, lower case
+    assert "FROM jurisdiction_membership m" in sql
+    assert "auto_enrol" not in sql  # review MIG-2: the old pods read it; the cutover script sets it
+    assert not re.search(r"UPDATE\s+\"?jurisdiction\"?", sql)
+    assert sql.index("INSERT INTO role_assignment") > sql.index("CREATE TABLE role_assignment")
+
+
+def test_0009_downgrade_removes_what_it_added(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0009:0008", downgrade=True)
+    for table in ("role_assignment", "access_request", "access_request_role", "system_feature_flag"):
+        assert f"DROP TABLE {table};" in sql, table
+    for column in ("is_active", "name"):
+        assert f'ALTER TABLE "user" DROP COLUMN {column};' in sql, column
+    for column in ("active_jurisdiction_id", "active_role"):
+        assert f"ALTER TABLE audit_log DROP COLUMN {column};" in sql, column
+    # Users created since have no role: they get one before NOT NULL comes back.
+    assert sql.index("UPDATE \"user\" SET role = 'Normal' WHERE role IS NULL") < sql.index(
+        'ALTER TABLE "user" ALTER COLUMN role SET NOT NULL'
+    )
+
+
+def test_the_models_declare_what_0009_makes():
+    tables = migrations.target_metadata().tables
+    assert {"role_assignment", "access_request", "access_request_role", "system_feature_flag"} <= set(tables)
+    assert tables["user"].columns["role"].nullable
+    assert not tables["user"].columns["is_active"].nullable
+    assert tables["user"].columns["name"].nullable
+    for column in ("active_jurisdiction_id", "active_role"):
+        assert tables["audit_log"].columns[column].nullable
+    names = {index.name for index in tables["role_assignment"].indexes}
+    assert {
+        "uq_role_assignment_user_jurisdiction_role",
+        "uq_role_assignment_user_global_role",
+        "uq_role_assignment_pending_jurisdiction_role",
+        "uq_role_assignment_pending_global_role",
+    } <= names
+    checks = {c.name for c in tables["role_assignment"].constraints if c.name}
+    assert {
+        "ck_role_assignment_role",
+        "ck_role_assignment_jurisdiction",
+        "ck_role_assignment_who",
+        "ck_role_assignment_email_lower",
+    } <= checks
+
+
+def _reset(engine):
+    from sqlalchemy import text
+
+    with engine.begin() as connection:
+        connection.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public"))
+
+
+def _migrate(engine, step, revision):
+    with engine.begin() as connection:
+        config = migrations.alembic_config()
+        config.attributes["connection"] = connection
+        step(config, revision)
+
+
+@pytest.mark.skipif(not os.getenv("TEST_POSTGRES_URL"), reason="needs TEST_POSTGRES_URL (a throwaway Postgres)")
+def test_0009_backfills_memberships_as_assignments_and_goes_up_down_up():
+    from sqlalchemy import create_engine, text
+
+    from alembic import command
+
+    engine = create_engine(os.environ["TEST_POSTGRES_URL"])
+    try:
+        _reset(engine)
+        _migrate(engine, command.upgrade, "0006")
+        et = "7e7e7e7e-0000-4000-8000-0000000000e1"
+        users = {
+            "judge": "3f2a9c1e-8b7d-4e6f-9a1b-2c3d4e5f6a01",
+            "admin": "3f2a9c1e-8b7d-4e6f-9a1b-2c3d4e5f6a02",
+            "both": "3f2a9c1e-8b7d-4e6f-9a1b-2c3d4e5f6a03",
+        }
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO jurisdiction (id, code, name, enabled, auto_enrol, settings, created_datetime,"
+                    " updated_datetime) VALUES (:et, 'ET', 'Employment Tribunal', true, true, '{}', now(), now())"
+                ),
+                {"et": et},
+            )
+            for name, uid in users.items():
+                connection.execute(
+                    text(
+                        'INSERT INTO "user" (id, created_datetime, email, azure_user_id, has_completed_onboarding,'
+                        " role) VALUES (:uid, now(), :email, :oid, true, 'Judge')"
+                    ),
+                    {"uid": uid, "email": f"{name}@example.test", "oid": f"oid-{name}"},
+                )
+            # Everyone is an IAC judge, as 0004 and the auto-enrol made them. The ET: an admin and two pending.
+            connection.execute(
+                text(
+                    "INSERT INTO jurisdiction_membership (id, jurisdiction_id, user_id, role, created_datetime)"
+                    ' SELECT gen_random_uuid(), :iac, id, \'judge\', now() FROM "user"'
+                ),
+                {"iac": IAC_ID},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO jurisdiction_membership (id, jurisdiction_id, user_id, role, created_datetime)"
+                    " VALUES (gen_random_uuid(), :et, :uid, 'admin', '2026-01-02 03:04:05+00')"
+                ),
+                {"et": et, "uid": users["admin"]},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO jurisdiction_membership (id, jurisdiction_id, email, role, created_datetime)"
+                    " VALUES (gen_random_uuid(), :et, 'Pending.Judge@Example.Test', 'judge', now())"
+                ),
+                {"et": et},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO jurisdiction_membership (id, jurisdiction_id, email, role, created_datetime)"
+                    " VALUES (gen_random_uuid(), :et, 'pending.admin@example.test', 'admin', now())"
+                ),
+                {"et": et},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO audit_log (id, timestamp, event_type, user_id, email, held_roles, required_roles)"
+                    " VALUES (gen_random_uuid(), now(), 'ACCESS_DENIED', 'oid', 'e', '[]', '[]')"
+                )
+            )
+
+        def assignments(connection):
+            rows = connection.execute(
+                text(
+                    "SELECT coalesce(u.email, a.pending_email), j.code, a.role, a.user_id IS NULL AS pending,"
+                    " a.granted_by IS NULL FROM role_assignment a"
+                    " LEFT JOIN \"user\" u ON u.id = a.user_id JOIN jurisdiction j ON j.id = a.jurisdiction_id"
+                )
+            ).all()
+            return sorted(tuple(r) for r in rows)
+
+        _migrate(engine, command.upgrade, "0009")
+        expected = [
+            ("admin@example.test", "ET", "JurisdictionAdministrator", False, True),
+            ("admin@example.test", "IAC", "Judge", False, True),
+            ("both@example.test", "IAC", "Judge", False, True),
+            ("judge@example.test", "IAC", "Judge", False, True),
+            ("pending.admin@example.test", "ET", "JurisdictionAdministrator", True, True),
+            ("pending.judge@example.test", "ET", "Judge", True, True),  # lower case
+        ]
+        with engine.connect() as connection:
+            assert assignments(connection) == expected
+            # auto_enrol is as it was (the old pods read it): the cutover script turns it off, not the migration.
+            assert connection.execute(text("SELECT count(*) FROM jurisdiction WHERE auto_enrol")).scalar_one() == 2
+            # Existing users stay active, with a name to come; the old tables are untouched.
+            assert connection.execute(text('SELECT bool_and(is_active) FROM "user"')).scalar_one() is True
+            assert connection.execute(text("SELECT count(*) FROM jurisdiction_membership")).scalar_one() == 6
+            assert connection.execute(text("SELECT active_role FROM audit_log")).scalar_one() is None
+
+        # The previous release still inserts users with a role and none of the new columns.
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    'INSERT INTO "user" (id, created_datetime, email, azure_user_id, has_completed_onboarding, role)'
+                    " VALUES (gen_random_uuid(), now(), 'old.pod@example.test', 'oid-old', false, 'Normal')"
+                )
+            )
+            assert connection.execute(text("SELECT is_active FROM \"user\" WHERE azure_user_id = 'oid-old'")).scalar_one()
+            # ... and the new code, one with no role at all.
+            connection.execute(
+                text(
+                    'INSERT INTO "user" (id, created_datetime, email, azure_user_id, has_completed_onboarding)'
+                    " VALUES (gen_random_uuid(), now(), 'no.role@example.test', 'oid-none', false)"
+                )
+            )
+
+        _migrate(engine, command.downgrade, "0006")
+        with engine.connect() as connection:
+            tables = set(
+                connection.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema='public'"))
+                .scalars()
+                .all()
+            )
+            assert not tables & {"role_assignment", "access_request", "access_request_role", "system_feature_flag"}
+            columns = set(
+                connection.execute(
+                    text("SELECT column_name FROM information_schema.columns WHERE table_name IN ('user', 'audit_log')")
+                )
+                .scalars()
+                .all()
+            )
+            assert not columns & {"is_active", "name", "active_role", "active_jurisdiction_id"} - {"active_jurisdiction_id"}
+            assert "active_role" not in columns
+            # The user created with no role has one again (the lowest), as the column is NOT NULL.
+            assert (
+                connection.execute(text("SELECT role FROM \"user\" WHERE azure_user_id = 'oid-none'")).scalar_one()
+                == "Normal"
+            )
+            assert connection.execute(text("SELECT count(*) FROM jurisdiction_membership")).scalar_one() == 6
+
+        _migrate(engine, command.upgrade, "0009")
+        with engine.connect() as connection:
+            assert len(assignments(connection)) == 6  # the same again, from the same memberships
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.skipif(not os.getenv("TEST_POSTGRES_URL"), reason="needs TEST_POSTGRES_URL (a throwaway Postgres)")
+def test_the_database_refuses_assignments_that_break_the_rules(fresh_postgres):
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    engine = fresh_postgres
+    iac = IAC_ID
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO jurisdiction (id, code, name, enabled, auto_enrol, settings, created_datetime,"
+                " updated_datetime) VALUES ('7e7e7e7e-0000-4000-8000-0000000000e1', 'ET', 'ET', true, false, '{}',"
+                " now(), now())"
+            )
+        )
+        for n in (1, 2):
+            connection.execute(
+                text(
+                    'INSERT INTO "user" (id, created_datetime, email, azure_user_id, has_completed_onboarding)'
+                    f" VALUES ('3f2a9c1e-8b7d-4e6f-9a1b-2c3d4e5f6a0{n}', now(), 'u{n}@example.test', 'oid{n}', false)"
+                )
+            )
+    u1, u2 = "3f2a9c1e-8b7d-4e6f-9a1b-2c3d4e5f6a01", "3f2a9c1e-8b7d-4e6f-9a1b-2c3d4e5f6a02"
+    et = "7e7e7e7e-0000-4000-8000-0000000000e1"
+
+    def insert(user=None, email=None, jurisdiction=None, role="Judge"):
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO role_assignment (id, user_id, pending_email, jurisdiction_id, role, granted_at)"
+                    " VALUES (gen_random_uuid(), :u, :e, :j, :r, now())"
+                ),
+                {"u": user, "e": email, "j": jurisdiction, "r": role},
+            )
+
+    # What is allowed.
+    insert(user=u1, jurisdiction=iac)
+    insert(user=u1, jurisdiction=et)  # a role held in two jurisdictions
+    insert(user=u1, jurisdiction=iac, role="LegalTextManager")  # two roles in one
+    insert(user=u1, jurisdiction=iac, role="JurisdictionAdministrator")
+    insert(user=u1, jurisdiction=None, role="JurisdictionSuperAdministrator")
+    insert(user=u2, jurisdiction=iac)
+    insert(email="new@example.test", jurisdiction=iac)
+    insert(email="new@example.test", jurisdiction=et)
+    insert(email="new@example.test", jurisdiction=None, role="JurisdictionSuperAdministrator")
+
+    refused = [
+        # SystemAdministrator is Entra only and Normal is gone: neither can be stored.
+        {"user": u2, "jurisdiction": iac, "role": "SystemAdministrator"},
+        {"user": u2, "jurisdiction": iac, "role": "Normal"},
+        {"user": u2, "jurisdiction": iac, "role": "judge"},
+        # A jurisdiction is required for all but the global role, and forbidden for it.
+        {"user": u2, "jurisdiction": None, "role": "Judge"},
+        {"user": u2, "jurisdiction": None, "role": "LegalTextManager"},
+        {"user": u2, "jurisdiction": None, "role": "JurisdictionAdministrator"},
+        {"user": u2, "jurisdiction": iac, "role": "JurisdictionSuperAdministrator"},
+        # Somebody, by id or by email.
+        {"jurisdiction": iac},
+        # A pending email is lower case.
+        {"email": "Upper@Example.test", "jurisdiction": iac},
+        # Unique per (user, jurisdiction, role), also for the global role (a NULL jurisdiction).
+        {"user": u1, "jurisdiction": iac},
+        {"user": u1, "jurisdiction": None, "role": "JurisdictionSuperAdministrator"},
+        # And per (pending email, jurisdiction, role).
+        {"email": "new@example.test", "jurisdiction": iac},
+        {"email": "new@example.test", "jurisdiction": None, "role": "JurisdictionSuperAdministrator"},
+    ]
+    for kwargs in refused:
+        with pytest.raises(IntegrityError):
+            insert(**kwargs)
+
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT count(*) FROM role_assignment")).scalar_one() == 9
+
+
+@pytest.mark.skipif(not os.getenv("TEST_POSTGRES_URL"), reason="needs TEST_POSTGRES_URL (a throwaway Postgres)")
+def test_the_database_refuses_access_requests_that_break_the_rules(fresh_postgres):
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    engine = fresh_postgres
+    uid = "3f2a9c1e-8b7d-4e6f-9a1b-2c3d4e5f6a01"
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                'INSERT INTO "user" (id, created_datetime, email, azure_user_id, has_completed_onboarding)'
+                f" VALUES ('{uid}', now(), 'u@example.test', 'oid', false)"
+            )
+        )
+
+    def request(status="pending"):
+        with engine.begin() as connection:
+            return connection.execute(
+                text(
+                    "INSERT INTO access_request (id, user_id, jurisdiction_id, status, created_at)"
+                    " VALUES (gen_random_uuid(), :u, :j, :s, now()) RETURNING id"
+                ),
+                {"u": uid, "j": IAC_ID, "s": status},
+            ).scalar_one()
+
+    for status in ("pending", "approved", "rejected", "withdrawn"):
+        request(status)
+    with pytest.raises(IntegrityError):
+        request("granted")
+
+    def ask(request_id, role):
+        with engine.begin() as connection:
+            connection.execute(
+                text("INSERT INTO access_request_role (access_request_id, role) VALUES (:r, :role)"),
+                {"r": request_id, "role": role},
+            )
+
+    request_id = request()
+    ask(request_id, "Judge")
+    ask(request_id, "LegalTextManager")
+    for role in ("JurisdictionAdministrator", "JurisdictionSuperAdministrator", "SystemAdministrator", "Normal"):
+        with pytest.raises(IntegrityError):
+            ask(request_id, role)
+    with pytest.raises(IntegrityError):
+        ask(request_id, "Judge")  # once
+
+
+@pytest.mark.skipif(not os.getenv("TEST_POSTGRES_URL"), reason="needs TEST_POSTGRES_URL (a throwaway Postgres)")
+def test_0009_keeps_every_existing_value_unchanged():
+    """DIAAT-331 again: after 0009 every row that existed before is still there with every
+    value it had; only new columns are added, and the old membership table is untouched."""
+    from sqlalchemy import create_engine, text
+
+    from alembic import command
+
+    engine = create_engine(os.environ["TEST_POSTGRES_URL"])
+    try:
+        _reset(engine)
+        _migrate(engine, command.upgrade, "0008")  # master's head: stages (0007) and templates (0008) are its own
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    'INSERT INTO "user" (id, created_datetime, updated_datetime, email, azure_user_id,'
+                    " has_completed_onboarding, role) VALUES ('3f2a9c1e-8b7d-4e6f-9a1b-2c3d4e5f6a7b',"
+                    " '2026-01-02 03:04:05', '2026-01-03 03:04:05', 'judge@example.test', 'oid', true, 'Judge')"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO audit_log (id, timestamp, event_type, user_id, email, held_roles, required_roles,"
+                    " outcome, object_type, object_id, request_id) VALUES (gen_random_uuid(), now(), 'transcript.view',"
+                    " 'u', 'e', '[]', '[]', 'success', 'transcription', 'o', 'r')"
+                )
+            )
+        added = {"user": ["is_active", "name"], "audit_log": ["active_jurisdiction_id", "active_role"]}
+        queries = {
+            table: f"SELECT to_jsonb(t) - ARRAY{added.get(table, [])}::text[] FROM \"{table}\" t ORDER BY 1::text"
+            for table in ("user", "audit_log", "jurisdiction", "jurisdiction_membership")
+        }
+
+        def snapshot():
+            with engine.connect() as connection:
+                return {name: connection.execute(text(query)).all() for name, query in queries.items()}
+
+        before = snapshot()
+        before_jurisdiction = [dict(row[0]) for row in before["jurisdiction"]]
+        _migrate(engine, command.upgrade, "0009")
+        after = snapshot()
+        for table in ("user", "audit_log", "jurisdiction_membership"):
+            assert after[table] == before[table], table
+        # The IAC's row: everything as it was, auto_enrol included (0004 set it true; 0009 leaves it).
+        [iac_after] = [dict(row[0]) for row in after["jurisdiction"]]
+        [iac_before] = before_jurisdiction
+        assert iac_before["auto_enrol"] is True
+        assert iac_after == iac_before
     finally:
         engine.dispose()

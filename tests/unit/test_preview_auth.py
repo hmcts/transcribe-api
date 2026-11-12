@@ -1,9 +1,11 @@
-"""Preview-only auth bypass (DIAAT-399).
+"""Preview-only auth bypass (DIAAT-399), under the BenchNotes token (DIAAT-373).
 
-PR previews run the web app with sign-in off, so the API is called without a
-token. AUTH_PREVIEW_USER_ENABLED lets those calls through as a fixed preview
-user, but only when ENVIRONMENT=preview; anywhere else the process refuses to
-start.
+PR previews run the web app with sign-in off, so no Entra token is sent. With
+AUTH_PREVIEW_USER_ENABLED, a sign-in (``POST /api/auth/session``) with no token is a fixed
+preview user, but only when ENVIRONMENT=preview; anywhere else the process refuses to
+start. The preview user is given every role (``sessions.ensure_preview_assignments``) and
+then needs a BenchNotes token like anyone else: every other route still refuses a request
+with none.
 """
 
 from __future__ import annotations
@@ -15,9 +17,11 @@ from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from tests.unit.test_token_auth import CLIENT, TENANT, _StubJwks, _token
+from tests.unit import auth_fixtures as af
+from tests.unit.auth_fixtures import CLIENT, TENANT, StubJwks
+from tests.unit.test_token_auth import _token
 from transcribe_api.domain.auth import token_auth
-from transcribe_api.domain.auth.token_auth import get_token_auth_user
+from transcribe_api.domain.auth.token_auth import get_entra_identity, get_token_auth_user
 from transcribe_api.runtime.settings_dictation import get_settings
 
 
@@ -36,13 +40,17 @@ def client(monkeypatch):
     monkeypatch.setenv("JWT_VERIFICATION_STRICT", "true")
     get_auth_settings.cache_clear()
     get_jwt_service.cache_clear()
-    get_jwt_service().jwks_client = _StubJwks()
+    get_jwt_service().jwks_client = StubJwks()
 
     app = FastAPI()
 
     @app.get("/whoami")
-    async def whoami(user=Depends(get_token_auth_user)):
+    async def whoami(user=Depends(get_entra_identity)):
         return user.model_dump()
+
+    @app.get("/other-route")
+    async def other_route(principal=Depends(get_token_auth_user)):
+        return {"sub": principal.sub}
 
     yield TestClient(app)
 
@@ -50,7 +58,7 @@ def client(monkeypatch):
     get_jwt_service.cache_clear()
 
 
-def test_no_token_resolves_to_the_preview_user(client):
+def test_no_token_resolves_to_the_preview_user_at_sign_in(client):
     from hmcts_azure_auth.roles import get_valid_roles
 
     r = client.get("/whoami")
@@ -61,6 +69,10 @@ def test_no_token_resolves_to_the_preview_user(client):
         "email": token_auth.PREVIEW_USER_EMAIL,
         "roles": list(get_valid_roles().values()),
     }
+
+
+def test_every_other_route_still_needs_a_benchnotes_token_in_preview(client):
+    assert client.get("/other-route").status_code == 401
 
 
 def test_preview_user_roles_are_configurable(client, monkeypatch):
@@ -166,3 +178,79 @@ def test_only_the_preview_values_turn_the_preview_user_on():
     for values_file in values_files:
         if values_file.name != "values.preview.template.yaml":
             assert "AUTH_PREVIEW_USER_ENABLED" not in values_file.read_text(), values_file.name
+
+
+# The preview user signs in and is given every role ----------------------------------------
+
+
+@pytest.fixture
+def session_client(jurisdiction_db, monkeypatch):
+    from transcribe_api.api import routes_session
+    from transcribe_api.api.routes_session import router as session_router
+
+    af.stub_entra(monkeypatch)
+    monkeypatch.setenv("ENVIRONMENT", "preview")
+    monkeypatch.setenv("AUTH_PREVIEW_USER_ENABLED", "true")
+    monkeypatch.setattr(routes_session, "get_engine", lambda: jurisdiction_db)
+    app = FastAPI()
+    app.include_router(session_router, prefix="/api")
+    yield TestClient(app, raise_server_exceptions=False)
+    af.unstub_entra()
+
+
+@pytest.mark.real_jurisdictions
+def test_the_preview_user_signs_in_with_no_token_and_holds_every_role(session_client, jurisdiction_db):
+    from tests.unit.jurisdiction_fixtures import add_jurisdiction
+
+    add_jurisdiction(jurisdiction_db, "IAC")
+    add_jurisdiction(jurisdiction_db, "ET")
+
+    response = session_client.post("/api/auth/session")
+
+    assert response.status_code == 200, response.text
+    me = response.json()["me"]
+    assert me["user"]["email"] == token_auth.PREVIEW_USER_EMAIL
+    # Several roles were given, so they choose, as anyone with several does.
+    assert me["status"] == "choose"
+    roles = {(a["jurisdiction"] and a["jurisdiction"]["code"], a["role"]) for a in me["assignments"]}
+    assert (None, "JurisdictionSuperAdministrator") in roles
+    for code in ("IAC", "ET"):
+        assert {(code, "Judge"), (code, "LegalTextManager"), (code, "JurisdictionAdministrator")} <= roles
+    # Every role the app has, so the previews' areas are all reachable: and the system one.
+    token = response.json()["token"]
+    pick = session_client.put(
+        "/api/me/context", json={"jurisdiction": "IAC", "role": "Judge"}, headers={"Authorization": f"Bearer {token}"}
+    )
+    assert pick.status_code == 200
+    assert "dictation.use" in pick.json()["me"]["permissions"]
+    assert "feature_flags.manage" in pick.json()["me"]["permissions"]  # the SystemAdministrator role too
+
+    # Signing in again changes nothing and duplicates nothing.
+    again = session_client.post("/api/auth/session")
+    assert len(again.json()["me"]["assignments"]) == len(me["assignments"])
+
+
+@pytest.mark.real_jurisdictions
+@pytest.mark.parametrize("environment", ["aat", "prod", "demo", "test"])
+def test_outside_preview_a_sign_in_with_no_token_is_401_and_gives_nobody_a_role(
+    session_client, jurisdiction_db, monkeypatch, environment
+):
+    from sqlmodel import Session, select
+
+    from transcribe_api.domain.models_dictation import RoleAssignment
+
+    monkeypatch.setenv("ENVIRONMENT", environment)
+    assert session_client.post("/api/auth/session").status_code == 401
+    with Session(jurisdiction_db) as session:
+        assert session.exec(select(RoleAssignment)).all() == []
+
+
+@pytest.mark.real_jurisdictions
+def test_a_real_sign_in_in_a_preview_is_not_given_every_role(session_client, jurisdiction_db):
+    """Only the no-token sign-in is the preview user: a token holder is who the token says."""
+    from tests.unit.jurisdiction_fixtures import add_jurisdiction
+
+    add_jurisdiction(jurisdiction_db, "IAC")
+    response = session_client.post("/api/auth/session", headers={"Authorization": f"Bearer {_token()}"})
+    assert response.status_code == 200
+    assert response.json()["me"]["status"] == "no_access"

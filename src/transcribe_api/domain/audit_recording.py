@@ -13,7 +13,9 @@ Audited actions (the vocabulary is ``runtime/telemetry_schema.AUDIT_ACTIONS``):
 * ``audio.export``: the job's audio was streamed back (the only audio egress);
 * ``job.delete``: a job and its audio were deleted;
 * ``job.submit``: a transcription job was submitted;
-* ``transcript.edit``: recorded only when refused (corrections and baselines).
+* ``transcript.edit`` (a correction, a merge, a baseline), ``transcript.rename_speaker``, ``transcript.rollback`` and
+  ``transcript.accept``: recorded when done (DIAAT-395; ``transcript.edit`` also when refused). ``detail`` has the kind of edit
+  and a segment ID, never its text.
 
 A refusal (outcome ``denied``) is recorded wherever DIAAT-285 records an ownership
 violation (``blocked`` and ``detected``), including the job list's ``detected``
@@ -43,7 +45,8 @@ Append-only: the writers only insert. Nothing in the application updates or dele
 audit rows.
 
 Access and retention (AC3): PENDING the security and data decision. There is no
-retention or purge mechanism, and no API to read audit records: access is direct
+retention or purge mechanism, and the only API that reads audit records is a recording's own history for its owner
+(domain/job_history.py, DIAAT-395: actions, times, actors, outcomes, never text); otherwise access is direct
 database access (the same access as the transcripts themselves). Do not add a purge
 or a read API without that decision.
 """
@@ -65,11 +68,21 @@ from hmcts_otel import conventions as c
 from hmcts_otel import get_request_id, record_event
 
 from transcribe_api.domain import audit as audit_core
+from transcribe_api.domain.auth.context import audit_context_fields
 from transcribe_api.domain.models_dictation import AuditLog
 
 logger = logging.getLogger(__name__)
 
-AuditAction = Literal["job.submit", "transcript.view", "transcript.edit", "audio.export", "job.delete"]
+AuditAction = Literal[
+    "job.submit",
+    "transcript.view",
+    "transcript.edit",
+    "transcript.rename_speaker",
+    "transcript.rollback",
+    "transcript.accept",
+    "audio.export",
+    "job.delete",
+]
 AuditOutcome = Literal["success", "denied", "failed"]
 AuditObjectType = Literal["job", "upload"]
 SecurityResourceType = Literal["job", "transcript", "audio", "upload"]
@@ -171,7 +184,9 @@ def write_audit(*records: AuditRecord) -> None:
 
 
 def _insert(rows: list[dict[str, object]]) -> None:
-    """Hand the rows to the shared writer (domain/audit.py), as audit_log rows."""
+    """Hand the rows to the shared writer (domain/audit.py), as audit_log rows, stamped with the
+    context the request acts in, as the shared writer's own rows are (DIAAT-390)."""
+    context = audit_context_fields()
     audit_core.persist_rows(
         [
             AuditLog(
@@ -184,6 +199,7 @@ def _insert(rows: list[dict[str, object]]) -> None:
                 object_id=str(row["object_id"]) if row["object_id"] is not None else None,
                 request_id=row["request_id"],
                 detail=row["detail"],
+                **context,
             )
             for row in rows
         ]

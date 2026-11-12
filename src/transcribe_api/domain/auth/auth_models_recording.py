@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from hmcts_azure_auth.models import AuthUser
+
+from transcribe_api.domain.auth.app_token import Context
 
 if TYPE_CHECKING:
     from transcribe_api.domain.models_recording import User
@@ -15,16 +18,23 @@ __all__ = ["AuthUser", "AuthenticatedUser"]
 
 @dataclass
 class AuthenticatedUser:
-    """A DB User paired with the Azure AD roles verified at request time.
+    """A DB User paired with what the caller's BenchNotes token says (DIAAT-373).
 
-    Roles are not persisted — the authoritative source is the JWT on every
-    request. Attribute access falls through to the wrapped User for all fields
-    not defined on this dataclass, so route code can use current_user.email,
-    current_user.id, etc. without changes.
+    ``ctx`` is the (jurisdiction, role) the user is acting in, None until chosen;
+    ``assignments`` are the pairs they hold; ``sysadmin`` is the Entra SystemAdministrator
+    role, copied into the token when it was minted. What they may do is derived from ``ctx`` and
+    ``sysadmin`` (domain/auth/authorisation.py).
+    Attribute access falls through to the wrapped User for all fields not defined on this
+    dataclass, so route code can use current_user.email, current_user.id, etc. without
+    changes.
     """
 
     db_user: User
-    app_roles: list[str]
+    ctx: Context | None = None
+    sysadmin: bool = False
+    assignments: tuple[Context, ...] = ()
+    # Where the token's chain of re-mints ends (app_token.mint): a re-mint never outlives it.
+    session_expires_at: datetime | None = None
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.db_user, name)

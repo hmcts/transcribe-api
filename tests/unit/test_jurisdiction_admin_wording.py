@@ -68,8 +68,8 @@ def test_their_judges_see_the_new_wording(jurisdiction_db, jurisdiction_app, set
     client_as(jurisdiction_app, jurisdiction_db, et_admin).put(
         "/api/jurisdictions/wording", headers={"X-Jurisdiction": "ET"}, json={"wording": {"help.subtitle": "ET"}}
     )
-    me = client_as(jurisdiction_app, jurisdiction_db, et_judge).get("/api/jurisdictions/me").json()
-    assert me["current"]["wording"] == {"help.subtitle": "ET"}
+    current = client_as(jurisdiction_app, jurisdiction_db, et_judge).get("/api/jurisdictions/current").json()
+    assert current["wording"] == {"help.subtitle": "ET"}
 
 
 def test_an_admin_in_one_jurisdiction_cannot_change_another(jurisdiction_db, jurisdiction_app, setup):
@@ -85,18 +85,19 @@ def test_an_admin_in_one_jurisdiction_cannot_change_another(jurisdiction_db, jur
     ):
         refused = request()
         assert refused.status_code == 403
-        assert refused.json()["detail"]["code"] == "jurisdiction_admin_required"
+        assert refused.json()["detail"]["code"] == "permission_denied"
     assert _settings(jurisdiction_db, "IAC") == IAC_SETTINGS
 
 
 def test_a_jurisdiction_they_do_not_belong_to_is_out_of_reach(jurisdiction_db, jurisdiction_app, setup):
+    """A tab naming a jurisdiction the user's token is not in is out of step with it (409)."""
     _, et_judge = setup
     add_jurisdiction(jurisdiction_db, "SSCS")
     refused = client_as(jurisdiction_app, jurisdiction_db, et_judge).put(
         "/api/jurisdictions/wording", headers={"X-Jurisdiction": "IAC"}, json={"wording": {"help.subtitle": "x"}}
     )
-    assert refused.status_code == 403
-    assert refused.json()["detail"]["code"] == jurisdictions.NOT_AVAILABLE
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["code"] == "context_changed"
     assert _settings(jurisdiction_db, "IAC") == IAC_SETTINGS
 
 
@@ -137,10 +138,12 @@ def test_the_admin_of_a_disabled_jurisdiction_cannot_edit_it(jurisdiction_db, ju
         et.enabled = False
         session.add(et)
         session.commit()
-    refused = client_as(jurisdiction_app, jurisdiction_db, et_admin).put(
+    # Their token, minted before it was disabled, still says they act as its admin.
+    refused = client_as(jurisdiction_app, jurisdiction_db, et_admin, ctx=("ET", "JurisdictionAdministrator")).put(
         "/api/jurisdictions/wording", headers={"X-Jurisdiction": "ET"}, json={"wording": {"help.subtitle": "x"}}
     )
     assert refused.status_code == 403
+    assert refused.json()["detail"]["code"] == jurisdictions.NOT_AVAILABLE
     assert _settings(jurisdiction_db, "ET")["wording"] == {"help.subtitle": "Employment Tribunal"}
 
 

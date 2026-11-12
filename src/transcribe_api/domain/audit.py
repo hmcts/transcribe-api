@@ -5,12 +5,13 @@ which is sampled, capped and expires (DIAAT-286, decision OD7).
 
 What is recorded
 ----------------
-* ``ACCESS_DENIED`` from the auth library (a role check refused a request; written
-  by ``write_audit_event``, the ``audit_writer`` of ``get_allowlisted_user``), and
+* ``ACCESS_DENIED`` from the permission checks (``require_permission`` refused a request, or the
+  dictation off-switch did: domain/auth/authorisation.py; written by ``write_audit_event``), and
   from the ownership checks of DIAAT-285 (``security.ownership_violation``): the
   same call sites write the audit row, with the identifiers the telemetry event
   deliberately leaves out.
-* ``ROLE_CHANGE`` (written by the auth library) and ``user.delete`` (admin routes).
+* ``ROLE_CHANGE`` (written by the auth library; ``user.delete`` rows of the old admin route
+  remain in the vocabulary for the migrated history: the route is gone).
 * ``transcript.view``, ``transcript.export``, ``transcript.delete``: the sensitive
   actions on a transcription, its transcript or its decision document (``audited``).
 
@@ -32,7 +33,16 @@ Each DIAAT-286 row has:
 * ``request_id``: ``hmcts.request.id``, the join to telemetry, e.g. from a
   ``security.ownership_violation`` event (which carries no identifiers) to the row
   that says who and what;
+* ``active_jurisdiction_id`` and ``active_role``: the context the actor was acting in
+  (DIAAT-390: the BenchNotes token's, set per request by the auth dependency,
+  domain/auth/context.py); NULL where there is none (a worker, a request before a context
+  is chosen, a global role's jurisdiction);
 * ``detail``: controlled values only (how, why refused); never content.
+
+The role, access request and feature flag changes are the exception (``stage_audit``): their row is
+added in the same transaction as the change and fail-closed, so the change is not made if the row
+cannot be written, and a committed change always has its row (the role history is read only from
+these rows).
 
 Writing never breaks the user's request (fail-open): a failed write logs the event
 and error types only, records ``audit.write_failed`` (no identifiers) and the
@@ -68,7 +78,9 @@ Access and retention (AC3)
 --------------------------
 Pending the linked security and data decision (open question).
 
-* Access: database access only. No route reads ``audit_log``; the admin routes write
+* Access: database access, plus two read-only routes: the role-change history (``GET /api/admin/role-history``,
+  domain/user_admin.py, DIAAT-383) and a recording's own history for its owner (``GET /api/v1/jobs/{id}/history``,
+  domain/job_history.py, DIAAT-395). The admin routes write
   it but do not show it.
 * Retention: none is implemented. Nothing deletes ``audit_log`` rows (the table has
   no purge job and no foreign keys, so rows outlive the users and transcriptions they
@@ -107,6 +119,7 @@ from sqlmodel import Session
 from starlette.requests import ClientDisconnect
 
 import transcribe_api.runtime.telemetry  # noqa: F401  (registers the merged schema)
+from transcribe_api.domain.auth.context import audit_context_fields
 from transcribe_api.domain.models_dictation import AuditLog
 from transcribe_api.runtime.db_connection import get_engine
 
@@ -126,7 +139,6 @@ ACCESS_DENIED = AuditEventType.ACCESS_DENIED.value
 TRANSCRIPT_VIEWED = "transcript.view"
 TRANSCRIPT_EXPORTED = "transcript.export"
 TRANSCRIPT_DELETED = "transcript.delete"
-USER_DELETED = "user.delete"
 
 # Outcomes
 SUCCESS = "success"
@@ -170,11 +182,8 @@ def _persist(row: AuditLog) -> bool:
 def write_audit_event(event: AuditEvent) -> None:
     """Write an AuditEvent from the auth library or an admin route.
 
-    get_allowlisted_user calls it in a worker thread on every 403; an async route calls
-    it the same way (``await asyncio.to_thread(write_audit_event, ...)``). Called on the
-    event loop by mistake, it is not inserted there but handed to a worker thread, as
-    for record_audit. Failures are logged but do not propagate: a logging failure must
-    never block a response.
+    Called by the permission checks (domain/auth/authorisation.py) on every refusal. Failures are logged but
+    do not propagate: a logging failure must never block a response.
     """
     try:  # building the row is part of the write: fail-open too
         row = AuditLog(
@@ -189,6 +198,7 @@ def write_audit_event(event: AuditEvent) -> None:
             client_ip=event.client_ip,
             outcome=DENIED if event.event_type == ACCESS_DENIED else SUCCESS,
             request_id=get_request_id(),
+            **audit_context_fields(),
         )
     except Exception as exc:
         _write_failed(str(event.event_type), exc)
@@ -221,6 +231,30 @@ def record_audit(
         _write_failed(action, exc)
         return False
     return _submit(row)
+
+
+def stage_audit(
+    session: Session,
+    action: str,
+    *,
+    actor_id: UUID | str,
+    outcome: str = SUCCESS,
+    object_type: str | None = None,
+    object_id: UUID | str | None = None,
+    detail: dict[str, Any] | None = None,
+) -> AuditLog:
+    """Add one audit row to the caller's session, to be committed WITH the change it records
+    (fail-closed). For the role, access request and feature flag changes (DIAAT-383, 392, 396):
+    if the row cannot be built or inserted the exception propagates, the transaction is not
+    committed, and the change is not made, so a committed change always has its audit row.
+
+    Unlike ``record_audit`` (fail-open, in its own transaction after the action) this never swallows
+    an error and never writes by itself: the caller commits."""
+    row = _audit_row(
+        action, actor_id=actor_id, outcome=outcome, object_type=object_type, object_id=object_id, detail=detail
+    )
+    session.add(row)
+    return row
 
 
 def persist_rows(rows: list[AuditLog]) -> bool:
@@ -292,9 +326,11 @@ def _audit_row(
     object_id: UUID | str | None,
     detail: dict[str, Any] | None,
     request_id: str | None = None,
+    context: dict[str, object] | None = None,
 ) -> AuditLog:
-    """The row, with the request ID (and timestamp) of the calling request's context,
-    or the request ID given (captured earlier, e.g. for a streamed response)."""
+    """The row, with the request ID, timestamp and active context (jurisdiction and role) of
+    the calling request's context, or the request ID and context given (captured earlier,
+    e.g. for a streamed response)."""
     return AuditLog(
         event_type=action,
         user_id=str(actor_id),
@@ -303,6 +339,7 @@ def _audit_row(
         object_id=str(object_id) if object_id is not None else None,
         detail=detail or None,
         request_id=request_id or get_request_id(),
+        **(context if context is not None else audit_context_fields()),
     )
 
 
@@ -334,6 +371,7 @@ class AuditedAction:
         self.finished = False
         # Built in the request's context: a streamed body may be sent outside it.
         self._request_id = get_request_id()
+        self._context = audit_context_fields()
         self._streams = False  # the outcome is settled when the response body ends
         self._client_may_stop = False  # a client ending the stream early still received it
         self._stream_pending = False  # the row is still to be written by the stream
@@ -425,6 +463,7 @@ class AuditedAction:
             object_id=self.object_id,
             detail=self.detail,
             request_id=self._request_id,
+            context=self._context,
         )
 
 

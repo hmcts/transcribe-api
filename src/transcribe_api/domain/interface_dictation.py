@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 import pytz
 from fastapi import HTTPException
-from sqlalchemy import delete, event, func, update
+from sqlalchemy import delete, event, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
@@ -14,13 +14,10 @@ from transcribe_api.documents.minutes.types import TranscriptionMetadata
 from transcribe_api.domain.exceptions import (
     JurisdictionConflictError,
     OwnershipConflictError,
-    UserHasTranscriptionsError,
-    UserNotFoundError,
 )
 from transcribe_api.domain.models_dictation import (
     BaseTable,
     DialogueEntry,
-    JurisdictionMembership,
     LiveTranscriptDraft,
     MinuteVersion,
     Tag,
@@ -662,77 +659,6 @@ def remove_tag_from_transcription(transcription_id: UUID, tag_name: str, user_id
             session.commit()
 
 
-# ---------------------------------------------------------------------------
-# Admin functions — bypass ownership filter
-# ---------------------------------------------------------------------------
-
-
-def admin_get_transcription_by_id(transcription_id: UUID) -> Transcription:
-    """Fetch a single transcription by ID with no user ownership check."""
-    with Session(engine) as session:
-        statement = (
-            select(Transcription)
-            .where(Transcription.id == transcription_id)
-            .options(
-                selectinload(Transcription.transcription_jobs),  # type: ignore[arg-type]
-                selectinload(Transcription.tags),  # type: ignore[arg-type]
-            )
-        )
-        transcription = session.exec(statement).first()
-        if not transcription:
-            raise HTTPException(status_code=404, detail="Transcription not found")
-        return transcription
-
-
-def admin_fetch_all_transcriptions(
-    *,
-    jurisdiction_id: UUID,
-    owner_email: str | None = None,
-    created_after: datetime | None = None,
-    created_before: datetime | None = None,
-    page: int = 1,
-    page_size: int = 50,
-) -> tuple[list[Transcription], int]:
-    """List all users' transcriptions in one jurisdiction (DIAAT-334), with optional
-    filters and pagination."""
-    if page < 1:
-        raise ValueError(f"page must be >= 1, got {page}")
-    if page_size < 1 or page_size > 200:
-        raise ValueError(f"page_size must be between 1 and 200, got {page_size}")
-
-    with Session(engine) as session:
-        filters = [Transcription.jurisdiction_id == jurisdiction_id]
-        if owner_email:
-            filters.append(User.email == owner_email)
-        if created_after:
-            filters.append(Transcription.created_datetime >= created_after)
-        if created_before:
-            filters.append(Transcription.created_datetime <= created_before)
-
-        count_stmt = (
-            select(func.count(Transcription.id))  # type: ignore[arg-type]
-            .join(User, Transcription.user_id == User.id)  # type: ignore[arg-type]
-        )
-        for f in filters:
-            count_stmt = count_stmt.where(f)
-        total = session.exec(count_stmt).one()
-
-        data_stmt = (
-            select(Transcription)
-            .join(User, Transcription.user_id == User.id)  # type: ignore[arg-type]
-            .options(
-                selectinload(Transcription.user),  # type: ignore[arg-type]
-                selectinload(Transcription.transcription_jobs),  # type: ignore[arg-type]
-                selectinload(Transcription.tags),  # type: ignore[arg-type]
-            )
-            .order_by(Transcription.created_datetime.desc())  # type: ignore[arg-type]
-        )
-        for f in filters:
-            data_stmt = data_stmt.where(f)
-        data_stmt = data_stmt.offset((page - 1) * page_size).limit(page_size)
-        transcriptions = session.exec(data_stmt).all()
-
-        return list(transcriptions), total
 _LIVE_DRAFT_MAX_AGE = timedelta(hours=24)
 
 
@@ -799,68 +725,3 @@ def delete_live_draft(user_id: UUID, jurisdiction_id: UUID) -> None:
         if draft:
             session.delete(draft)
             session.commit()
-
-
-# ---------------------------------------------------------------------------
-# Admin user management
-# ---------------------------------------------------------------------------
-
-
-def admin_list_users(
-    *,
-    page: int = 1,
-    page_size: int = 50,
-    search_email: str | None = None,
-) -> tuple[list[User], int]:
-    """Return a paginated list of all users with an optional email substring filter."""
-    if page < 1:
-        raise HTTPException(status_code=422, detail="page must be >= 1")
-    if page_size < 1 or page_size > 200:
-        raise HTTPException(status_code=422, detail="page_size must be between 1 and 200")
-
-    with Session(engine) as session:
-        filters = []
-        if search_email:
-            filters.append(User.email.ilike(f"%{search_email}%"))
-
-        count_stmt = select(func.count(User.id))  # type: ignore[arg-type]
-        for f in filters:
-            count_stmt = count_stmt.where(f)
-        total = session.exec(count_stmt).one()
-
-        data_stmt = select(User)
-        for f in filters:
-            data_stmt = data_stmt.where(f)
-        data_stmt = data_stmt.offset((page - 1) * page_size).limit(page_size)
-        users = list(session.exec(data_stmt).all())
-        return users, total
-
-
-def admin_delete_user(user_id: UUID) -> None:
-    """Delete a user after verifying they have no transcriptions.
-
-    Raises UserNotFoundError if the user does not exist.
-    Raises UserHasTranscriptionsError if the user still owns transcriptions.
-    Automatically removes the user's live drafts and jurisdiction memberships first.
-    """
-    with Session(engine) as session:
-        user = session.get(User, user_id)
-        if not user:
-            raise UserNotFoundError(user_id)
-
-        transcription_count = session.exec(
-            select(func.count(Transcription.id)).where(Transcription.user_id == user_id)  # type: ignore[arg-type]
-        ).one()
-        if transcription_count > 0:
-            raise UserHasTranscriptionsError(user_id, transcription_count)
-
-        # A draft per jurisdiction, and the user's memberships (DIAAT-322).
-        for draft in session.exec(select(LiveTranscriptDraft).where(LiveTranscriptDraft.user_id == user_id)).all():
-            session.delete(draft)
-        for membership in session.exec(
-            select(JurisdictionMembership).where(JurisdictionMembership.user_id == user_id)
-        ).all():
-            session.delete(membership)
-
-        session.delete(user)
-        session.commit()

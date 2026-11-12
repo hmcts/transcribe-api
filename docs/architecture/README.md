@@ -122,7 +122,7 @@ config:
   layout: elk
 ---
 flowchart LR
-  judge["Actor<br/>Any signed-in user<br/>Judge, Normal or an admin role"]
+  judge["Actor<br/>Any signed-in user<br/>Judge, or an administrator role"]
   ltm["Actor<br/>LegalTextManager"]
   sysadmin["Actor<br/>SystemAdministrator"]
 
@@ -331,7 +331,7 @@ sequenceDiagram
   loop while the page is open
     U->>W: Poll the job list or job
     W->>A: GET /api/v1/jobs
-    A->>D: Read jobs (own jobs, or all for SystemAdministrator)
+    A->>D: Read jobs (own jobs only: nobody sees another user's)
     A-->>U: Status and transcript
   end
   U->>A: Play audio (GET /api/v1/jobs/id/audio, via web)

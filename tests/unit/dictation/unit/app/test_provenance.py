@@ -8,7 +8,6 @@ import asyncio
 import contextvars
 import json
 import threading
-import uuid
 from datetime import datetime
 from importlib import metadata
 from pathlib import Path
@@ -260,35 +259,9 @@ def test_the_jobs_route_saves_as_a_client(client, as_user, mocker):
     assert save.call_args.kwargs["from_client"] is True
 
 
-# The investigator's view -------------------------------------------------------------------
-
-
-def test_administrators_see_the_provenance_of_each_output(mocker):
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-
-    import transcribe_api.api.routes_dictation_privileged
-    from tests.unit.dictation.unit.api.test_routes import _make_transcription, _make_user
-    from tests.unit.jurisdiction_fixtures import IAC_JURISDICTION_ID
-    from transcribe_api.domain.auth.dependencies_dictation import get_current_user
-    from transcribe_api.domain.models_dictation import TranscriptionJob
-
-    test_app = FastAPI()
-    test_app.include_router(transcribe_api.api.routes_dictation_privileged.router, prefix="/api")
-    test_app.dependency_overrides[get_current_user] = lambda: _make_user(roles=["SystemAdministrator"])
-    transcription = _make_transcription(uuid.uuid4())
-    transcription.jurisdiction_id = IAC_JURISDICTION_ID  # where the administrator works (DIAAT-334)
-    record = Provenance(output="decision_document", template="decision", template_version="0123456789ab").to_record()
-    job = TranscriptionJob(transcription_id=transcription.id, dialogue_entries=[], provenance=record)
-    transcription.__dict__["transcription_jobs"] = [job]
-    mocker.patch(
-        "transcribe_api.api.routes_dictation_privileged.admin_get_transcription_by_id", return_value=transcription
-    )
-
-    body = TestClient(test_app).get(f"/api/admin/transcriptions/{transcription.id}").json()
-    assert body["id"] == str(transcription.id)
-    assert body["title"] == transcription.title
-    assert body["provenance"] == [{"job_id": str(job.id), "provenance": record}]
+# The investigator's view (GET /api/admin/transcriptions/{id}) went with the SystemAdministrator's access to
+# other users' records (DIAAT-389): the provenance is still recorded on each job; reading it back is a
+# database query until a route is agreed (DIAAT-397).
 
 
 def test_the_dictionary_version_is_the_installed_package():

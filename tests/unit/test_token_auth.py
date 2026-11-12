@@ -1,8 +1,10 @@
 """Token-only authentication (domain/auth/token_auth.py).
 
-These use real RS256 tokens signed with a throwaway key, and stub only the JWKS
-lookup, so the library's own verifier (audience, issuer, expiry, signature) is
-what is under test.
+Two kinds of token, one for each side of the sign-in (DIAAT-373): the Entra ID token, accepted
+only by ``get_entra_identity`` (the sign-in), and the BenchNotes access token, accepted only by
+``get_token_auth_user`` (everything else). The Entra tests use real RS256 tokens signed with a
+throwaway key and stub only the JWKS lookup, so the library's own verifier (audience, issuer,
+expiry, signature) is what is under test.
 """
 
 from __future__ import annotations
@@ -10,49 +12,23 @@ from __future__ import annotations
 import base64
 import json
 import time
+from uuid import uuid4
 
-import jwt
 import pytest
-from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
-from transcribe_api.domain.auth import token_auth
-from transcribe_api.domain.auth.token_auth import get_token_auth_user
-
-TENANT = "11111111-1111-1111-1111-111111111111"
-CLIENT = "22222222-2222-2222-2222-222222222222"
-ISSUER = f"https://login.microsoftonline.com/{TENANT}/v2.0"
-
-_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-_OTHER_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+from tests.unit import auth_fixtures as af
+from tests.unit.auth_fixtures import CLIENT, ISSUER, OTHER_KEY, TENANT  # noqa: F401
+from transcribe_api.domain.auth import app_token
+from transcribe_api.domain.auth.app_token import Context
+from transcribe_api.domain.auth.token_auth import get_entra_identity, get_token_auth_user
 
 
-class _StubJwks:
-    """Stands in for PyJWKClient: always returns our test public key."""
-
-    def get_signing_key_from_jwt(self, _token):
-        class _Key:
-            key = _KEY.public_key()
-
-        return _Key()
-
-
-def _token(key=_KEY, **overrides) -> str:
-    now = int(time.time())
-    claims = {
-        "aud": CLIENT,
-        "iss": ISSUER,
-        "iat": now,
-        "nbf": now,
-        "exp": now + 3600,
-        "oid": "aaaaaaaa-0000-0000-0000-000000000001",
-        "preferred_username": "judge.real@justice.gov.uk",
-        "name": "Judge Real",
-        "roles": ["Judge"],
-    }
-    claims.update(overrides)
-    return jwt.encode(claims, key, algorithm="RS256")
+def _token(key=af.ENTRA_KEY, **overrides) -> str:
+    """An Entra ID token for a judge, with the claims the library reads."""
+    claims = {"oid": "aaaaaaaa-0000-0000-0000-000000000001", "roles": ["Judge"]}
+    return af.entra_token(key=key, **(claims | overrides))
 
 
 def _principal(email: str, oid: str) -> str:
@@ -70,28 +46,27 @@ def _principal(email: str, oid: str) -> str:
 
 @pytest.fixture
 def client(monkeypatch):
-    from hmcts_azure_auth.jwt import get_jwt_service
-    from hmcts_azure_auth.models import get_auth_settings
-
     monkeypatch.setenv("ENVIRONMENT", "test")
-    monkeypatch.setenv("AZURE_AD_TENANT_ID", TENANT)
-    monkeypatch.setenv("AZURE_AD_CLIENT_ID", CLIENT)
-    monkeypatch.setenv("JWT_ENABLE_VERIFICATION", "true")
-    monkeypatch.setenv("JWT_VERIFICATION_STRICT", "true")
-    get_auth_settings.cache_clear()
-    get_jwt_service.cache_clear()
-    get_jwt_service().jwks_client = _StubJwks()
+    af.stub_entra(monkeypatch)
 
     app = FastAPI()
 
     @app.get("/whoami")
-    async def whoami(user=Depends(get_token_auth_user)):
+    async def whoami(user=Depends(get_entra_identity)):
         return user.model_dump()
+
+    @app.get("/principal")
+    async def principal(user=Depends(get_token_auth_user)):
+        return {
+            "sub": str(user.user_id),
+            "sysadmin": user.sysadmin,
+            "assignments": [a.to_claim() for a in user.assignments],
+            "ctx": user.ctx.to_claim() if user.ctx else None,
+        }
 
     yield TestClient(app)
 
-    get_auth_settings.cache_clear()
-    get_jwt_service.cache_clear()
+    af.unstub_entra()
 
 
 def test_valid_token_authenticates_with_identity_from_claims(client):
@@ -144,7 +119,7 @@ def test_invalid_claims_are_401(client, bad):
 
 
 def test_token_signed_by_another_key_is_401(client):
-    r = client.get("/whoami", headers={"Authorization": f"Bearer {_token(key=_OTHER_KEY)}"})
+    r = client.get("/whoami", headers={"Authorization": f"Bearer {_token(key=OTHER_KEY)}"})
     assert r.status_code == 401
 
 
@@ -172,19 +147,20 @@ def test_non_strict_mode_does_not_let_a_bad_token_through(client, monkeypatch):
     monkeypatch.setenv("JWT_VERIFICATION_STRICT", "false")
     get_auth_settings.cache_clear()
     get_jwt_service.cache_clear()
-    get_jwt_service().jwks_client = _StubJwks()
+    get_jwt_service().jwks_client = af.StubJwks()
     r = client.get("/whoami", headers={"Authorization": f"Bearer {_token(aud='some-other-app')}"})
     assert r.status_code == 401
 
 
-def test_local_development_uses_the_mock_identity(client, monkeypatch):
+def test_local_mode_has_no_mock_identity_any_more(client, monkeypatch):
+    """DIAAT-373: local development signs in as a persona (POST /api/auth/session), through the same
+    mint as everywhere else, not as an identity with every role."""
     monkeypatch.setenv("ENVIRONMENT", "local")
-    r = client.get("/whoami")
-    assert r.status_code == 200
-    assert r.json()["user_id"] == token_auth.LOCAL_DEV_USER_ID
+    assert client.get("/whoami").status_code == 401
+    assert client.get("/principal").status_code == 401
 
 
-APP_ROLES = "Judge,LegalTextManager,SystemAdministrator,Normal"
+APP_ROLES = "Judge,LegalTextManager,SystemAdministrator"
 
 
 def test_access_roles_set_and_none_held_is_403(client, monkeypatch):
@@ -202,7 +178,7 @@ def test_access_roles_set_and_one_held_authenticates(client, monkeypatch):
 
 def test_access_roles_ignores_roles_outside_the_list(client, monkeypatch):
     monkeypatch.setenv("AUTH_ACCESS_ROLES", "Judge, LegalTextManager")
-    r = client.get("/whoami", headers={"Authorization": f"Bearer {_token(roles=['Normal', 'SomethingElse'])}"})
+    r = client.get("/whoami", headers={"Authorization": f"Bearer {_token(roles=['Contributor', 'SomethingElse'])}"})
     assert r.status_code == 403
 
 
@@ -212,21 +188,63 @@ def test_blank_access_roles_are_not_checked(client, monkeypatch):
     assert r.status_code == 200
 
 
-def test_user_without_an_access_role_is_never_resolved(client, monkeypatch):
-    """No application user row is created for someone refused at the door."""
+def test_the_access_roles_gate_is_the_sign_ins_not_the_app_tokens(client, monkeypatch):
+    """The Entra gate (AUTH_ACCESS_ROLES) guards the sign-in. A BenchNotes token carries no Entra roles."""
     monkeypatch.setenv("AUTH_ACCESS_ROLES", APP_ROLES)
-    resolved: list[str] = []
+    token, _ = app_token.mint(uuid4(), sysadmin=False, assignments=[], ctx=None)
+    assert client.get("/principal", headers={"Authorization": f"Bearer {token}"}).status_code == 200
 
-    def resolver(azure_user_id: str, email: str, roles: list[str]):
-        resolved.append(azure_user_id)
-        return {"id": azure_user_id}
 
-    token_user = token_auth.build_token_user_dep(resolver)
+# --- the BenchNotes access token ----------------------------------------------------------
 
-    @client.app.get("/me")
-    async def me(user=Depends(token_user)):
-        return user
+JUDGE_ET = Context("ET", "Judge")
 
-    r = client.get("/me", headers={"Authorization": f"Bearer {_token(roles=[])}"})
-    assert r.status_code == 403
-    assert resolved == []
+
+def test_a_benchnotes_token_authenticates_with_what_it_says(client):
+    user_id = uuid4()
+    token, _ = app_token.mint(
+        user_id, sysadmin=True, assignments=[JUDGE_ET, Context(None, "JurisdictionSuperAdministrator")], ctx=JUDGE_ET
+    )
+    response = client.get("/principal", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    assert response.json() == {
+        "sub": str(user_id),
+        "sysadmin": True,
+        "assignments": [
+            {"jurisdiction": "ET", "role": "Judge"},
+            {"jurisdiction": None, "role": "JurisdictionSuperAdministrator"},
+        ],
+        "ctx": {"jurisdiction": "ET", "role": "Judge"},
+    }
+
+
+def test_an_entra_token_is_not_a_benchnotes_token(client):
+    response = client.get("/principal", headers={"Authorization": f"Bearer {_token()}"})
+    assert response.status_code == 401 and response.headers["www-authenticate"] == "Bearer"
+
+
+def test_a_benchnotes_token_is_not_an_entra_token(client):
+    token, _ = app_token.mint(uuid4(), sysadmin=False, assignments=[], ctx=None)
+    assert client.get("/whoami", headers={"Authorization": f"Bearer {token}"}).status_code == 401
+
+
+@pytest.mark.parametrize(
+    "header",
+    [None, "", "Bearer", "Bearer ", "Basic abc", "bearer lower-case-scheme"],
+)
+def test_a_missing_or_malformed_authorization_header_is_401(client, header):
+    headers = {} if header is None else {"Authorization": header}
+    assert client.get("/principal", headers=headers).status_code == 401
+
+
+def test_an_expired_or_forged_benchnotes_token_is_401(client):
+    expired, _ = app_token.mint(uuid4(), sysadmin=False, assignments=[], ctx=None, now=time.time() - 1000)
+    forged = af.forged_app_token({"sysadmin": True}, key="another-key-another-key-another-key-0000")
+    wrong_audience = af.forged_app_token({"aud": CLIENT})
+    for token in (expired, forged, wrong_audience):
+        assert client.get("/principal", headers={"Authorization": f"Bearer {token}"}).status_code == 401
+
+
+def test_a_benchnotes_token_naming_system_administrator_as_a_context_is_401(client):
+    token = af.forged_app_token({"ctx": {"jurisdiction": None, "role": "SystemAdministrator"}})
+    assert client.get("/principal", headers={"Authorization": f"Bearer {token}"}).status_code == 401
