@@ -14,7 +14,8 @@ Both are dropped only if they are still there, so a database where they are alre
 Locks: dropping the column takes ACCESS EXCLUSIVE on ``jurisdiction``, and dropping the table's foreign
 keys takes it on ``user`` as well; live requests read both all the time. As in 0010, every lock is taken up
 front, each attempt giving up after LOCK_TIMEOUT (shorter than PostgreSQL's deadlock_timeout) and releasing
-what it took, so a request in progress is never the one aborted.
+what it took, so a request in progress is never the one aborted. Nothing reads the legacy table, so the DROP
+gets its lock without waiting.
 
 Downgrade puts back an empty table and the column (false, with 0010's default), in the shape 0010 left
 them, so 0010's and the older downgrades still run. The dropped rows do not come back.
@@ -41,24 +42,23 @@ logger = logging.getLogger("alembic.runtime.migration")
 
 LEGACY_TABLE = "jurisdiction_membership_legacy"
 
-LOCK_JURISDICTION = "LOCK TABLE jurisdiction IN ACCESS EXCLUSIVE MODE"
-LOCKS_FOR_THE_TABLE = (
+LOCKS = (
+    "LOCK TABLE jurisdiction IN ACCESS EXCLUSIVE MODE",
     'LOCK TABLE "user" IN ACCESS EXCLUSIVE MODE',
-    f"LOCK TABLE {LEGACY_TABLE} IN ACCESS EXCLUSIVE MODE",
 )
 LOCK_TIMEOUT = "500ms"
 LOCK_ATTEMPTS = 120
 LOCK_NOT_AVAILABLE = "55P03"
 
 
-def _lock(bind, locks) -> None:
-    """Take every lock, all or none per attempt (a savepoint), until they are free. lock_timeout stays set
+def _lock(bind) -> None:
+    """Take LOCKS, all or none per attempt (a savepoint), until they are free. lock_timeout stays set
     after: a wait that was not foreseen fails the migration (the pod restarts and tries again)."""
     bind.execute(sa.text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
     for attempt in range(1, LOCK_ATTEMPTS + 1):
         savepoint = bind.begin_nested()
         try:
-            for statement in locks:
+            for statement in LOCKS:
                 bind.execute(sa.text(statement))
         except sa.exc.OperationalError as exc:
             savepoint.rollback()
@@ -73,12 +73,10 @@ def _lock(bind, locks) -> None:
 
 def upgrade() -> None:
     if context.is_offline_mode():
-        for statement in (LOCK_JURISDICTION, *LOCKS_FOR_THE_TABLE):
+        for statement in LOCKS:
             op.execute(sa.text(statement))
     else:
-        bind = op.get_bind()
-        legacy = bind.execute(sa.text("SELECT to_regclass(:name)"), {"name": LEGACY_TABLE}).scalar_one()
-        _lock(bind, (LOCK_JURISDICTION, *LOCKS_FOR_THE_TABLE) if legacy else (LOCK_JURISDICTION,))
+        _lock(op.get_bind())
     op.execute(sa.text(f"DROP TABLE IF EXISTS {LEGACY_TABLE}"))
     op.execute(sa.text("ALTER TABLE jurisdiction DROP COLUMN IF EXISTS auto_enrol"))
 

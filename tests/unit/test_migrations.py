@@ -1059,9 +1059,7 @@ def test_0011_drops_the_legacy_table_and_auto_enrol_under_the_locks(monkeypatch)
     sql = _offline_sql(monkeypatch, "0010:0011")
     assert sql.index("LOCK TABLE jurisdiction IN ACCESS EXCLUSIVE MODE") < sql.index(
         'LOCK TABLE "user" IN ACCESS EXCLUSIVE MODE'
-    ) < sql.index("LOCK TABLE jurisdiction_membership_legacy IN ACCESS EXCLUSIVE MODE") < sql.index(
-        "DROP TABLE IF EXISTS jurisdiction_membership_legacy"
-    ) < sql.index("ALTER TABLE jurisdiction DROP COLUMN IF EXISTS auto_enrol")
+    ) < sql.index("DROP TABLE IF EXISTS jurisdiction_membership_legacy") < sql.index("ALTER TABLE jurisdiction DROP COLUMN IF EXISTS auto_enrol")
 
 
 def test_0011_downgrade_puts_back_an_empty_table_and_the_column(monkeypatch):
