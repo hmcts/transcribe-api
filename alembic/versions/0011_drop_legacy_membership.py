@@ -54,7 +54,6 @@ LOCK_NOT_AVAILABLE = "55P03"
 def _lock(bind) -> None:
     """Take LOCKS, all or none per attempt (a savepoint), until they are free. lock_timeout stays set
     after: a wait that was not foreseen fails the migration (the pod restarts and tries again)."""
-    bind.execute(sa.text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
     for attempt in range(1, LOCK_ATTEMPTS + 1):
         savepoint = bind.begin_nested()
         try:
@@ -72,6 +71,7 @@ def _lock(bind) -> None:
 
 
 def upgrade() -> None:
+    op.execute(sa.text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
     if context.is_offline_mode():
         for statement in LOCKS:
             op.execute(sa.text(statement))
