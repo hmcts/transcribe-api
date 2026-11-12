@@ -59,6 +59,8 @@ from transcribe_api.domain.auth.dependencies_dictation import (
 )
 from transcribe_api.domain.auth.permissions import assignable_roles
 from transcribe_api.domain.jurisdictions import (
+    STAGE_DRAFT,
+    STAGE_LIVE,
     TEMPLATE_IAC_DECISION,
     WORDING_KEYS,
     ActiveJurisdiction,
@@ -378,6 +380,20 @@ async def update_anonymity_status(
 _JURISDICTION_ADMIN = require_permission("jurisdictions.manage")
 
 
+class SignOffRecord(BaseModel):
+    # DIAAT-347: the service lead who signed it off for everyone, and when.
+    service_lead: str
+    signed_off_at: str | None
+
+
+class SignOffWrite(BaseModel):
+    """The service lead's sign-off, needed to switch it on for everyone (DIAAT-347):
+    their name, and the admin's confirmation that they have signed it off."""
+
+    service_lead: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    confirmed: Literal[True]
+
+
 class JurisdictionAdminRecord(BaseModel):
     code: str
     name: str
@@ -385,6 +401,8 @@ class JurisdictionAdminRecord(BaseModel):
     service: str | None
     # DIAAT-345: draft (its admins see it), test (its testers too) or live (everyone).
     stage: Literal["draft", "test", "live"]
+    # DIAAT-347: the sign-off it went live with; None while not live, or live before.
+    sign_off: SignOffRecord | None = None
     enabled: bool
     settings: dict[str, Any]
     member_count: int
@@ -400,6 +418,8 @@ class JurisdictionWrite(BaseModel):
     # Left out: unchanged (a new jurisdiction is enabled, a draft).
     enabled: bool | None = None
     stage: Literal["draft", "test", "live"] | None = None
+    # Needed when ``stage`` makes it live (DIAAT-347).
+    sign_off: SignOffWrite | None = None
     # Left out: unchanged; blank: none (the name is shown).
     display_name: Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)] | None = None
     service: Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)] | None = None
@@ -413,6 +433,7 @@ class WordingKeysResponse(BaseModel):
 
 JURISDICTION_NOT_READY = "jurisdiction_not_ready"
 TEMPLATE_NOT_READY = "template_not_ready"
+SIGN_OFF_REQUIRED = "sign_off_required"
 TEMPLATE_VALUES_INVALID = "template_values_invalid"
 
 
@@ -437,6 +458,8 @@ def _admin_errors():
             status_code=400,
             detail={"code": JURISDICTION_NOT_READY, "message": str(exc), "problems": exc.problems},
         ) from None
+    except jurisdictions_admin.NotSignedOffError as exc:  # DIAAT-347: who signed it off
+        raise HTTPException(status_code=400, detail={"code": SIGN_OFF_REQUIRED, "message": str(exc)}) from None
     except jurisdictions_admin.NotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
     except jurisdictions_admin.ConflictError as exc:
@@ -451,6 +474,11 @@ def _admin_session_run(operation):
     """Run a jurisdictions_admin operation in a session, its errors mapped (_admin_errors)."""
     with _admin_errors(), Session(get_engine()) as session:
         return operation(session)
+
+
+def _sign_off(body: SignOffWrite | None, admin_user: User) -> jurisdictions_admin.SignOff | None:
+    """The sign-off sent with a save, recorded by the admin saving it (DIAAT-347)."""
+    return None if body is None else jurisdictions_admin.SignOff(body.service_lead, admin_user.id)
 
 
 def _audit_jurisdiction_change(action: str, admin_user: User, detail: dict[str, Any]) -> None:
@@ -534,6 +562,7 @@ def admin_put_jurisdiction(
             stage=body.stage,
             display_name=body.display_name,
             service=body.service,
+            sign_off=_sign_off(body.sign_off, admin_user),
         )
         created = outcome.startswith("Created")
         return next(r for r in jurisdictions_admin.jurisdictions_overview(session) if r["code"] == code.strip().upper())
@@ -550,6 +579,7 @@ def admin_put_jurisdiction(
             "display_name": record["display_name"],
             "service": record["service"],
             "stage": record["stage"],
+            "sign_off": record["sign_off"],
             "enabled": record["enabled"],
             "template": settings.get("template"),
             "features": settings.get("features"),
@@ -633,6 +663,11 @@ class TemplateAdminRecord(BaseModel):
     name: str
     service: str | None
     file_name: str
+    # DIAAT-347: draft (no one chooses it), test (the test group and the jurisdiction's
+    # admins) or live (all its judges), and the sign-off it went live with.
+    stage: Literal["draft", "test", "live"]
+    sign_off: SignOffRecord | None = None
+    # Live: what the previous web release shows (DIAAT-344).
     enabled: bool
     boxes: list[dict[str, Any]]
     fields: list[dict[str, Any]]
@@ -654,8 +689,19 @@ class TemplateWrite(BaseModel):
     name: str = PydanticField(min_length=1, max_length=200)
     service: str | None = PydanticField(default=None, max_length=200)
     fields: list[TemplateField] = PydanticField(max_length=500)
+    # DIAAT-347: who can choose it; live needs ``sign_off``.
+    stage: Literal["draft", "test", "live"] | None = None
+    sign_off: SignOffWrite | None = None
+    # The previous web release's switch, read only without ``stage``: off is a draft,
+    # on is live (and so is refused without a sign-off).
     enabled: bool = False
     version: str
+
+    @property
+    def chosen_stage(self) -> str:
+        if self.stage is not None:
+            return self.stage
+        return STAGE_LIVE if self.enabled else STAGE_DRAFT
 
 
 def _audit_template_change(action: str, admin_user: User, code: str, row_id: str, detail: dict[str, Any]) -> None:
@@ -734,7 +780,13 @@ async def admin_upload_template(
         admin_user,
         code,
         record["id"],
-        {"change": "uploaded" if replace is None else "file_replaced", "boxes": len(record["boxes"])},
+        # A new file that leaves a box unlinked takes it back to draft (DIAAT-347).
+        {
+            "change": "uploaded" if replace is None else "file_replaced",
+            "boxes": len(record["boxes"]),
+            "stage": record["stage"],
+            "sign_off": record["sign_off"],
+        },
     )
     return TemplateAdminRecord(**record)
 
@@ -746,9 +798,10 @@ def admin_update_template(
     body: TemplateWrite,
     admin_user: User = Depends(_TEMPLATE_ADMIN),
 ) -> TemplateAdminRecord:
-    """Save a template's name, fields and whether judges can choose it. Refused (400,
-    ``template_not_ready``, with ``problems`` naming each box) unless every box has a
-    complete field; 409 if it changed since ``version``."""
+    """Save a template's name, fields and who can choose it (``stage``, DIAAT-347).
+    Refused (400, ``template_not_ready``, with ``problems`` naming each box) unless
+    every box has a complete field; (400, ``sign_off_required``) live without the
+    service lead's sign-off; 409 if it changed since ``version``."""
     assert_jurisdiction_in_scope(admin_user, code)
     record = _admin_session_run(
         lambda s: jurisdiction_templates.template_record(
@@ -759,13 +812,18 @@ def admin_update_template(
                 name=body.name,
                 service=body.service,
                 fields=body.fields,
-                enabled=body.enabled,
+                stage=body.chosen_stage,
                 expected_version=body.version,
+                sign_off=_sign_off(body.sign_off, admin_user),
             )
         )
     )
     _audit_template_change(
-        "template.edit", admin_user, code, record["id"], {"change": "fields", "enabled": record["enabled"]}
+        "template.edit",
+        admin_user,
+        code,
+        record["id"],
+        {"change": "fields", "stage": record["stage"], "sign_off": record["sign_off"]},
     )
     return TemplateAdminRecord(**record)
 

@@ -85,7 +85,9 @@ def _add_the_et(engine) -> None:
         add_assignment(session, role="Judge", jurisdiction_id=et.id, email="et.judge@example.test")
         add_assignment(session, role="JurisdictionAdministrator", jurisdiction_id=et.id, email="et.admin@example.test")
         session.commit()
-        admin.put_jurisdiction(session, "ET", "Employment Tribunal", settings, stage="live")  # DIAAT-345
+        admin.put_jurisdiction(  # DIAAT-345, DIAAT-347
+            session, "ET", "Employment Tribunal", settings, stage="live", sign_off=admin.SignOff("A Lead")
+        )
 
 
 def test_the_iacs_wording_is_the_text_its_judges_saw_before():

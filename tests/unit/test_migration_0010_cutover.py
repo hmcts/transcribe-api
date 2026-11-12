@@ -247,9 +247,11 @@ def test_0010_retires_the_membership_table_and_auto_enrol(world):
         assert connection.execute(text("SELECT count(*) FROM jurisdiction_membership_legacy")).scalar_one() == 14
         assert connection.execute(text("SELECT bool_or(auto_enrol) FROM jurisdiction")).scalar_one() is False
     # The models no longer map auto_enrol: a jurisdiction they insert gets the column's default.
-    with Session(world) as session:
-        session.add(Jurisdiction(code="SSCS", name="Social Security", settings={}))
-        session.commit()
+    # Only the columns 0010 has: later revisions' (0012's sign-off) are not there yet.
+    with world.begin() as connection:
+        connection.execute(
+            Jurisdiction.__table__.insert().values(id=uuid4(), code="SSCS", name="Social Security", settings={})
+        )
     with world.connect() as connection:
         assert connection.execute(text("SELECT auto_enrol FROM jurisdiction WHERE code = 'SSCS'")).scalar_one() is False
 

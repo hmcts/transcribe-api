@@ -115,6 +115,12 @@ class Jurisdiction(SQLModel, table=True):
     # testers and admins; live, all of them. The admin area creates drafts; a row
     # made without a stage is live, as every jurisdiction was before stages.
     stage: str = Field(default="live", max_length=8, sa_column_kwargs={"server_default": text("'live'")})
+    # The service lead's sign-off recorded when it was last switched on for everyone
+    # (DIAAT-347, 0012): their name, when, and the admin who recorded it. None while it
+    # is not live, and for a jurisdiction live before sign-offs were recorded.
+    signed_off_by: str | None = Field(default=None, max_length=200)
+    signed_off_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
+    signed_off_recorded_by: UUID | None = Field(default=None)
     settings: dict = Field(sa_column=Column(JSONB, nullable=False))
     created_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
     updated_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
@@ -313,7 +319,12 @@ class JurisdictionTemplate(SQLModel, table=True):
     """
 
     __tablename__ = "jurisdiction_template"
-    __table_args__ = (UniqueConstraint("jurisdiction_id", "name", name="uq_jurisdiction_template_name"),)
+    __table_args__ = (
+        UniqueConstraint("jurisdiction_id", "name", name="uq_jurisdiction_template_name"),
+        CheckConstraint("stage IN ('draft', 'test', 'live')", name="ck_jurisdiction_template_stage"),
+        # The previous release's pods cannot switch on one that is not live (0012).
+        CheckConstraint("NOT enabled OR stage = 'live'", name="ck_jurisdiction_template_enabled_is_live"),
+    )
 
     id: UUID = Field(default_factory=uuid4, primary_key=True, nullable=False)
     jurisdiction_id: UUID = Field(foreign_key="jurisdiction.id", index=True, nullable=False)
@@ -329,8 +340,16 @@ class JurisdictionTemplate(SQLModel, table=True):
     boxes: list = Field(sa_column=Column(JSONB, nullable=False))
     # [{tag, label, type, required, options, source}], in form order (TemplateField).
     fields: list = Field(sa_column=Column(JSONB, nullable=False))
-    # Judges can choose it. Never with a box unlinked.
+    # Who can choose it on the recording page (DIAAT-347, 0012): draft, no one (the
+    # admin area previews it); test, the jurisdiction's test group and admins; live,
+    # all its judges. Never past draft with a box unlinked.
+    stage: str = Field(default="draft", max_length=8, sa_column_kwargs={"server_default": text("'draft'")})
+    # Live, kept for the previous release while this one rolls out (DIAAT-344).
     enabled: bool = Field(default=False)
+    # The service lead's sign-off for going live, as for a jurisdiction.
+    signed_off_by: str | None = Field(default=None, max_length=200)
+    signed_off_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
+    signed_off_recorded_by: UUID | None = Field(default=None)
     created_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
     updated_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
 

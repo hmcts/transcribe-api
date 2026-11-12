@@ -58,10 +58,10 @@ AWARE_TIMESTAMP_COLUMNS = {
 # Timestamp columns added after 0002, created timestamptz from the start.
 ADDED_AWARE_TIMESTAMP_COLUMNS = {
     "transcription_job": ["processing_started_datetime", "stuck_reported_at"],  # 0003
-    "jurisdiction": ["created_datetime", "updated_datetime"],  # 0004
+    "jurisdiction": ["created_datetime", "updated_datetime", "signed_off_at"],  # 0004, 0012
     "jurisdiction_membership": ["created_datetime"],  # 0004
     "upload_jurisdiction": ["created_datetime"],  # 0004
-    "jurisdiction_template": ["created_datetime", "updated_datetime"],  # 0008
+    "jurisdiction_template": ["created_datetime", "updated_datetime", "signed_off_at"],  # 0008, 0012
     "role_assignment": ["granted_at"],  # 0009
     "access_request": ["decided_at", "created_at"],  # 0009
     "system_feature_flag": ["updated_at"],  # 0009
@@ -99,7 +99,7 @@ def _alter_type_sql(table: str, column: str, type_sql: str) -> re.Pattern[str]:
 def test_there_is_one_history_with_one_head():
     script = ScriptDirectory.from_config(migrations.alembic_config())
     assert script.get_bases() == ["0001"]
-    assert script.get_heads() == ["0011"]
+    assert script.get_heads() == ["0012"]
 
 
 def test_baseline_creates_every_table(monkeypatch):
@@ -296,6 +296,35 @@ def test_0006_downgrade_keeps_only_the_iacs_row(monkeypatch):
     sql = _offline_sql(monkeypatch, "0006:0005", downgrade=True)
     assert f"DELETE FROM document_content WHERE jurisdiction_id <> '{IAC_ID}'" in sql
     assert "DROP COLUMN jurisdiction_id" in sql
+
+
+def test_0012_makes_each_template_judges_could_choose_live_and_writes_no_jurisdiction(monkeypatch):
+    """DIAAT-347. Templates get draft, test and live; a template judges could choose
+    stays theirs. The sign-off columns are added empty."""
+    sql = _offline_sql(monkeypatch, "0011:0012")
+    assert "ALTER TABLE jurisdiction_template ADD COLUMN stage VARCHAR(8) DEFAULT 'draft' NOT NULL" in sql
+    assert "CHECK (stage IN ('draft', 'test', 'live'))" in sql
+    assert "UPDATE jurisdiction_template SET stage = 'live' WHERE enabled" in sql
+    # After the backfill, so every template switched on is live by then.
+    enabled_is_live = "ADD CONSTRAINT ck_jurisdiction_template_enabled_is_live CHECK (NOT enabled OR stage = 'live')"
+    assert sql.index("SET stage = 'live' WHERE enabled") < sql.index(enabled_is_live)
+    for table in ("jurisdiction", "jurisdiction_template"):
+        assert f"ALTER TABLE {table} ADD COLUMN signed_off_by VARCHAR(200);" in sql
+        assert f"ALTER TABLE {table} ADD COLUMN signed_off_at TIMESTAMP WITH TIME ZONE;" in sql
+        assert f"ALTER TABLE {table} ADD COLUMN signed_off_recorded_by UUID;" in sql
+        # The previous release's writes kept to the rules (test_sign_off_postgres.py).
+        assert f"CREATE TRIGGER {table}_sign_off_guard BEFORE UPDATE ON {table}" in sql
+    assert _forbidden_live_writes("0012", sql) == []
+
+
+def test_0012_downgrade_reverses_it(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0012:0011", downgrade=True)
+    for table in ("jurisdiction", "jurisdiction_template"):
+        for column in ("signed_off_by", "signed_off_at", "signed_off_recorded_by"):
+            assert f"ALTER TABLE {table} DROP COLUMN {column};" in sql
+        assert sql.index(f"DROP FUNCTION {table}_sign_off_guard()") < sql.index(f"ALTER TABLE {table} DROP COLUMN")
+    assert "ALTER TABLE jurisdiction_template DROP CONSTRAINT ck_jurisdiction_template_enabled_is_live;" in sql
+    assert "ALTER TABLE jurisdiction_template DROP COLUMN stage;" in sql
 
 
 def test_0004_iac_settings_are_valid_and_set_every_wording_key():

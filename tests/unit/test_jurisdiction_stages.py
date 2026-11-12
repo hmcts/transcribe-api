@@ -136,8 +136,69 @@ def test_live_every_member_sees_it(jurisdiction_db, as_admin):
     judge = sign_up(jurisdiction_db, "judge@example.test")
     assert _codes(jurisdiction_db, judge) == []
 
-    assert as_admin.put("/api/admin/jurisdictions/ET", json={**ET, "stage": "live"}).status_code == 200
+    assert (
+        as_admin.put("/api/admin/jurisdictions/ET", json={**ET, "stage": "live", "sign_off": SIGN_OFF}).status_code
+        == 200
+    )
     assert _codes(jurisdiction_db, judge) == ["ET"]
+
+
+SIGN_OFF = {"service_lead": "A Lead", "confirmed": True}
+
+
+def test_it_goes_live_for_everyone_only_with_the_service_leads_sign_off(jurisdiction_db, as_admin):
+    """DIAAT-347: who signed it off, and when, is kept with it while it is live."""
+    as_admin.put("/api/admin/jurisdictions/ET", json=ET)
+    _members(jurisdiction_db, ("lead@example.test", "admin", False))
+
+    refused = as_admin.put("/api/admin/jurisdictions/ET", json={**ET, "stage": "live"})
+    assert (refused.status_code, refused.json()["detail"]["code"]) == (400, "sign_off_required")
+    assert "service lead's sign-off" in refused.json()["detail"]["message"]
+    not_confirmed = {**ET, "stage": "live", "sign_off": {**SIGN_OFF, "confirmed": False}}
+    assert as_admin.put("/api/admin/jurisdictions/ET", json=not_confirmed).status_code == 422
+    [record] = [r for r in as_admin.get("/api/admin/jurisdictions").json() if r["code"] == "ET"]
+    assert record["stage"] == "draft"
+
+    live = as_admin.put(
+        "/api/admin/jurisdictions/ET",
+        json={**ET, "stage": "live", "sign_off": {**SIGN_OFF, "service_lead": "  A   Lead "}},
+    ).json()
+    assert live["stage"] == "live"
+    assert live["sign_off"]["service_lead"] == "A Lead"
+    assert live["sign_off"]["signed_off_at"]
+    with Session(jurisdiction_db) as session:
+        row = session.exec(select(Jurisdiction).where(Jurisdiction.code == "ET")).one()
+        assert row.signed_off_recorded_by is not None  # the admin who recorded it
+    # A save while live keeps it, without asking again.
+    assert (
+        as_admin.put("/api/admin/jurisdictions/ET", json={**ET, "name": "ET 2"}).json()["sign_off"] == live["sign_off"]
+    )
+
+    back = as_admin.put("/api/admin/jurisdictions/ET", json={**ET, "stage": "test"}).json()
+    assert (back["stage"], back["sign_off"]) == ("test", None)  # asked again next time
+
+    with Session(jurisdiction_db) as session:
+        edits = [r.detail for r in session.exec(select(AuditLog)).all() if r.event_type == "jurisdiction.edit"]
+    assert [e["sign_off"]["service_lead"] for e in edits if e["sign_off"]] == ["A Lead", "A Lead"]
+
+
+def test_the_command_line_needs_the_sign_off_to_go_live(jurisdiction_db, monkeypatch):
+    import io
+
+    with Session(jurisdiction_db) as session:
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(ET_SETTINGS)))
+        admin.run(["put", "ET", "--name", "Employment Tribunals"], session)
+    _members(jurisdiction_db, ("lead@example.test", "admin", False))
+    with Session(jurisdiction_db) as session:
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(ET_SETTINGS)))
+        with pytest.raises(admin.NotSignedOffError):
+            admin.run(["put", "ET", "--name", "Employment Tribunals", "--stage", "live"], session)
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(ET_SETTINGS)))
+        admin.run(
+            ["put", "ET", "--name", "Employment Tribunals", "--stage", "live", "--signed-off-by", "A Lead"], session
+        )
+        row = session.exec(select(Jurisdiction).where(Jurisdiction.code == "ET")).one()
+        assert (row.stage, row.signed_off_by, row.signed_off_recorded_by) == ("live", "A Lead", None)
 
 
 def test_switched_off_hides_it_whatever_its_stage(jurisdiction_db):
