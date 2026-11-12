@@ -31,13 +31,14 @@ from transcribe_api.domain.assignments import (
     distinct_contexts,
     ensure_assignment,
     load_assignments,
-    stored_contexts,
 )
 from transcribe_api.domain.auth import app_token
 from transcribe_api.domain.auth.app_token import Context
 from transcribe_api.domain.auth.permissions import (
+    ROLE_JUDGE,
     ROLE_JURISDICTION_ADMIN,
     ROLE_JURISDICTION_SUPER_ADMIN,
+    ROLE_LEGAL_TEXT_MANAGER,
     ROLE_SYSTEM_ADMIN,
     permissions_for,
 )
@@ -133,27 +134,17 @@ def contexts_of(assignments: list[Assignment], sysadmin: bool) -> list[Context]:
     return [*contexts, SYSTEM_ADMIN_CONTEXT] if sysadmin else contexts
 
 
-def _given_contexts(assignments: list[Assignment], sysadmin: bool) -> list[Context]:
-    given = stored_contexts(assignments)
-    return [*given, SYSTEM_ADMIN_CONTEXT] if sysadmin else given
-
-
 def select_context(
     contexts: list[Context],
     *,
     requested: Context | None,
     requested_given: bool,
-    given: list[Context] | None = None,
 ) -> Context | None:
     """The context a minted token carries. ``requested_given``: the caller named one (even
     one that makes no sense): it is kept if the user holds it, and otherwise there is none.
-    Not named: the single pair, if there is exactly one. ``given``: the pairs the user was given
-    (``contexts`` also has those included with an administrator role): when there is exactly one
-    of those, it is the choice, so an administrator lands as one and is not asked."""
+    Not named: the single pair, if there is exactly one."""
     if requested_given:
         return requested if requested is not None and requested in contexts else None
-    if given is not None and len(given) == 1 and given[0] in contexts:
-        return given[0]
     return contexts[0] if len(contexts) == 1 else None
 
 
@@ -274,7 +265,7 @@ def mint_session(
         chosen
         if chosen is not None
         else select_context(
-            contexts, requested=requested, requested_given=requested_given, given=_given_contexts(assignments, sysadmin)
+            contexts, requested=requested, requested_given=requested_given
         )
     )
     token, expires_at = app_token.mint(
@@ -307,10 +298,11 @@ class SignInIdentity:
 def ensure_preview_assignments(session: Session, user: User) -> None:
     """A PR preview has no Entra and no administrator to give anyone a role, so its fixed user
     is given every role (DIAAT-399, DIAAT-373): JurisdictionSuperAdministrator, and
-    JurisdictionAdministrator (so also Judge and LegalTextManager) in every jurisdiction.
+    JurisdictionAdministrator, Judge and LegalTextManager in every jurisdiction.
     Idempotent: what is already held is left alone, and a jurisdiction created since is added
     at the next sign-in. Only ever called for the preview user (``SignInIdentity.preview``)."""
     ensure_assignment(session, role=ROLE_JURISDICTION_SUPER_ADMIN, jurisdiction_id=None, user_id=user.id)
     for jurisdiction_id in session.exec(select(Jurisdiction.id)).all():
-        ensure_assignment(session, role=ROLE_JURISDICTION_ADMIN, jurisdiction_id=jurisdiction_id, user_id=user.id)
+        for role in (ROLE_JURISDICTION_ADMIN, ROLE_JUDGE, ROLE_LEGAL_TEXT_MANAGER):
+            ensure_assignment(session, role=role, jurisdiction_id=jurisdiction_id, user_id=user.id)
     session.commit()

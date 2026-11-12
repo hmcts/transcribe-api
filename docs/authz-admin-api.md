@@ -1,4 +1,4 @@
-# The administration API (DIAAT-373 Phase 4 and 7)
+# The administration API (DIAAT-373 Phase 4 and 7, DIAAT-406)
 
 The endpoints administrators use to give and take away roles, decide access requests, set feature flags and
 edit jurisdictions, and the one a Judge uses to read the history of a recording. Every route is behind
@@ -19,23 +19,29 @@ JADMIN=$(tok jadmin-iac IAC:JurisdictionAdministrator)     # acting as the IAC's
 
 | Role to assign | Who | Refused with |
 |---|---|---|
-| `Judge`, `LegalTextManager` in J | a JurisdictionAdministrator acting in J (`users.manage`); a JurisdictionSuperAdministrator in any J | another jurisdiction: 403 `jurisdiction_not_in_scope`; anyone else: 403 `assignment_not_allowed` / `permission_denied` |
-| `JurisdictionAdministrator` in J | a JurisdictionSuperAdministrator (`jurisdiction_admin.assign`) | a JurisdictionAdministrator, a SystemAdministrator: 403 `assignment_not_allowed` |
+| `Judge`, `LegalTextManager` in J | a JurisdictionAdministrator acting in J (`users.manage`), from the Users screen | another jurisdiction: 403 `jurisdiction_not_in_scope`; anyone else (a JurisdictionSuperAdministrator included): 403 `assignment_not_allowed` / `permission_denied` |
+| `JurisdictionAdministrator` in J | a JurisdictionSuperAdministrator (`jurisdiction_admin.assign`), in any J, from the Jurisdictions screen | a JurisdictionAdministrator, a SystemAdministrator: 403 `assignment_not_allowed` |
 | `JurisdictionSuperAdministrator` (global, no jurisdiction) | a SystemAdministrator only (`jurisdiction_super_admin.assign`) | everyone else: 403 `assignment_not_allowed` |
 | `SystemAdministrator` | nobody (it is not a stored role) | 403 `assignment_not_allowed` |
-| `JurisdictionSuperAdministrator`, **to themselves** | a SystemAdministrator acting as SystemAdministrator (how the first JurisdictionSuperAdministrator is set up) | |
-| a role **to themselves** | everyone else by the rows above, as for anyone: a JurisdictionSuperAdministrator gives themselves JurisdictionAdministrator, Judge or LegalTextManager; a JurisdictionAdministrator Judge or LegalTextManager in its jurisdiction; a Judge or LegalTextManager nothing (they raise an access request) | a role equal to or above the one they act in: 403 `assignment_not_allowed` |
-| their own `JurisdictionAdministrator` / `JurisdictionSuperAdministrator` (removing) | nobody but a SystemAdministrator takes away their own administrator role | 403 `assignment_not_allowed` |
+| a role **to themselves** (giving or removing) | by the rows above, as for anyone: a SystemAdministrator JurisdictionSuperAdministrator (how the first one is set up); a JurisdictionSuperAdministrator JurisdictionAdministrator in any jurisdiction (it may also remove its own JurisdictionAdministrator); a JurisdictionAdministrator Judge or LegalTextManager in its jurisdiction; a Judge or LegalTextManager nothing (they raise an access request) | a role the role they act in does not assign: 403 `assignment_not_allowed` |
+| the role they are **acting in** (removing it from themselves) | nobody | 403 `assignment_not_allowed` |
 
-The rule (DIAAT-403): nobody gives a role equal to or above the one they act in, to themselves or to anyone else; the one exception is a
-SystemAdministrator giving JurisdictionSuperAdministrator, which is the only role a SystemAdministrator gives (or takes away), to others or to
-themselves: never JurisdictionAdministrator, Judge or LegalTextManager. Giving a role to yourself follows the same rules as giving it to someone else.
+The rule (DIAAT-406): each role gives exactly one level, to others or to itself: the SystemAdministrator JurisdictionSuperAdministrator, the
+JurisdictionSuperAdministrator JurisdictionAdministrator, the JurisdictionAdministrator Judge and LegalTextManager. Nobody else gives a role, and nobody
+takes away the role they are acting in. Judge and LegalTextManager are asked for by access request, which only a JurisdictionAdministrator decides.
+
+A user can hold roles in one or more jurisdictions, in any combination. For example, Judge in IAC, Judge and LegalTextManager in Employment, and
+JurisdictionAdministrator in a third jurisdiction, all at once. "One jurisdiction" only means each assignment names exactly one jurisdiction
+(JurisdictionSuperAdministrator and SystemAdministrator are global). It never limits how many jurisdictions a person can be in. A
+JurisdictionAdministrator sees and changes only the assignments in its own jurisdiction of a user who holds roles elsewhere, and anyone may request
+access to another jurisdiction even if they hold roles.
 
 Where a role is held: a JurisdictionAdministrator assignment (like Judge and LegalTextManager) names exactly one jurisdiction, never none and never
 several (`"jurisdiction"` is one code; null is 400 `invalid_assignment`, a list 422). A JurisdictionSuperAdministrator assignment is global
 (`"jurisdiction": null`; a code is 400 `invalid_assignment`). The database backs this with `ck_role_assignment_jurisdiction` (migration 0009).
 One person may be JurisdictionAdministrator in several jurisdictions through separate assignments, one per jurisdiction: each is its own context
-in the switcher, with that jurisdiction's scope only. A JurisdictionSuperAdministrator is one context, for all jurisdictions. Neither administrator
+(the web app's header has a jurisdiction control and a role control), with that jurisdiction's scope only. A JurisdictionAdministrator holds Judge or LegalTextManager only if given them (no derived roles:
+migration 0013 stored them for every administrator that had them derived, [`authz-token-and-context.md`](authz-token-and-context.md)). A JurisdictionSuperAdministrator is one context, for all jurisdictions. Neither administrator
 role can be asked for in an access request (400 `role_not_requestable`): only Judge and LegalTextManager can.
 
 Nothing is assigned into a **disabled** jurisdiction: 409 `jurisdiction_disabled` (also for a SystemAdministrator, and when approving a request for one
@@ -56,21 +62,22 @@ assign, to others or to themselves, never `SystemAdministrator`. One shape, pinn
 {"roles": ["Judge", "LegalTextManager"]}
 ```
 
-A JurisdictionSuperAdministrator gets `["Judge", "LegalTextManager", "JurisdictionAdministrator"]`; a SystemAdministrator
+That is a JurisdictionAdministrator's. A JurisdictionSuperAdministrator gets `["JurisdictionAdministrator"]`; a SystemAdministrator
 `["JurisdictionSuperAdministrator"]`, to others or to themselves.
 
 ## Users
 
-`GET /api/admin/users?search=&jurisdiction=&role=&page=1&page_size=25` (`users.manage` or `jurisdiction_super_admin.assign`).
+`GET /api/admin/users?search=&jurisdiction=&role=&page=1&page_size=25` (`users.manage`, `jurisdiction_admin.assign` or `jurisdiction_super_admin.assign`).
 Users who have signed in, ordered by email, then people added by email who have not (`pending: true`). `page_size` is 1 to 200.
 
 * A **JurisdictionAdministrator** lists the users with a role in the jurisdiction it acts in, showing only their assignments there.
   A `search` of three or more characters, with no `jurisdiction=` and no `role=`, matches the email of **any user who has signed in**
   (so someone with no role, or a role elsewhere, can be found and added), again showing only the assignments in its jurisdiction.
   `jurisdiction=` for another jurisdiction is 403 `jurisdiction_not_in_scope`.
-* A **JurisdictionSuperAdministrator** or **SystemAdministrator** lists everyone with every assignment (a SystemAdministrator is never
-  an assignment and so appears nowhere); `jurisdiction=` and `role=` narrow it to those holding a role there (`role=JurisdictionSuperAdministrator`
-  with no jurisdiction lists the global holders).
+* A **JurisdictionSuperAdministrator** or **SystemAdministrator** reaches it only to find whom to appoint (DIAAT-406): it lists everyone, but shows
+  only the assignments of the role it appoints (JurisdictionAdministrator; JurisdictionSuperAdministrator). `jurisdiction=` and `role=` narrow it to
+  those holding a role there (`role=JurisdictionSuperAdministrator` with no jurisdiction lists the global holders); `role=` for a role it does not
+  appoint is 403 `assignment_not_allowed`. A SystemAdministrator is never an assignment and so appears nowhere.
 * The `id` of a `pending` row is its first assignment's id: not a user, so deactivating it is 404, and every `assignments[].id` works with `DELETE /admin/assignments/{id}`.
 
 ```bash
@@ -125,20 +132,26 @@ is checked on every request).
 
 ## Deactivating
 
-`POST /api/admin/users/{id}/deactivate` and `/reactivate` (`users.manage`): **204**, idempotent. A deactivated user is refused 403 `user_deactivated`
-on their next request and cannot sign in. 404 `user_not_found` (also for a user a JurisdictionAdministrator cannot see). Refused with 403:
-`cannot_deactivate_self`; `assignment_not_allowed` for a user who holds a role the caller may not assign (a JurisdictionAdministrator cannot
-deactivate another one, and nobody can deactivate a JurisdictionSuperAdministrator: a SystemAdministrator has no `users.manage`), and, for a JurisdictionAdministrator, for a
-user who also works in another jurisdiction (deactivation is across all of them: remove their role in yours instead).
-The scope is the **role** the caller acts in: a SystemAdministrator who gave themselves a stored role and acts in it has that role's scope (a
-JurisdictionAdministrator's: its jurisdiction) and the role's assignment rights, not a global one, so it cannot deactivate a JurisdictionSuperAdministrator or list the
-users of another jurisdiction. (Its own permission, `jurisdiction_super_admin.assign`, still lets it list every user, with no context or in a role with no `users.manage`, to find who to make a
-JurisdictionSuperAdministrator.)
+`POST /api/admin/users/{id}/deactivate` and `/reactivate` (`users.manage` or `accounts.manage`): **204**, idempotent. A deactivated user is refused
+403 `user_deactivated` on their next request, in every jurisdiction, and cannot sign in. Nobody deactivates themselves (403 `cannot_deactivate_self`).
+
+* The **JurisdictionSuperAdministrator** (`accounts.manage`, DIAAT-406) reaches any account: JurisdictionAdministrators, other
+  JurisdictionSuperAdministrators and users who hold roles in several jurisdictions included.
+* A **JurisdictionAdministrator** (`users.manage`) reaches only users whose roles are all in the jurisdiction it acts in: 404 `user_not_found` for a
+  user it cannot see; 403 `assignment_not_allowed` for one who also works in another jurisdiction (remove their roles in yours instead) or who holds
+  an administrator role.
+* A SystemAdministrator deactivates nobody. The scope is the **role** the caller acts in: a SystemAdministrator who acts in a stored role has that
+  role's scope and rights only.
 
 ## Role-change history
 
-`GET /api/admin/role-history?jurisdiction=&page=1&page_size=50` (`role_audit.read`): newest first. A JurisdictionAdministrator reads the
-jurisdiction it acts in (`jurisdiction=` for another is 403); a JurisdictionSuperAdministrator everything, or one jurisdiction's with `jurisdiction=`. `change`
+`GET /api/admin/role-history?jurisdiction=&user=&page=1&page_size=50` (`role_audit.read`): newest first. A JurisdictionAdministrator reads those of the
+jurisdiction it acts in (`jurisdiction=` for another is 403 `jurisdiction_not_in_scope`); the JurisdictionSuperAdministrator reads every jurisdiction's
+and the global changes (appointments of JurisdictionSuperAdministrators, deactivations of users of several jurisdictions), or one jurisdiction's with
+`jurisdiction=` (DIAAT-406). `user=<id>` narrows either to the changes made to that user (a user leaving a jurisdiction included): across all
+jurisdictions for the JurisdictionSuperAdministrator, in its own for a JurisdictionAdministrator. A role given to an email before its owner first
+signed in is included by the assignment they claimed: each claim is audited as `assignment.claimed` (user and assignment id; not itself listed),
+and every grant and removal records its `assignment_id`. A grant to the same address that was removed before anyone claimed it is not linked. `change`
 is one of `assignment.added`, `assignment.removed`, `user.deactivated`, `user.reactivated`, `membership.leave`, `access_request.approved`,
 `access_request.rejected` (an approved request is one row per role).
 
@@ -164,7 +177,7 @@ else (refusals, recording access, jurisdiction edits) stays fail-open.
 
 ## Access requests
 
-For any signed-in user, with or without a role:
+For any signed-in user, with or without a role (someone who holds roles may ask for one in another jurisdiction, or another role in one of theirs):
 
 * `POST /api/access-requests` body `{"jurisdiction": "IAC", "roles": ["Judge", "LegalTextManager"]}` -> **201** `AccessRequest`
   `{id, jurisdiction: {code, name}, roles, status, created_at, decided_at, reason}`. 400 `role_not_requestable` for anything but Judge and
@@ -173,14 +186,14 @@ For any signed-in user, with or without a role:
 * `GET /api/access-requests/mine` -> every request they made, newest first.
 * `POST /api/access-requests/{id}/withdraw` -> the request, `withdrawn`. 404 for someone else's, 409 `request_not_pending` once decided.
 
-For an approver (`access.approve`: a JurisdictionAdministrator of the jurisdiction it acts in, or a JurisdictionSuperAdministrator; a SystemAdministrator is refused):
+For an approver (`access.approve`: a JurisdictionAdministrator of the jurisdiction it acts in only, DIAAT-406; a JurisdictionSuperAdministrator and a SystemAdministrator are refused):
 
 * `GET /api/admin/access-requests?status=pending` (`pending` by default; also `approved`, `rejected`, `withdrawn`, `all`) -> `AccessRequest` plus
   `"requester": {id, email, name}`, oldest first.
 * `POST /api/admin/access-requests/{id}/approve` and `/reject`, body `{"reason": str | null}` (optional, at most 500 characters) -> the request. Approving
   writes the requested assignments **in the same transaction** as the new status (a role already held is left as it is); if that fails the request stays pending.
   403 `jurisdiction_not_in_scope` for another jurisdiction's request, 403 `own_request` for your own (nobody decides their own request: another
-  administrator does), 404 `request_not_found`, 409 `request_not_pending` once decided (also if withdrawn), 409 `jurisdiction_disabled` (approving only).
+  JurisdictionAdministrator does), 404 `request_not_found`, 409 `request_not_pending` once decided (also if withdrawn), 409 `jurisdiction_disabled` (approving only).
 
 ```json
 {"id": "febfd968-…", "jurisdiction": {"code": "IAC", "name": "Immigration and Asylum Chamber"}, "roles": ["Judge", "LegalTextManager"],
@@ -191,8 +204,8 @@ The requester's next `POST /api/auth/session` has the new assignments, and `me.p
 
 ### Email (GOV.UK Notify, DIAAT-398)
 
-After the response (never failing or delaying it): a new request emails every active JurisdictionAdministrator of its jurisdiction and every active
-JurisdictionSuperAdministrator, once each (not the requester), with `requester_name`, `jurisdiction_name`, `roles` and
+After the response (never failing or delaying it): a new request emails every active JurisdictionAdministrator of its jurisdiction (who alone decide
+it, DIAAT-406), once each (not the requester), with `requester_name`, `jurisdiction_name`, `roles` and
 `link` = `{APP_URL}/admin?tab=approvals&request=<id>`; an approval or rejection emails the requester `jurisdiction_name`, `roles`, `outcome`
 (`approved`/`rejected`) and `link` = `{APP_URL}/`; a withdrawal emails nobody. The reason is not in an email. Settings:
 `GOV_NOTIFY_API_KEY` (as the pipeline's), `GOV_NOTIFY_TEMPLATE_ACCESS_REQUEST` and `GOV_NOTIFY_TEMPLATE_ACCESS_DECIDED` (template ids). With no key
@@ -222,16 +235,21 @@ read per process per 5 seconds; the PUT clears the cache of the process that too
 
 ## Jurisdictions
 
-`GET /api/admin/jurisdictions` and `PUT /api/admin/jurisdictions/{code}` keep their shapes (`jurisdictions.manage`, scoped; creating needs
-`jurisdiction.create`, a JurisdictionSuperAdministrator's); there is no `auto_enrol` and no members endpoint any more. A JurisdictionAdministrator changes only
-the `settings` (template, features, wording) of its own jurisdiction: changing `name` or `enabled` also needs `jurisdiction.create` (403 `permission_denied`; send the
-name and `enabled` it already has, or leave `enabled` out). Errors on this endpoint are `{code, message}` like the others (409 `edit_conflict` for a stale `version`,
-`already_exists` for adding one that exists). A jurisdiction's wording by code:
+`GET /api/admin/jurisdictions` and `PUT /api/admin/jurisdictions/{code}` keep their shapes (`jurisdictions.manage`, the JurisdictionSuperAdministrator's, for
+any jurisdiction; a JurisdictionAdministrator has none since DIAAT-406). Creating one, and changing `name`, `enabled`, the stage, display name or service of one,
+also needs `jurisdiction.create` (also the JurisdictionSuperAdministrator's). There is no `auto_enrol` and no members endpoint any more. Errors on this endpoint are
+`{code, message}` like the others (409 `edit_conflict` for a stale `version`, `already_exists` for adding one that exists). A jurisdiction's screen wording by code:
 
 * `GET /api/admin/jurisdictions/{code}/wording` -> `{code, name, keys, wording, version}`
 * `PUT /api/admin/jurisdictions/{code}/wording` body `{"wording": {key: text}, "version": "<as read>"}` -> the same. 400 for an unknown key, 404 for an unknown
-  jurisdiction, 409 if it changed since `version`. `jurisdiction.wording.edit`: a JurisdictionSuperAdministrator edits any jurisdiction's, a
-  JurisdictionAdministrator only its own (403 `jurisdiction_not_in_scope`), nobody else (a SystemAdministrator included).
+  jurisdiction, 409 if it changed since `version`. `jurisdiction.wording.edit`: a JurisdictionSuperAdministrator, any jurisdiction's; nobody else (a
+  JurisdictionAdministrator and a SystemAdministrator included).
+
+Screen wording is the UI labels (`WORDING_KEYS`), not legal text (Document Content, the LegalTextManager's). Only the JurisdictionSuperAdministrator
+edits it, here; the in-jurisdiction route `/api/jurisdictions/wording` was removed (DIAAT-406).
+
+A jurisdiction's uploaded Word templates (`/api/admin/jurisdictions/{code}/templates...`, DIAAT-344) are `templates.manage`: a JurisdictionAdministrator, in the
+jurisdiction it acts in only (403 `jurisdiction_not_in_scope` for another).
 
 ## A recording's history
 

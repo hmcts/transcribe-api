@@ -87,6 +87,7 @@ def app():
     from fastapi import FastAPI
 
     from transcribe_api.api.routes_dictation_privileged import router as admin_router
+
     test_app = FastAPI()
     test_app.include_router(admin_router, prefix="/api")
     return test_app
@@ -100,6 +101,7 @@ def client(app):
 @pytest.fixture
 def as_user(app):
     from transcribe_api.domain.auth.dependencies_dictation import get_current_user
+
     yield lambda user: app.dependency_overrides.__setitem__(get_current_user, lambda: user)
     app.dependency_overrides.pop(get_current_user, None)
 
@@ -108,6 +110,7 @@ def as_user(app):
 def mock_content(mocker):
     """Mock file I/O so tests don't touch the filesystem."""
     import copy
+
     data = copy.deepcopy(SAMPLE_CONTENT)
     mocker.patch("transcribe_api.api.routes_dictation_privileged._read_content", return_value=data)
     mocker.patch("transcribe_api.api.routes_dictation_privileged._write_content")
@@ -117,6 +120,7 @@ def mock_content(mocker):
 # ---------------------------------------------------------------------------
 # GET /api/admin/me — admin.access
 # ---------------------------------------------------------------------------
+
 
 def test_admin_me_returns_200_for_legal_text_manager(client, as_user):
     as_user(_make_user(roles=["LegalTextManager"]))
@@ -172,13 +176,14 @@ def test_admin_me_returns_403_for_judge_only(client, as_user):
 # GET /api/admin/roles — {"roles": [...]} (DIAAT-374)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize(
     ("role", "sysadmin", "expected"),
     [
         ("JurisdictionAdministrator", False, ["Judge", "LegalTextManager"]),
-        ("JurisdictionSuperAdministrator", False, ["Judge", "LegalTextManager", "JurisdictionAdministrator"]),
+        ("JurisdictionSuperAdministrator", False, ["JurisdictionAdministrator"]),
         ("SystemAdministrator", True, ["JurisdictionSuperAdministrator"]),
-        ("JurisdictionSuperAdministrator", True, ["Judge", "LegalTextManager", "JurisdictionAdministrator"]),
+        ("JurisdictionSuperAdministrator", True, ["JurisdictionAdministrator"]),
     ],
 )
 def test_admin_roles_is_an_object_with_the_roles_the_caller_may_assign(client, app, role, sysadmin, expected):
@@ -187,7 +192,9 @@ def test_admin_roles_is_an_object_with_the_roles_the_caller_may_assign(client, a
     from transcribe_api.domain.auth.dependencies_dictation import get_current_user
 
     ctx = Context(None if role in ("JurisdictionSuperAdministrator", "SystemAdministrator") else "IAC", role)
-    app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(db_user=_make_user(), ctx=ctx, sysadmin=sysadmin)
+    app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(
+        db_user=_make_user(), ctx=ctx, sysadmin=sysadmin
+    )
 
     response = client.get("/api/admin/roles")
 
@@ -209,6 +216,7 @@ def test_admin_roles_is_refused_to_those_who_assign_nothing(client, as_user, rol
 # GET /api/admin/document-content
 # ---------------------------------------------------------------------------
 
+
 def test_get_document_content_returns_full_payload(client, as_user, mock_content):
     as_user(_make_user(roles=["LegalTextManager"]))
     response = client.get("/api/admin/document-content")
@@ -218,7 +226,9 @@ def test_get_document_content_returns_full_payload(client, as_user, mock_content
     assert body["legal_frameworks"][0]["id"] == "eea_deportation"
 
 
-@pytest.mark.parametrize("role", ["Judge", "JurisdictionAdministrator", "JurisdictionSuperAdministrator", "SystemAdministrator"])
+@pytest.mark.parametrize(
+    "role", ["Judge", "JurisdictionAdministrator", "JurisdictionSuperAdministrator", "SystemAdministrator"]
+)
 def test_get_document_content_returns_403_for_everyone_but_the_legal_text_manager(client, as_user, mock_content, role):
     # legal_text.manage is the LegalTextManager's alone (DIAAT-376, DIAAT-389): not an administrator's, not the Entra role's.
     as_user(_make_user(roles=[role]))
@@ -229,6 +239,7 @@ def test_get_document_content_returns_403_for_everyone_but_the_legal_text_manage
 # ---------------------------------------------------------------------------
 # PUT /api/admin/document-content/hearing-types/{item_id}
 # ---------------------------------------------------------------------------
+
 
 def test_update_hearing_type_returns_updated_item(client, as_user, mock_content):
     as_user(_make_user(roles=["LegalTextManager"]))
@@ -255,8 +266,9 @@ def test_update_hearing_type_returns_404_when_not_found(client, as_user, mock_co
     assert response.status_code == 404
 
 
-def test_update_hearing_type_returns_403_without_role(client, as_user, mock_content):
-    as_user(_make_user(roles=["Judge"]))
+@pytest.mark.parametrize("role", ["Judge", "JurisdictionAdministrator", "JurisdictionSuperAdministrator"])
+def test_update_hearing_type_returns_403_for_everyone_but_the_legal_text_manager(client, as_user, mock_content, role):
+    as_user(_make_user(roles=[role]))
     payload = {
         "id": "face_to_face",
         "title": "X",
@@ -270,6 +282,7 @@ def test_update_hearing_type_returns_403_without_role(client, as_user, mock_cont
 # ---------------------------------------------------------------------------
 # POST /api/admin/document-content/hearing-types
 # ---------------------------------------------------------------------------
+
 
 def test_create_hearing_type_returns_201(client, as_user, mock_content):
     as_user(_make_user(roles=["LegalTextManager"]))
@@ -300,6 +313,7 @@ def test_create_hearing_type_returns_409_for_duplicate(client, as_user, mock_con
 # DELETE /api/admin/document-content/hearing-types/{item_id}
 # ---------------------------------------------------------------------------
 
+
 def test_delete_hearing_type_returns_204(client, as_user, mock_content):
     as_user(_make_user(roles=["LegalTextManager"]))
     response = client.delete("/api/admin/document-content/hearing-types/face_to_face")
@@ -315,6 +329,7 @@ def test_delete_hearing_type_returns_404_when_not_found(client, as_user, mock_co
 # ---------------------------------------------------------------------------
 # PUT /api/admin/document-content/legal-frameworks/{item_id}
 # ---------------------------------------------------------------------------
+
 
 def test_update_legal_framework_returns_updated_item(client, as_user, mock_content):
     as_user(_make_user(roles=["LegalTextManager"]))
@@ -347,6 +362,7 @@ def test_update_legal_framework_returns_404_when_not_found(client, as_user, mock
 # POST /api/admin/document-content/legal-frameworks
 # ---------------------------------------------------------------------------
 
+
 def test_create_legal_framework_returns_201(client, as_user, mock_content):
     as_user(_make_user(roles=["LegalTextManager"]))
     payload = {
@@ -378,6 +394,7 @@ def test_create_legal_framework_returns_409_for_duplicate(client, as_user, mock_
 # DELETE /api/admin/document-content/legal-frameworks/{item_id}
 # ---------------------------------------------------------------------------
 
+
 def test_delete_legal_framework_returns_204(client, as_user, mock_content):
     as_user(_make_user(roles=["LegalTextManager"]))
     response = client.delete("/api/admin/document-content/legal-frameworks/eea_deportation")
@@ -393,6 +410,7 @@ def test_delete_legal_framework_returns_404_when_not_found(client, as_user, mock
 # ---------------------------------------------------------------------------
 # PUT /api/admin/document-content/anonymity-statuses/{item_id}
 # ---------------------------------------------------------------------------
+
 
 def test_update_anonymity_status_returns_200(client, as_user, mock_content):
     as_user(_make_user(roles=["LegalTextManager"]))
@@ -428,6 +446,7 @@ def test_update_anonymity_status_returns_404_when_not_found(client, as_user, moc
 # ---------------------------------------------------------------------------
 # DIAAT-389: /api/admin/transcriptions* are gone: no role needs another user's dictation records
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize("roles", [["SystemAdministrator"], ["LegalTextManager"], ["Judge"]])
 def test_the_admin_transcription_endpoints_no_longer_exist(client, as_user, roles):

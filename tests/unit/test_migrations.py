@@ -99,7 +99,7 @@ def _alter_type_sql(table: str, column: str, type_sql: str) -> re.Pattern[str]:
 def test_there_is_one_history_with_one_head():
     script = ScriptDirectory.from_config(migrations.alembic_config())
     assert script.get_bases() == ["0001"]
-    assert script.get_heads() == ["0012"]
+    assert script.get_heads() == ["0013"]
 
 
 def test_baseline_creates_every_table(monkeypatch):
@@ -1427,3 +1427,13 @@ def test_0009_keeps_every_existing_value_unchanged():
         assert iac_after == iac_before
     finally:
         engine.dispose()
+
+
+def test_0013_stores_the_administrators_judge_and_legal_text_manager_under_a_lock(monkeypatch):
+    """DIAAT-406: the backfill cannot overlap a first sign-in claiming pending rows."""
+    sql = _offline_sql(monkeypatch, "0012:0013")
+    lock = "LOCK TABLE role_assignment IN ACCESS EXCLUSIVE MODE"
+    assert lock in sql
+    assert sql.index(lock) < sql.index("INSERT INTO role_assignment")
+    assert "('Judge'), ('LegalTextManager')" in sql
+    assert _forbidden_live_writes("0013", sql) == []

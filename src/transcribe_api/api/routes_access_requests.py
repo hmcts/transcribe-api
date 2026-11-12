@@ -1,10 +1,9 @@
 """Access requests (DIAAT-396, DIAAT-398), under ``/api``.
 
-The requester's side works for any signed-in user, with or without a role or a context (a user
-with no role is who it is for): ``POST /access-requests``, ``GET /access-requests/mine``,
-``POST /access-requests/{id}/withdraw``. The approver's side needs ``access.approve`` (a
-JurisdictionAdministrator of the jurisdiction, or a JurisdictionSuperAdministrator; a
-SystemAdministrator is refused): ``GET /admin/access-requests``,
+The requester's side works for any signed-in user, with or without a role or a context: a user
+with no role, or one asking for a role in another jurisdiction (DIAAT-406): ``POST /access-requests``, ``GET /access-requests/mine``,
+``POST /access-requests/{id}/withdraw``. The approver's side needs ``access.approve``: a
+JurisdictionAdministrator of the jurisdiction only (DIAAT-406): ``GET /admin/access-requests``,
 ``POST /admin/access-requests/{id}/approve`` and ``/reject``. The rules are
 domain/access_requests.py; the emails (sent after the response, never failing it) are
 domain/notify/access_request_emails.py. Plain defs: the work is synchronous, so FastAPI runs

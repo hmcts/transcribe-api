@@ -4,8 +4,8 @@ code change or release. Real lookups on SQLite.
 
 AC1: an uploaded template whose boxes are all linked can be used by judges.
 AC2: saving with a box unlinked says which box.
-AC3: only an administrator can manage templates: a JurisdictionAdministrator of the jurisdiction, or a
-JurisdictionSuperAdministrator (DIAAT-373: not a judge, a LegalTextManager, nor a SystemAdministrator).
+AC3: only a JurisdictionAdministrator of the jurisdiction can manage its templates (DIAAT-406: not a
+judge, a LegalTextManager, the JurisdictionSuperAdministrator, nor a SystemAdministrator).
 
 DIAAT-346: the product team previews a template with sample details before any judge
 sees it, and is told in plain words when the preview fails.
@@ -35,6 +35,7 @@ from tests.unit.jurisdiction_fixtures import (
 )
 from tests.unit.template_docx import JUDGMENT, Sdt, document_text, make_template
 from transcribe_api.documents.content_loader import save_document_content
+from transcribe_api.domain.assignments import add_assignment
 from transcribe_api.domain.models_dictation import AuditLog, JurisdictionTemplate, Transcription, TranscriptionJob
 
 pytestmark = pytest.mark.real_jurisdictions
@@ -277,19 +278,29 @@ def test_a_file_benchnotes_cannot_fill_says_why(as_admin):
     )
 
 
-@pytest.mark.parametrize("role", ["Judge", "LegalTextManager"])
-def test_only_an_administrator_may_manage_templates(jurisdiction_db, admin_app, et, role):
+@pytest.mark.parametrize("role", ["Judge", "LegalTextManager", "JurisdictionSuperAdministrator"])
+def test_only_the_jurisdictions_administrator_may_manage_templates(jurisdiction_db, admin_app, et, role):
     user = add_user(jurisdiction_db)
-    add_member(jurisdiction_db, user, et, role=role)
-    client = client_as(admin_app, jurisdiction_db, user, ctx=("ET", role))
+    if role == "JurisdictionSuperAdministrator":
+        with Session(jurisdiction_db) as session:
+            add_assignment(session, role=role, jurisdiction_id=None, user_id=user.id)
+            session.commit()
+        client = client_as(admin_app, jurisdiction_db, user, ctx=(None, role))
+    else:
+        add_member(jurisdiction_db, user, et, role=role)
+        client = client_as(admin_app, jurisdiction_db, user, ctx=("ET", role))
     some_id = "00000000-0000-4000-8000-000000000000"
-    assert client.get("/api/admin/jurisdictions/ET/templates").status_code == 403
-    assert upload(client).status_code == 403
-    assert client.put(f"/api/admin/jurisdictions/ET/templates/{some_id}", json={}).status_code == 403
-    assert client.delete(f"/api/admin/jurisdictions/ET/templates/{some_id}").status_code == 403
-    preview = client.post(f"/api/admin/jurisdictions/ET/templates/{some_id}/preview", json={"version": ""})
-    assert preview.status_code == 403
-    assert client.get(f"/api/admin/jurisdictions/ET/templates/{some_id}/form").status_code == 403
+    some = f"/api/admin/jurisdictions/ET/templates/{some_id}"
+    for refused in (
+        client.get("/api/admin/jurisdictions/ET/templates"),
+        upload(client),
+        client.put(some, json={}),
+        client.delete(some),
+        client.post(f"{some}/preview", json={"version": ""}),
+        client.get(f"{some}/form"),
+    ):
+        assert refused.status_code == 403
+        assert refused.json()["detail"]["code"] == "permission_denied"
     with Session(jurisdiction_db) as session:
         assert session.exec(select(JurisdictionTemplate)).all() == []
 
@@ -301,9 +312,7 @@ def test_a_system_administrator_has_no_part_in_templates(jurisdiction_db, admin_
     assert upload(client).status_code == 403
 
 
-def test_an_administrator_manages_only_the_templates_of_the_jurisdiction_they_work_in(
-    jurisdiction_db, admin_app, et
-):
+def test_an_administrator_manages_only_the_templates_of_the_jurisdiction_they_work_in(jurisdiction_db, admin_app, et):
     iac = add_jurisdiction(jurisdiction_db, "IAC")
     user = add_user(jurisdiction_db)
     add_member(jurisdiction_db, user, iac, role="admin")

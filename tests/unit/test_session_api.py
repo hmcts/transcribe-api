@@ -227,48 +227,46 @@ def test_two_pairs_must_be_chosen_and_the_context_is_null_until_then(client, wor
     assert me["active"] is None and me["permissions"] == []
     assert [(a["jurisdiction"]["code"], a["role"]) for a in me["assignments"]] == [
         ("ET", "Judge"),
-        ("IAC", "Judge"),  # included with the administrator role
-        ("IAC", "LegalTextManager"),  # likewise
         ("IAC", ADMIN),
     ]
     claims = claims_of(response.json()["token"])
     assert claims["ctx"] is None
-    assert len(claims["assignments"]) == 4
+    assert len(claims["assignments"]) == 2
     # And until they choose, every ordinary route is refused.
     refused = client.get("/api/user", headers=bearer(response.json()["token"]))
     assert refused.status_code == 403 and refused.json()["detail"]["code"] == "context_required"
 
 
-def test_an_administrator_lands_as_the_administrator_and_can_switch_to_the_included_roles(client, world, db):
+def test_an_administrator_holds_only_the_administrator_role_and_lands_in_it(client, world, db):
     person = user_with(client, db, (world["iac"], "admin"))
     response = person.sign_in()
     me = response.json()["me"]
 
-    # Three pairs are offered, but only one was given: they are not asked to choose.
     assert me["status"] == "ready"
     assert me["active"]["role"] == ADMIN
-    assert [(a["jurisdiction"]["code"], a["role"]) for a in me["assignments"]] == [
-        ("IAC", "Judge"),
-        ("IAC", "LegalTextManager"),
-        ("IAC", ADMIN),
-    ]
+    assert [(a["jurisdiction"]["code"], a["role"]) for a in me["assignments"]] == [("IAC", ADMIN)]
     token = response.json()["token"]
-    assert len(claims_of(token)["assignments"]) == 3
+    assert claims_of(token)["assignments"] == [{"jurisdiction": "IAC", "role": ADMIN}]
+    assert "dictation.use" not in me["permissions"] and "legal_text.manage" not in me["permissions"]
 
-    judge = client.put("/api/me/context", json={"jurisdiction": "IAC", "role": "Judge"}, headers=bearer(token))
+    for role in ("Judge", "LegalTextManager"):
+        refused = client.put("/api/me/context", json={"jurisdiction": "IAC", "role": role}, headers=bearer(token))
+        assert refused.status_code == 403 and refused.json()["detail"]["code"] == "context_not_available"
+
+
+def test_an_administrator_also_given_judge_there_must_choose_and_can_switch_to_it(client, world, db):
+    person = user_with(client, db, (world["iac"], "admin"), (world["iac"], "judge"))
+    response = person.sign_in()
+    me = response.json()["me"]
+
+    assert me["status"] == "choose"
+    assert [(a["jurisdiction"]["code"], a["role"]) for a in me["assignments"]] == [("IAC", "Judge"), ("IAC", ADMIN)]
+    judge = client.put(
+        "/api/me/context", json={"jurisdiction": "IAC", "role": "Judge"}, headers=bearer(response.json()["token"])
+    )
     assert judge.status_code == 200
     assert "dictation.use" in judge.json()["me"]["permissions"]
     assert "users.manage" not in judge.json()["me"]["permissions"]
-
-    manager = client.put(
-        "/api/me/context", json={"jurisdiction": "IAC", "role": "LegalTextManager"}, headers=bearer(token)
-    )
-    assert manager.status_code == 200
-    assert "document_content.write" in manager.json()["me"]["permissions"]
-
-    # The included roles stop at the administrator's own jurisdiction.
-    elsewhere = client.put("/api/me/context", json={"jurisdiction": "ET", "role": "Judge"}, headers=bearer(token))
-    assert elsewhere.status_code == 403 and elsewhere.json()["detail"]["code"] == "context_not_available"
 
 
 def test_an_assignment_says_what_stage_its_jurisdiction_is_at_so_a_screen_can_mark_one_not_live(client, world, db):
@@ -278,13 +276,11 @@ def test_an_assignment_says_what_stage_its_jurisdiction_is_at_so_a_screen_can_ma
         et.stage = "draft"
         session.add(et)
         session.commit()
-    person = user_with(client, db, (world["et"], "admin"), (world["iac"], "judge"))
+    person = user_with(client, db, (world["et"], "admin"), (world["et"], "judge"), (world["iac"], "judge"))
     me = person.sign_in().json()["me"]
 
     stages = {(a["jurisdiction"]["code"], a["role"]): a["jurisdiction"]["stage"] for a in me["assignments"]}
-    assert stages[("ET", ADMIN)] == "draft"
-    assert stages[("ET", "Judge")] == "draft"  # included with the administrator role: the same jurisdiction
-    assert stages[("IAC", "Judge")] == "live"
+    assert stages == {("ET", ADMIN): "draft", ("ET", "Judge"): "draft", ("IAC", "Judge"): "live"}
 
 
 def test_an_administrator_with_a_second_given_role_must_choose(client, world, db):
@@ -292,11 +288,17 @@ def test_an_administrator_with_a_second_given_role_must_choose(client, world, db
     assert person.sign_in().json()["me"]["status"] == "choose"
 
 
-def test_a_renewal_keeps_an_included_role_the_session_chose(client, world, db):
-    person = user_with(client, db, (world["iac"], "admin"))
+def test_a_renewal_keeps_a_judge_role_an_administrator_was_given_and_chose(client, world, db):
+    person = user_with(client, db, (world["iac"], "admin"), (world["iac"], "judge"))
     renewed = person.sign_in(requested_context="IAC:Judge").json()
     assert renewed["me"]["active"]["role"] == "Judge"
     assert claims_of(renewed["token"])["ctx"] == {"jurisdiction": "IAC", "role": "Judge"}
+
+
+def test_a_renewal_naming_a_role_an_administrator_was_not_given_has_none(client, world, db):
+    person = user_with(client, db, (world["iac"], "admin"))
+    renewed = person.sign_in(requested_context="IAC:Judge").json()
+    assert renewed["me"]["active"] is None and renewed["me"]["status"] == "choose"
 
 
 def test_two_roles_in_one_jurisdiction_are_two_pairs(client, world, db):
@@ -308,9 +310,7 @@ def test_choosing_a_pair_gives_a_token_acting_in_it(client, world, db):
     person = user_with(client, db, (world["et"], "judge"), (world["iac"], "admin"))
     token = person.sign_in().json()["token"]
 
-    chosen = client.put(
-        "/api/me/context", json={"jurisdiction": "iac", "role": ADMIN}, headers=bearer(token)
-    )
+    chosen = client.put("/api/me/context", json={"jurisdiction": "iac", "role": ADMIN}, headers=bearer(token))
 
     assert chosen.status_code == 200
     body = chosen.json()
@@ -334,6 +334,36 @@ def test_the_permissions_are_those_of_the_active_role_only_not_the_union(client,
     assert "users.manage" in admin["me"]["permissions"] and "dictation.use" not in admin["me"]["permissions"]
 
 
+def test_a_user_holds_any_combination_of_roles_in_any_number_of_jurisdictions(client, world, db):
+    from transcribe_api.domain.auth.permissions import ROLE_PERMISSIONS
+
+    third = add_jurisdiction(db, "SSCS")
+    person = user_with(
+        client,
+        db,
+        (world["iac"], "judge"),
+        (world["et"], "judge"),
+        (world["et"], "LegalTextManager"),
+        (third, "admin"),
+    )
+    token = person.sign_in().json()["token"]
+
+    me = client.get("/api/me/permissions", headers=bearer(token)).json()
+    held = [(a["jurisdiction"]["code"], a["role"]) for a in me["assignments"]]
+    assert held == [("ET", "Judge"), ("ET", "LegalTextManager"), ("IAC", "Judge"), ("SSCS", ADMIN)]
+    assert me["status"] == "choose"
+
+    for code, role in held:
+        chosen = client.put("/api/me/context", json={"jurisdiction": code, "role": role}, headers=bearer(token))
+        assert chosen.status_code == 200, (code, role)
+        body = chosen.json()
+        assert body["me"]["active"]["jurisdiction"]["code"] == code and body["me"]["active"]["role"] == role
+        assert set(body["me"]["permissions"]) == ROLE_PERMISSIONS[role]
+        assert claims_of(body["token"])["ctx"] == {"jurisdiction": code, "role": role}
+        again = client.get("/api/me/permissions", headers=bearer(body["token"])).json()
+        assert set(again["permissions"]) == ROLE_PERMISSIONS[role]
+
+
 @pytest.mark.parametrize(
     "body",
     [
@@ -343,7 +373,9 @@ def test_the_permissions_are_those_of_the_active_role_only_not_the_union(client,
         pytest.param({"jurisdiction": None, "role": "Judge"}, id="a-judge-with-no-jurisdiction"),
         pytest.param({"jurisdiction": None, "role": SUPER}, id="super-administrator-not-held"),
         pytest.param({"jurisdiction": "XX", "role": "Judge"}, id="no-such-jurisdiction"),
-        pytest.param({"jurisdiction": "ET", "role": "SystemAdministrator"}, id="system-administrator-in-a-jurisdiction"),
+        pytest.param(
+            {"jurisdiction": "ET", "role": "SystemAdministrator"}, id="system-administrator-in-a-jurisdiction"
+        ),
         pytest.param({"jurisdiction": "ET", "role": "Normal"}, id="normal"),
     ],
 )
@@ -411,7 +443,11 @@ def test_a_super_administrator_has_one_context_for_all_jurisdictions(client, wor
     assert len(supers) == 1 and supers[0]["jurisdiction"] is None
     assert me["status"] == "ready" and me["active"]["role"] == SUPER and me["active"]["jurisdiction"] is None
     for code in ("IAC", "ET"):
-        refused = client.put("/api/me/context", json={"jurisdiction": code, "role": SUPER}, headers=bearer(person.sign_in().json()["token"]))
+        refused = client.put(
+            "/api/me/context",
+            json={"jurisdiction": code, "role": SUPER},
+            headers=bearer(person.sign_in().json()["token"]),
+        )
         assert refused.status_code == 403 and refused.json()["detail"]["code"] == "context_not_available"
 
 
@@ -421,7 +457,9 @@ def test_a_renewal_names_a_global_context_with_a_dash(client, world, db):
     assert claims_of(renewed.json()["token"])["ctx"] == {"jurisdiction": None, "role": SUPER}
 
 
-@pytest.mark.parametrize("requested", ["IAC:Judge", "ET:JurisdictionAdministrator", "-:Judge", "nonsense", ":", "ET:", ""])
+@pytest.mark.parametrize(
+    "requested", ["IAC:Judge", "ET:JurisdictionAdministrator", "-:Judge", "nonsense", ":", "ET:", ""]
+)
 def test_a_renewal_naming_a_context_no_longer_held_has_none(client, world, db, requested):
     """Not the auto rule either: a user who had chosen something they have lost chooses again."""
     person = user_with(client, db, (world["et"], "judge"))
@@ -443,7 +481,7 @@ def test_a_role_removed_while_active_is_gone_at_the_next_token(client, world, db
     # ... and the renewal, which keeps the context only if it is held, drops it.
     renewed = person.sign_in(requested_context="ET:Judge").json()
     assert renewed["me"]["active"] is None
-    assert [a["role"] for a in renewed["me"]["assignments"]] == ["Judge", "LegalTextManager", ADMIN]
+    assert [a["role"] for a in renewed["me"]["assignments"]] == [ADMIN]
 
 
 # --- SystemAdministrator ----------------------------------------------------------------
@@ -518,9 +556,7 @@ def test_acting_in_another_context_a_system_administrator_has_that_roles_permiss
 
 
 def test_a_system_administrator_with_no_context_chosen_has_no_permissions(client, world, db):
-    person = user_with(
-        client, db, (world["et"], "judge"), (world["iac"], "admin"), roles=["SystemAdministrator"]
-    )
+    person = user_with(client, db, (world["et"], "judge"), (world["iac"], "admin"), roles=["SystemAdministrator"])
     token = person.sign_in().json()["token"]
     me = client.get("/api/me/permissions", headers=bearer(token)).json()
     assert me["status"] == "choose" and me["active"] is None and me["permissions"] == []
@@ -638,7 +674,10 @@ def test_the_entra_token_is_rejected_on_ordinary_routes(client, world):
     for path in ("/api/user", "/api/me/permissions", "/api/jurisdictions/current", "/api/jurisdictions/public"):
         response = client.get(path, headers=bearer(entra))
         assert response.status_code == 401, path
-    assert client.put("/api/me/context", json={"jurisdiction": "ET", "role": "Judge"}, headers=bearer(entra)).status_code == 401
+    assert (
+        client.put("/api/me/context", json={"jurisdiction": "ET", "role": "Judge"}, headers=bearer(entra)).status_code
+        == 401
+    )
     assert client.delete("/api/me/jurisdictions/ET", headers=bearer(entra)).status_code == 401
 
 
@@ -732,7 +771,9 @@ def test_a_matching_or_absent_context_header_is_fine(client, world, db):
     assert (
         client.get("/api/jurisdictions/current", headers=bearer(token, **{"X-Jurisdiction": "ET", "X-Role": "Judge"}))
     ).status_code == 200
-    assert client.get("/api/jurisdictions/current", headers=bearer(token, **{"X-Jurisdiction": "et"})).status_code == 200
+    assert (
+        client.get("/api/jurisdictions/current", headers=bearer(token, **{"X-Jurisdiction": "et"})).status_code == 200
+    )
     assert client.get("/api/jurisdictions/current", headers=bearer(token, **{"X-Role": "Judge"})).status_code == 200
 
 
@@ -768,7 +809,9 @@ def test_a_stale_tab_can_still_ask_who_it_is_and_switch(client, world, db):
     token = person.sign_in(requested_context="ET:Judge").json()["token"]
     stale = {"X-Jurisdiction": "IAC", "X-Role": ADMIN}
     assert client.get("/api/me/permissions", headers=bearer(token, **stale)).status_code == 200
-    switched = client.put("/api/me/context", json={"jurisdiction": "IAC", "role": ADMIN}, headers=bearer(token, **stale))
+    switched = client.put(
+        "/api/me/context", json={"jurisdiction": "IAC", "role": ADMIN}, headers=bearer(token, **stale)
+    )
     assert switched.status_code == 200
 
 
@@ -894,7 +937,11 @@ def test_leaving_a_jurisdiction_deletes_only_that_jurisdictions_assignments(clie
 
     assert response.status_code == 200
     with Session(db) as session:
-        mine = [(r.jurisdiction_id, r.role) for r in session.exec(select(RoleAssignment)).all() if r.user_id == person.user_id]
+        mine = [
+            (r.jurisdiction_id, r.role)
+            for r in session.exec(select(RoleAssignment)).all()
+            if r.user_id == person.user_id
+        ]
         theirs = [r.role for r in session.exec(select(RoleAssignment)).all() if r.user_id == stranger.user_id]
     assert sorted(mine, key=str) == sorted([(world["iac"].id, ADMIN), (None, SUPER)], key=str)
     assert theirs == ["Judge"]  # nobody else's
@@ -902,8 +949,6 @@ def test_leaving_a_jurisdiction_deletes_only_that_jurisdictions_assignments(clie
     # The global role first (by jurisdiction name: none), then the IAC's.
     assert [(a["jurisdiction"] and a["jurisdiction"]["code"], a["role"]) for a in me["assignments"]] == [
         (None, SUPER),
-        ("IAC", "Judge"),
-        ("IAC", "LegalTextManager"),
         ("IAC", ADMIN),
     ]
     # They were acting in the IAC, which they have not left: the context is kept.
@@ -912,16 +957,14 @@ def test_leaving_a_jurisdiction_deletes_only_that_jurisdictions_assignments(clie
 
 
 def test_leaving_the_active_jurisdiction_means_choosing_again(client, world, db):
-    person = user_with(
-        client, db, (world["et"], "judge"), (world["iac"], "admin"), (None, SUPER)
-    )
+    person = user_with(client, db, (world["et"], "judge"), (world["iac"], "admin"), (None, SUPER))
     token = person.sign_in(requested_context="ET:Judge").json()["token"]
     response = client.delete("/api/me/jurisdictions/ET", headers=bearer(token))
     assert response.status_code == 200
     me = response.json()["me"]
     assert me["status"] == "choose" and me["active"] is None
     assert claims_of(response.json()["token"])["ctx"] is None
-    assert [a["role"] for a in me["assignments"]] == [SUPER, "Judge", "LegalTextManager", ADMIN]
+    assert [a["role"] for a in me["assignments"]] == [SUPER, ADMIN]
 
 
 def test_leaving_the_active_jurisdiction_with_one_pair_left_selects_it(client, world, db):
@@ -1004,10 +1047,9 @@ def persona(client, name, **headers):
     [
         ("judge-et", "ready", [("ET", "Judge")], False),
         ("judge-iac", "ready", [("IAC", "Judge")], False),
-        # An administrator also holds Judge and LegalTextManager in their jurisdiction, but lands as the administrator.
-        ("multi", "choose", [("ET", "Judge"), ("IAC", "Judge"), ("IAC", "LegalTextManager"), ("IAC", ADMIN)], False),
-        ("jadmin-iac", "ready", [("IAC", "Judge"), ("IAC", "LegalTextManager"), ("IAC", ADMIN)], False),
-        ("jadmin-et", "ready", [("ET", "Judge"), ("ET", "LegalTextManager"), ("ET", ADMIN)], False),
+        ("multi", "choose", [("ET", "Judge"), ("IAC", ADMIN)], False),
+        ("jadmin-iac", "ready", [("IAC", ADMIN)], False),
+        ("jadmin-et", "ready", [("ET", ADMIN)], False),
         ("legal-iac", "ready", [("IAC", "LegalTextManager")], False),
         ("jsuper", "ready", [(None, SUPER)], False),
         ("sysadmin", "ready", [(None, "SystemAdministrator")], True),
@@ -1148,7 +1190,9 @@ def test_the_token_lifetime_is_the_setting(client, world, db, monkeypatch):
     response = Person(client).sign_in()
     claims = claims_of(response.json()["token"])
     assert claims["exp"] - claims["iat"] == 120
-    assert app_token.verify(response.json()["token"]).expires_at.isoformat().startswith(response.json()["expires_at"][:19])
+    assert (
+        app_token.verify(response.json()["token"]).expires_at.isoformat().startswith(response.json()["expires_at"][:19])
+    )
 
 
 def test_the_recording_area_checks_the_tabs_context_headers_too(client, world, db, monkeypatch):
@@ -1199,7 +1243,9 @@ def test_a_persona_is_also_refused_against_a_database_that_is_not_local(client, 
 
     seed_personas(db)
     local_url = os.environ["DATABASE_CONNECTION_STRING"]
-    monkeypatch.setenv("DATABASE_CONNECTION_STRING", "postgresql://u:p@shared-db.example.com:5432/benchnotes")  # pragma: allowlist secret
+    monkeypatch.setenv(
+        "DATABASE_CONNECTION_STRING", "postgresql://u:p@shared-db.example.com:5432/benchnotes"
+    )  # pragma: allowlist secret
     settings_recording.get_settings.cache_clear()
     refused = persona(client, "sysadmin")
     assert refused.status_code == 401 and refused.json()["detail"]["code"] == "dev_persona_disabled"
