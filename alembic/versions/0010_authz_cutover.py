@@ -36,9 +36,13 @@ Then the old data is retired, so nothing can grant access from it again:
 
 - ``jurisdiction_membership`` becomes ``jurisdiction_membership_legacy``: kept (recoverable), not read.
 - ``jurisdiction.auto_enrol`` is set false everywhere and given a default, so the code, which no longer
-  maps it, can insert jurisdictions. The column itself stays until a later release: the 0009 release maps
-  it and selects it with every jurisdiction, so dropping it here would fail those pods for as long as they
-  serve during this rollout, and any rollback to them.
+  maps it, can insert jurisdictions. The column itself stays (0011 drops both): the 0009 release maps it and
+  selects it with every jurisdiction, so dropping it here would fail those pods for as long as they serve
+  during this rollout.
+
+Rolling back to the 0009 release's image is not supported once this has run: with RUN_MIGRATIONS=true its
+pods crash-loop with "Can't locate revision identified by '0010'". The database must be downgraded first
+(``alembic downgrade 0009``, from a newer image), and once 0011 has run the memberships are gone.
 
 Downgrade restores the table name and removes the default. The assignments it added and the pending
 copies it removed or trimmed stay: they are what the 0009 release expects to find. auto_enrol stays

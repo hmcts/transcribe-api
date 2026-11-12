@@ -276,7 +276,7 @@ def test_0010_goes_down_and_up_again_without_adding_anything(world):
 
 def test_0010_on_a_database_with_nothing_to_catch_up(engine, caplog):
     with caplog.at_level(logging.INFO, logger="alembic.runtime.migration"):
-        migrate(engine, "head")
+        migrate(engine, "0010")
     assert "0 membership(s)" in caplog.text
     assert "memberships with no assignment" not in caplog.text
     assert "jurisdiction_membership_legacy" in tables(engine)

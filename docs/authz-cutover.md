@@ -53,7 +53,7 @@ memberships any more. In one transaction:
    membership whose person has such an audit row in that jurisdiction is left alone: someone has decided about their access there since 0009.
 3. It sets `jurisdiction.auto_enrol` false everywhere and gives the column a default (the code no longer maps it).
 4. It renames `jurisdiction_membership` to `jurisdiction_membership_legacy`: nothing reads it, and nothing can grant access from it again.
-   The data is kept for recovery.
+   Migration 0011 has since dropped it (below).
 
 It never touches users, requests or audit rows, and never removes access (an assignment whose membership the old code deleted stays).
 The counts are logged with the migration's own lines at startup ("Running upgrade 0009 -> 0010"):
@@ -64,12 +64,30 @@ removed: 0; assignments put in the test group: 0; jurisdictions with auto_enrol 
 since 0009, 0 other
 ```
 
-"Other" unmatched memberships (with neither a user nor an email, or anything unexpected) are also logged as a warning, by membership id, to
-look at in `jurisdiction_membership_legacy`. It is tested on a real PostgreSQL (`tests/unit/test_migration_0010_cutover.py`).
+"Other" unmatched memberships (with neither a user nor an email, or anything unexpected) were also logged as a warning, by membership id.
+It is tested on a real PostgreSQL (`tests/unit/test_migration_0010_cutover.py`).
 
-`jurisdiction.auto_enrol` itself is dropped in a later release, not by 0010: the 0009 release maps it and selects it with every
-jurisdiction, so dropping it while its pods may still serve (during the rollout, or after a rollback to it) would fail them.
-`alembic downgrade 0009` renames the table back and removes the default; the assignments 0010 added stay.
+0010 kept `jurisdiction.auto_enrol`: the 0009 release maps it and selects it with every jurisdiction, so dropping it while its pods might
+still serve would have failed them. `alembic downgrade 0009` renames the table back and removes the default; the assignments 0010 added stay.
+
+**Rolling back to the 0009 release is not supported** once 0010 has run: its image, started with `RUN_MIGRATIONS=true`, crash-loops with
+"Can't locate revision identified by '0010'". A rollback past 0010 needs the database downgraded first (`alembic downgrade 0009`, run from a
+newer image), and after 0011 the old memberships are gone, so it would not bring back anyone's access.
+
+## The legacy data dropped: migration 0011 (DIAAT-405)
+
+0010 has run in AAT, demo and prod, and every environment runs a newer image, so migration **0011** (`0011_drop_legacy_membership`) drops
+what 0010 retired: the table `jurisdiction_membership_legacy` (with its keys, indexes and constraints) and the column `jurisdiction.auto_enrol`.
+Both are dropped only if still there. The rows are not exported or checked first, by decision: anyone whose access turns out to be missing
+is given it again by hand by an administrator.
+
+Dropping the column locks `jurisdiction`, and dropping the table's foreign keys locks `user`, both exclusively, and live requests read both
+all the time. As 0010 does, it takes every lock up front, each attempt giving way after 500 ms and trying again, so a request in progress is
+never the one aborted. After 120 attempts (about a minute and a half) the migration fails and the pod tries again.
+
+`alembic downgrade 0010` puts back an empty `jurisdiction_membership_legacy` and `jurisdiction.auto_enrol` (false, with its default) in the
+shape 0010 left them, so the older downgrades still run; the dropped rows do not come back. It is tested on a real PostgreSQL
+(`tests/unit/test_migration_0011_drop_legacy.py`).
 
 ## Deployment configuration
 

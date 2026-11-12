@@ -46,20 +46,6 @@ def target_metadata() -> MetaData:
     return SQLModel.metadata
 
 
-# In the database but no longer in the models (0010): kept for recovery, or until the release whose
-# pods still select it is gone. Autogenerate and the drift test leave them alone.
-RETIRED_TABLES = frozenset({"jurisdiction_membership_legacy"})
-RETIRED_COLUMNS = frozenset({("jurisdiction", "auto_enrol")})
-
-
-def include_object(obj, name, type_, reflected, compare_to) -> bool:
-    if type_ == "table":
-        return name not in RETIRED_TABLES
-    if type_ == "column":
-        return (obj.table.name, name) not in RETIRED_COLUMNS
-    return True
-
-
 def run_migrations(engine=None) -> None:
     """Upgrade the database to the latest revision, one process at a time."""
     if engine is None:
