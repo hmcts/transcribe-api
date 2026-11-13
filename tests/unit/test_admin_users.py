@@ -58,7 +58,7 @@ def test_the_list_has_the_contracts_shape(world, cast):
     assert set(page) == {"items", "total", "page", "page_size"}
     assert page["page"] == 1 and page["page_size"] == 25 and page["total"] == len(page["items"]) == 3
     for item in page["items"]:
-        assert set(item) == {"id", "email", "name", "is_active", "assignments", "pending", "can_set_active"}
+        assert set(item) == {"id", "email", "name", "is_active", "assignments", "pending"}
         for assignment in item["assignments"]:
             assert set(assignment) == {"id", "jurisdiction", "role", "tester"}
     ivy = next(i for i in page["items"] if i["email"] == cast.judge_iac.email)
@@ -523,21 +523,19 @@ def test_a_deactivated_holders_sign_in_still_records_the_claim(world, cast):
     assert refused.status_code == 403 and code(refused) == "assignment_not_allowed"
 
 
-def test_the_list_says_which_accounts_the_caller_may_deactivate_without_naming_the_system_administrator(world, cast):
+def test_the_list_does_not_tell_a_system_administrators_account_from_anyone_elses(world, cast):
+    """The protection is the API's alone: the list shows a holder as it shows anyone with the same roles (DIAAT-403)."""
     holder = world.person("Sam Sysadmin Judge", ("IAC", JUDGE), sysadmin=True)
-    everyone = cast.jsuper.get("/api/admin/users", role=SUPER).json()
-    allowed = {i["email"]: i["can_set_active"] for i in everyone["items"]}
-    assert allowed[cast.sysadmin.email] is allowed[holder.email] is allowed[cast.jsuper.email] is False
-    assert allowed[cast.jadmin_iac.email] is allowed[cast.both.email] is allowed[cast.nobody.email] is True
-    assert "SystemAdministrator" not in str(everyone)
-
-    in_iac = cast.jadmin_iac.get("/api/admin/users", role=ADMIN, jurisdiction="IAC").json()
-    allowed = {i["email"]: i["can_set_active"] for i in in_iac["items"]}
-    assert allowed[cast.judge_iac.email] is True
-    assert allowed[cast.both.email] is allowed[cast.jadmin_iac.email] is allowed[holder.email] is False
-
-    system = cast.sysadmin.get("/api/admin/users").json()
-    assert not any(i["can_set_active"] for i in system["items"])
+    for page in (
+        cast.jsuper.get("/api/admin/users", role=SUPER).json(),
+        cast.jadmin_iac.get("/api/admin/users", role=ADMIN, jurisdiction="IAC").json(),
+    ):
+        rows = {i["email"]: i for i in page["items"]}
+        mine, judge = rows[holder.email], rows[cast.judge_iac.email]
+        assert set(mine) == set(judge)
+        assert (mine["is_active"], mine["pending"]) == (judge["is_active"], judge["pending"])
+        assert [a["role"] for a in mine["assignments"]] == [a["role"] for a in judge["assignments"]]
+        assert "SystemAdministrator" not in str(page)
 
 
 def _set_active(world, person: Person, active: bool) -> None:

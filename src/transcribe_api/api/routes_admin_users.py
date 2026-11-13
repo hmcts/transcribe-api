@@ -57,9 +57,6 @@ class AdminUserOut(BaseModel):
     is_active: bool
     assignments: list[AssignmentOut]
     pending: bool
-    # Whether the caller may deactivate or reactivate this account: false for its own, a pending row,
-    # one outside a JurisdictionAdministrator's reach, and one that holds SystemAdministrator (DIAAT-407).
-    can_set_active: bool
 
 
 class AdminUsersResponse(BaseModel):
@@ -130,7 +127,6 @@ def list_admin_users(
                 is_active=row.is_active,
                 assignments=[_assignment(a) for a in row.assignments],
                 pending=row.pending,
-                can_set_active=row.can_set_active,
             )
             for row in result.items
         ],

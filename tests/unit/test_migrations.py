@@ -918,7 +918,7 @@ def test_0004_and_0005_keep_every_existing_value_unchanged():
                 connection.execute(text(statement), ids)
 
         # Whole rows, as JSON, without the columns 0004 adds.
-        added = {"user": ["active_jurisdiction_id", "name", "is_active"]}  # 0004, then 0009
+        added = {"user": ["active_jurisdiction_id", "name", "is_active", "sysadmin"]}  # 0004, then 0009, then 0014
         tables = (
             "user",
             "transcription",

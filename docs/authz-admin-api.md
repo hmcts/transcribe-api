@@ -79,9 +79,6 @@ Users who have signed in, ordered by email, then people added by email who have 
   those holding a role there (`role=JurisdictionSuperAdministrator` with no jurisdiction lists the global holders); `role=` for a role it does not
   appoint is 403 `assignment_not_allowed`. A SystemAdministrator is never an assignment and so appears nowhere.
 * The `id` of a `pending` row is its first assignment's id: not a user, so deactivating it is 404, and every `assignments[].id` works with `DELETE /admin/assignments/{id}`.
-* `can_set_active` says whether the caller may deactivate and reactivate that account (the rules under [Deactivating](#deactivating)): false for
-  its own, a `pending` row, one a JurisdictionAdministrator cannot reach, one that holds SystemAdministrator, and every row for a SystemAdministrator.
-  It does not say why, so it names nobody as SystemAdministrator.
 
 ```bash
 curl -s "localhost:8000/api/admin/users?search=walkthrough" -H "Authorization: Bearer $JADMIN"
@@ -89,7 +86,7 @@ curl -s "localhost:8000/api/admin/users?search=walkthrough" -H "Authorization: B
 ```json
 {"items": [{"id": "f2d5a92f-…", "email": "walkthrough.judge@localhost.test", "name": null, "is_active": true,
             "assignments": [{"id": "f2d5a92f-…", "jurisdiction": {"code": "IAC", "name": "Immigration and Asylum Chamber"}, "role": "Judge"}],
-            "pending": true, "can_set_active": false}],
+            "pending": true}],
  "total": 1, "page": 1, "page_size": 25}
 ```
 
@@ -145,8 +142,9 @@ is checked on every request).
   an administrator role.
 * A SystemAdministrator deactivates nobody. The scope is the **role** the caller acts in: a SystemAdministrator who acts in a stored role has that
   role's scope and rights only.
-* Nobody deactivates or reactivates an account that holds **SystemAdministrator** (DIAAT-407): 403 `assignment_not_allowed`, whoever asks and whatever
-  else the account holds. The API tells from `user.sysadmin`, the Entra claim of that person's latest sign-in (migration 0014; seeded from the retired
+* Nobody deactivates or reactivates an account that holds **SystemAdministrator** (DIAAT-407): 403 `assignment_not_allowed` ("You cannot deactivate
+  or reactivate this account"), whoever asks and whatever else the account holds. The user list does not mark these accounts (they stay invisible,
+  DIAAT-403), so the screens offer Deactivate and the API refuses it. The API tells from `user.sysadmin`, the Entra claim of that person's latest sign-in (migration 0014; seeded from the retired
   `user.role` for those who have not signed in since). It grants nothing: permissions still come from the token. Someone whose Entra role is removed
   can be deactivated again once they have signed in without it. A deactivated holder is reactivated in the database, not in the app.
 

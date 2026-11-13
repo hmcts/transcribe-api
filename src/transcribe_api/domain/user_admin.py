@@ -412,53 +412,6 @@ def _role_may_assign(actor: object, role: str) -> bool:
     return role in assignable_roles(ctx.role if ctx else None, sysadmin=False)
 
 
-@dataclass(frozen=True)
-class _Refusal:
-    status: int
-    code: str
-    message: str
-
-
-def _active_change_refusal(
-    actor: object, target: User, held: list[tuple[RoleAssignment, Jurisdiction | None]]
-) -> _Refusal | None:
-    """Why the actor may not deactivate or reactivate ``target`` (who holds ``held``), or None if it may."""
-    if not (has_permission(actor, "accounts.manage") or has_permission(actor, "users.manage")):
-        return _Refusal(403, ASSIGNMENT_NOT_ALLOWED, "You cannot deactivate or reactivate accounts.")
-    if target.id == actor.id:  # type: ignore[attr-defined]
-        return _Refusal(403, "cannot_deactivate_self", "You cannot deactivate your own account.")
-    if not has_permission(actor, "accounts.manage"):
-        scope = jurisdiction_scope(actor)
-        in_scope = [row for row, j in held if j is not None and scope is not None and j.code in scope]
-        if not in_scope:
-            return _Refusal(404, "user_not_found", "There is no such user.")
-        if len(in_scope) != len(held):
-            return _Refusal(
-                403,
-                ASSIGNMENT_NOT_ALLOWED,
-                "That user has roles in other jurisdictions too: remove their roles here instead.",
-            )
-        for row, _j in held:
-            if not _role_may_assign(actor, row.role):
-                return _Refusal(403, ASSIGNMENT_NOT_ALLOWED, f"You cannot deactivate a {row.role}.")
-    if target.sysadmin:
-        return _Refusal(403, ASSIGNMENT_NOT_ALLOWED, "You cannot deactivate or reactivate this account.")
-    return None
-
-
-def _held_by(session: Session, user_ids: list[UUID]) -> dict[UUID, list[tuple[RoleAssignment, Jurisdiction | None]]]:
-    held: dict[UUID, list[tuple[RoleAssignment, Jurisdiction | None]]] = {user_id: [] for user_id in user_ids}
-    if user_ids:
-        rows = session.exec(
-            select(RoleAssignment, Jurisdiction)
-            .join(Jurisdiction, Jurisdiction.id == RoleAssignment.jurisdiction_id, isouter=True)
-            .where(RoleAssignment.user_id.in_(user_ids))  # type: ignore[union-attr]
-        ).all()
-        for row, j in rows:
-            held[row.user_id].append((row, j))  # type: ignore[index]
-    return held
-
-
 def set_user_active(session: Session, actor: object, user_id: UUID, *, active: bool) -> bool:
     """Deactivate or reactivate a user (instead of deleting them); False if they already were.
 
@@ -468,16 +421,35 @@ def set_user_active(session: Session, actor: object, user_id: UUID, *, active: b
     the jurisdiction it acts in (404 for any other: they are not in its list; 403 ``assignment_not_allowed``
     for one who also works elsewhere, since deactivation is across every jurisdiction), and never one who
     holds an administrator role. Nobody deactivates or reactivates an account that holds SystemAdministrator
-    (``user.sysadmin``, DIAAT-407): 403 ``assignment_not_allowed``."""
-    target = session.get(User, user_id)
+    (``user.sysadmin``, DIAAT-407): 403 ``assignment_not_allowed``, with a message that does not say why, as
+    the user list never says who holds it either."""
+    # Locked until the change commits, so a sign-in that sets ``sysadmin`` meanwhile is not missed.
+    target = session.get(User, user_id, with_for_update=True)
     if target is None:
         raise error(404, "user_not_found", "There is no such user.")
-    held = _held_by(session, [user_id])[user_id]
-    refusal = _active_change_refusal(actor, target, held)
-    if refusal is not None:
-        if refusal.status == 404:
-            raise error(refusal.status, refusal.code, refusal.message)
-        raise refuse(actor, refusal.code, refusal.message)
+    if user_id == actor.id:  # type: ignore[attr-defined]
+        raise refuse(actor, "cannot_deactivate_self", "You cannot deactivate your own account.")
+    held = session.exec(
+        select(RoleAssignment, Jurisdiction)
+        .join(Jurisdiction, Jurisdiction.id == RoleAssignment.jurisdiction_id, isouter=True)
+        .where(RoleAssignment.user_id == user_id)
+    ).all()
+    if not has_permission(actor, "accounts.manage"):
+        scope = jurisdiction_scope(actor)
+        in_scope = [row for row, j in held if j is not None and scope is not None and j.code in scope]
+        if not in_scope:
+            raise error(404, "user_not_found", "There is no such user.")
+        if len(in_scope) != len(held):
+            raise refuse(
+                actor,
+                ASSIGNMENT_NOT_ALLOWED,
+                "That user has roles in other jurisdictions too: remove their roles here instead.",
+            )
+        for row, _j in held:
+            if not _role_may_assign(actor, row.role):
+                raise refuse(actor, ASSIGNMENT_NOT_ALLOWED, f"You cannot deactivate a {row.role}.")
+    if target.sysadmin:
+        raise refuse(actor, ASSIGNMENT_NOT_ALLOWED, "You cannot deactivate or reactivate this account.")
     if target.is_active == active:
         return False
     target.is_active = active
@@ -513,8 +485,6 @@ class UserRow:
     is_active: bool
     assignments: list[AssignmentView]
     pending: bool
-    # Whether the caller may deactivate or reactivate it (``set_user_active`` would not refuse).
-    can_set_active: bool
 
 
 @dataclass(frozen=True)
@@ -679,7 +649,6 @@ def list_users(
         for row, j in rows:
             by_email[row.pending_email].append((row, j))
 
-    held = _held_by(session, list(by_user))
     items = [
         UserRow(
             id=u.id,
@@ -688,7 +657,6 @@ def list_users(
             is_active=u.is_active,
             assignments=by_user[u.id],
             pending=False,
-            can_set_active=_active_change_refusal(actor, u, held[u.id]) is None,
         )
         for u in users
     ]
@@ -705,7 +673,6 @@ def list_users(
                 is_active=True,
                 assignments=[_view(row, j, None) for row, j in rows],
                 pending=True,
-                can_set_active=False,
             )
         )
     return UserPage(items, users_total + pending_total, page, page_size)
