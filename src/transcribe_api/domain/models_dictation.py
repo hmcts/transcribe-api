@@ -88,6 +88,9 @@ class User(BaseTable, table=True):
     name: str | None = Field(default=None)
     # 0009: a deactivated user is refused at sign-in and never re-enabled by it.
     is_active: bool = Field(default=True)
+    # 0014 (DIAAT-407): the Entra SystemAdministrator claim of their latest sign-in. Grants nothing (the
+    # token's claim does that); it lets an administrator's request tell that the account holds it.
+    sysadmin: bool = Field(default=False, sa_column_kwargs={"server_default": text("false")})
     transcriptions: list["Transcription"] = Relationship(back_populates="user")
 
 
@@ -355,7 +358,7 @@ class JurisdictionTemplate(SQLModel, table=True):
 
 
 class TemplateFile(SQLModel, table=True):
-    """A template file that a saved version names (DIAAT-348, 0014), once by its SHA-256."""
+    """A template file that a saved version names (DIAAT-348, 0015), once by its SHA-256."""
 
     __tablename__ = "template_file"
 
@@ -364,7 +367,7 @@ class TemplateFile(SQLModel, table=True):
 
 
 class SettingVersion(SQLModel, table=True):
-    """One saved version of a jurisdiction's settings or of a template (DIAAT-348, 0014):
+    """One saved version of a jurisdiction's settings or of a template (DIAAT-348, 0015):
     what was saved, by whom and when (setting_history.py). Never changed once written."""
 
     __tablename__ = "setting_version"

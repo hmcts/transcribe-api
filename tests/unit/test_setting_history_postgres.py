@@ -1,5 +1,5 @@
 """DIAAT-348 on a real PostgreSQL (TEST_POSTGRES_URL, a throwaway one): versions kept
-and put back through migration 0014's tables, with JSONB copies and template files
+and put back through migration 0015's tables, with JSONB copies and template files
 stored once. Skipped without a database (the route tests run on SQLite)."""
 
 from __future__ import annotations

@@ -239,7 +239,9 @@ the shared routes.)
   `users.manage`; JurisdictionAdministrator: `jurisdiction_admin.assign`; JurisdictionSuperAdministrator: `jurisdiction_super_admin.assign`), and that is
   decided per request in `domain/user_admin.py` (403 `assignment_not_allowed`, or `jurisdiction_not_in_scope`), not by the route's declaration.
 * **The access request routes for the requester are exempt (`signed_in_endpoint`)**, not `access.request`: a user with no role has no context, and the
-  contract says any signed-in user, including one who holds roles and asks for one in another jurisdiction. Approving and listing are `access.approve`:
+  contract says any signed-in user, including one who holds roles and asks for one in another jurisdiction. A caller acting in a context must also hold
+  `access.request` to ask (`ensure_permission`, DIAAT-407), so acting as SystemAdministrator it is `permission_denied`; withdrawing and reading their own
+  stay open. Approving and listing are `access.approve`:
   only a JurisdictionAdministrator, which sees and decides the requests of the jurisdiction it acts in (DIAAT-406); a JurisdictionSuperAdministrator, and
   one acting as SystemAdministrator, are refused (`permission_denied`); a SystemAdministrator who also holds an approving role has its rights only while acting in it, and with no context gets `context_required`.
 * **`GET /api/v1/jobs/{id}/history` is `recording.audit.read`** (Judge), and only the owner reads it: another Judge, or the owner in another jurisdiction, gets the

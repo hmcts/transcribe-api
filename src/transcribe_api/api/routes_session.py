@@ -104,7 +104,7 @@ async def get_sign_in_identity(
         azure_user_id=entra.user_id,
         email=entra.email,
         name=entra.name,
-        # Only the Entra roles claim says so, at sign-in; the database never does. The role's
+        # Only the Entra roles claim says so, at sign-in; ``user.sysadmin`` only records it. The role's
         # value in the token is its name (the library's configurable role map is not used).
         sysadmin=ROLE_SYSTEM_ADMIN in entra.roles,
         # No token sent, with the preview user on (ENVIRONMENT=preview only): the preview user.
@@ -137,7 +137,13 @@ def create_session(
     email beforehand is theirs). 403 ``user_deactivated`` for a deactivated user."""
     _no_store(response)
     with Session(get_engine()) as session:
-        user = sign_in(session, azure_user_id=identity.azure_user_id, email=identity.email, name=identity.name)
+        user = sign_in(
+            session,
+            azure_user_id=identity.azure_user_id,
+            email=identity.email,
+            name=identity.name,
+            sysadmin=identity.sysadmin,
+        )
         if identity.preview and preview_user_enabled():
             ensure_preview_assignments(session, user)
         return mint_session(

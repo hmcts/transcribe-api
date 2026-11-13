@@ -39,7 +39,7 @@ HS256, signed with `APP_JWT_SIGNING_KEY`. `iss` is `benchnotes-api`, `aud` is `b
 | `sub` | the user's UUID |
 | `iat`, `exp` | issued at, expires |
 | `sess_exp` | when the Entra-verified sign-in this token descends from stops being good: sign-in time plus one lifetime. Set only at `POST /api/auth/session`; a token minted by `PUT /api/me/context` or `DELETE /api/me/jurisdictions/{code}` carries the presenting token's and expires no later than it (`exp = min(now + TTL, sess_exp)`) |
-| `sysadmin` | true if the Entra `roles` claim held `SystemAdministrator` at mint time. Never read from the database |
+| `sysadmin` | true if the Entra `roles` claim held `SystemAdministrator` at mint time. Never read from the database (sign-in records it in `user.sysadmin`, DIAAT-407, only so that nobody can deactivate the account: it grants nothing) |
 | `assignments` | `[{"jurisdiction": "ET" \| null, "role": "Judge"}, ...]`, the distinct pairs the user holds |
 | `ctx` | `{"jurisdiction": "ET" \| null, "role": "Judge"}`, the pair they act in, or `null` until chosen |
 | `name` | display name (informational; never used to authorise) |

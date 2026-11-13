@@ -11,7 +11,8 @@ the JurisdictionSuperAdministrator is global.
 copied into the BenchNotes token as ``sysadmin`` when the token is minted. A holder is offered
 it as a context of its own (no jurisdiction), and has the system-level permissions only while
 acting in it (DIAAT-403): acting as any other role, they have that role's permissions and no
-more, like anyone else. It is invisible to everyone else (never assignable, never listed).
+more, like anyone else. It is invisible to everyone else (never assignable, never listed). Sign-in records
+the claim in ``user.sysadmin`` (DIAAT-407) only so that nobody can deactivate the account; it grants nothing.
 
 Responsibilities (DIAAT-406): the SystemAdministrator appoints JurisdictionSuperAdministrators; the
 JurisdictionSuperAdministrator manages jurisdictions (their settings and screen wording), appoints their

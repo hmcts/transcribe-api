@@ -14,8 +14,8 @@ starts with its first save after this release; what was there before is recorded
 as the version before it. The previous release's pods do not know the tables and keep
 working while this one rolls out.
 
-Revision ID: 0014
-Revises: 0013
+Revision ID: 0015
+Revises: 0014
 Create Date: 2026-11-12
 """
 
@@ -25,8 +25,8 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "0014"
-down_revision = "0013"
+revision = "0015"
+down_revision = "0014"
 branch_labels = None
 depends_on = None
 
