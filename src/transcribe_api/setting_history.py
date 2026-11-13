@@ -68,6 +68,7 @@ def _latest(session: Session, kind: str, object_id: UUID) -> SettingVersion | No
         select(SettingVersion)
         .where(SettingVersion.kind == kind, SettingVersion.object_id == object_id)
         .order_by(SettingVersion.number.desc())  # type: ignore[attr-defined]
+        .limit(1)
     ).first()
 
 
