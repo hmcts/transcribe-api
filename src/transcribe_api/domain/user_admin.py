@@ -15,7 +15,8 @@ says they hold (the permissions of the role they act in only, domain/auth/author
   a JurisdictionSuperAdministrator JurisdictionAdministrator anywhere, a SystemAdministrator
   JurisdictionSuperAdministrator. A Judge or LegalTextManager gives nobody a role (they raise an access
   request, which a JurisdictionAdministrator decides).
-* Nobody takes away the role they are acting in, and nobody deactivates themselves.
+* Nobody takes away the role they are acting in, and nobody deactivates themselves, or an account that holds
+  SystemAdministrator (``user.sysadmin``, DIAAT-407).
 
 A user holds any combination of roles in any number of jurisdictions. A JurisdictionAdministrator sees and
 changes only the assignments in its own jurisdiction of a user who also holds roles elsewhere.
@@ -419,8 +420,11 @@ def set_user_active(session: Session, actor: object, user_id: UUID, *, active: b
     (DIAAT-406). A JurisdictionAdministrator (``users.manage``) reaches only users whose roles are all in
     the jurisdiction it acts in (404 for any other: they are not in its list; 403 ``assignment_not_allowed``
     for one who also works elsewhere, since deactivation is across every jurisdiction), and never one who
-    holds an administrator role."""
-    target = session.get(User, user_id)
+    holds an administrator role. Nobody deactivates or reactivates an account that holds SystemAdministrator
+    (``user.sysadmin``, DIAAT-407): 403 ``assignment_not_allowed``, with a message that does not say why, as
+    the user list never says who holds it either."""
+    # Locked until the change commits, so a sign-in that sets ``sysadmin`` meanwhile is not missed.
+    target = session.get(User, user_id, with_for_update=True)
     if target is None:
         raise error(404, "user_not_found", "There is no such user.")
     if user_id == actor.id:  # type: ignore[attr-defined]
@@ -444,6 +448,8 @@ def set_user_active(session: Session, actor: object, user_id: UUID, *, active: b
         for row, _j in held:
             if not _role_may_assign(actor, row.role):
                 raise refuse(actor, ASSIGNMENT_NOT_ALLOWED, f"You cannot deactivate a {row.role}.")
+    if target.sysadmin:
+        raise refuse(actor, ASSIGNMENT_NOT_ALLOWED, "You cannot deactivate or reactivate this account.")
     if target.is_active == active:
         return False
     target.is_active = active

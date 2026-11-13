@@ -142,6 +142,11 @@ is checked on every request).
   an administrator role.
 * A SystemAdministrator deactivates nobody. The scope is the **role** the caller acts in: a SystemAdministrator who acts in a stored role has that
   role's scope and rights only.
+* Nobody deactivates or reactivates an account that holds **SystemAdministrator** (DIAAT-407): 403 `assignment_not_allowed` ("You cannot deactivate
+  or reactivate this account"), whoever asks and whatever else the account holds. The user list does not mark these accounts (they stay invisible,
+  DIAAT-403), so the screens offer Deactivate and the API refuses it. The API tells from `user.sysadmin`, the Entra claim of that person's latest sign-in (migration 0014; seeded from the retired
+  `user.role` for those who have not signed in since). It grants nothing: permissions still come from the token. Someone whose Entra role is removed
+  can be deactivated again once they have signed in without it. A deactivated holder is reactivated in the database, not in the app.
 
 ## Role-change history
 
@@ -183,6 +188,9 @@ For any signed-in user, with or without a role (someone who holds roles may ask 
   `{id, jurisdiction: {code, name}, roles, status, created_at, decided_at, reason}`. 400 `role_not_requestable` for anything but Judge and
   LegalTextManager (400 `roles_required` for none), 404 `jurisdiction_not_found` (unknown or disabled), 409 `duplicate_request` (an identical
   pending request), 409 `already_assigned` (they hold a requested role there), 409 `too_many_pending_requests` (five are waiting already: withdraw one). 429 `too_many_requests` (ten made in the last 24 hours, decided or not: asking, withdrawing and asking again would email the approvers each time).
+  403 `permission_denied` while acting as SystemAdministrator (DIAAT-407): a caller in a context needs `access.request`, which every role but
+  SystemAdministrator holds. With no context (no role yet, or several held and none chosen) asking still works, and a SystemAdministrator acting in
+  another role asks as that role does.
 * `GET /api/access-requests/mine` -> every request they made, newest first.
 * `POST /api/access-requests/{id}/withdraw` -> the request, `withdrawn`. 404 for someone else's, 409 `request_not_pending` once decided.
 

@@ -151,6 +151,35 @@ def test_a_jurisdiction_administrator_holds_no_judge_role_it_was_not_given_so_ma
     assert response.status_code == 201, response.text
 
 
+def test_acting_as_system_administrator_nobody_asks_for_access(world, cast):
+    """DIAAT-407: the SystemAdministrator context does not hold ``access.request``."""
+    refused = ask(cast.sysadmin, "IAC", [JUDGE])
+    assert refused.status_code == 403 and code(refused) == "permission_denied"
+    assert cast.sysadmin.get("/api/access-requests/mine").json() == []
+    assert world.audit("access_request.created") == []
+    (denied,) = world.audit("ACCESS_DENIED")
+    assert denied.user_id == str(cast.sysadmin.user_id)
+    assert denied.detail == {"reason": "permission_denied", "permission": "access.request"}
+
+
+def test_a_system_administrator_acting_in_another_role_or_in_none_still_asks(world, cast):
+    holder = world.person("Sam Both", (None, SUPER), sysadmin=True)
+    as_super = ask(holder, "IAC", [JUDGE], role=SUPER)
+    assert as_super.status_code == 201, as_super.text
+    # Holding two contexts and having chosen neither: no context, as for a user with no role.
+    no_context = world.client.post(
+        "/api/access-requests", json={"jurisdiction": "ET", "roles": [JUDGE]}, headers=_no_context(holder)
+    )
+    assert no_context.status_code == 201, no_context.text
+    assert ask(holder, "ET", [LTM]).status_code == 403  # back in the SystemAdministrator context
+
+
+def _no_context(person) -> dict[str, str]:
+    response = person.sign_in()
+    assert response.status_code == 200 and response.json()["me"]["active"] is None, response.text
+    return {"Authorization": f"Bearer {response.json()['token']}"}
+
+
 def test_a_request_can_be_made_again_after_it_was_withdrawn_rejected_or_approved_and_removed(world, cast):
     first = ask(cast.nobody, "IAC", [JUDGE]).json()
     assert cast.nobody.post(f"/api/access-requests/{first['id']}/withdraw").status_code == 200

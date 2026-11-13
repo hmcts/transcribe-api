@@ -99,7 +99,7 @@ def _alter_type_sql(table: str, column: str, type_sql: str) -> re.Pattern[str]:
 def test_there_is_one_history_with_one_head():
     script = ScriptDirectory.from_config(migrations.alembic_config())
     assert script.get_bases() == ["0001"]
-    assert script.get_heads() == ["0013"]
+    assert script.get_heads() == ["0014"]
 
 
 def test_baseline_creates_every_table(monkeypatch):
@@ -918,7 +918,7 @@ def test_0004_and_0005_keep_every_existing_value_unchanged():
                 connection.execute(text(statement), ids)
 
         # Whole rows, as JSON, without the columns 0004 adds.
-        added = {"user": ["active_jurisdiction_id", "name", "is_active"]}  # 0004, then 0009
+        added = {"user": ["active_jurisdiction_id", "name", "is_active", "sysadmin"]}  # 0004, then 0009, then 0014
         tables = (
             "user",
             "transcription",
