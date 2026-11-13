@@ -718,3 +718,111 @@ def test_a_local_web_app_may_send_the_files_name(monkeypatch):
     )
     assert response.status_code == 200
     assert "x-upload-filename" in response.headers["access-control-allow-headers"].lower()
+
+
+# DIAAT-348: who changed a template, when, what it was before; going back ----------------
+
+
+def _template_history(client, template_id: str) -> list[dict]:
+    response = client.get(f"/api/admin/jurisdictions/ET/templates/{template_id}/history")
+    assert response.status_code == 200, response.json()
+    return response.json()["versions"]
+
+
+def _restore(client, template: dict, number: int):
+    return client.post(
+        f"/api/admin/jurisdictions/ET/templates/{template['id']}/history/{number}/restore",
+        json={"version": template["version"]},
+    )
+
+
+def test_a_templates_history_says_who_changed_what_and_what_it_was_before(as_admin):
+    template = upload(as_admin).json()
+    live = as_admin.put(f"/api/admin/jurisdictions/ET/templates/{template['id']}", json=complete(template)).json()
+    new_file = make_template([*JUDGMENT, ["Signed by the judge"]])
+    upload(as_admin, new_file, "v2.docx", replace=template["id"], version=live["version"])
+
+    replaced, saved, uploaded = _template_history(as_admin, template["id"])
+
+    assert (uploaded["number"], uploaded["first"], uploaded["saved_by"]["email"]) == (1, True, "admin@example.test")
+    assert {"setting": "stage", "before": "draft", "after": "live"} in saved["changes"]
+    assert {"setting": "signed_off_by", "before": None, "after": "A Lead"} in saved["changes"]
+    assert {"setting": "fields.Party2.required", "before": True, "after": False} in saved["changes"]
+    (file_change,) = replaced["changes"]
+    assert (file_change["setting"], file_change["before"].split(" (")[0], file_change["after"].split(" (")[0]) == (
+        "file",
+        "ET judgment.docx",
+        "v2.docx",
+    )
+
+
+def test_going_back_gives_judges_the_earlier_template_from_then_on(jurisdiction_db, as_admin, as_et_judge):
+    """A change broke a live template: going back puts its earlier file and fields back,
+    for judges at once; it stays live, with the sign-off it had."""
+    good = _enabled_template(as_admin)
+    body = complete(good, sign_off=None)
+    body["fields"] = [{**f, "label": "Broken"} if f["tag"] == "Party1" else f for f in body["fields"]]
+    broken = as_admin.put(f"/api/admin/jurisdictions/ET/templates/{good['id']}", json=body).json()
+    broken = upload(
+        as_admin,
+        make_template([*JUDGMENT, ["Wrong footer"]]),
+        "broken.docx",
+        replace=good["id"],
+        version=broken["version"],
+    ).json()
+    (judges,) = as_et_judge.get("/api/jurisdictions/templates").json()
+    assert {f["tag"]: f["label"] for f in judges["fields"]}["Party1"] == "Broken"
+    # The version it went live with.
+    number = next(
+        v["number"]
+        for v in _template_history(as_admin, good["id"])
+        if v["restored_from"] is None and any(c["setting"] == "stage" for c in v["changes"])
+    )
+
+    restored = _restore(as_admin, broken, number)
+
+    assert restored.status_code == 200, restored.json()
+    back = restored.json()
+    assert (back["file_name"], back["fields"], back["stage"], back["sign_off"]) == (
+        good["file_name"],
+        good["fields"],
+        "live",
+        good["sign_off"],
+    )
+    (judges,) = as_et_judge.get("/api/jurisdictions/templates").json()
+    assert {f["tag"]: f["label"] for f in judges["fields"]}["Party1"] == "Party1Name"
+    with Session(jurisdiction_db) as session:
+        row = session.get(JurisdictionTemplate, UUID(good["id"]))
+        assert row.content == TEMPLATE
+    newest = _template_history(as_admin, good["id"])[0]
+    assert (newest["restored_from"], newest["content_as_now"]) == (number, True)
+    action, detail = _audit(jurisdiction_db)[-1]
+    assert (action, detail["change"], detail["restored_from"]) == ("template.edit", "restored", number)
+
+
+def test_going_back_to_a_version_with_a_box_unlinked_keeps_a_live_template_live(as_admin):
+    """Going back never takes a template past draft with a box unlinked: such a version
+    is refused while the template is live."""
+    template = _enabled_template(as_admin)
+    costs = make_template([*JUDGMENT, ["Costs: ", Sdt("Costs")]])
+    unlinked = upload(as_admin, costs, "costs.docx", replace=template["id"], version=template["version"]).json()
+    assert (unlinked["stage"], unlinked["problems"] != []) == ("draft", True)
+    incomplete = _template_history(as_admin, template["id"])[0]["number"]
+    complete_again = _restore(as_admin, unlinked, incomplete - 1).json()  # still a draft: who sees it stays
+    assert complete_again["stage"] == "draft"
+    live = as_admin.put(f"/api/admin/jurisdictions/ET/templates/{template['id']}", json=complete(complete_again)).json()
+
+    refused = _restore(as_admin, live, incomplete)
+
+    assert (refused.status_code, refused.json()["detail"]["code"]) == (400, "template_not_ready")
+    current = as_admin.get("/api/admin/jurisdictions/ET/templates").json()[0]
+    assert (current["stage"], current["file_name"]) == ("live", "ET judgment.docx")
+
+
+def test_going_back_from_a_stale_page_or_to_no_such_version_is_refused(as_admin):
+    template = upload(as_admin).json()
+    saved = as_admin.put(f"/api/admin/jurisdictions/ET/templates/{template['id']}", json=complete(template)).json()
+
+    stale = _restore(as_admin, template, 1)
+    assert (stale.status_code, stale.json()["detail"]["code"]) == (409, "edit_conflict")
+    assert _restore(as_admin, saved, 99).status_code == 404

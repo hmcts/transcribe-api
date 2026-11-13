@@ -31,7 +31,9 @@ from transcribe_api.domain.models_dictation import (
     JurisdictionTemplate,
     MinuteVersion,
     RoleAssignment,
+    SettingVersion,
     Tag,
+    TemplateFile,
     Transcription,
     TranscriptionJob,
     TranscriptionTagAssociation,
@@ -47,6 +49,8 @@ JURISDICTION_TABLES = [
     User.__table__,
     Jurisdiction.__table__,
     JurisdictionTemplate.__table__,
+    SettingVersion.__table__,  # DIAAT-348
+    TemplateFile.__table__,
     RoleAssignment.__table__,
     AccessRequest.__table__,
     AccessRequestRole.__table__,

@@ -40,10 +40,16 @@
   "GET /api/admin/jurisdictions/wording-keys": [
     "JurisdictionSuperAdministrator"
   ],
+  "GET /api/admin/jurisdictions/{code}/history": [
+    "JurisdictionSuperAdministrator"
+  ],
   "GET /api/admin/jurisdictions/{code}/templates": [
     "JurisdictionAdministrator"
   ],
   "GET /api/admin/jurisdictions/{code}/templates/{template_id}/form": [
+    "JurisdictionAdministrator"
+  ],
+  "GET /api/admin/jurisdictions/{code}/templates/{template_id}/history": [
     "JurisdictionAdministrator"
   ],
   "GET /api/admin/jurisdictions/{code}/wording": [
@@ -187,7 +193,13 @@
   "POST /api/admin/document-content/legal-frameworks": [
     "LegalTextManager"
   ],
+  "POST /api/admin/jurisdictions/{code}/history/{number}/restore": [
+    "JurisdictionSuperAdministrator"
+  ],
   "POST /api/admin/jurisdictions/{code}/templates": [
+    "JurisdictionAdministrator"
+  ],
+  "POST /api/admin/jurisdictions/{code}/templates/{template_id}/history/{number}/restore": [
     "JurisdictionAdministrator"
   ],
   "POST /api/admin/jurisdictions/{code}/templates/{template_id}/preview": [

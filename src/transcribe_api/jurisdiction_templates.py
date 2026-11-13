@@ -8,6 +8,9 @@ an unknown template 404, a change made meanwhile 409.
 
 DIAAT-347: a template goes from draft to the jurisdiction's test group to all its
 judges (``stage``), live only with the service lead's sign-off (set_stage).
+
+DIAAT-348: every save is kept as a version (setting_history.py), and an earlier one's
+content can be saved again (restore_template).
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from uuid import UUID
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
+from transcribe_api import setting_history
 from transcribe_api.documents.content_loader import get_document_content
 from transcribe_api.documents.uploaded_templates import (
     NOT_ASKED,
@@ -133,7 +137,9 @@ def _default_name(file_name: str) -> str:
     return stem.strip()[:MAX_NAME_LENGTH] or "Template"
 
 
-def add_template(session: Session, code: str, file_name: str, data: bytes) -> JurisdictionTemplate:
+def add_template(
+    session: Session, code: str, file_name: str, data: bytes, *, saved_by: UUID | None = None
+) -> JurisdictionTemplate:
     """A new template from an upload, with a proposed field for each box: a draft, not
     available to judges until the admin has checked its fields and moved it on."""
     jurisdiction = _jurisdiction(session, code)
@@ -161,13 +167,21 @@ def add_template(session: Session, code: str, file_name: str, data: bytes) -> Ju
         enabled=False,
     )
     session.add(row)
+    setting_history.record(session, row, saved_by)
     _commit(session, unique)
     session.refresh(row)
     return row
 
 
 def replace_file(
-    session: Session, code: str, template_id: UUID, file_name: str, data: bytes, expected_version: str
+    session: Session,
+    code: str,
+    template_id: UUID,
+    file_name: str,
+    data: bytes,
+    expected_version: str,
+    *,
+    saved_by: UUID | None = None,
 ) -> JurisdictionTemplate:
     """A new file for a template: fields kept for the boxes it still has; a new box
     has no field until the admin links one. Until it is complete it is a draft again,
@@ -175,6 +189,7 @@ def replace_file(
     boxes = _read_file(data)
     row = _template(session, code, template_id, lock=True)
     _check_version(row, expected_version)
+    setting_history.catch_up(session, row)
     fields = merge_fields(boxes, fields_of(row))
     row.file_name = file_name[:255] or row.file_name
     row.content = data
@@ -185,6 +200,7 @@ def replace_file(
         _move(row, STAGE_DRAFT, None)
     row.updated_datetime = datetime.now(UTC)
     session.add(row)
+    setting_history.record(session, row, saved_by)
     _commit(session, row.name)
     session.refresh(row)
     return row
@@ -214,12 +230,14 @@ def update_template(
     stage: str,
     expected_version: str,
     sign_off: SignOff | None = None,
+    saved_by: UUID | None = None,
 ) -> JurisdictionTemplate:
     """Save the admin's fields and who can choose it (``stage``): every box linked and
     every field complete, or nothing is saved (TemplateProblemsError names what is
     missing). It goes live only with ``sign_off`` (NotSignedOffError)."""
     row = _template(session, code, template_id, lock=True)
     _check_version(row, expected_version)
+    setting_history.catch_up(session, row)
     problems = field_problems(boxes_of(row), fields)
     if problems:
         raise TemplateProblemsError(problems)
@@ -232,6 +250,56 @@ def update_template(
     _move(row, stage, sign_off)
     row.updated_datetime = datetime.now(UTC)
     session.add(row)
+    setting_history.record(session, row, saved_by)
+    _commit(session, row.name)
+    session.refresh(row)
+    return row
+
+
+def restore_template(
+    session: Session,
+    code: str,
+    template_id: UUID,
+    number: int,
+    *,
+    expected_version: str,
+    saved_by: UUID | None = None,
+) -> JurisdictionTemplate:
+    """Go back to version ``number`` (DIAAT-348): its name, file and fields saved again,
+    as a new version. Who can choose the template (its stage and sign-off) stays as it is
+    now, so judges get the earlier version from then on. One past draft must still have
+    every box linked (TemplateProblemsError)."""
+    row = _template(session, code, template_id, lock=True)
+    _check_version(row, expected_version)
+    earlier = setting_history.version_of(session, setting_history.KIND_TEMPLATE, row.id, number)
+    if earlier is None:
+        msg = f"The template has no version {number}"
+        raise NotFoundError(msg)
+    snapshot = earlier.snapshot
+    content = row.content if snapshot["sha256"] == row.sha256 else setting_history.file_of(session, snapshot["sha256"])
+    if content is None:
+        msg = f"The file of version {number} is not kept"
+        raise NotFoundError(msg)
+    boxes = [Box.from_record(b) for b in snapshot["boxes"]]
+    try:
+        fields = [TemplateField.model_validate(f) for f in snapshot["fields"]]
+    except ValueError as exc:
+        msg = f"Version {number} cannot be put back: {exc}"
+        raise AdminError(msg) from None
+    problems = field_problems(boxes, fields)
+    if problems and row.stage != STAGE_DRAFT:
+        raise TemplateProblemsError(problems)
+    setting_history.catch_up(session, row)
+    row.name = _name(snapshot["name"])
+    row.service = snapshot.get("service")
+    row.file_name = snapshot["file_name"]
+    row.content = content
+    row.sha256 = snapshot["sha256"]
+    row.boxes = snapshot["boxes"]
+    row.fields = snapshot["fields"]
+    row.updated_datetime = datetime.now(UTC)
+    session.add(row)
+    setting_history.record(session, row, saved_by, restored_from=number)
     _commit(session, row.name)
     session.refresh(row)
     return row

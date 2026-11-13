@@ -357,6 +357,43 @@ class JurisdictionTemplate(SQLModel, table=True):
     updated_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
 
 
+class TemplateFile(SQLModel, table=True):
+    """A template file that a saved version names (DIAAT-348, 0015), once by its SHA-256."""
+
+    __tablename__ = "template_file"
+
+    sha256: str = Field(primary_key=True, max_length=64)
+    content: bytes = Field(sa_column=Column(LargeBinary, nullable=False))
+
+
+class SettingVersion(SQLModel, table=True):
+    """One saved version of a jurisdiction's settings or of a template (DIAAT-348, 0015):
+    what was saved, by whom and when (setting_history.py). Never changed once written."""
+
+    __tablename__ = "setting_version"
+    __table_args__ = (
+        UniqueConstraint("kind", "object_id", "number", name="uq_setting_version_number"),
+        CheckConstraint("kind IN ('jurisdiction', 'template')", name="ck_setting_version_kind"),
+    )
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True, nullable=False)
+    # 'jurisdiction' or 'template', and its id.
+    kind: str = Field(max_length=16)
+    object_id: UUID
+    # The jurisdiction it belongs to (itself, for a jurisdiction): whose administrators see it.
+    jurisdiction_id: UUID = Field(foreign_key="jurisdiction.id", index=True, nullable=False)
+    # 1 for the first version of each jurisdiction or template, then 2, 3...
+    number: int
+    # The settings as saved (setting_history.snapshot_of); a template's file by its SHA-256.
+    snapshot: dict = Field(sa_column=Column(JSONB, nullable=False))
+    # The user who saved it; None where no user did: the command line, or the previous
+    # release while this one rolled out (found changed at the next save).
+    saved_by: UUID | None = Field(default=None)
+    saved_at: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
+    # The version whose content it put back, when it was saved by going back to one.
+    restored_from: int | None = Field(default=None)
+
+
 class DocumentContent(SQLModel, table=True):
     """A jurisdiction's legal wording (DIAAT-342): hearing types, legal frameworks and
     anonymity text, as the JSON the admin area edits. One row per jurisdiction.
