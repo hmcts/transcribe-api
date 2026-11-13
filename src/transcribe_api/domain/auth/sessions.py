@@ -100,20 +100,27 @@ class SessionResponse(BaseModel):
 # --- sign-in ---------------------------------------------------------------------------
 
 
-def sign_in(session: Session, *, azure_user_id: str, email: str, name: str) -> User:
+def sign_in(session: Session, *, azure_user_id: str, email: str, name: str, sysadmin: bool = False) -> User:
     """The user for a verified identity, created at their first sign-in (with what was
     assigned to their email beforehand: domain/jurisdictions.enrol_new_user) and given no
-    role of their own.
+    role of their own. ``user.sysadmin`` records the Entra claim of this sign-in (DIAAT-407),
+    a deactivated user's included, so that nobody else can switch the account off or on.
 
     403 ``user_deactivated`` for a deactivated user: signing in never re-creates or re-enables
     them (their row is found by the same ID, and stays as it is)."""
     user = session.exec(select(User).where(User.azure_user_id == azure_user_id)).first()
     if user is None:
         user = insert_user_or_load_existing(
-            session, User(email=email, azure_user_id=azure_user_id, name=name or None)
+            session, User(email=email, azure_user_id=azure_user_id, name=name or None, sysadmin=sysadmin)
         )
-    elif name and user.name != name:
+    changed = False
+    if name and user.name != name:
         user.name = name
+        changed = True
+    if user.sysadmin != sysadmin:
+        user.sysadmin = sysadmin
+        changed = True
+    if changed:
         session.add(user)
         session.commit()
         session.refresh(user)

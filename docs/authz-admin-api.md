@@ -79,6 +79,9 @@ Users who have signed in, ordered by email, then people added by email who have 
   those holding a role there (`role=JurisdictionSuperAdministrator` with no jurisdiction lists the global holders); `role=` for a role it does not
   appoint is 403 `assignment_not_allowed`. A SystemAdministrator is never an assignment and so appears nowhere.
 * The `id` of a `pending` row is its first assignment's id: not a user, so deactivating it is 404, and every `assignments[].id` works with `DELETE /admin/assignments/{id}`.
+* `can_set_active` says whether the caller may deactivate and reactivate that account (the rules under [Deactivating](#deactivating)): false for
+  its own, a `pending` row, one a JurisdictionAdministrator cannot reach, one that holds SystemAdministrator, and every row for a SystemAdministrator.
+  It does not say why, so it names nobody as SystemAdministrator.
 
 ```bash
 curl -s "localhost:8000/api/admin/users?search=walkthrough" -H "Authorization: Bearer $JADMIN"
@@ -86,7 +89,7 @@ curl -s "localhost:8000/api/admin/users?search=walkthrough" -H "Authorization: B
 ```json
 {"items": [{"id": "f2d5a92f-…", "email": "walkthrough.judge@localhost.test", "name": null, "is_active": true,
             "assignments": [{"id": "f2d5a92f-…", "jurisdiction": {"code": "IAC", "name": "Immigration and Asylum Chamber"}, "role": "Judge"}],
-            "pending": true}],
+            "pending": true, "can_set_active": false}],
  "total": 1, "page": 1, "page_size": 25}
 ```
 
@@ -142,6 +145,10 @@ is checked on every request).
   an administrator role.
 * A SystemAdministrator deactivates nobody. The scope is the **role** the caller acts in: a SystemAdministrator who acts in a stored role has that
   role's scope and rights only.
+* Nobody deactivates or reactivates an account that holds **SystemAdministrator** (DIAAT-407): 403 `assignment_not_allowed`, whoever asks and whatever
+  else the account holds. The API tells from `user.sysadmin`, the Entra claim of that person's latest sign-in (migration 0014; seeded from the retired
+  `user.role` for those who have not signed in since). It grants nothing: permissions still come from the token. Someone whose Entra role is removed
+  can be deactivated again once they have signed in without it. A deactivated holder is reactivated in the database, not in the app.
 
 ## Role-change history
 
@@ -183,6 +190,9 @@ For any signed-in user, with or without a role (someone who holds roles may ask 
   `{id, jurisdiction: {code, name}, roles, status, created_at, decided_at, reason}`. 400 `role_not_requestable` for anything but Judge and
   LegalTextManager (400 `roles_required` for none), 404 `jurisdiction_not_found` (unknown or disabled), 409 `duplicate_request` (an identical
   pending request), 409 `already_assigned` (they hold a requested role there), 409 `too_many_pending_requests` (five are waiting already: withdraw one). 429 `too_many_requests` (ten made in the last 24 hours, decided or not: asking, withdrawing and asking again would email the approvers each time).
+  403 `permission_denied` while acting as SystemAdministrator (DIAAT-407): a caller in a context needs `access.request`, which every role but
+  SystemAdministrator holds. With no context (no role yet, or several held and none chosen) asking still works, and a SystemAdministrator acting in
+  another role asks as that role does.
 * `GET /api/access-requests/mine` -> every request they made, newest first.
 * `POST /api/access-requests/{id}/withdraw` -> the request, `withdrawn`. 404 for someone else's, 409 `request_not_pending` once decided.
 

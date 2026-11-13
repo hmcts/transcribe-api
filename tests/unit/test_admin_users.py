@@ -58,7 +58,7 @@ def test_the_list_has_the_contracts_shape(world, cast):
     assert set(page) == {"items", "total", "page", "page_size"}
     assert page["page"] == 1 and page["page_size"] == 25 and page["total"] == len(page["items"]) == 3
     for item in page["items"]:
-        assert set(item) == {"id", "email", "name", "is_active", "assignments", "pending"}
+        assert set(item) == {"id", "email", "name", "is_active", "assignments", "pending", "can_set_active"}
         for assignment in item["assignments"]:
             assert set(assignment) == {"id", "jurisdiction", "role", "tester"}
     ivy = next(i for i in page["items"] if i["email"] == cast.judge_iac.email)
@@ -476,6 +476,78 @@ def test_a_deactivated_account_is_refused_whichever_jurisdiction_it_works_in(wor
     for token in tokens:
         refused = world.client.get("/api/user/onboarding-status", headers=token)
         assert refused.status_code == 403 and code(refused) == "user_deactivated"
+
+
+def test_nobody_deactivates_or_reactivates_an_account_that_holds_system_administrator(world, cast):
+    """DIAAT-407: whatever else the account holds, and whoever asks."""
+    holder = world.person("Sam Sysadmin Judge", ("IAC", JUDGE), sysadmin=True)
+    for target in (cast.sysadmin, holder):
+        assert world.user(target).sysadmin is True
+        refused = cast.jsuper.post(f"/api/admin/users/{target.user_id}/deactivate", role=SUPER)
+        assert refused.status_code == 403 and code(refused) == "assignment_not_allowed"
+        assert world.user(target).is_active is True
+    by_admin = cast.jadmin_iac.post(f"/api/admin/users/{holder.user_id}/deactivate", role=ADMIN, jurisdiction="IAC")
+    assert by_admin.status_code == 403 and code(by_admin) == "assignment_not_allowed"
+    assert world.user(holder).is_active is True
+
+    _set_active(world, holder, False)
+    still_off = cast.jsuper.post(f"/api/admin/users/{holder.user_id}/reactivate", role=SUPER)
+    assert still_off.status_code == 403 and code(still_off) == "assignment_not_allowed"
+    assert world.user(holder).is_active is False
+    assert world.audit("user.deactivated") == world.audit("user.reactivated") == []
+
+
+def test_a_super_administrator_still_deactivates_and_reactivates_a_jurisdiction_administrator(world, cast):
+    off = cast.jsuper.post(f"/api/admin/users/{cast.jadmin_iac.user_id}/deactivate", role=SUPER)
+    assert off.status_code == 204 and world.user(cast.jadmin_iac).is_active is False
+    on = cast.jsuper.post(f"/api/admin/users/{cast.jadmin_iac.user_id}/reactivate", role=SUPER)
+    assert on.status_code == 204 and world.user(cast.jadmin_iac).is_active is True
+
+
+def test_the_system_administrator_claim_is_recorded_at_every_sign_in(world, cast):
+    """The latest sign-in's claim: an account that no longer holds the Entra role can be deactivated again."""
+    assert world.user(cast.jsuper).sysadmin is False
+    cast.sysadmin.sysadmin = False
+    assert cast.sysadmin.sign_in().status_code == 200
+    assert world.user(cast.sysadmin).sysadmin is False
+    assert cast.jsuper.post(f"/api/admin/users/{cast.sysadmin.user_id}/deactivate", role=SUPER).status_code == 204
+
+
+def test_a_deactivated_holders_sign_in_still_records_the_claim(world, cast):
+    former = world.person("Fay Former")
+    _set_active(world, former, False)
+    former.sysadmin = True
+    assert former.sign_in().status_code == 403
+    assert world.user(former).sysadmin is True
+    refused = cast.jsuper.post(f"/api/admin/users/{former.user_id}/reactivate", role=SUPER)
+    assert refused.status_code == 403 and code(refused) == "assignment_not_allowed"
+
+
+def test_the_list_says_which_accounts_the_caller_may_deactivate_without_naming_the_system_administrator(world, cast):
+    holder = world.person("Sam Sysadmin Judge", ("IAC", JUDGE), sysadmin=True)
+    everyone = cast.jsuper.get("/api/admin/users", role=SUPER).json()
+    allowed = {i["email"]: i["can_set_active"] for i in everyone["items"]}
+    assert allowed[cast.sysadmin.email] is allowed[holder.email] is allowed[cast.jsuper.email] is False
+    assert allowed[cast.jadmin_iac.email] is allowed[cast.both.email] is allowed[cast.nobody.email] is True
+    assert "SystemAdministrator" not in str(everyone)
+
+    in_iac = cast.jadmin_iac.get("/api/admin/users", role=ADMIN, jurisdiction="IAC").json()
+    allowed = {i["email"]: i["can_set_active"] for i in in_iac["items"]}
+    assert allowed[cast.judge_iac.email] is True
+    assert allowed[cast.both.email] is allowed[cast.jadmin_iac.email] is allowed[holder.email] is False
+
+    system = cast.sysadmin.get("/api/admin/users").json()
+    assert not any(i["can_set_active"] for i in system["items"])
+
+
+def _set_active(world, person: Person, active: bool) -> None:
+    from transcribe_api.domain.models_dictation import User
+
+    with Session(world.engine) as session:
+        user = session.get(User, person.user_id)
+        user.is_active = active
+        session.add(user)
+        session.commit()
 
 
 def test_a_system_administrator_and_a_judge_cannot_deactivate(world, cast):

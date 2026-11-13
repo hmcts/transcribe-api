@@ -11,7 +11,7 @@ DIAAT-394), under ``/api/admin``.
   ``jurisdiction_super_admin.assign``: which of them is enough depends on the role (the rules decide).
 * ``POST /admin/users/{id}/deactivate`` and ``/reactivate``: ``users.manage`` (a JurisdictionAdministrator:
   users whose roles are all in its jurisdiction) or ``accounts.manage`` (the JurisdictionSuperAdministrator:
-  any account but its own).
+  any account but its own). Nobody's reaches an account that holds SystemAdministrator (DIAAT-407).
 * ``GET /admin/role-history``: ``role_audit.read`` (a JurisdictionAdministrator: its jurisdiction's; the
   JurisdictionSuperAdministrator: all of it). ``user=`` narrows it to the changes made to one user.
 
@@ -57,6 +57,9 @@ class AdminUserOut(BaseModel):
     is_active: bool
     assignments: list[AssignmentOut]
     pending: bool
+    # Whether the caller may deactivate or reactivate this account: false for its own, a pending row,
+    # one outside a JurisdictionAdministrator's reach, and one that holds SystemAdministrator (DIAAT-407).
+    can_set_active: bool
 
 
 class AdminUsersResponse(BaseModel):
@@ -127,6 +130,7 @@ def list_admin_users(
                 is_active=row.is_active,
                 assignments=[_assignment(a) for a in row.assignments],
                 pending=row.pending,
+                can_set_active=row.can_set_active,
             )
             for row in result.items
         ],
@@ -181,7 +185,7 @@ def deactivate_user(
     admin_user: User = Depends(require_permission("users.manage", "accounts.manage")),
 ) -> Response:
     """Deactivate a user: they are refused at their next request, and cannot sign in again until
-    reactivated. Nobody deactivates themselves. Idempotent."""
+    reactivated. Nobody deactivates themselves, or an account that holds SystemAdministrator. Idempotent."""
     with Session(db_connection.get_engine()) as session:
         user_admin.set_user_active(session, admin_user, user_id, active=False)
     return Response(status_code=204)

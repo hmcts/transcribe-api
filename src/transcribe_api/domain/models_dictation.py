@@ -88,6 +88,9 @@ class User(BaseTable, table=True):
     name: str | None = Field(default=None)
     # 0009: a deactivated user is refused at sign-in and never re-enabled by it.
     is_active: bool = Field(default=True)
+    # 0014 (DIAAT-407): the Entra SystemAdministrator claim of their latest sign-in. Grants nothing (the
+    # token's claim does that); it lets an administrator's request tell that the account holds it.
+    sysadmin: bool = Field(default=False, sa_column_kwargs={"server_default": text("false")})
     transcriptions: list["Transcription"] = Relationship(back_populates="user")
 
 

@@ -2,7 +2,8 @@
 
 The requester's side works for any signed-in user, with or without a role or a context: a user
 with no role, or one asking for a role in another jurisdiction (DIAAT-406): ``POST /access-requests``, ``GET /access-requests/mine``,
-``POST /access-requests/{id}/withdraw``. The approver's side needs ``access.approve``: a
+``POST /access-requests/{id}/withdraw``. A new request also needs ``access.request`` when the caller acts in a
+context, which every role's has but the SystemAdministrator's (DIAAT-407). The approver's side needs ``access.approve``: a
 JurisdictionAdministrator of the jurisdiction only (DIAAT-406): ``GET /admin/access-requests``,
 ``POST /admin/access-requests/{id}/approve`` and ``/reject``. The rules are
 domain/access_requests.py; the emails (sent after the response, never failing it) are
@@ -20,6 +21,8 @@ from pydantic import BaseModel, Field, StringConstraints
 from sqlmodel import Session
 
 from transcribe_api.domain import access_requests
+from transcribe_api.domain.auth.authorisation import ensure_permission
+from transcribe_api.domain.auth.context import context_of
 from transcribe_api.domain.auth.dependencies_dictation import require_permission, signed_in_endpoint
 from transcribe_api.domain.auth.sessions import AccessRequestOut
 from transcribe_api.domain.models_dictation import User
@@ -45,9 +48,13 @@ def create_access_request(
 ) -> AccessRequestOut:
     """Ask for Judge and/or LegalTextManager in a jurisdiction. 400 ``role_not_requestable`` for
     any other role, 404 for an unknown or disabled jurisdiction, 409 ``duplicate_request`` for an
-    identical pending request and ``already_assigned`` for a role already held there. The people
+    identical pending request and ``already_assigned`` for a role already held there. 403
+    ``permission_denied`` in a context without ``access.request`` (acting as SystemAdministrator). The people
     who can approve it are emailed after the response."""
     response.headers["Cache-Control"] = "no-store"
+    # With no context nobody holds a permission, and a user with no role must still be able to ask.
+    if context_of(user) is not None:
+        ensure_permission(user, "access.request")
     with Session(db_connection.get_engine()) as session:
         created = access_requests.create_request(
             session, user.db_user, jurisdiction_code=body.jurisdiction, roles=body.roles
