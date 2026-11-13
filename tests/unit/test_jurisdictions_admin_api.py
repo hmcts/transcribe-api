@@ -215,3 +215,134 @@ def test_adding_a_jurisdiction_never_overwrites_an_existing_one(jurisdiction_db,
 
 def test_a_blank_name_is_refused(as_admin):
     assert as_admin.put("/api/admin/jurisdictions/ET", json={"name": "   ", "settings": {}}).status_code == 422
+
+
+# DIAAT-348: who changed which setting, when, what it was before; going back -------------
+
+
+def _put(client, code: str, **body) -> dict:
+    current = next(j for j in client.get("/api/admin/jurisdictions").json() if j["code"] == code)
+    saved = client.put(
+        f"/api/admin/jurisdictions/{code}",
+        json={"name": current["name"], "settings": current["settings"], "version": current["version"]} | body,
+    )
+    assert saved.status_code == 200, saved.json()
+    return saved.json()
+
+
+def _history(client, code: str) -> list[dict]:
+    response = client.get(f"/api/admin/jurisdictions/{code}/history")
+    assert response.status_code == 200, response.json()
+    return response.json()["versions"]
+
+
+def test_the_history_says_who_changed_a_setting_when_and_what_it_was_before(as_admin):
+    _put(as_admin, "IAC", settings={"wording": {"help.subtitle": "Asylum appeals"}})
+    current = _put(as_admin, "IAC", settings={"wording": {"help.subtitle": "Immigration and asylum appeals"}})
+
+    newest, before, *_ = _history(as_admin, "IAC")
+    assert newest["saved_by"]["email"] == "admin@example.test"
+    assert newest["saved_at"]
+    assert newest["changes"] == [
+        {
+            "setting": "settings.wording.help.subtitle",
+            "before": "Asylum appeals",
+            "after": "Immigration and asylum appeals",
+        }
+    ]
+    assert {"setting": "settings.wording.help.subtitle", "before": None, "after": "Asylum appeals"} in before["changes"]
+    assert newest["content_as_now"] is True and before["content_as_now"] is False
+    # The wording page's saves are kept too.
+    wording = as_admin.get("/api/admin/jurisdictions/IAC/wording").json()
+    as_admin.put("/api/admin/jurisdictions/IAC/wording", json={"wording": {}, "version": wording["version"]})
+    assert _history(as_admin, "IAC")[0]["changes"] == [
+        {"setting": "settings.wording.help.subtitle", "before": "Immigration and asylum appeals", "after": None}
+    ]
+    assert current["code"] == "IAC"
+
+
+def test_a_change_made_outside_the_admin_area_is_kept_before_the_next_save(jurisdiction_db, as_admin):
+    """The command line, or the previous release while this one rolls out, saves no
+    version: the next save records it first, by no one, so what it changed from is true."""
+    _put(as_admin, "IAC", name="Immigration and Asylum Chamber")
+    with Session(jurisdiction_db) as session:
+        row = session.exec(select(Jurisdiction).where(Jurisdiction.code == "IAC")).one()
+        row.name = "Changed elsewhere"
+        session.add(row)
+        session.commit()
+
+    _put(as_admin, "IAC", name="Immigration and Asylum Chamber (IAC)")
+
+    newest, outside, *_ = _history(as_admin, "IAC")
+    assert newest["changes"] == [
+        {"setting": "name", "before": "Changed elsewhere", "after": "Immigration and Asylum Chamber (IAC)"}
+    ]
+    assert outside["saved_by"] is None
+    assert outside["changes"] == [
+        {"setting": "name", "before": "Immigration and Asylum Chamber", "after": "Changed elsewhere"}
+    ]
+    assert _history(as_admin, "IAC")[-1]["first"] is True
+
+
+def test_going_back_puts_the_earlier_settings_back_and_keeps_who_sees_it(jurisdiction_db, as_admin):
+    good = _put(as_admin, "IAC", settings={"wording": {"help.subtitle": "Asylum appeals"}})
+    _put(as_admin, "IAC", settings={"wording": {"help.subtitle": "A mistake"}}, display_name="Wrong")
+    broken = _put(as_admin, "IAC", enabled=False)
+    number = next(
+        v["number"] for v in _history(as_admin, "IAC") if any(c["after"] == "Asylum appeals" for c in v["changes"])
+    )
+
+    restored = as_admin.post(
+        f"/api/admin/jurisdictions/IAC/history/{number}/restore", json={"version": broken["version"]}
+    )
+
+    assert restored.status_code == 200, restored.json()
+    body = restored.json()
+    assert (body["settings"]["wording"], body["display_name"]) == (good["settings"]["wording"], None)
+    assert (body["enabled"], body["stage"]) == (False, broken["stage"])  # who sees it stays as it is
+    newest = _history(as_admin, "IAC")[0]
+    assert (newest["restored_from"], newest["content_as_now"]) == (number, True)
+    assert {c["setting"] for c in newest["changes"]} == {"settings.wording.help.subtitle", "display_name"}
+    with Session(jurisdiction_db) as session:
+        audits = [r.detail for r in session.exec(select(AuditLog)).all() if r.detail.get("change") == "restored"]
+    assert audits == [{"code": "IAC", "change": "restored", "restored_from": number}]
+
+
+def test_going_back_from_a_stale_page_or_to_no_such_version_is_refused(as_admin):
+    opened = _put(as_admin, "IAC", settings={"wording": {"help.subtitle": "One"}})
+    _put(as_admin, "IAC", settings={"wording": {"help.subtitle": "Two"}})
+
+    stale = as_admin.post("/api/admin/jurisdictions/IAC/history/1/restore", json={"version": opened["version"]})
+    assert (stale.status_code, stale.json()["detail"]["code"]) == (409, "edit_conflict")
+    current = next(j for j in as_admin.get("/api/admin/jurisdictions").json() if j["code"] == "IAC")
+    missing = as_admin.post("/api/admin/jurisdictions/IAC/history/99/restore", json={"version": current["version"]})
+    assert missing.status_code == 404
+    assert current["settings"]["wording"] == {"help.subtitle": "Two"}
+
+
+def test_a_jurisdiction_administrator_puts_back_settings_but_not_a_name(jurisdiction_db, admin_app, as_iac_admin):
+    """As for a save: the names and service need ``jurisdiction.create``, and other
+    jurisdictions' history is not theirs."""
+    _put(as_iac_admin, "IAC", settings={"wording": {"help.subtitle": "First"}})
+    with Session(jurisdiction_db) as session:
+        row = session.exec(select(Jurisdiction).where(Jurisdiction.code == "IAC")).one()
+        row.name = "Renamed by a super administrator"
+        session.add(row)
+        session.commit()
+    current = _put(as_iac_admin, "IAC", settings={"wording": {"help.subtitle": "Second"}})
+    versions = _history(as_iac_admin, "IAC")
+    old_name = next(v["number"] for v in versions if v["first"])
+    old_wording = next(v["number"] for v in versions if any(c["after"] == "First" for c in v["changes"]))
+
+    refused = as_iac_admin.post(
+        f"/api/admin/jurisdictions/IAC/history/{old_name}/restore", json={"version": current["version"]}
+    )
+    assert (refused.status_code, refused.json()["detail"]["code"]) == (403, "permission_denied")
+    assert as_iac_admin.get("/api/admin/jurisdictions/ET/history").status_code == 403
+
+    renamed_wording = old_wording + 1  # "First" under the new name: the outside change, recorded at the next save
+    put_back = as_iac_admin.post(
+        f"/api/admin/jurisdictions/IAC/history/{renamed_wording}/restore", json={"version": current["version"]}
+    )
+    assert put_back.status_code == 200, put_back.json()
+    assert put_back.json()["settings"]["wording"] == {"help.subtitle": "First"}

@@ -17,6 +17,7 @@ import tempfile
 import urllib.parse
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import UUID
@@ -28,7 +29,7 @@ from pydantic import Field as PydanticField
 from sqlmodel import Session, select
 from starlette.background import BackgroundTask
 
-from transcribe_api import jurisdiction_templates, jurisdictions_admin
+from transcribe_api import jurisdiction_templates, jurisdictions_admin, setting_history
 from transcribe_api.api.document_content_models import (
     AdminDocumentContentResponse,
     AnonymityStatusPayload,
@@ -65,7 +66,7 @@ from transcribe_api.domain.jurisdictions import (
     WORDING_KEYS,
     ActiveJurisdiction,
 )
-from transcribe_api.domain.models_dictation import Jurisdiction
+from transcribe_api.domain.models_dictation import Jurisdiction, JurisdictionTemplate
 from transcribe_api.runtime.db_connection import get_engine
 from transcribe_api.runtime.log_sanitization import sanitize_for_log
 
@@ -563,6 +564,7 @@ def admin_put_jurisdiction(
             display_name=body.display_name,
             service=body.service,
             sign_off=_sign_off(body.sign_off, admin_user),
+            saved_by=admin_user.id,
         )
         created = outcome.startswith("Created")
         return next(r for r in jurisdictions_admin.jurisdictions_overview(session) if r["code"] == code.strip().upper())
@@ -631,7 +633,9 @@ def admin_put_jurisdiction_wording(
     response.headers["Cache-Control"] = "no-store"
     assert_jurisdiction_in_scope(admin_user, code)
     saved = _admin_session_run(
-        lambda session: jurisdictions_admin.set_wording(session, code, body.wording, expected_version=body.version)
+        lambda session: jurisdictions_admin.set_wording(
+            session, code, body.wording, expected_version=body.version, saved_by=admin_user.id
+        )
     )
     changed = sorted(key for key in set(saved.before) | set(saved.wording) if saved.before.get(key) != saved.wording.get(key))
     _audit_jurisdiction_change(
@@ -766,9 +770,11 @@ async def admin_upload_template(
 
     def upload(session: Session) -> dict:
         if replace is None:
-            row = jurisdiction_templates.add_template(session, code, file_name, data)
+            row = jurisdiction_templates.add_template(session, code, file_name, data, saved_by=admin_user.id)
         else:
-            row = jurisdiction_templates.replace_file(session, code, replace, file_name, data, version or "")
+            row = jurisdiction_templates.replace_file(
+                session, code, replace, file_name, data, version or "", saved_by=admin_user.id
+            )
         return jurisdiction_templates.template_record(row)
 
     record = await asyncio.to_thread(_admin_session_run, upload)
@@ -815,6 +821,7 @@ def admin_update_template(
                 stage=body.chosen_stage,
                 expected_version=body.version,
                 sign_off=_sign_off(body.sign_off, admin_user),
+                saved_by=admin_user.id,
             )
         )
     )
@@ -891,3 +898,149 @@ def admin_delete_template(
     assert_jurisdiction_in_scope(admin_user, code)
     _admin_session_run(lambda s: jurisdiction_templates.delete_template(s, code, template_id))
     _audit_template_change("template.delete", admin_user, code, str(template_id), {})
+
+
+# ---------------------------------------------------------------------------
+# History, and going back to an earlier version (DIAAT-348): of a jurisdiction's settings
+# and of a template, for whoever may change them. Going back saves the earlier content
+# again, as a new version, under the same rules as a save; who sees it stays as it is.
+# ---------------------------------------------------------------------------
+
+
+class HistorySaver(BaseModel):
+    id: str
+    email: str
+    name: str | None
+
+
+class HistoryChange(BaseModel):
+    # What changed, as setting_history names it: "name", "settings.wording.home.intro",
+    # "fields.JudgeTitle.required", "file"...
+    setting: str
+    before: Any
+    after: Any
+
+
+class HistoryVersion(BaseModel):
+    number: int
+    saved_at: datetime
+    # None: no user saved it (the command line, or the previous release while this one
+    # rolled out, found changed at the next save).
+    saved_by: HistorySaver | None
+    # The version whose content it put back, when it was saved by going back.
+    restored_from: int | None
+    # The first version kept: there is nothing before it to compare with.
+    first: bool
+    # Going back to it would change nothing.
+    content_as_now: bool
+    changes: list[HistoryChange]
+
+
+class HistoryResponse(BaseModel):
+    # Newest first.
+    versions: list[HistoryVersion]
+
+
+class RestoreRequest(BaseModel):
+    # The version edited, as for a save: a change made meanwhile is not undone (409).
+    version: str
+
+
+def _history(session: Session, row: Jurisdiction | JurisdictionTemplate) -> HistoryResponse:
+    return HistoryResponse(versions=[HistoryVersion(**v) for v in setting_history.history(session, row)])
+
+
+@router.get("/jurisdictions/{code}/history", response_model=HistoryResponse)
+def admin_jurisdiction_history(
+    code: str,
+    response: Response,
+    admin_user: User = Depends(_JURISDICTION_ADMIN),
+) -> HistoryResponse:
+    """Who changed the jurisdiction's settings, when, and what each was before."""
+    response.headers["Cache-Control"] = "no-store"
+    assert_jurisdiction_in_scope(admin_user, code)
+    return _admin_session_run(lambda s: _history(s, jurisdictions_admin._jurisdiction(s, code)))
+
+
+@router.post("/jurisdictions/{code}/history/{number}/restore", response_model=JurisdictionAdminRecord)
+def admin_restore_jurisdiction(
+    code: str,
+    number: int,
+    body: RestoreRequest,
+    admin_user: User = Depends(_JURISDICTION_ADMIN),
+) -> JurisdictionAdminRecord:
+    """Go back to version ``number``: its names, service and settings saved again; its
+    stage, whether it is on and its sign-off stay as they are. Putting back a name, display
+    name or service needs ``jurisdiction.create``, as changing them does (403)."""
+    assert_jurisdiction_in_scope(admin_user, code)
+
+    def names_change(session: Session) -> bool:
+        row = jurisdictions_admin._jurisdiction(session, code)
+        earlier = setting_history.version_of(session, setting_history.KIND_JURISDICTION, row.id, number)
+        if earlier is None:
+            return False  # restore_jurisdiction says so (404)
+        snapshot = earlier.snapshot
+        return (snapshot.get("name"), snapshot.get("display_name"), snapshot.get("service")) != (
+            row.name,
+            row.display_name,
+            row.service,
+        )
+
+    if _admin_session_run(names_change):
+        ensure_permission(admin_user, "jurisdiction.create")
+
+    def restore(session: Session) -> dict:
+        row = jurisdictions_admin.restore_jurisdiction(
+            session, code, number, expected_version=body.version, saved_by=admin_user.id
+        )
+        return next(r for r in jurisdictions_admin.jurisdictions_overview(session) if r["code"] == row.code)
+
+    record = _admin_session_run(restore)
+    _audit_jurisdiction_change(
+        "jurisdiction.edit", admin_user, {"code": record["code"], "change": "restored", "restored_from": number}
+    )
+    return JurisdictionAdminRecord(**record)
+
+
+@router.get("/jurisdictions/{code}/templates/{template_id}/history", response_model=HistoryResponse)
+def admin_template_history(
+    code: str,
+    template_id: UUID,
+    response: Response,
+    admin_user: User = Depends(_TEMPLATE_ADMIN),
+) -> HistoryResponse:
+    """Who changed the template, when, and what each setting was before."""
+    response.headers["Cache-Control"] = "no-store"
+    assert_jurisdiction_in_scope(admin_user, code)
+    return _admin_session_run(lambda s: _history(s, jurisdiction_templates.template_of(s, code, template_id)))
+
+
+@router.post(
+    "/jurisdictions/{code}/templates/{template_id}/history/{number}/restore", response_model=TemplateAdminRecord
+)
+def admin_restore_template(
+    code: str,
+    template_id: UUID,
+    number: int,
+    body: RestoreRequest,
+    admin_user: User = Depends(_TEMPLATE_ADMIN),
+) -> TemplateAdminRecord:
+    """Go back to version ``number``: its name, file and fields saved again; who can choose
+    it stays as it is, so judges get the earlier version from then on. Refused (400,
+    ``template_not_ready``) when that would leave a template past draft with a box unlinked."""
+    assert_jurisdiction_in_scope(admin_user, code)
+    record = _admin_session_run(
+        lambda s: jurisdiction_templates.template_record(
+            jurisdiction_templates.restore_template(
+                s, code, template_id, number, expected_version=body.version, saved_by=admin_user.id
+            )
+        )
+    )
+    _audit_template_change(
+        "template.edit",
+        admin_user,
+        code,
+        record["id"],
+        {"change": "restored", "restored_from": number, "stage": record["stage"], "sign_off": record["sign_off"]},
+    )
+    return TemplateAdminRecord(**record)

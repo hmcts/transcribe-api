@@ -17,6 +17,9 @@ assignment endpoints (api/routes_admin_users.py, DIAAT-383); the command line no
 
 DIAAT-347: a jurisdiction is switched on for everyone (``live``) only with the service lead's
 sign-off recorded (``--signed-off-by``): set_stage, which templates use too.
+
+DIAAT-348: every save is kept as a version (setting_history.py), and an earlier one's
+content can be saved again (restore_jurisdiction).
 """
 
 from __future__ import annotations
@@ -32,11 +35,13 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
+from transcribe_api import setting_history
 from transcribe_api.domain.auth.permissions import ROLE_JURISDICTION_ADMIN as ASSIGNED_ADMIN
 from transcribe_api.domain.jurisdictions import (
     STAGE_DRAFT,
     STAGE_LIVE,
     STAGES,
+    WORDING_KEYS,
     JurisdictionSettings,
     parse_settings,
     readiness_problems,
@@ -173,8 +178,10 @@ def put_jurisdiction(
     display_name: str | None = None,
     service: str | None = None,
     sign_off: SignOff | None = None,
+    saved_by: UUID | None = None,
 ) -> str:
-    """Create or update a jurisdiction. ``enabled`` left as None keeps its current value (a
+    """Create or update a jurisdiction, kept as a version saved by ``saved_by`` (None:
+    the command line). ``enabled`` left as None keeps its current value (a
     new jurisdiction: enabled, a draft), so updating the wording cannot re-enable a disabled
     jurisdiction. So are the stage, the display name and the service (blank: none).
 
@@ -213,6 +220,8 @@ def put_jurisdiction(
         raise ConflictError(msg)
     if created:
         row = Jurisdiction(code=code, name=name, settings=validated, enabled=True, stage=STAGE_DRAFT)
+    else:
+        setting_history.catch_up(session, row)
     if stage is not None and stage != STAGE_DRAFT and row.stage == STAGE_DRAFT:
         admins = 0 if created else _admin_count(session, row.id)
         problems = readiness_problems(JurisdictionSettings.model_validate(validated), admin_count=admins)
@@ -235,6 +244,7 @@ def put_jurisdiction(
             raise
     row.updated_datetime = datetime.now(UTC)
     session.add(row)
+    setting_history.record(session, row, saved_by)
     try:
         session.commit()
     except IntegrityError:  # created by someone else at the same moment
@@ -254,7 +264,12 @@ class WordingSaved(NamedTuple):
 
 
 def set_wording(
-    session: Session, code: str, wording: dict[str, str], *, expected_version: str | None = None
+    session: Session,
+    code: str,
+    wording: dict[str, str],
+    *,
+    expected_version: str | None = None,
+    saved_by: UUID | None = None,
 ) -> WordingSaved:
     """Replace a jurisdiction's wording only (DIAAT-356: what its own admins change).
     Every key sent is checked, blank or not; blank text means the default. The rest
@@ -273,14 +288,53 @@ def set_wording(
         raise AdminError(msg) from None
     kept = {key: text for key, text in trimmed.items() if text}
     before = dict((row.settings or {}).get("wording") or {})
+    setting_history.catch_up(session, row)
     row.settings = {**(row.settings or {}), "wording": kept}
     row.updated_datetime = datetime.now(UTC)
     session.add(row)
+    setting_history.record(session, row, saved_by)
     session.flush()
     session.refresh(row)  # the version as stored, still under the lock
     saved = WordingSaved(before, kept, version(row))
     session.commit()
     return saved
+
+
+def restore_jurisdiction(
+    session: Session, code: str, number: int, *, expected_version: str, saved_by: UUID | None = None
+) -> Jurisdiction:
+    """Go back to version ``number`` (DIAAT-348): its names, service and settings saved
+    again, as a new version. Who sees the jurisdiction (its stage, whether it is on, its
+    sign-off) stays as it is now, so, as for a save that keeps the stage, readiness is not
+    checked again. Wording this release no longer has is left out. A stale
+    ``expected_version`` is refused (ConflictError), as for a save."""
+    row = _jurisdiction(session, code, lock=True)
+    if version(row) != expected_version:
+        msg = f"{row.code} was changed by someone else meanwhile; load it again"
+        raise ConflictError(msg)
+    earlier = setting_history.version_of(session, setting_history.KIND_JURISDICTION, row.id, number)
+    if earlier is None:
+        msg = f"{row.code} has no version {number}"
+        raise NotFoundError(msg)
+    snapshot = earlier.snapshot
+    settings = dict(snapshot.get("settings") or {})
+    settings["wording"] = {key: text for key, text in (settings.get("wording") or {}).items() if key in WORDING_KEYS}
+    try:
+        validated = JurisdictionSettings.model_validate(settings)
+    except ValueError as exc:
+        msg = f"Version {number} cannot be put back: {exc}"
+        raise AdminError(msg) from None
+    setting_history.catch_up(session, row)
+    row.name = snapshot.get("name") or row.name
+    row.display_name = snapshot.get("display_name")
+    row.service = snapshot.get("service")
+    row.settings = validated.model_dump(mode="json")
+    row.updated_datetime = datetime.now(UTC)
+    session.add(row)
+    setting_history.record(session, row, saved_by, restored_from=number)
+    session.commit()
+    session.refresh(row)
+    return row
 
 
 def _member_counts(session: Session) -> dict:

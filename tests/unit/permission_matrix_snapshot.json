@@ -46,10 +46,16 @@
   "GET /api/admin/jurisdictions/wording-keys": [
     "jurisdictions.manage"
   ],
+  "GET /api/admin/jurisdictions/{code}/history": [
+    "jurisdictions.manage"
+  ],
   "GET /api/admin/jurisdictions/{code}/templates": [
     "jurisdictions.manage"
   ],
   "GET /api/admin/jurisdictions/{code}/templates/{template_id}/form": [
+    "jurisdictions.manage"
+  ],
+  "GET /api/admin/jurisdictions/{code}/templates/{template_id}/history": [
     "jurisdictions.manage"
   ],
   "GET /api/admin/jurisdictions/{code}/wording": [
@@ -211,7 +217,13 @@
   "POST /api/admin/document-content/legal-frameworks": [
     "legal_text.manage"
   ],
+  "POST /api/admin/jurisdictions/{code}/history/{number}/restore": [
+    "jurisdictions.manage"
+  ],
   "POST /api/admin/jurisdictions/{code}/templates": [
+    "jurisdictions.manage"
+  ],
+  "POST /api/admin/jurisdictions/{code}/templates/{template_id}/history/{number}/restore": [
     "jurisdictions.manage"
   ],
   "POST /api/admin/jurisdictions/{code}/templates/{template_id}/preview": [
