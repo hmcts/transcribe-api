@@ -281,7 +281,11 @@ def restore_template(
         msg = f"The file of version {number} is not kept"
         raise NotFoundError(msg)
     boxes = [Box.from_record(b) for b in snapshot["boxes"]]
-    fields = [TemplateField.model_validate(f) for f in snapshot["fields"]]
+    try:
+        fields = [TemplateField.model_validate(f) for f in snapshot["fields"]]
+    except ValueError as exc:
+        msg = f"Version {number} cannot be put back: {exc}"
+        raise AdminError(msg) from None
     problems = field_problems(boxes, fields)
     if problems and row.stage != STAGE_DRAFT:
         raise TemplateProblemsError(problems)
