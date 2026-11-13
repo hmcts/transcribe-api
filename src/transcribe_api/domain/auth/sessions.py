@@ -113,17 +113,16 @@ def sign_in(session: Session, *, azure_user_id: str, email: str, name: str, sysa
         user = insert_user_or_load_existing(
             session, User(email=email, azure_user_id=azure_user_id, name=name or None, sysadmin=sysadmin)
         )
-    changed = False
+    # Locked and read afresh: an overlapping sign-in with another claim must not be compared with a stale copy.
+    user = session.exec(
+        select(User).where(User.id == user.id).with_for_update().execution_options(populate_existing=True)
+    ).one()
     if name and user.name != name:
         user.name = name
-        changed = True
-    if user.sysadmin != sysadmin:
-        user.sysadmin = sysadmin
-        changed = True
-    if changed:
-        session.add(user)
-        session.commit()
-        session.refresh(user)
+    user.sysadmin = sysadmin
+    session.add(user)
+    session.commit()
+    session.refresh(user)
     if not user.is_active:
         raise user_deactivated()
     return user
