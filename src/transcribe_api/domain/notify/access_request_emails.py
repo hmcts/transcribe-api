@@ -1,8 +1,8 @@
 """Emails about access requests, through GOV.UK Notify (DIAAT-398).
 
-* **New access request**: to every active JurisdictionAdministrator of the request's jurisdiction
-  and every active JurisdictionSuperAdministrator, once each (distinct users and addresses; not the
-  requester, who knows). Personalisation: ``requester_name``, ``jurisdiction_name``, ``roles`` and
+* **New access request**: to every active JurisdictionAdministrator of the request's jurisdiction,
+  who alone decide it (DIAAT-406), once each (distinct users and addresses; not the requester, who
+  knows). Personalisation: ``requester_name``, ``jurisdiction_name``, ``roles`` and
   ``link``, which opens the request in Admin's approvals queue (``{APP_URL}/admin?tab=approvals&
   request=<id>``): the link carries only the request's ID, the approver signs in and is checked for
   ``access.approve`` like for any other request.
@@ -25,7 +25,7 @@ from uuid import UUID
 
 from sqlmodel import Session, select
 
-from transcribe_api.domain.auth.permissions import ROLE_JURISDICTION_ADMIN, ROLE_JURISDICTION_SUPER_ADMIN
+from transcribe_api.domain.auth.permissions import ROLE_JURISDICTION_ADMIN
 from transcribe_api.domain.models_dictation import AccessRequest, AccessRequestRole, Jurisdiction, RoleAssignment, User
 from transcribe_api.domain.notify import gov_notify
 from transcribe_api.runtime import db_connection
@@ -110,15 +110,15 @@ def _load(session: Session, request_id: UUID) -> tuple[AccessRequest, Jurisdicti
 
 
 def approver_recipients(session: Session, request: AccessRequest, jurisdiction: Jurisdiction, requester: User, roles: list[str]) -> list[Recipient]:
-    """Active JurisdictionAdministrators of the jurisdiction and JurisdictionSuperAdministrators:
-    distinct users, one address each, never the requester."""
+    """Active JurisdictionAdministrators of the jurisdiction: distinct users, one address each, never
+    the requester."""
     rows = session.exec(
         select(User)
         .join(RoleAssignment, RoleAssignment.user_id == User.id)
         .where(
             User.is_active,
-            ((RoleAssignment.role == ROLE_JURISDICTION_ADMIN) & (RoleAssignment.jurisdiction_id == jurisdiction.id))
-            | (RoleAssignment.role == ROLE_JURISDICTION_SUPER_ADMIN),
+            RoleAssignment.role == ROLE_JURISDICTION_ADMIN,
+            RoleAssignment.jurisdiction_id == jurisdiction.id,
         )
         .distinct()
     ).all()

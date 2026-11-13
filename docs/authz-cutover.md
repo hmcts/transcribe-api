@@ -117,11 +117,11 @@ SystemAdministrator (the Entra app role `SystemAdministrator`, assigned to someo
    `POST /api/admin/assignments {"email": "...", "jurisdiction": null, "role": "JurisdictionSuperAdministrator"}` with a SystemAdministrator's BenchNotes token.
 3. A SystemAdministrator may also give **themselves** JurisdictionSuperAdministrator, the only role it gives (contract section 1, DIAAT-403): `{"user_id": "<their id, from GET /api/me/permissions>", "jurisdiction": null,
    "role": "JurisdictionSuperAdministrator"}`. Then they sign in again and choose the context. A SystemAdministrator acting in a stored role has **that role's permissions and scope** only, not a
-   global one, and the self-assigned role is subject to the same rules as anyone's (a role strictly below the one acted in, for themselves as for others; nobody deactivates themselves). They can
+   global one, and the self-assigned role is subject to the same rules as anyone's (only the role the role acted in gives, for themselves as for others; nobody deactivates themselves). They can
    remove it again the same way.
-4. The JurisdictionSuperAdministrator then adds the JurisdictionAdministrators of each jurisdiction (by email or from the user list), who add the judges and legal text
-   managers and approve access requests. LegalTextManager is **not** carried over from Entra: nobody can edit the legal wording until a JurisdictionAdministrator or a
-   JurisdictionSuperAdministrator gives someone LegalTextManager. And Entra-only roles are not carried: check the aat and demo groups before the cutover, since someone in
+4. The JurisdictionSuperAdministrator then adds the JurisdictionAdministrators of each jurisdiction (by email or from the user list, in the Jurisdictions screen), who
+   add the judges and legal text managers and approve access requests (DIAAT-406: only a JurisdictionAdministrator does either). LegalTextManager is **not** carried over
+   from Entra: nobody can edit the legal wording until a JurisdictionAdministrator gives someone LegalTextManager. And Entra-only roles are not carried: check the aat and demo groups before the cutover, since someone in
    the delivery team who held only an Entra role has no assignment afterwards (a Judge membership from 0004 is carried).
 
 Locally the same is done with the dev personas (`docs/authz-token-and-context.md`).

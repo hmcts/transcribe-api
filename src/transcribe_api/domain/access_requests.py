@@ -1,5 +1,6 @@
 """Access requests (DIAAT-396): a user asks for Judge and/or LegalTextManager in a jurisdiction, and
-a JurisdictionAdministrator of it, or a JurisdictionSuperAdministrator, approves or rejects.
+a JurisdictionAdministrator of it approves or rejects (DIAAT-406). Anyone may ask: someone with no
+role, or someone who holds roles and wants one in another jurisdiction (or another role in one of theirs).
 
 * Only ``REQUESTABLE_ROLES`` can be asked for (400 ``role_not_requestable``); the jurisdiction must
   exist and be enabled (404 ``jurisdiction_not_found``); a user already holding a requested role
@@ -11,9 +12,9 @@ a JurisdictionAdministrator of it, or a JurisdictionSuperAdministrator, approves
 * Nobody decides their own request (403 ``own_request``); a request for a jurisdiction that has been
   disabled since cannot be approved (409 ``jurisdiction_disabled``); a user has at most
   ``MAX_PENDING_REQUESTS`` waiting (409 ``too_many_pending_requests``).
-* The approver acts in the request's jurisdiction (a JurisdictionSuperAdministrator in any):
-  403 ``jurisdiction_not_in_scope`` otherwise. ``access.approve`` is the JurisdictionAdministrator's
-  and the JurisdictionSuperAdministrator's: a SystemAdministrator is refused by the permission check.
+* The approver acts in the request's jurisdiction: 403 ``jurisdiction_not_in_scope`` otherwise.
+  ``access.approve`` is the JurisdictionAdministrator's only: a JurisdictionSuperAdministrator and a
+  SystemAdministrator are refused by the permission check.
 * Every request, approval, rejection and withdrawal is audited (``access_request.created`` ...);
   approvals and rejections are in the role-change history (domain/user_admin.py), one row per role.
 
@@ -239,8 +240,7 @@ class QueuedRequest:
 
 
 def list_for_approver(session: Session, actor: object, *, status: str) -> list[QueuedRequest]:
-    """The requests the actor may decide: those of the jurisdiction they act in (all, for a
-    JurisdictionSuperAdministrator). ``status``: one of the four, or ``all``. Pending ones oldest
+    """The requests the actor may decide: those of the jurisdiction they act in. ``status``: one of the four, or ``all``. Pending ones oldest
     first (the queue), others newest first."""
     scope = jurisdiction_scope(actor)
     query = (

@@ -1,0 +1,60 @@
+name: Postgres tests
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  unit:
+    name: Unit tests (Postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        # Matches pgsql_version in infrastructure/variables.tf.
+        image: postgres:16
+        env:
+          POSTGRES_DB: transcribe_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d transcribe_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_POSTGRES_URL: postgresql://postgres@localhost:5432/transcribe_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+
+      - name: Install ffmpeg
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg
+
+      - name: Install dependencies from uv.lock
+        run: uv sync --locked
+
+      - name: Run unit tests
+        run: |
+          set -o pipefail
+          uv run --no-sync pytest tests/unit -rs --no-cov | tee pytest.log
+
+      - name: Fail if any Postgres test was skipped
+        run: |
+          if grep -E '^SKIPPED .*needs TEST_POSTGRES_URL' pytest.log; then
+            echo "::error::Postgres-backed tests were skipped although TEST_POSTGRES_URL is set"
+            exit 1
+          fi

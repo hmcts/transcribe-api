@@ -355,7 +355,7 @@ class JurisdictionTemplate(SQLModel, table=True):
 
 
 class TemplateFile(SQLModel, table=True):
-    """A template file that a saved version names (DIAAT-348, 0013), once by its SHA-256."""
+    """A template file that a saved version names (DIAAT-348, 0014), once by its SHA-256."""
 
     __tablename__ = "template_file"
 
@@ -364,7 +364,7 @@ class TemplateFile(SQLModel, table=True):
 
 
 class SettingVersion(SQLModel, table=True):
-    """One saved version of a jurisdiction's settings or of a template (DIAAT-348, 0013):
+    """One saved version of a jurisdiction's settings or of a template (DIAAT-348, 0014):
     what was saved, by whom and when (setting_history.py). Never changed once written."""
 
     __tablename__ = "setting_version"

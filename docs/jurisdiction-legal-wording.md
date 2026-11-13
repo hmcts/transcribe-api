@@ -2,9 +2,12 @@
 
 "Legal wording" is what the IAC decision document is built from: the **hearing types**,
 the **legal frameworks** (and the legal issues they carry) and the **anonymity** text.
-Before DIAAT-342 it was one global row. Now each jurisdiction has its own, and its admins
-edit that one only. (Not to be confused with the *screen wording*, the 16 `WORDING_KEYS`
-in `jurisdiction.settings.wording`, edited at `/api/jurisdictions/wording`.)
+Before DIAAT-342 it was one global row. Now each jurisdiction has its own, and its
+LegalTextManager edits that one only, in the Document Content screen (Legal Frameworks
+included). (Not to be confused with the *screen wording*, the 16 `WORDING_KEYS` in
+`jurisdiction.settings.wording`: UI labels, not legal text, which the JurisdictionSuperAdministrator
+edits from the Jurisdictions screen at `/api/admin/jurisdictions/{code}/wording`, and nobody else:
+the in-jurisdiction route `/api/jurisdictions/wording` was removed in DIAAT-406.)
 
 ## Which jurisdiction
 
@@ -25,8 +28,9 @@ From DIAAT-373 the role is the one the user is **acting as** in the active juris
 | any | everyone else: a Judge, a JurisdictionAdministrator, a JurisdictionSuperAdministrator, a LegalTextManager of another jurisdiction | no | no |
 
 Since DIAAT-376 the permission is `legal_text.manage`, which only the LegalTextManager holds. A
-JurisdictionAdministrator (who could edit it under DIAAT-342) edits the *screen* wording of its
-jurisdiction (`jurisdiction.wording.edit`), not its legal text; and a SystemAdministrator no longer reads
+JurisdictionAdministrator (who could edit it under DIAAT-342) edits neither the legal text nor, since
+DIAAT-406, the screen wording (`jurisdiction.wording.edit` is the JurisdictionSuperAdministrator's); it
+gives the LegalTextManager role in its jurisdiction. A SystemAdministrator no longer reads
 the IAC's legal wording either (DIAAT-389: system-level work only). The LegalTextManager is held in a
 jurisdiction (it was one global Entra role that meant the IAC).
 

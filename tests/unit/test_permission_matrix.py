@@ -511,7 +511,7 @@ def test_the_dictation_and_recording_routes_are_a_judges_alone_by_where_they_liv
             assert allowed(persona, route) is judge_acting, (route.key, persona.name)
 
 
-def test_legal_text_managers_reach_only_legal_text_templates_and_the_admin_landing_page(routes):
+def test_legal_text_managers_reach_only_document_content_and_the_admin_landing_page(routes):
     ltm = PERSONAS["LegalTextManager"]
     reached = {r.key for r in guarded(routes) if allowed(ltm, r)}
     for method, path in reached:
@@ -546,6 +546,65 @@ def test_a_system_administrator_has_only_the_system_routes_and_the_admin_landing
     }
 
 
+ROLE_SNAPSHOT = Path(__file__).with_name("permission_matrix_roles_snapshot.json")
+ACTIVE_ROLES = ("Judge", "LegalTextManager", "JurisdictionAdministrator", "JurisdictionSuperAdministrator", "SystemAdministrator")
+
+
+def test_who_reaches_every_route_per_active_role_is_the_committed_snapshot(routes):
+    """``"METHOD /path"`` -> the active roles (contexts) that reach it, for every guarded route: the role x
+    route matrix to review when responsibilities move between roles (DIAAT-406). Regenerate it as the
+    declarations snapshot (``UPDATE_PERMISSION_SNAPSHOT=1``)."""
+    actual = {
+        f"{route.method} {route.path}": [role for role in ACTIVE_ROLES if allowed(PERSONAS[role], route)]
+        for route in sorted(guarded(routes), key=lambda r: (r.path, r.method))
+    }
+    actual = dict(sorted(actual.items()))
+    if os.getenv("UPDATE_PERMISSION_SNAPSHOT"):
+        ROLE_SNAPSHOT.write_text(json.dumps(actual, indent=2) + "\n")
+    assert actual == json.loads(ROLE_SNAPSHOT.read_text())
+
+
+def test_each_admin_area_is_reached_by_its_one_role(routes):
+    """DIAAT-406: users, approvals and templates are the JurisdictionAdministrator's, jurisdictions the
+    JurisdictionSuperAdministrator's, legal text the LegalTextManager's; deactivation and the role history
+    are both administrators' (each with its own scope)."""
+    by_key = {r.key: r for r in routes}
+    areas = {
+        "JurisdictionAdministrator": [
+            ("GET", "/api/admin/access-requests"),
+            ("POST", "/api/admin/access-requests/{request_id}/approve"),
+            ("POST", "/api/admin/access-requests/{request_id}/reject"),
+            ("GET", "/api/admin/jurisdictions/{code}/templates"),
+            ("POST", "/api/admin/jurisdictions/{code}/templates"),
+            ("PUT", "/api/admin/jurisdictions/{code}/templates/{template_id}"),
+            ("DELETE", "/api/admin/jurisdictions/{code}/templates/{template_id}"),
+        ],
+        "JurisdictionSuperAdministrator": [
+            ("GET", "/api/admin/jurisdictions"),
+            ("PUT", "/api/admin/jurisdictions/{code}"),
+            ("GET", "/api/admin/jurisdictions/wording-keys"),
+            ("GET", "/api/admin/jurisdictions/{code}/wording"),
+            ("PUT", "/api/admin/jurisdictions/{code}/wording"),
+        ],
+        "LegalTextManager": [
+            ("GET", "/api/admin/document-content"),
+            ("PUT", "/api/admin/document-content/legal-frameworks/{item_id}"),
+            ("POST", "/api/admin/document-content/legal-frameworks"),
+        ],
+    }
+    for owner, keys in areas.items():
+        for key in keys:
+            reached = [role for role in ACTIVE_ROLES if allowed(PERSONAS[role], by_key[key])]
+            assert reached == [owner], (key, reached)
+    for key in (
+        ("POST", "/api/admin/users/{user_id}/deactivate"),
+        ("POST", "/api/admin/users/{user_id}/reactivate"),
+        ("GET", "/api/admin/role-history"),
+    ):
+        reached = [role for role in ACTIVE_ROLES if allowed(PERSONAS[role], by_key[key])]
+        assert reached == ["JurisdictionAdministrator", "JurisdictionSuperAdministrator"], (key, reached)
+
+
 def test_the_matrix_is_printed(routes, capsys):
     """For reading (``-s``): one line per route, then the callers allowed on it."""
     names = list(PERSONAS)
@@ -560,15 +619,15 @@ def test_the_matrix_is_printed(routes, capsys):
 # DIAAT-383, 391, 392, 394, 395, 396: what each new route of Phase 4 asks for, written out from the
 # contract (section 3), so that a route cannot drift to another permission unnoticed.
 ADMIN_ROUTE_PERMISSIONS: dict[tuple[str, str], set[str]] = {
-    ("GET", "/api/admin/users"): {"users.manage", "jurisdiction_super_admin.assign"},
+    ("GET", "/api/admin/users"): {"users.manage", "jurisdiction_admin.assign", "jurisdiction_super_admin.assign"},
     ("POST", "/api/admin/assignments"): {"users.manage", "jurisdiction_admin.assign", "jurisdiction_super_admin.assign"},
     ("DELETE", "/api/admin/assignments/{assignment_id}"): {
         "users.manage",
         "jurisdiction_admin.assign",
         "jurisdiction_super_admin.assign",
     },
-    ("POST", "/api/admin/users/{user_id}/deactivate"): {"users.manage"},
-    ("POST", "/api/admin/users/{user_id}/reactivate"): {"users.manage"},
+    ("POST", "/api/admin/users/{user_id}/deactivate"): {"users.manage", "accounts.manage"},
+    ("POST", "/api/admin/users/{user_id}/reactivate"): {"users.manage", "accounts.manage"},
     ("GET", "/api/admin/role-history"): {"role_audit.read"},
     ("GET", "/api/admin/access-requests"): {"access.approve"},
     ("POST", "/api/admin/access-requests/{request_id}/approve"): {"access.approve"},
@@ -632,17 +691,17 @@ def test_the_system_permissions_never_leak_into_another_context(routes):
 
 
 # ---------------------------------------------------------------------------
-# Who may give which role, to themselves and to others (DIAAT-403)
+# Who may give which role, to themselves and to others (DIAAT-403, DIAAT-406)
 # ---------------------------------------------------------------------------
 
-# The rule, not the code under test: a role strictly below the one acted in, the same for yourself as for
-# anyone else. Acting as SystemAdministrator: JurisdictionSuperAdministrator only, for others and for
-# themselves (how the first one is set up).
+# The rule, not the code under test, the same for yourself as for anyone else: a JurisdictionAdministrator
+# gives Judge and LegalTextManager, a JurisdictionSuperAdministrator JurisdictionAdministrator, and acting as
+# SystemAdministrator JurisdictionSuperAdministrator (how the first one is set up).
 _STRICTLY_BELOW = {
     "Judge": set(),
     "LegalTextManager": set(),
     "JurisdictionAdministrator": {"Judge", "LegalTextManager"},
-    "JurisdictionSuperAdministrator": {"JurisdictionAdministrator", "Judge", "LegalTextManager"},
+    "JurisdictionSuperAdministrator": {"JurisdictionAdministrator"},
 }
 
 

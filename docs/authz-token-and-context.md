@@ -60,12 +60,18 @@ the token's `assignments`, and chosen like any other. Its permissions apply only
 claim too: a token with that context and no `sysadmin` is refused. Nobody else ever sees it: it is never in a user list, role list or the
 Users screens).
 
-A `JurisdictionAdministrator` also holds `Judge` and `LegalTextManager` in their own jurisdiction, without being given
-them: `domain/assignments.load_assignments` adds them (`derived`) to what a user may act as, so they appear in the token's
-`assignments`, in `GET /me/permissions` and in `PUT /me/context`, and are never written to `role_assignment`. Removing
-the administrator role (or leaving the jurisdiction) removes them. Not for another jurisdiction, and not for the global
-`JurisdictionSuperAdministrator` or the `SystemAdministrator`. When no context is named at sign-in, the user lands in the
-one pair they were given (an administrator lands as administrator); two or more given pairs, or none, means they choose.
+A user can hold roles in one or more jurisdictions, in any combination. For example, Judge in IAC, Judge and LegalTextManager in
+Employment, and JurisdictionAdministrator in a third jurisdiction, all at once. "One jurisdiction" only means each assignment names
+exactly one jurisdiction (JSA and SA are global). It never limits how many jurisdictions a person can be in. Each (jurisdiction, role)
+pair is a context of its own. A JurisdictionAdministrator sees and changes only the assignments in its own jurisdiction of a user who
+holds roles elsewhere, and anyone may request access to another jurisdiction even if they hold roles.
+
+Every role a user acts in is one they were given (DIAAT-406): none is derived. A `JurisdictionAdministrator` acts as `Judge` or
+`LegalTextManager` in its jurisdiction only if it holds those roles too (it may give them to itself in the Users screen). Migration 0013
+stored a `Judge` and a `LegalTextManager` row (`granted_by` NULL) for every existing JurisdictionAdministrator assignment, of a user or a
+pending email, so nobody lost what they could do; its downgrade keeps them. A user who holds JurisdictionAdministrator in a jurisdiction
+sees it in every role they hold there, even before it is live (so they can try it as a Judge). When no context is named at sign-in, the
+user lands in their one pair; two or more, or none, means they choose.
 
 Settings (`runtime/settings_dictation.py`):
 
@@ -154,6 +160,7 @@ curl -s localhost:8000/api/me/permissions -H "Authorization: Bearer $TOKEN"
 | `judge-et` | Judge in ET | no |
 | `judge-iac` | Judge in IAC | no |
 | `multi` | Judge in ET, JurisdictionAdministrator in IAC | no |
+| `many` | Judge in IAC, Judge and LegalTextManager in ET, JurisdictionAdministrator in SSCS | no |
 | `jadmin-iac` | JurisdictionAdministrator in IAC | no |
 | `jadmin-et` | JurisdictionAdministrator in ET | no |
 | `legal-iac` | LegalTextManager in IAC | no |
@@ -161,8 +168,8 @@ curl -s localhost:8000/api/me/permissions -H "Authorization: Bearer $TOKEN"
 | `sysadmin` | none (SystemAdministrator context only) | yes |
 | `no-role` | none | no |
 
-Emails are `<name>@localhost.test`. The seed script creates the jurisdictions ET ("Employment Tribunal")
-and IAC if missing, the users and their assignments, and never deletes anything. A persona with
+Emails are `<name>@localhost.test`. The seed script creates the jurisdictions ET ("Employment Tribunal"),
+IAC and SSCS if missing, the users and their assignments, and never deletes anything. A persona with
 assignments that has not been seeded is 409 `persona_not_seeded`.
 
 Local mode no longer signs every request in as one developer with all roles: without a persona (or a
@@ -200,8 +207,8 @@ A PR preview has no Entra and runs the web app with sign-in off (DIAAT-399), so 
 environment), `POST /api/auth/session` with **no** Authorization header signs in the fixed preview user
 (`domain/auth/token_auth.get_entra_identity`): the roles in `AUTH_PREVIEW_USER_ROLES` (default: every app role, so
 the SystemAdministrator flag too), still through the `AUTH_ACCESS_ROLES` check. It is given every role at sign-in
-(`domain/auth/sessions.ensure_preview_assignments`): JurisdictionSuperAdministrator, and JurisdictionAdministrator (so
-Judge and LegalTextManager too) in every jurisdiction, so it chooses a context like anyone with several, and every
+(`domain/auth/sessions.ensure_preview_assignments`): JurisdictionSuperAdministrator, and JurisdictionAdministrator,
+Judge and LegalTextManager in every jurisdiction, so it chooses a context like anyone with several, and every
 area of the app is reachable. Then it holds a BenchNotes token like anyone else: **every other route still refuses a
 request with none** (401), so the web in a preview must sign in through that route (it sends no Authorization header).
 A sign-in that does send a token is verified as usual and gets what its user holds. The chart's preview values set

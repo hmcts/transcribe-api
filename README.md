@@ -77,7 +77,7 @@ uv sync --extra dev
 ```
 
 `ENVIRONMENT=local` lets `POST /api/auth/session` sign in as a **dev persona**
-(`X-Dev-Persona: judge-et`, `multi`, `sysadmin`, `no-role`, ...) instead of an Entra token. Create
+(`X-Dev-Persona: judge-et`, `multi`, `many`, `sysadmin`, `no-role`, ...) instead of an Entra token. Create
 them with `.venv/bin/python scripts-seed-personas.py`; the token the API returns is what every other
 route then requires. See [`docs/authz-token-and-context.md`](docs/authz-token-and-context.md). Put an
 `APP_JWT_SIGNING_KEY` in `.env` (`.env.example` says how to generate one); deployed

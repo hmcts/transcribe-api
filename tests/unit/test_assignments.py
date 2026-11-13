@@ -54,23 +54,19 @@ def test_a_user_can_hold_several_roles_in_several_jurisdictions(world, session):
         ("ET", "Judge"),
         ("ET", "LegalTextManager"),
         ("IAC", "Judge"),
-        ("IAC", "LegalTextManager"),  # included with the administrator role, not given
         ("IAC", "JurisdictionAdministrator"),
     ]
     assert svc.distinct_contexts(loaded)[0] == Context(None, "JurisdictionSuperAdministrator")
-    assert len(svc.distinct_contexts(loaded)) == 6
+    assert len(svc.distinct_contexts(loaded)) == 5
 
 
 def test_a_role_held_in_one_jurisdiction_is_nothing_in_another(world, session):
-    svc.add_assignment(session, role="JurisdictionAdministrator", jurisdiction_id=world["et"].id, user_id=world["user"].id)
+    svc.add_assignment(
+        session, role="JurisdictionAdministrator", jurisdiction_id=world["et"].id, user_id=world["user"].id
+    )
     session.commit()
     contexts = svc.distinct_contexts(svc.load_assignments(session, world["user"].id))
-    # What comes with the administrator role is theirs in ET too, and nothing in IAC.
-    assert contexts == [
-        Context("ET", "Judge"),
-        Context("ET", "LegalTextManager"),
-        Context("ET", "JurisdictionAdministrator"),
-    ]
+    assert contexts == [Context("ET", "JurisdictionAdministrator")]
     assert all(context.jurisdiction != "IAC" for context in contexts)
 
 
@@ -252,81 +248,99 @@ def test_leaving_a_jurisdiction_you_hold_nothing_in_removes_nothing(world, sessi
     assert len(svc.load_assignments(session, world["user"].id)) == 1
 
 
-# --- Judge and LegalTextManager come with the administrator role (DIAAT-373) -------------
+# --- an administrator holds only what it was given (DIAAT-406) ---------------------------
 
 
 def _pairs(assignments):
-    return [(a.jurisdiction_code, a.role, a.derived) for a in assignments]
+    return [(a.jurisdiction_code, a.role) for a in assignments]
 
 
-def test_an_administrator_also_holds_judge_and_legal_text_manager_in_their_own_jurisdiction(world, session):
-    svc.add_assignment(session, role="JurisdictionAdministrator", jurisdiction_id=world["iac"].id, user_id=world["user"].id)
+def test_an_administrator_holds_only_the_administrator_role_it_was_given(world, session):
+    svc.add_assignment(
+        session, role="JurisdictionAdministrator", jurisdiction_id=world["iac"].id, user_id=world["user"].id
+    )
     session.commit()
 
     loaded = svc.load_assignments(session, world["user"].id)
 
-    assert _pairs(loaded) == [
-        ("IAC", "Judge", True),
-        ("IAC", "LegalTextManager", True),
-        ("IAC", "JurisdictionAdministrator", False),
-    ]
-    assert all(a.id is None for a in loaded if a.derived)
-    # Only the one given is what they land in when they have not chosen.
-    assert svc.stored_contexts(loaded) == [Context("IAC", "JurisdictionAdministrator")]
-
-
-def test_the_included_roles_are_not_stored(world, session):
-    svc.add_assignment(session, role="JurisdictionAdministrator", jurisdiction_id=world["iac"].id, user_id=world["user"].id)
-    session.commit()
-    svc.load_assignments(session, world["user"].id)
-    session.commit()
+    assert _pairs(loaded) == [("IAC", "JurisdictionAdministrator")]
+    assert all(a.id is not None for a in loaded)
     roles = session.exec(select(RoleAssignment.role).where(RoleAssignment.user_id == world["user"].id)).all()
     assert roles == ["JurisdictionAdministrator"]
 
 
-def test_the_included_roles_are_only_in_the_administrators_own_jurisdiction(world, session):
-    svc.add_assignment(session, role="JurisdictionAdministrator", jurisdiction_id=world["iac"].id, user_id=world["user"].id)
+def test_an_administrator_given_judge_too_holds_both_and_nothing_more(world, session):
+    svc.add_assignment(
+        session, role="JurisdictionAdministrator", jurisdiction_id=world["iac"].id, user_id=world["user"].id
+    )
+    svc.add_assignment(session, role="Judge", jurisdiction_id=world["iac"].id, user_id=world["user"].id)
+    session.commit()
+
+    assert _pairs(svc.load_assignments(session, world["user"].id)) == [
+        ("IAC", "Judge"),
+        ("IAC", "JurisdictionAdministrator"),
+    ]
+
+
+def test_an_administrators_own_roles_are_only_in_the_jurisdictions_they_were_given_in(world, session):
+    svc.add_assignment(
+        session, role="JurisdictionAdministrator", jurisdiction_id=world["iac"].id, user_id=world["user"].id
+    )
     svc.add_assignment(session, role="Judge", jurisdiction_id=world["et"].id, user_id=world["user"].id)
     session.commit()
 
     contexts = svc.distinct_contexts(svc.load_assignments(session, world["user"].id))
 
-    assert Context("ET", "Judge") in contexts
-    assert Context("ET", "LegalTextManager") not in contexts
-    assert Context("ET", "JurisdictionAdministrator") not in contexts
-    assert Context("IAC", "LegalTextManager") in contexts
+    assert contexts == [Context("ET", "Judge"), Context("IAC", "JurisdictionAdministrator")]
 
 
-def test_a_role_held_as_a_row_is_not_listed_twice(world, session):
-    svc.add_assignment(session, role="JurisdictionAdministrator", jurisdiction_id=world["iac"].id, user_id=world["user"].id)
-    svc.add_assignment(session, role="Judge", jurisdiction_id=world["iac"].id, user_id=world["user"].id)
-    session.commit()
-
-    loaded = svc.load_assignments(session, world["user"].id)
-
-    assert _pairs(loaded) == [
-        ("IAC", "Judge", False),
-        ("IAC", "LegalTextManager", True),
-        ("IAC", "JurisdictionAdministrator", False),
-    ]
-
-
-def test_nothing_is_included_in_a_disabled_jurisdiction(world, session):
-    svc.add_assignment(session, role="JurisdictionAdministrator", jurisdiction_id=world["off"].id, user_id=world["user"].id)
+def test_nothing_is_loaded_for_an_administrator_of_a_disabled_jurisdiction(world, session):
+    svc.add_assignment(
+        session, role="JurisdictionAdministrator", jurisdiction_id=world["off"].id, user_id=world["user"].id
+    )
+    svc.add_assignment(session, role="Judge", jurisdiction_id=world["off"].id, user_id=world["user"].id)
     session.commit()
     assert svc.load_assignments(session, world["user"].id) == []
 
 
-def test_the_super_administrator_and_other_roles_include_nothing(world, session):
+def test_the_super_administrator_and_other_roles_hold_only_what_they_were_given(world, session):
     svc.add_assignment(session, role="JurisdictionSuperAdministrator", jurisdiction_id=None, user_id=world["user"].id)
     svc.add_assignment(session, role="LegalTextManager", jurisdiction_id=world["et"].id, user_id=world["other"].id)
     session.commit()
-    assert _pairs(svc.load_assignments(session, world["user"].id)) == [(None, "JurisdictionSuperAdministrator", False)]
-    assert _pairs(svc.load_assignments(session, world["other"].id)) == [("ET", "LegalTextManager", False)]
+    assert _pairs(svc.load_assignments(session, world["user"].id)) == [(None, "JurisdictionSuperAdministrator")]
+    assert _pairs(svc.load_assignments(session, world["other"].id)) == [("ET", "LegalTextManager")]
 
 
-def test_leaving_the_jurisdiction_takes_the_included_roles_with_the_administrator_role(world, session):
-    svc.add_assignment(session, role="JurisdictionAdministrator", jurisdiction_id=world["iac"].id, user_id=world["user"].id)
+@pytest.mark.parametrize("stage", ["draft", "test"])
+def test_an_administrator_sees_a_jurisdiction_not_yet_live_in_every_role_it_holds_there(world, session, stage):
+    early = add_jurisdiction(world["engine"], "NEW", stage=stage)
+    for role in ("JurisdictionAdministrator", "Judge", "LegalTextManager"):
+        svc.add_assignment(session, role=role, jurisdiction_id=early.id, user_id=world["user"].id)
+    svc.add_assignment(session, role="Judge", jurisdiction_id=early.id, user_id=world["other"].id)
+    session.commit()
+
+    assert _pairs(svc.load_assignments(session, world["user"].id)) == [
+        ("NEW", "Judge"),
+        ("NEW", "LegalTextManager"),
+        ("NEW", "JurisdictionAdministrator"),
+    ]
+    assert svc.load_assignments(session, world["other"].id) == []
+
+
+def test_administering_one_jurisdiction_shows_no_draft_elsewhere(world, session):
+    draft = add_jurisdiction(world["engine"], "DRAFT", stage="draft")
+    svc.add_assignment(
+        session, role="JurisdictionAdministrator", jurisdiction_id=world["et"].id, user_id=world["user"].id
+    )
+    svc.add_assignment(session, role="Judge", jurisdiction_id=draft.id, user_id=world["user"].id)
+    session.commit()
+    assert _pairs(svc.load_assignments(session, world["user"].id)) == [("ET", "JurisdictionAdministrator")]
+
+
+def test_leaving_the_jurisdiction_removes_the_administrator_role(world, session):
+    svc.add_assignment(
+        session, role="JurisdictionAdministrator", jurisdiction_id=world["iac"].id, user_id=world["user"].id
+    )
     session.commit()
 
     left = svc.leave_jurisdiction(session, world["user"].id, "IAC")

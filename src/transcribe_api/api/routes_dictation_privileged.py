@@ -159,9 +159,10 @@ async def get_admin_roles(
     ),
 ) -> RolesResponse:
     """The roles the caller may assign (DIAAT-374: ``{"roles": [...]}``, which is what the Users
-    tab reads), by the contract's assignment rules for the role they act in: a
-    JurisdictionAdministrator Judge and LegalTextManager; a JurisdictionSuperAdministrator also
-    JurisdictionAdministrator; acting as SystemAdministrator JurisdictionSuperAdministrator only. Never SystemAdministrator, which nobody can grant."""
+    tab reads), by the assignment rules for the role they act in (DIAAT-406): a
+    JurisdictionAdministrator Judge and LegalTextManager; a JurisdictionSuperAdministrator
+    JurisdictionAdministrator; acting as SystemAdministrator JurisdictionSuperAdministrator. Never
+    SystemAdministrator, which nobody can grant."""
     ctx = auth_context.context_of(admin_user)
     return RolesResponse(roles=assignable_roles(ctx.role if ctx else None, auth_context.sysadmin_of(admin_user)))
 
@@ -172,9 +173,8 @@ async def get_admin_roles(
 # The routes below edit the legal wording (hearing types, legal frameworks, anonymity
 # text) of ONE jurisdiction: the one the request works in (the token's context, as for every
 # route). Who may: whoever holds ``legal_text.manage`` in it, which is the LegalTextManager
-# acting in that jurisdiction (DIAAT-373; a JurisdictionAdministrator edits the screen wording
-# of its jurisdiction, not its legal text, and a SystemAdministrator reads no jurisdiction's
-# material). A jurisdiction without the IAC decision template has no legal wording to edit
+# acting in that jurisdiction (DIAAT-373, DIAAT-406: no administrator edits legal text, and a
+# SystemAdministrator reads no jurisdiction's material). A jurisdiction without the IAC decision template has no legal wording to edit
 # (404, as for its judges).
 # ---------------------------------------------------------------------------
 
@@ -371,12 +371,10 @@ async def update_anonymity_status(
 # runs anything on a cluster. Plain defs: the database work is synchronous, so
 # FastAPI runs them in the threadpool. Each change is audited.
 #
-# ``jurisdictions.manage``, a jurisdiction-scoped permission: a JurisdictionAdministrator
-# sees and changes only the jurisdiction they are working in (403 ``jurisdiction_not_in_scope``
-# for another), a JurisdictionSuperAdministrator any. Creating one also needs
-# ``jurisdiction.create`` (JurisdictionSuperAdministrator). A SystemAdministrator has none of
-# these (DIAAT-389). Who holds a role in a jurisdiction is not here: it is the assignment
-# endpoints' (api/routes_admin_users.py).
+# ``jurisdictions.manage``: the JurisdictionSuperAdministrator's, for every jurisdiction (DIAAT-406).
+# Creating one, renaming it or changing its stage also needs ``jurisdiction.create``. A
+# JurisdictionAdministrator and a SystemAdministrator have none of these. Who holds a role in a
+# jurisdiction is not here: it is the assignment endpoints' (api/routes_admin_users.py).
 
 _JURISDICTION_ADMIN = require_permission("jurisdictions.manage")
 
@@ -512,9 +510,7 @@ def _jurisdiction_exists(code: str) -> bool:
 def admin_list_jurisdictions(
     admin_user: User = Depends(_JURISDICTION_ADMIN),
 ) -> list[JurisdictionAdminRecord]:
-    """The jurisdictions the caller manages, with their settings and member count: every one for
-    a JurisdictionSuperAdministrator, only the one they are working in for a
-    JurisdictionAdministrator."""
+    """Every jurisdiction, with its settings and member count (a JurisdictionSuperAdministrator's)."""
     scope = jurisdiction_scope(admin_user)
     return [
         JurisdictionAdminRecord(**row)
@@ -540,9 +536,7 @@ def admin_put_jurisdiction(
     """Create or update a jurisdiction. Its settings are validated first (400); a
     stale ``version`` is refused (409). Updating needs the jurisdiction to be in the caller's
     scope; creating one, renaming one, enabling or disabling one, moving it between stages and changing its
-    display name or service need ``jurisdiction.create`` too (403 ``permission_denied``): a
-    JurisdictionAdministrator changes only the template, features and wording of its own jurisdiction (the
-    ``settings``), never its name, stage or whether it is on."""
+    display name or service need ``jurisdiction.create`` too (403 ``permission_denied``)."""
     if _jurisdiction_exists(code):
         assert_jurisdiction_in_scope(admin_user, code)
         if not has_permission(admin_user, "jurisdiction.create"):
@@ -595,9 +589,8 @@ def admin_put_jurisdiction(
 # A jurisdiction's screen wording, by code (DIAAT-391, DIAAT-394)
 # ---------------------------------------------------------------------------
 # The same wording as ``/api/jurisdictions/wording`` (the jurisdiction the caller acts in), by
-# the jurisdiction's code, for the Jurisdictions screen: a JurisdictionSuperAdministrator edits
-# any jurisdiction's, a JurisdictionAdministrator only its own (403 ``jurisdiction_not_in_scope``
-# for another). ``jurisdiction.wording.edit``, scoped.
+# the jurisdiction's code, for the Jurisdictions screen: ``jurisdiction.wording.edit``, which only the
+# JurisdictionSuperAdministrator holds (any jurisdiction).
 
 
 def _wording_view(code: str) -> JurisdictionWording:
@@ -648,10 +641,8 @@ def admin_put_jurisdiction_wording(
 
 
 # ---------------------------------------------------------------------------
-# A jurisdiction's Word templates (DIAAT-344): ``jurisdictions.manage``, as for the jurisdiction
-# itself, so a JurisdictionAdministrator (in the jurisdiction they work in) or a
-# JurisdictionSuperAdministrator (any); not a LegalTextManager, whose ``templates.manage`` is for
-# the legal text templates, and not a SystemAdministrator (DIAAT-389)
+# A jurisdiction's Word templates (DIAAT-344): ``templates.manage``, the JurisdictionAdministrator's, in
+# the jurisdiction it acts in only (DIAAT-406)
 # ---------------------------------------------------------------------------
 # Uploaded as the raw request body with Content-Type exactly application/octet-stream,
 # like the browser's other uploads: Front Door's WAF blocks multipart bodies, and lets
@@ -659,7 +650,7 @@ def admin_put_jurisdiction_wording(
 # comes in X-Upload-Filename (URL-encoded).
 
 UPLOAD_CONTENT_TYPE = "application/octet-stream"
-_TEMPLATE_ADMIN = _JURISDICTION_ADMIN
+_TEMPLATE_ADMIN = require_permission("templates.manage")
 
 
 class TemplateAdminRecord(BaseModel):

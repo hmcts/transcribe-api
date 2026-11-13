@@ -3,7 +3,7 @@
 each kind of user without Entra: ``POST /api/auth/session`` with ``X-Dev-Persona: <name>``
 (only when ENVIRONMENT=local).
 
-Creates, if missing, the jurisdictions ET and IAC, the personas' users
+Creates, if missing, the jurisdictions ET, IAC and SSCS, the personas' users
 (``<name>@localhost.test``) and their role assignments:
 
     judge-et     Judge in ET                              jadmin-iac   JurisdictionAdministrator in IAC
@@ -11,6 +11,7 @@ Creates, if missing, the jurisdictions ET and IAC, the personas' users
     multi        Judge in ET, JurisdictionAdministrator   legal-iac    LegalTextManager in IAC
                  in IAC                                   jsuper       JurisdictionSuperAdministrator (global)
     sysadmin     no assignments, SystemAdministrator      no-role      no assignments
+    many         Judge in IAC, Judge and LegalTextManager in ET, JurisdictionAdministrator in SSCS
 
 Safe to run again: what exists is left as it is, and nothing is deleted. It refuses to run
 unless ENVIRONMENT is local and the database is the developer's own (the same check as the

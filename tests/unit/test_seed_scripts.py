@@ -43,6 +43,10 @@ CONTRACT_PERSONAS = {
     "judge-et": ([("ET", "Judge")], False),
     "judge-iac": ([("IAC", "Judge")], False),
     "multi": ([("ET", "Judge"), ("IAC", "JurisdictionAdministrator")], False),
+    "many": (
+        [("IAC", "Judge"), ("ET", "Judge"), ("ET", "LegalTextManager"), ("SSCS", "JurisdictionAdministrator")],
+        False,
+    ),
     "jadmin-iac": ([("IAC", "JurisdictionAdministrator")], False),
     "jadmin-et": ([("ET", "JurisdictionAdministrator")], False),
     "legal-iac": ([("IAC", "LegalTextManager")], False),
@@ -117,12 +121,12 @@ def test_the_personas_script_creates_the_jurisdictions_users_and_assignments_and
         users = session.exec(select(User)).all()
         assignments = session.exec(select(RoleAssignment)).all()
 
-    assert sorted(first["jurisdictions"]) == ["ET", "IAC"]
-    assert len(first["users"]) == 9 and len(first["assignments"]) == 8
+    assert sorted(first["jurisdictions"]) == ["ET", "IAC", "SSCS"]
+    assert len(first["users"]) == 10 and len(first["assignments"]) == 12
     assert second == {"jurisdictions": [], "users": [], "assignments": []}  # nothing the second time
     assert jurisdictions["ET"].name == "Employment Tribunal"
     assert jurisdictions["IAC"].name == "Immigration and Asylum Chamber" and jurisdictions["IAC"].enabled
-    assert len(users) == 9 and len(assignments) == 8
+    assert len(users) == 10 and len(assignments) == 12
     assert all(u.role is None and u.is_active for u in users)
 
 

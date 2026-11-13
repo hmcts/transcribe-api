@@ -104,11 +104,8 @@ def test_assignments_are_the_users_enabled_jurisdictions_only(engine):
     add_member(engine, user, off)
     add_member(engine, other, iac)
 
-    # The administrator role in ET brings Judge and LegalTextManager there; OFF is disabled and left out.
     assert _assignments(engine, user) == [
-        ("ET", "Judge"),
         ("ET", "JurisdictionAdministrator"),
-        ("ET", "LegalTextManager"),
         ("IAC", "Judge"),
     ]
 
@@ -198,11 +195,7 @@ def test_a_new_user_claims_assignments_added_for_their_email(engine):
     user = sign_up(engine, "ET.Judge@Example.test")
 
     # Claimed, and nothing else: an ET test judge sees the ET only.
-    assert _assignments(engine, user) == [
-        ("ET", "Judge"),
-        ("ET", "JurisdictionAdministrator"),
-        ("ET", "LegalTextManager"),
-    ]
+    assert _assignments(engine, user) == [("ET", "JurisdictionAdministrator")]
     with Session(engine) as session:
         assert session.exec(select(RoleAssignment.pending_email)).all() == [None]
 
@@ -263,8 +256,11 @@ def test_current_gives_the_jurisdiction_the_user_acts_in_with_its_wording(engine
     iac = add_jurisdiction(
         engine,
         "IAC",
-        settings={"wording": {"records.column_title": "Hearing"}, "template": "iac_decision",
-                  "features": {"hearing_recordings": True}},
+        settings={
+            "wording": {"records.column_title": "Hearing"},
+            "template": "iac_decision",
+            "features": {"hearing_recordings": True},
+        },
     )
     user = add_user(engine, roles=())
     add_member(engine, user, iac)
