@@ -133,7 +133,7 @@ def record(
     first (a clash is then the commit's, as without the history)."""
     with session.no_autoflush:
         latest = _latest(session, kind_of(row), row.id)
-        if latest is None or latest.snapshot != snapshot_of(row):
+        if restored_from is not None or latest is None or latest.snapshot != snapshot_of(row):
             _add(session, row, saved_by=saved_by, saved_at=datetime.now(UTC), restored_from=restored_from)
 
 
