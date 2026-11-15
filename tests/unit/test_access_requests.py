@@ -114,6 +114,16 @@ def test_an_unknown_or_disabled_jurisdiction_is_a_404(world, cast):
         assert response.status_code == 404 and code(response) == "jurisdiction_not_found"
 
 
+def test_a_jurisdiction_in_draft_or_test_cannot_be_asked_for(world, cast):
+    """Until it is live it is its administrators' and testers' only (DIAAT-345, DIAAT-357)."""
+    add_jurisdiction(world.engine, "NEW", stage="draft")
+    add_jurisdiction(world.engine, "TRY", stage="test")
+    for jurisdiction in ("NEW", "TRY"):
+        response = ask(cast.nobody, jurisdiction, [JUDGE])
+        assert response.status_code == 404 and code(response) == "jurisdiction_not_found"
+    assert cast.nobody.get("/api/access-requests/mine").json() == []
+
+
 def test_an_identical_pending_request_is_a_409_but_a_different_one_is_not(world, cast):
     assert ask(cast.nobody, "IAC", [JUDGE]).status_code == 201
     duplicate = ask(cast.nobody, "IAC", [JUDGE])

@@ -47,10 +47,10 @@ def create_access_request(
     user: User = Depends(signed_in_endpoint),
 ) -> AccessRequestOut:
     """Ask for Judge and/or LegalTextManager in a jurisdiction. 400 ``role_not_requestable`` for
-    any other role, 404 for an unknown or disabled jurisdiction, 409 ``duplicate_request`` for an
+    any other role, 404 for an unknown, disabled or not yet live jurisdiction, 409 ``duplicate_request`` for an
     identical pending request and ``already_assigned`` for a role already held there. 403
     ``permission_denied`` in a context without ``access.request`` (acting as SystemAdministrator). The people
-    who can approve it are emailed after the response."""
+    who can approve it, and the product team's inbox when set, are emailed after the response."""
     response.headers["Cache-Control"] = "no-store"
     # With no context nobody holds a permission, and a user with no role must still be able to ask.
     if context_of(user) is not None:

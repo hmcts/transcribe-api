@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     # template id sends nothing for that email and says so in the log (domain/notify/access_request_emails.py).
     GOV_NOTIFY_TEMPLATE_ACCESS_REQUEST: str | None = None
     GOV_NOTIFY_TEMPLATE_ACCESS_DECIDED: str | None = None
+    # DIAAT-357: the product team's inbox, also sent "new access request" (with a link to the app,
+    # not to the approvals queue). Blank: only the approvers are.
+    ACCESS_REQUEST_TEAM_EMAIL: str | None = None
     # JWT Verification Settings - Strict by default
     JWT_ENABLE_VERIFICATION: bool = True
     JWT_VERIFICATION_STRICT: bool = True
