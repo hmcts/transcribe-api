@@ -186,7 +186,7 @@ For any signed-in user, with or without a role (someone who holds roles may ask 
 
 * `POST /api/access-requests` body `{"jurisdiction": "IAC", "roles": ["Judge", "LegalTextManager"]}` -> **201** `AccessRequest`
   `{id, jurisdiction: {code, name}, roles, status, created_at, decided_at, reason}`. 400 `role_not_requestable` for anything but Judge and
-  LegalTextManager (400 `roles_required` for none), 404 `jurisdiction_not_found` (unknown or disabled), 409 `duplicate_request` (an identical
+  LegalTextManager (400 `roles_required` for none), 404 `jurisdiction_not_found` (unknown, disabled, or in draft or test: DIAAT-357), 409 `duplicate_request` (an identical
   pending request), 409 `already_assigned` (they hold a requested role there), 409 `too_many_pending_requests` (five are waiting already: withdraw one). 429 `too_many_requests` (ten made in the last 24 hours, decided or not: asking, withdrawing and asking again would email the approvers each time).
   403 `permission_denied` while acting as SystemAdministrator (DIAAT-407): a caller in a context needs `access.request`, which every role but
   SystemAdministrator holds. With no context (no role yet, or several held and none chosen) asking still works, and a SystemAdministrator acting in
@@ -214,9 +214,11 @@ The requester's next `POST /api/auth/session` has the new assignments, and `me.p
 
 After the response (never failing or delaying it): a new request emails every active JurisdictionAdministrator of its jurisdiction (who alone decide
 it, DIAAT-406), once each (not the requester), with `requester_name`, `jurisdiction_name`, `roles` and
-`link` = `{APP_URL}/admin?tab=approvals&request=<id>`; an approval or rejection emails the requester `jurisdiction_name`, `roles`, `outcome`
+`link` = `{APP_URL}/admin?tab=approvals&request=<id>`, and (DIAAT-357) the product team's inbox `ACCESS_REQUEST_TEAM_EMAIL`
+when set, the same but with `link` = `{APP_URL}/` (once if it is also an approver's address, never the requester's); an approval or rejection emails the requester `jurisdiction_name`, `roles`, `outcome`
 (`approved`/`rejected`) and `link` = `{APP_URL}/`; a withdrawal emails nobody. The reason is not in an email. Settings:
-`GOV_NOTIFY_API_KEY` (as the pipeline's), `GOV_NOTIFY_TEMPLATE_ACCESS_REQUEST` and `GOV_NOTIFY_TEMPLATE_ACCESS_DECIDED` (template ids). With no key
+`GOV_NOTIFY_API_KEY` (as the pipeline's), `GOV_NOTIFY_TEMPLATE_ACCESS_REQUEST` and `GOV_NOTIFY_TEMPLATE_ACCESS_DECIDED` (template ids),
+`ACCESS_REQUEST_TEAM_EMAIL` (blank: approvers only). With no key
 nothing is sent and the log says what would have been (no addresses):
 
 ```

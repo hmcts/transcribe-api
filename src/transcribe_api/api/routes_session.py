@@ -7,7 +7,7 @@ The rest work for any signed-in user, with or without a context chosen:
 * ``GET /api/me/permissions``: who am I, what do I hold, what am I acting as and may do;
 * ``PUT /api/me/context``: choose the (jurisdiction, role) to act as (403 for one not held);
 * ``DELETE /api/me/jurisdictions/{code}``: leave a jurisdiction (audited ``membership.leave``);
-* ``GET /api/jurisdictions/public``: the enabled jurisdictions, for the access request form.
+* ``GET /api/jurisdictions/public``: the enabled, live jurisdictions, for the access request form.
 
 Each token-returning route answers ``{token, expires_at, me}``: the web app keeps the token
 in its server-side session, never in the browser. Plain defs: the database work is
@@ -236,11 +236,11 @@ class PublicJurisdiction(JurisdictionRef):
 
 @router.get("/jurisdictions/public", response_model=list[PublicJurisdiction])
 def public_jurisdictions(response: Response, _user: User = Depends(signed_in_endpoint)) -> list[PublicJurisdiction]:
-    """Every enabled jurisdiction, by name, with the roles that can be requested in it: what a
-    user with no role chooses from on the access request form. Any signed-in user, with or
-    without a role or a context."""
+    """Every enabled, live jurisdiction, by name, with the roles that can be requested in it: what a
+    user with no role chooses from on the access request form. One in draft or test is not named
+    to outsiders (DIAAT-345, DIAAT-357). Any signed-in user, with or without a role or a context."""
     response.headers["Cache-Control"] = "no-store"
     with Session(get_engine()) as session:
-        rows = session.exec(select(Jurisdiction).where(Jurisdiction.enabled).order_by(Jurisdiction.name)).all()
+        rows = session.exec(select(Jurisdiction).where(Jurisdiction.enabled, Jurisdiction.stage == "live").order_by(Jurisdiction.name)).all()
     return [PublicJurisdiction(code=row.code, name=row.name, roles=list(REQUESTABLE_ROLES)) for row in rows]
 

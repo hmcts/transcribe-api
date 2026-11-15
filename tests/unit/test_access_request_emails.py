@@ -91,6 +91,66 @@ def test_a_new_request_emails_the_jurisdictions_administrators_once_each(world, 
     assert len(notify.sent) == 2  # and nothing to the ET's administrator, the judge or the requester
 
 
+@pytest.fixture
+def team_inbox(monkeypatch):
+    from transcribe_api.runtime import settings_dictation
+
+    def set_to(address: str) -> None:
+        monkeypatch.setenv("ACCESS_REQUEST_TEAM_EMAIL", address)
+        settings_dictation.get_settings.cache_clear()
+
+    yield set_to
+    monkeypatch.delenv("ACCESS_REQUEST_TEAM_EMAIL", raising=False)
+    settings_dictation.get_settings.cache_clear()
+
+
+def test_the_product_teams_inbox_is_told_too_with_a_link_to_the_app(world, cast, notify, team_inbox):
+    """DIAAT-357. Not the approvals queue: only the jurisdiction's administrators can use it."""
+    team_inbox("benchnotes-team@justice.gov.uk")
+    ask(cast.requester, roles=(JUDGE,))
+
+    assert recipients(notify, "template-new-request") == [
+        "abe@justice.gov.uk",
+        "ada@justice.gov.uk",
+        "benchnotes-team@justice.gov.uk",
+    ]
+    (mail,) = [m for m in notify.sent if m["to"] == "benchnotes-team@justice.gov.uk"]
+    assert mail["personalisation"] == {
+        "requester_name": "Rita Requester",
+        "jurisdiction_name": "Immigration and Asylum Chamber",
+        "roles": "Judge",
+        "link": "http://localhost:8000/",
+    }
+
+
+def test_without_a_team_inbox_only_the_approvers_are_told(world, cast, notify, team_inbox):
+    team_inbox("  ")
+    ask(cast.requester)
+    assert recipients(notify, "template-new-request") == ["abe@justice.gov.uk", "ada@justice.gov.uk"]
+
+
+def test_a_team_inbox_that_is_an_approvers_or_the_requesters_address_is_not_emailed_again(
+    world, cast, notify, team_inbox
+):
+    team_inbox("ADA@justice.gov.uk")
+    ask(cast.requester)
+    assert recipients(notify, "template-new-request") == ["abe@justice.gov.uk", "ada@justice.gov.uk"]
+
+    notify.sent.clear()
+    team_inbox("rita@justice.gov.uk")
+    ask(cast.requester, where="ET")
+    assert recipients(notify, "template-new-request") == ["eli@justice.gov.uk"]
+
+
+def test_a_decision_is_not_sent_to_the_team_inbox(world, cast, notify, team_inbox):
+    team_inbox("benchnotes-team@justice.gov.uk")
+    request_id = ask(cast.requester).json()["id"]
+    notify.sent.clear()
+    approved = cast.admin_iac.post(f"/api/admin/access-requests/{request_id}/approve", role=ADMIN, jurisdiction="IAC")
+    assert approved.status_code == 200
+    assert recipients(notify, "template-decided") == ["rita@justice.gov.uk"]
+
+
 def test_a_new_request_does_not_email_the_super_administrators(world, cast, notify):
     assert ask(cast.requester).status_code == 201
     assert ask(cast.requester, where="ET").status_code == 201
@@ -350,6 +410,7 @@ def test_the_notify_template_ids_are_settings_and_blank_by_default():
     fields = Settings.model_fields
     assert fields["GOV_NOTIFY_TEMPLATE_ACCESS_REQUEST"].default is None
     assert fields["GOV_NOTIFY_TEMPLATE_ACCESS_DECIDED"].default is None
+    assert fields["ACCESS_REQUEST_TEAM_EMAIL"].default is None
 
 
 def test_the_template_ids_come_from_the_settings(monkeypatch):

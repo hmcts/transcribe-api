@@ -113,7 +113,7 @@ All under `/api`. Errors are `{"detail": {"code": ..., "message": ...}}`.
 | `GET /me/permissions` | no | `MeResponse` |
 | `PUT /me/context` `{jurisdiction, role}` | no | `{token, expires_at, me}`; 403 `context_not_available` for a pair not held (nothing changes) |
 | `DELETE /me/jurisdictions/{code}` | no | leave a jurisdiction: deletes the user's assignments **there only**, audited `membership.leave`; same body as the session. 404 `not_a_member` |
-| `GET /jurisdictions/public` | no | `[{code, name, roles}]`, the enabled jurisdictions and the roles that can be requested there (`Judge`, `LegalTextManager`) |
+| `GET /jurisdictions/public` | no | `[{code, name, roles}]`, the enabled, live jurisdictions (DIAAT-357) and the roles that can be requested there (`Judge`, `LegalTextManager`) |
 | `GET /jurisdictions/current` | yes | the active jurisdiction's `{code, name, template, features, wording}` (replaces what `GET /jurisdictions/me` gave the web app for its wording and features) |
 
 `MeResponse`:

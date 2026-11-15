@@ -898,8 +898,11 @@ def test_a_context_in_a_jurisdiction_disabled_since_is_403(client, world, db):
     assert response.status_code == 403 and response.json()["detail"]["code"] == "jurisdiction_not_available"
 
 
-def test_the_public_jurisdictions_are_the_enabled_ones_by_name(client, world, db):
+def test_the_public_jurisdictions_are_the_enabled_live_ones_by_name(client, world, db):
     add_jurisdiction(db, "OFF", enabled=False)
+    # Not named to outsiders before it is live (DIAAT-357).
+    add_jurisdiction(db, "NEW", stage="draft")
+    add_jurisdiction(db, "TRY", stage="test")
     token = Person(client).sign_in().json()["token"]
     assert client.get("/api/jurisdictions/public", headers=bearer(token)).json() == [
         {"code": "ET", "name": "ET name", "roles": ["Judge", "LegalTextManager"]},

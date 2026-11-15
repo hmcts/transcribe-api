@@ -3,7 +3,8 @@ a JurisdictionAdministrator of it approves or rejects (DIAAT-406). Anyone may as
 role, or someone who holds roles and wants one in another jurisdiction (or another role in one of theirs).
 
 * Only ``REQUESTABLE_ROLES`` can be asked for (400 ``role_not_requestable``); the jurisdiction must
-  exist and be enabled (404 ``jurisdiction_not_found``); a user already holding a requested role
+  exist, be enabled and be live (404 ``jurisdiction_not_found``: one in draft or test is its
+  administrators' and testers' only, DIAAT-345, DIAAT-357); a user already holding a requested role
   there gets 409 ``already_assigned``; an identical request still pending gets 409
   ``duplicate_request``.
 * Approving writes the requested assignments, idempotently (a role the user already holds is
@@ -120,7 +121,9 @@ def create_request(session: Session, user: User, *, jurisdiction_code: str, role
             400, "role_not_requestable", f"You can only ask for {' and '.join(REQUESTABLE_ROLES)}."
         )
     jurisdiction = session.exec(
-        select(Jurisdiction).where(Jurisdiction.code == jurisdiction_code.strip().upper(), Jurisdiction.enabled)
+        select(Jurisdiction).where(
+            Jurisdiction.code == jurisdiction_code.strip().upper(), Jurisdiction.enabled, Jurisdiction.stage == "live"
+        )
     ).first()
     if jurisdiction is None:
         raise error(404, "jurisdiction_not_found", "There is no such jurisdiction.")

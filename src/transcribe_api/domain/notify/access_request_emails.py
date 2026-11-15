@@ -5,7 +5,10 @@
   knows). Personalisation: ``requester_name``, ``jurisdiction_name``, ``roles`` and
   ``link``, which opens the request in Admin's approvals queue (``{APP_URL}/admin?tab=approvals&
   request=<id>``): the link carries only the request's ID, the approver signs in and is checked for
-  ``access.approve`` like for any other request.
+  ``access.approve`` like for any other request. Also to the product team's inbox when
+  ``ACCESS_REQUEST_TEAM_EMAIL`` is set (DIAAT-357), with ``link`` to the app instead: the approvals
+  queue is the jurisdiction's administrators' only. Once, if it is an approver's address too; never
+  when it is the requester's.
 * **Access request decided**: to the requester when it is approved or rejected (never for one they
   withdrew). Personalisation: ``jurisdiction_name``, ``roles``, ``outcome`` (``approved`` or
   ``rejected``) and ``link`` to the app. Nothing of the approver's reason.
@@ -139,8 +142,27 @@ def approver_recipients(session: Session, request: AccessRequest, jurisdiction: 
     return recipients
 
 
+def team_recipients(jurisdiction: Jurisdiction, requester: User, roles: list[str], approvers: list[Recipient]) -> list[Recipient]:
+    """The product team's inbox (``ACCESS_REQUEST_TEAM_EMAIL``), when set and not already emailed."""
+    address = (get_settings().ACCESS_REQUEST_TEAM_EMAIL or "").strip()
+    taken = {r.email.lower() for r in approvers} | {(requester.email or "").strip().lower()}
+    if not address or address.lower() in taken:
+        return []
+    return [
+        Recipient(
+            address,
+            {
+                "requester_name": requester.name or requester.email,
+                "jurisdiction_name": jurisdiction.name,
+                "roles": _roles_text(roles),
+                "link": f"{_app_url()}/",
+            },
+        )
+    ]
+
+
 def notify_approvers(request_id: UUID) -> None:
-    """Tell the approvers of a new request. Run after the response; never raises."""
+    """Tell the approvers of a new request, and the product team. Run after the response; never raises."""
     try:
         with Session(db_connection.get_engine()) as session:
             loaded = _load(session, request_id)
@@ -148,6 +170,7 @@ def notify_approvers(request_id: UUID) -> None:
                 return
             request, jurisdiction, requester, roles = loaded
             recipients = approver_recipients(session, request, jurisdiction, requester, roles)
+            recipients += team_recipients(jurisdiction, requester, roles, recipients)
         dispatch(EMAIL_NEW_REQUEST, recipients)
     except Exception as exc:
         logger.warning("Notify email %s not sent (%s)", EMAIL_NEW_REQUEST, type(exc).__name__)
