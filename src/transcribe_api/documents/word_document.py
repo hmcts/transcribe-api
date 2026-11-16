@@ -223,6 +223,15 @@ class WordDocument:
                 previous.addnext(para)
             previous = para
             written.append(para)
+        if template_ppr is not None:
+            sect_pr = template_ppr.find(qn("w:sectPr"))
+            if sect_pr is not None:
+                ppr = written[-1].find(qn("w:pPr"))
+                change = ppr.find(qn("w:pPrChange"))
+                if change is not None:
+                    change.addprevious(deepcopy(sect_pr))
+                else:
+                    ppr.append(deepcopy(sect_pr))
         written_ids = {id(p) for p in written}
         for old in list(sdt_content):
             if old.tag == qn("w:p") and id(old) not in written_ids:
