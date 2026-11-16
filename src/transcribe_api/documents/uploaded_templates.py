@@ -738,8 +738,21 @@ def box_paragraphs(blocks: list[ContentBlock]) -> list[BoxParagraph]:
             counters.clear()
             paragraphs.append(BoxParagraph(text=block.text, bold=True, underline=block.underline))
         elif isinstance(block, Paragraph):
-            level = block.list_level or 0
-            if level <= 0:
+            level = block.list_level
+            if level == 0:
+                counters.clear()
+                paragraphs.append(
+                    BoxParagraph(
+                        text=block.text,
+                        label="•",
+                        bold=block.bold,
+                        italic=block.italic,
+                        underline=block.underline,
+                        left_indent_pt=block.left_indent_pt or _LIST_INDENT_PT,
+                    )
+                )
+                continue
+            if level is None or level < 0:
                 counters.clear()
                 paragraphs.append(
                     BoxParagraph(
