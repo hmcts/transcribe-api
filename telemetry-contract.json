@@ -449,6 +449,7 @@
     },
     "live_draft.trigger": {
       "allowed_values": [
+        "edit",
         "interval",
         "late-finalisation",
         "pause",

@@ -15,7 +15,6 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
 from tests.unit.jurisdiction_fixtures import add_jurisdiction, add_member, add_user, client_as, sign_up
-from transcribe_api.api.routes_dictation import TEMPLATE_NOT_AVAILABLE
 from transcribe_api.domain import interface_dictation, jurisdictions
 from transcribe_api.domain.assignments import load_assignments
 from transcribe_api.domain.auth.app_token import Context
@@ -67,10 +66,13 @@ def test_settings_accept_known_wording_keys_only():
         JurisdictionSettings.model_validate({"wording": {"home.intro": "x" * 501}})
     with pytest.raises(ValueError):
         JurisdictionSettings.model_validate({"template": "et_judgment"})
+    # The built-in IAC decision is gone: an older admin page still sends it, never kept.
+    assert JurisdictionSettings.model_validate({"template": "iac_decision"}).template is None
 
 
 def test_a_stored_row_keeps_what_this_release_knows_and_drops_the_rest(caplog):
-    """A key from a newer release or a hand edit must not cost the IAC its template."""
+    """A key from a newer release or a hand edit must not cost the IAC its wording; the
+    built-in decision template it had is no longer used."""
     settings = parse_settings(
         {
             "wording": {"records.column_title": "Hearing", "future.key": "x", "home.intro": 3},
@@ -80,7 +82,7 @@ def test_a_stored_row_keeps_what_this_release_knows_and_drops_the_rest(caplog):
         }
     )
     assert settings.wording == {"records.column_title": "Hearing"}
-    assert settings.template == "iac_decision"
+    assert settings.template is None
     assert settings.features.hearing_recordings is True
     assert "ignored" in caplog.text
 
@@ -272,7 +274,7 @@ def test_current_gives_the_jurisdiction_the_user_acts_in_with_its_wording(engine
     assert response.json() == {
         "code": "IAC",
         "name": "IAC name",
-        "template": "iac_decision",
+        "template": None,  # judges choose its uploaded templates
         "features": {"hearing_recordings": True},
         "wording": {"records.column_title": "Hearing"},
     }
@@ -331,8 +333,9 @@ def test_routes_refuse_a_global_role_which_has_no_jurisdiction(engine, jurisdict
     assert response.json()["detail"]["code"] == NO_JURISDICTION
 
 
-def test_document_content_is_the_iac_templates_only(engine, jurisdiction_app, mocker):
-    iac = add_jurisdiction(engine, "IAC", settings={"template": "iac_decision"})
+def test_every_jurisdiction_has_its_document_content(engine, jurisdiction_app, mocker):
+    """Its uploaded templates' legal issues, hearing type and anonymity are filled from it."""
+    iac = add_jurisdiction(engine, "IAC")
     et = add_jurisdiction(engine, "ET")
     user = add_user(engine)
     add_member(engine, user, iac)
@@ -344,8 +347,7 @@ def test_document_content_is_the_iac_templates_only(engine, jurisdiction_app, mo
     client = client_as(jurisdiction_app, engine, user)
 
     assert client.get("/api/document-content", headers={"X-Jurisdiction": "IAC"}).status_code == 200
-    refused = client.get("/api/document-content", headers={"X-Jurisdiction": "ET"})
-    assert (refused.status_code, refused.json()) == (404, {"detail": TEMPLATE_NOT_AVAILABLE})
+    assert client.get("/api/document-content", headers={"X-Jurisdiction": "ET"}).status_code == 200
 
 
 def test_the_live_draft_is_the_jurisdictions_own(engine, jurisdiction_app, mocker):
@@ -412,7 +414,7 @@ def test_an_upload_started_in_a_jurisdiction_the_user_has_since_left_stays_there
         upload_id, user.id, lambda: jurisdictions.upload_jurisdiction_id(upload_id, user.id)
     )
     assert made.jurisdiction_id == et.id
-    assert jurisdictions.owned_transcription_jurisdiction(made.id, user.id) == (True, et.id)
+    assert jurisdictions.transcription_owner_and_jurisdiction(made.id) == (user.id, et.id)
 
 
 def test_the_jurisdiction_of_an_existing_transcription_is_not_looked_up(engine):
@@ -426,12 +428,12 @@ def test_the_jurisdiction_of_an_existing_transcription_is_not_looked_up(engine):
     assert interface_dictation.load_or_create_transcription(saved.id, user.id, must_not_ask).id == saved.id
 
 
-def test_only_a_jurisdiction_with_the_decision_template_can_submit_a_decision(engine, jurisdiction_app, mocker):
-    et = add_jurisdiction(engine, "ET")
+def test_no_jurisdiction_can_submit_the_built_in_decision_form(engine, jurisdiction_app, mocker):
+    et = add_jurisdiction(engine, "ET", settings={"template": "iac_decision"})
     user = add_user(engine)
     add_member(engine, user, et)
     save = mocker.patch("transcribe_api.api.routes_dictation.save_transcription")
-    render = mocker.patch("transcribe_api.api.routes_dictation.render_hearing_document")
+    render = mocker.patch("transcribe_api.api.routes_dictation._render_uploaded_template")
     body = {
         "form_data": {
             "location": "Birmingham",
@@ -448,8 +450,8 @@ def test_only_a_jurisdiction_with_the_decision_template_can_submit_a_decision(en
 
     response = client_as(jurisdiction_app, engine, user).post("/api/live-transcription/submission", json=body)
 
-    # The template gate, not an unknown route, and before anything is made.
-    assert (response.status_code, response.json()) == (404, {"detail": TEMPLATE_NOT_AVAILABLE})
+    # Refused before anything is made: a submission names one of its uploaded templates.
+    assert response.status_code == 422
     render.assert_not_called()
     save.assert_not_called()
 

@@ -5,12 +5,11 @@ identified (``transcriptionjob.provenance``) without storing content in monitori
 """
 
 import asyncio
-import contextvars
 import json
 import threading
+import uuid
 from datetime import datetime
 from importlib import metadata
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -150,34 +149,47 @@ def test_a_decision_document_records_its_template_version_release_and_time(clien
 
     as_user(_make_user(roles=["Judge"]))
     mocker.patch("transcribe_api.runtime.version.APP_VERSION", "9.9.9-release")
-    this_content = {"intro": "the content this render used"}
-
-    def render(**_):
-        content_loader._used(this_content)
-        # Another request loads different content meanwhile (outside this context).
-        contextvars.Context().run(content_loader._used, {"intro": "another request's content"})
-        path = MagicMock(spec=Path)
-        path.exists.return_value = False
-        return path
-
-    mocker.patch("transcribe_api.api.routes_dictation.render_hearing_document", side_effect=render)
     with capture_telemetry() as telemetry:
         assert client.post("/api/live-transcription/submission", json=_MINIMAL_BODY).status_code == 200
         (completed,) = telemetry.events("document_generation.completed")
 
     job = submission.call_args.args[0]
     provenance = Provenance.model_validate(job.provenance)
-    with versioning.track_render() as expected:
-        content_loader._used(this_content)
     assert provenance.output == "decision_document"
-    assert provenance.template == "decision"
-    assert provenance.template_version == expected.version == completed["document.template_version"]
+    assert provenance.template == "uploaded"
+    # The template file's: it fills no box from Document Content.
+    assert provenance.template_version == "0123456789ab" == completed["document.template_version"]
     assert provenance.application_release == "9.9.9-release"
     assert isinstance(provenance.generated_at, datetime)
     assert provenance.speech is None  # dictation: the browser's Speech session, not ours
     text = json.dumps(job.provenance)
     for content in (PII_APPELLANT, PII_RESPONDENT, PII_JUDGE, PII_TRANSCRIPT):
         assert content not in text
+
+
+def test_a_template_filled_from_document_content_is_versioned_by_that_content_too(mocker):
+    from transcribe_api.api import routes_dictation
+    from transcribe_api.documents.uploaded_templates import TemplateField
+
+    fields = [
+        TemplateField(tag="Hearing", label="Hearing type", type="hearing_type"),
+        TemplateField(tag="Background", label="Background", type="dictated", required=False),
+    ]
+    mocker.patch.object(routes_dictation, "_chosen_template", return_value=(fields, b"x", "ab" * 32, "T"))
+    versions = []
+    for description in ("Heard in person.", "Heard by video."):
+        content = {"hearing_types": [{"id": "h", "title": "H", "hearing_description": description}]}
+        mocker.patch(
+            "transcribe_api.jurisdiction_templates.get_document_content",
+            side_effect=lambda _id, content=content: content_loader._used(content),
+        )
+        request = routes_dictation.LiveTranscriptionSubmissionRequest(
+            template_id=uuid.uuid4(), values={"Hearing": "h"}, messages=[]
+        )
+        jurisdiction = MagicMock(id=uuid.uuid4())
+        versions.append(routes_dictation._uploaded_template_plan(request, jurisdiction, uuid.uuid4()).version)
+    assert versions[0] != versions[1]
+    assert "abababababab" not in versions
 
 
 @pytest.fixture

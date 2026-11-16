@@ -17,7 +17,7 @@ from transcribe_api.api import routes_dictation
 
 
 class _BlockingRender:
-    """Stands in for render_hearing_document: blocks until released, then writes."""
+    """Stands in for _render_uploaded_template: blocks until released, then writes."""
 
     def __init__(self, tmp_path: Path) -> None:
         self.output = tmp_path / "hearing-document.docx"
@@ -36,7 +36,7 @@ class _BlockingRender:
 @pytest.fixture
 def render(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _BlockingRender:
     fake = _BlockingRender(tmp_path)
-    monkeypatch.setattr(routes_dictation, "render_hearing_document", fake)
+    monkeypatch.setattr(routes_dictation, "_render_uploaded_template", fake)
     return fake
 
 
@@ -53,7 +53,9 @@ async def _wait_for(event: threading.Event) -> None:
 
 @pytest.mark.asyncio
 async def test_a_render_cancelled_mid_way_is_deleted_when_the_thread_finishes(render: _BlockingRender) -> None:
-    task = asyncio.create_task(routes_dictation._render_hearing_document_off_loop())
+    task = asyncio.create_task(
+        routes_dictation._render_hearing_document_off_loop(renderer=routes_dictation._render_uploaded_template)
+    )
     await _wait_for(render.started)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -66,7 +68,9 @@ async def test_a_render_cancelled_mid_way_is_deleted_when_the_thread_finishes(re
 
 @pytest.mark.asyncio
 async def test_a_render_cancelled_after_it_finished_is_deleted(render: _BlockingRender) -> None:
-    task = asyncio.create_task(routes_dictation._render_hearing_document_off_loop())
+    task = asyncio.create_task(
+        routes_dictation._render_hearing_document_off_loop(renderer=routes_dictation._render_uploaded_template)
+    )
     await _wait_for(render.started)
     render.release.set()
     # Block the loop until the thread has written, so the request is cancelled after
@@ -84,7 +88,9 @@ def test_a_render_abandoned_at_shutdown_is_deleted_after_the_loop_has_closed(ren
     # after that, so the worker thread itself must delete the document.
     loop = asyncio.new_event_loop()
     try:
-        task = loop.create_task(routes_dictation._render_hearing_document_off_loop())
+        task = loop.create_task(
+            routes_dictation._render_hearing_document_off_loop(renderer=routes_dictation._render_uploaded_template)
+        )
         loop.run_until_complete(asyncio.to_thread(render.started.wait, 5))
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -101,6 +107,8 @@ def test_a_render_abandoned_at_shutdown_is_deleted_after_the_loop_has_closed(ren
 async def test_a_completed_render_returns_the_document(render: _BlockingRender) -> None:
     render.release.set()
 
-    output = await routes_dictation._render_hearing_document_off_loop()
+    output = await routes_dictation._render_hearing_document_off_loop(
+        renderer=routes_dictation._render_uploaded_template
+    )
 
     assert output.read_bytes() == b"transcript and judicial notes"

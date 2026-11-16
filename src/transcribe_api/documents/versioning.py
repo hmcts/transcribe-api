@@ -90,6 +90,10 @@ class RenderVersion:
     def version(self) -> str:
         return template_version_for(self._content_digests)
 
+    @property
+    def used_content(self) -> bool:
+        return bool(self._content_digests)
+
 
 @contextlib.contextmanager
 def track_render() -> Iterator[RenderVersion]:

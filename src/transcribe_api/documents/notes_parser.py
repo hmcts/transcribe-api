@@ -46,12 +46,22 @@ class _TipTapHTMLParser(HTMLParser):
     * All other tags are silently ignored; their text content is still captured.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        aliases: dict[str, str] | None = None,
+        default_section: str | None = None,
+    ) -> None:
         super().__init__()
 
+        # Heading text (lower-cased) -> section. With a default section (an uploaded
+        # template's), text before any section heading goes there, and another heading
+        # stays in its section as a bold paragraph; without, both are dropped.
+        self._aliases = _SECTION_ALIAS_MAP if aliases is None else aliases
+        self._keep_other_headings = default_section is not None
         # Sections accumulate Paragraph blocks
-        self._sections: dict[str, list[Paragraph]] = {k: [] for k in _SECTION_KEYS}
-        self._current_section: str | None = None
+        keys = _SECTION_KEYS if aliases is None else dict.fromkeys(aliases.values())
+        self._sections: dict[str, list[Paragraph]] = {k: [] for k in keys}
+        self._current_section: str | None = default_section
 
         # --- per-block state ---
         self._in_heading: bool = False
@@ -159,8 +169,12 @@ class _TipTapHTMLParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
-            heading_text = "".join(self._text_parts).strip().lower()
-            self._current_section = _SECTION_ALIAS_MAP.get(heading_text)
+            heading_text = "".join(self._text_parts).strip()
+            section = self._aliases.get(heading_text.lower())
+            if section is not None or not self._keep_other_headings:
+                self._current_section = section
+            elif heading_text and self._current_section is not None:
+                self._sections[self._current_section].append(Paragraph(text=heading_text, bold=True))
             self._in_heading = False
             self._reset_block()
 
@@ -226,3 +240,25 @@ def parse_notes_html(html: str) -> dict[str, list[Paragraph]]:
     parser = _TipTapHTMLParser()
     parser.feed(html)
     return parser.get_sections()
+
+
+def parse_notes_into_sections(html: str, sections: list[tuple[str, str]]) -> dict[str, list[Paragraph]]:
+    """Split the notes among an uploaded template's dictated sections, given as (key,
+    name) in order: each section's part follows a heading with its name (or, for the
+    IAC's names, an alias such as "Findings of fact"). Text before any such heading is
+    the first section's; other headings stay, as bold paragraphs."""
+    if not sections:
+        return {}
+    aliases = {name.strip().lower(): key for key, name in reversed(sections)}
+    # A section named as one of the IAC's (Facts, Findings of fact...) answers to all its names.
+    by_canonical = {_SECTION_ALIAS_MAP[name]: key for name, key in aliases.items() if name in _SECTION_ALIAS_MAP}
+    for alias, canonical in _SECTION_ALIAS_MAP.items():
+        if canonical in by_canonical and alias not in aliases:
+            aliases[alias] = by_canonical[canonical]
+    first = sections[0][0]
+    if not html or not html.strip():
+        return {key: [] for key, _ in sections}
+    parser = _TipTapHTMLParser(aliases=aliases, default_section=first)
+    parser.feed(html)
+    found = parser.get_sections()
+    return {key: found.get(key, []) for key, _ in sections}

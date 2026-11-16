@@ -876,7 +876,7 @@ def test_the_current_jurisdiction_is_the_contexts(client, world, db):
     token = _acting(client, db, world, pair=("iac", "judge"))
     body = client.get("/api/jurisdictions/current", headers=bearer(token)).json()
     assert body["code"] == "IAC" and body["name"] == "Immigration and Asylum Chamber"
-    assert body["template"] == "iac_decision" and body["features"] == {"hearing_recordings": True}
+    assert body["template"] is None and body["features"] == {"hearing_recordings": True}
     assert "home.intro" in body["wording"]
 
 

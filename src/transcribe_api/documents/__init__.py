@@ -3,9 +3,8 @@
 This module provides tools for generating Word documents from templates.
 
 Quick Start:
-    # For API endpoints - use render_hearing_document
-    from transcribe_api.documents import render_hearing_document
-    path = render_hearing_document(request, output_dir, user_email)
+    # Hearing documents are filled from a jurisdiction's uploaded template:
+    # see documents/uploaded_templates.py.
 
     # For scripts/testing - use DocumentData + render_document
     from transcribe_api.documents import DocumentData, HearingFormData, render_document
@@ -38,8 +37,6 @@ from transcribe_api.documents.models import (
 )
 from transcribe_api.documents.template_renderer import (
     render_document,
-    render_hearing_document,
-    render_hearing_document_structured,
     render_structured_document,
 )
 from transcribe_api.documents.word_document import WordDocument
@@ -59,7 +56,5 @@ __all__ = [
     "WordDocument",
     "build_hearing_document_from_document_data",
     "render_document",
-    "render_hearing_document",
-    "render_hearing_document_structured",
     "render_structured_document",
 ]

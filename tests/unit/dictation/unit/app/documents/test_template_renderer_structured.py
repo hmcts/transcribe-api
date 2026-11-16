@@ -2,7 +2,6 @@
 
 from math import isclose
 from pathlib import Path
-from types import SimpleNamespace
 from zipfile import ZipFile
 
 from defusedxml.ElementTree import fromstring
@@ -22,7 +21,6 @@ from transcribe_api.documents.template_renderer import (
     FEE_AWARD_DROPDOWN_OPTIONS,
     FEE_AWARD_DROPDOWN_PLACEHOLDER,
     render_document,
-    render_hearing_document,
     render_structured_document,
 )
 
@@ -494,47 +492,3 @@ def test_render_structured_document_quotation_increments_1cm_per_nesting_level(t
 
     assert isclose(default_para.paragraph_format.left_indent.cm, 2.0, abs_tol=0.02)
     assert isclose(nested_para.paragraph_format.left_indent.cm, 3.0, abs_tol=0.02)
-
-
-def test_render_hearing_document_uses_structured_pipeline_without_template(monkeypatch, tmp_path: Path) -> None:
-    # If old template pipeline were still used, this non-existent template path would fail.
-    from transcribe_api.documents import template_renderer
-
-    monkeypatch.setattr(template_renderer, "DECISION_TEMPLATE_PATH", tmp_path / "does-not-exist.docx")
-
-    form_data = SimpleNamespace(
-        case_id="PA/12345/2025",
-        location="Taylor House",
-        location_other=None,
-        jurisdiction="First-tier Tribunal Immigration and Asylum Chamber",
-        hearing_date="2026-01-23",
-        judge_name="N SONI",
-        anonymity_order="granted",
-        appellant_name="ELLIOTT",
-        respondent="THE SECRETARY OF STATE FOR THE HOME DEPARTMENT",
-        hearing_type="face_to_face",
-        appellant_rep_type="represented",
-        appellant_rep_details="Ms. Patel",
-        respondent_rep_type="counsel",
-        respondent_rep_name="Mr. Thomas",
-        appealable_decision_date="2025-12-01",
-        legal_issues=["asylum_pre_naba", "credibility"],
-        document_type="Decision",
-        next_hearing_type=None,
-        next_hearing_adjudicator=None,
-    )
-    sectioned_messages = SimpleNamespace(
-        background=[SimpleNamespace(speaker="Judge", text="Background text", timestamp="10:00:00", timestamp_ms=0)],
-        evidence=[SimpleNamespace(speaker="Counsel", text="Evidence text", timestamp="10:10:00", timestamp_ms=600000)],
-        facts=[SimpleNamespace(speaker="Judge", text="Facts text", timestamp="10:20:00", timestamp_ms=1200000)],
-    )
-    request = SimpleNamespace(form_data=form_data, get_sectioned_messages=lambda: sectioned_messages)
-
-    output_path = render_hearing_document(request, tmp_path, "court.clerk@justice.gov.uk")
-    generated = Document(str(output_path))
-    body_text = [p.text for p in generated.paragraphs if p.text.strip()]
-
-    assert "The Hearing" in body_text
-    assert "Background" in body_text
-    assert "Evidence" in body_text
-    assert "Facts" in body_text

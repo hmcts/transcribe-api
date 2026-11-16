@@ -22,6 +22,8 @@ from pydantic import BaseModel
 from sqlmodel import Session
 
 from transcribe_api import jurisdiction_templates
+from transcribe_api.documents.content_loader import get_document_content
+from transcribe_api.documents.uploaded_templates import CONTENT_TYPES, Prefill, ShowWhen, content_choices
 from transcribe_api.domain.auth.dependencies_dictation import (
     get_active_jurisdiction,
     require_permission,
@@ -40,6 +42,8 @@ class CurrentJurisdiction(BaseModel):
     code: str
     # What users see: the display name, else the name (DIAAT-345).
     name: str
+    # Always None: the built-in IAC decision is gone, judges choose uploaded templates.
+    # Kept for an older release's web pods during a rollout.
     template: str | None
     features: JurisdictionFeatures
     wording: dict[str, str]
@@ -97,6 +101,17 @@ class TemplateFormField(BaseModel):
     type: str
     required: bool
     options: list[TemplateOption]
+    # Asked only when this other question's answer is one of these.
+    show_when: ShowWhen | None = None
+    # What the answer starts as, from who is signed in, for the judge to change.
+    prefill: Prefill | None = None
+
+
+class TemplateSection(BaseModel):
+    """A dictated box: a section the judge dictates into, by its name."""
+
+    tag: str
+    label: str
 
 
 class AvailableTemplate(BaseModel):
@@ -104,28 +119,44 @@ class AvailableTemplate(BaseModel):
     name: str
     service: str | None
     fields: list[TemplateFormField]
+    # In the template's order; the first is where dictation goes until the judge picks.
+    sections: list[TemplateSection]
 
 
 def template_forms(rows: list[JurisdictionTemplate], jurisdiction_id: UUID) -> list[AvailableTemplate]:
     """Each template's Hearing Details form: the fields a judge fills (not those
-    BenchNotes fills), in the admin's order. A legal issues field offers the
-    jurisdiction's legal frameworks, as its Legal Text Manager keeps them."""
-    legal_issues: list[TemplateOption] | None = None
+    BenchNotes fills), in the admin's order. Legal issues, hearing type and anonymity
+    offer the jurisdiction's Document Content, as its Legal Text Manager keeps it."""
+    choices: dict[str, dict[str, str]] | None = None
     result = []
     for row in rows:
         form_fields = []
         for f in jurisdiction_templates.judge_fields(row):
-            if f.type == "legal_issues":
-                if legal_issues is None:
-                    frameworks = jurisdiction_templates.legal_frameworks(jurisdiction_id)
-                    legal_issues = [TemplateOption(value=i, label=t) for i, t in frameworks.items()]
-                options = legal_issues
+            if f.type in CONTENT_TYPES:
+                if choices is None:
+                    choices = content_choices(get_document_content(jurisdiction_id))
+                options = [TemplateOption(value=i, label=t) for i, t in choices[f.type].items()]
             else:
                 options = [TemplateOption(value=o, label=o) for o in f.options]
             form_fields.append(
-                TemplateFormField(tag=f.tag, label=f.label, type=f.type, required=f.required, options=options)
+                TemplateFormField(
+                    tag=f.tag,
+                    label=f.label,
+                    type=f.type,
+                    required=f.required,
+                    options=options,
+                    show_when=f.show_when,
+                    prefill=f.prefill,
+                )
             )
-        result.append(AvailableTemplate(id=str(row.id), name=row.name, service=row.service, fields=form_fields))
+        sections = [
+            TemplateSection(tag=f.tag, label=f.label)
+            for f in jurisdiction_templates.fields_of(row)
+            if f.type == "dictated"
+        ]
+        result.append(
+            AvailableTemplate(id=str(row.id), name=row.name, service=row.service, fields=form_fields, sections=sections)
+        )
     return result
 
 

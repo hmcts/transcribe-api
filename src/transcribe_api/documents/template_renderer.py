@@ -10,7 +10,6 @@ import uuid as _uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.oxml import OxmlElement
@@ -27,12 +26,10 @@ from transcribe_api.documents.content_loader import (
     get_hearing_title,
     get_legal_framework_content,
     get_legal_issues_display,
-    legal_wording_of,
 )
 from transcribe_api.documents.hearing_document_router import (
     APPELLANT_RULE_28_TEXT,
     RESPONDENT_RULE_28_TEXT,
-    build_hearing_document_from_document_data,
 )
 from transcribe_api.documents.lib.markdown_to_blocks import markdown_to_plain_text
 from transcribe_api.documents.lib.models import (
@@ -43,7 +40,7 @@ from transcribe_api.documents.lib.models import (
     TemplateBody,
 )
 from transcribe_api.documents.lib.procedural_frontmatter_docx import render_frontmatter
-from transcribe_api.documents.models import DocumentData, HearingFormData, TranscriptMessage
+from transcribe_api.documents.models import DocumentData
 from transcribe_api.documents.styles import (
     INDENT_INCREMENT_CM,
     QUOTATION_BASE_INDENT_CM,
@@ -60,11 +57,6 @@ from transcribe_api.documents.styles import (
 )
 from transcribe_api.documents.word_document import WordDocument
 from transcribe_api.runtime.logger import logger
-
-if TYPE_CHECKING:
-    from uuid import UUID
-
-    from transcribe_api.api.routes_dictation import LiveTranscriptionSubmissionRequest
 
 # Current year for copyright notice
 CURRENT_YEAR = datetime.now(UTC).year
@@ -602,105 +594,3 @@ def render_document(
         raise RuntimeError(msg) from e
 
     return output_path
-
-
-def render_hearing_document(
-    request: LiveTranscriptionSubmissionRequest,
-    output_dir: Path,
-    user_email: str,
-    jurisdiction_id: UUID | None = None,
-) -> Path:
-    """Render a hearing document from an API submission request.
-
-    This is the interface used by the /live-transcription/submission endpoint.
-    It routes through the structured HearingDocument pipeline by default.
-
-    Args:
-        request: The live transcription submission request
-        output_dir: Directory for the rendered document
-        user_email: Email of the submitting user
-        jurisdiction_id: The jurisdiction the document is made in: its legal wording is
-            used (DIAAT-342). None: the IAC's.
-
-    Returns:
-        Path to the rendered document
-    """
-    return render_hearing_document_structured(request, output_dir, user_email, jurisdiction_id)
-
-
-def render_hearing_document_structured(
-    request: LiveTranscriptionSubmissionRequest,
-    output_dir: Path,
-    user_email: str,
-    jurisdiction_id: UUID | None = None,
-) -> Path:
-    """Render a hearing document through HearingDocument block routing, with the legal
-    wording of ``jurisdiction_id`` (None: the IAC's)."""
-    document_data = _build_document_data_from_submission(request, user_email)
-    with legal_wording_of(jurisdiction_id):
-        hearing_document = build_hearing_document_from_document_data(document_data)
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / _generate_output_filename()
-    return render_document(hearing_document, output_path)
-
-
-def _build_document_data_from_submission(
-    request: LiveTranscriptionSubmissionRequest,
-    user_email: str,
-) -> DocumentData:
-    from transcribe_api.documents.models import SectionTranscripts
-
-    form = request.form_data
-
-    # Get sectioned messages from the request (handles both sectioned and legacy formats)
-    sectioned_msgs = request.get_sectioned_messages()
-
-    # Convert API messages to document model messages
-    def convert_messages(msgs: list) -> list[TranscriptMessage]:
-        return [
-            TranscriptMessage(
-                speaker=msg.speaker,
-                text=msg.text,
-                timestamp=msg.timestamp,
-                timestamp_ms=msg.timestamp_ms,
-            )
-            for msg in msgs
-        ]
-
-    # Create sectioned transcript for document data
-    section_transcripts = SectionTranscripts(
-        background=convert_messages(sectioned_msgs.background),
-        evidence=convert_messages(sectioned_msgs.evidence),
-        facts=convert_messages(sectioned_msgs.facts),
-    )
-
-    document_data = DocumentData(
-        notes=getattr(request, "notes", None),
-        form_data=HearingFormData(
-            case_id=form.case_id,
-            location=form.location,
-            location_other=form.location_other,
-            jurisdiction=form.jurisdiction,
-            hearing_date=form.hearing_date,
-            judge_name=form.judge_name,
-            anonymity_order=form.anonymity_order,
-            appellant_name=form.appellant_name,
-            respondent=form.respondent,
-            hearing_type=form.hearing_type,
-            # Appellant representation fields
-            appellant_rep_type=form.appellant_rep_type,
-            appellant_rep_details=form.appellant_rep_details,
-            # Respondent representation fields
-            respondent_rep_type=form.respondent_rep_type,
-            respondent_rep_name=form.respondent_rep_name,
-            appealable_decision_date=form.appealable_decision_date,
-            legal_issues=form.legal_issues,
-            document_type=form.document_type,
-            next_hearing_type=form.next_hearing_type,
-            next_hearing_adjudicator=form.next_hearing_adjudicator,
-        ),
-        messages=section_transcripts,
-        user_email=user_email,
-    )
-    return document_data

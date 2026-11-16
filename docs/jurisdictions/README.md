@@ -96,9 +96,11 @@ There is no auto-enrol any more.
   `domain/jurisdictions.py`):
   - `wording`: only the keys in `WORDING_KEYS`. Any key a jurisdiction does not set
     uses the web app's neutral default.
-  - `template`: `iac_decision` (the IAC hearing form and decision document) or `null`.
-    A jurisdiction with no template dictates into a general section and copies its
-    text out, unless it has uploaded templates (below).
+  - `template`: no longer used. There is no built-in template for one jurisdiction:
+    every jurisdiction's judges choose from its uploaded templates (below), and one
+    with none dictates into a general section and copies its text out. A stored
+    `iac_decision` (the IAC's, from migration `0004`) and one sent by an older release's
+    admin page are accepted and dropped; `GET /api/jurisdictions/current` gives `null`.
   - `features.hearing_recordings`: whether the jurisdiction uses the hearing
     recordings area.
 - **[`et.example.json`](et.example.json)** is a starting point for the ET. Its wording
@@ -113,7 +115,9 @@ from the token's context the answer is 409 `context_changed`.
 A jurisdiction can have any number of Word templates, uploaded in the admin area on the
 **Jurisdictions** tab (SystemAdministrator only), with no code change or release.
 Judges of the jurisdiction choose one on the recording page and fill its Hearing
-Details form; their document is the template with its boxes filled.
+Details form; their document is the template with its boxes filled. These are the only
+templates: the built-in IAC decision is gone, so the IAC uploads its decision template
+too (until it does, its judges dictate and copy their text out).
 
 - **The boxes** are the template's content controls (Word: Developer > Controls). Each
   needs a tag (Properties > Tag), else its title is used. Boxes with the same tag are one
@@ -122,16 +126,43 @@ Details form; their document is the template with its boxes filled.
 - **The field list.** An upload proposes a field for each box: its title as the label,
   its type, required. The admin changes the label, type, required/optional, options and
   order, but cannot add a field: every field is one of the template's boxes. Types:
-  text, date, dropdown, multi-select, yes/no, number, legal issues (the jurisdiction's
-  legal frameworks, kept by its Legal Text Manager), filled by BenchNotes (the
-  jurisdiction's name, or the year) and dictated text (the judgment: what was dictated,
-  then the judge's own text). Exactly one box takes the dictated text.
+  text, date, dropdown, multi-select, yes/no, number; legal issues, hearing type and
+  anonymity, answered from the jurisdiction's Document Content (kept by its Legal Text
+  Manager, at most one box each); filled by BenchNotes; and dictated text.
+- **Document Content** fills boxes as the built-in IAC decision did. The legal issues box
+  lists the chosen frameworks' questions, `(a)`, `(b)`..., and the hearing type box its
+  section title. "Filled by BenchNotes" boxes take the jurisdiction's name or the year,
+  or follow an answer: the legal framework text of the issues chosen, the hearing
+  type's description, and the anonymity reasons, order heading and order text (left
+  out, with the box's paragraph, where the Document Content says `[DELETE]`); such a box
+  needs the box it follows. Markdown keeps its headings, bold, lists and quotes. Tags
+  the IAC's decision template uses (`LegalIssues`, `LegalFrameworkContent`,
+  `HearingType`, `HearingDescription`, `AnonymityHead`, `AnonymityReasonsText`,
+  `AnonymityOrderText`, `Background`, `Evidence`, `Facts`...) are proposed as these.
+- **Dictated sections.** Every dictated box is a section (Background, Evidence...) the
+  judge picks while dictating, by its name, so no two may share one; at least one is
+  needed. Each gets what was dictated into it, then "Your notes" and the part of the
+  notes under a heading with its name (text before any is the first section's), as the
+  built-in decision did, or `[No <name> content]`. `GET /api/jurisdictions/templates`
+  lists each template's `sections`; a submission's `messages` are by section tag (a
+  list, or a section the template does not have, goes to the first). A box that is all
+  its paragraph holds becomes a box around paragraphs, in that paragraph's style.
 - **Saving** is refused (400 `template_not_ready`) until every box has a complete field;
   `problems` names each box or field. Only then can it be enabled for judges.
 - **A new file** for a template (`?replace=<id>&version=<version>`) keeps the fields of
   the boxes it still has. A new box has no field yet, so the template is switched off
   for judges until the admin links it.
-- **Empty optional boxes** are removed, with their paragraph when every box in it is
+- **Asked only when** (`show_when: {tag, answers}`): a question is asked only when
+  another question with set answers (a list, yes/no as `yes`/`no`, or a Document Content
+  one by id) was answered with one of `answers`, as the built-in form asked "Specify
+  location" only after "Other". A question not asked is not required, a value sent for
+  it is dropped, and so is one asked after it.
+- **Starts with** (`prefill`, text questions): `judge_name` or `judge_title`, which the
+  web app fills from the signed-in user's email as the built-in form did; the judge can
+  change it.
+- **When left empty** (`empty_text`): what a question's box prints when it has no answer
+  (or was not asked), such as a standard fee award line.
+- **Empty optional boxes** with no `empty_text` are removed, with their paragraph when every box in it is
   empty (an unused party or panel member leaves no line). Text outside the boxes stays,
   so an "and" between parties in a paragraph of its own is left behind until template
   owners group each party block in one content control.
@@ -149,4 +180,5 @@ links Word would fetch (an image pasted from an email, `cid:`, is fine), whether
 relationship or a field that fetches content when Word updates fields (INCLUDEPICTURE,
 INCLUDETEXT, LINK, DDE, DDEAUTO, IMPORT; simple or complex, in any part). It is stored in
 the database (`jurisdiction_template`, migration `0008`) with its SHA-256, which is the
-document's template version in its provenance.
+document's template version in its provenance; when boxes were filled from Document
+Content, the version combines the file's hash with that content's.
