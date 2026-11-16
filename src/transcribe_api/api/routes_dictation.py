@@ -1536,7 +1536,17 @@ async def _save_live_transcription_submission(  # NOSONAR
             "facts": [],
         },
         "sections": [
-            {"tag": tag, "label": label, "messages": by_section.get(tag, [])} for tag, label in plan.sections.items()
+            {
+                "tag": tag,
+                "label": label,
+                "messages": [
+                    msg
+                    for source_tag, messages in by_section.items()
+                    if source_tag == tag or (index == 0 and source_tag not in plan.sections)
+                    for msg in messages
+                ],
+            }
+            for index, (tag, label) in enumerate(plan.sections.items())
         ],
         "notes": request.notes,
         "submitted_at": datetime.now(UTC).isoformat(),
