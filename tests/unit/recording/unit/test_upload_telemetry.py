@@ -21,6 +21,7 @@ from hmcts_otel import default_redactor, get_tracer
 from hmcts_otel.testing import TelemetryCapture, capture_telemetry
 from opentelemetry.trace import SpanKind
 
+from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.runtime.telemetry import JOURNEY_UPLOAD, configure_telemetry, upload_id_from_blob
 from transcribe_api.stt.preprocessing import AudioDecodeError
 
@@ -109,7 +110,7 @@ def _post(client: TestClient, name: str = "hearing.mp3", body: bytes = b"audio",
 )
 def test_each_validation_failure_has_its_own_event_and_code(tel, mocker, name, setup, code):
     if setup == "too_large":
-        mocker.patch("transcribe_api.api.routes_recording._MAX_UPLOAD_BYTES", 4)
+        mocker.patch.object(get_settings(), "MAX_UPLOAD_BYTES", 4)
     client = _client(mocker, normalised=AudioDecodeError("bad") if setup == "undecodable" else b"")
 
     response = _post(client, name, body=b"0123456789")
@@ -135,7 +136,7 @@ def test_storage_failure_is_not_a_validation_failure(tel, mocker):
 
 
 def test_oversized_upload_is_a_too_large_validation_failure(tel, mocker):
-    mocker.patch("transcribe_api.api.routes_recording._MAX_UPLOAD_BYTES", 4)
+    mocker.patch.object(get_settings(), "MAX_UPLOAD_BYTES", 4)
     response = _post(_client(mocker), body=b"0123456789")
     assert response.status_code == 413
     (invalid,) = tel.events("upload.validation_failed")
@@ -204,10 +205,14 @@ def test_recording_exactly_at_the_limit_is_accepted(tel, mocker):
     assert tel.events("upload.validation_failed") == []
 
 
-def test_default_duration_limit_is_azures_240_minutes_per_file():
+def test_effective_duration_limit_is_azures_240_minutes_per_file_with_the_flags_off():
+    # DIAAT-408: the setting is 8 hours, but a recording over Azure's 240 minutes per file is
+    # accepted only with both flags on (tests/unit/recording/unit/audio/test_recording_limits.py).
     from transcribe_api.runtime.settings_recording import Settings
+    from transcribe_api.stt.recording_limits import current_limit_seconds
 
-    assert Settings.model_fields["MAX_AUDIO_DURATION_SECONDS"].default == 240 * 60
+    assert Settings.model_fields["MAX_AUDIO_DURATION_SECONDS"].default == 8 * 60 * 60
+    assert current_limit_seconds() == 240 * 60
 
 
 @pytest.mark.parametrize(
@@ -548,3 +553,68 @@ def test_a_padded_hearing_id_is_normalised_whatever_the_padding(padding):
     from transcribe_api.api.routes_recording import _hearing_id
 
     assert _hearing_id(f"{padding}{HEARING_ID}{padding}") == str(UUID(HEARING_ID))
+
+
+# DIAAT-408: the limits come from settings and flags -------------------------------------------
+
+
+def _both_flags(monkeypatch, on: bool) -> None:
+    from transcribe_api.runtime import settings_dictation
+
+    for name in ("LONG_RECORDINGS_ENABLED", "ASYNC_UPLOAD_PREPARATION"):
+        monkeypatch.setenv(name, str(on).lower())
+    settings_dictation.get_settings.cache_clear()
+
+
+def test_five_hours_is_refused_with_the_flags_off_naming_the_4_hour_limit(tel, mocker, monkeypatch):
+    _both_flags(monkeypatch, False)
+    mocker.patch("transcribe_api.api.routes_recording._wav_duration_seconds", return_value=5 * 3600.0)
+    response = _post(_client(mocker))
+    assert response.status_code == 422
+    assert response.json()["detail"] == "The recording is 5 hours long. Recordings can be at most 4 hours."
+
+
+def test_five_hours_is_accepted_with_both_flags_on(tel, mocker, monkeypatch):
+    _both_flags(monkeypatch, True)
+    mocker.patch("transcribe_api.api.routes_recording._wav_duration_seconds", return_value=5 * 3600.0)
+    assert _post(_client(mocker)).status_code == 201
+
+
+def test_over_eight_hours_is_refused_with_both_flags_on_naming_the_8_hour_limit(tel, mocker, monkeypatch):
+    _both_flags(monkeypatch, True)
+    mocker.patch("transcribe_api.api.routes_recording._wav_duration_seconds", return_value=8 * 3600.0 + 120)
+    response = _post(_client(mocker))
+    assert response.status_code == 422
+    assert response.json()["detail"] == "The recording is 8 hours 2 minutes long. Recordings can be at most 8 hours."
+
+
+def test_one_flag_alone_does_not_lift_the_4_hour_limit(tel, mocker, monkeypatch):
+    from transcribe_api.runtime import settings_dictation
+
+    monkeypatch.setenv("LONG_RECORDINGS_ENABLED", "true")
+    monkeypatch.setenv("ASYNC_UPLOAD_PREPARATION", "false")
+    settings_dictation.get_settings.cache_clear()
+    mocker.patch("transcribe_api.api.routes_recording._wav_duration_seconds", return_value=5 * 3600.0)
+    assert _post(_client(mocker)).status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("size", "text"),
+    [(1024**3, "1 GB"), (4 * 1024**3, "4 GB"), (1536 * 1024**2, "1.5 GB"), (512 * 1024**2, "512 MB")],
+)
+def test_the_size_limit_is_described_from_the_setting(size, text):
+    from transcribe_api.api.routes_recording import _format_bytes, _too_large_detail
+
+    assert _format_bytes(size) == text
+    assert _too_large_detail(size).startswith(f"The audio file is too large (the limit is {text}). ")
+
+
+def test_the_413_message_names_the_configured_limit(tel, mocker):
+    mocker.patch.object(get_settings(), "MAX_UPLOAD_BYTES", 3 * 1024**3)
+    mocker.patch("transcribe_api.api.routes_recording._UPLOAD_CHUNK_BYTES", 4)
+    # Not over the limit: accepted.
+    assert _post(_client(mocker), body=b"0123456789").status_code == 201
+    mocker.patch.object(get_settings(), "MAX_UPLOAD_BYTES", 4)
+    response = _post(_client(mocker), body=b"0123456789")
+    assert response.status_code == 413
+    assert response.json()["detail"].startswith("The audio file is too large (the limit is 0 MB). ")

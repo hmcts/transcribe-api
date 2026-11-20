@@ -106,6 +106,28 @@ file names), every request gets an `X-Request-Id`, and health probes are not tra
 - There is no Sentry: errors go to Application Insights. `SENTRY_DSN` is ignored.
 - The base image's `/opt/otel` distro is kept off `PYTHONPATH` (Dockerfile), so Azure Monitor is configured once.
 
+## Recording length and size limits (DIAAT-408)
+
+How long a recording may be, and how large its file, are settings and two system feature flags, all read in one place
+(`stt/recording_limits.py`, `runtime/settings_recording.py`). Azure batch transcription with diarization fails a file over
+240 minutes, so a longer recording has to be split before it is submitted; until that is done by the service, only 240 minutes
+are accepted.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `MAX_AUDIO_DURATION_SECONDS` | 28800 (8 h) | The longest recording the service can accept, as decoded. It applies in full only while both flags below are on; otherwise the limit is `min(this, 14400)`. |
+| `PART_TARGET_SECONDS` | 12600 (3 h 30 m) | The longest part a recording over 240 minutes is split into. 1 to 14400 (Azure's per-file limit). |
+| `MAX_PARALLEL_PARTS` | 4 | How many parts of one recording are prepared and submitted at once. |
+| `MAX_UPLOAD_BYTES` | 1 GiB | Backstop on the size of one upload (HTTP 413 above it). **transcribe-web reads the same figure from its own `MAX_UPLOAD_BYTES` environment variable: set both to the same value.** A move to 4 GB needs this and the resumable block upload (not built). |
+
+| Flag (admin > Feature flags) | Default setting | Effect |
+|---|---|---|
+| `async_upload_preparation` | `ASYNC_UPLOAD_PREPARATION=false` | `POST /uploads` stores the original and answers at once; the worker converts it and submits the job. |
+| `long_recordings_enabled` | `LONG_RECORDINGS_ENABLED=false` | Recordings over 240 minutes, up to `MAX_AUDIO_DURATION_SECONDS`. Takes effect only with `async_upload_preparation` on. |
+
+Both off: behaviour is as before DIAAT-408 (240 minutes, everything done inside the request). The effective limit is
+what `GET /api/flags` returns as `max_recording_seconds`, which the web app shows on the upload page.
+
 ## Database migrations
 
 One Alembic history in `alembic/`. Its first revision, `0001_baseline`, replaced

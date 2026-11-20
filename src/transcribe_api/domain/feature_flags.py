@@ -1,13 +1,23 @@
 """System feature flags (DIAAT-388, DIAAT-392): the layer that says whether a switch is on.
 
 A flag is a row of ``system_feature_flag`` (name, value) that a SystemAdministrator sets; a flag
-with no row has its default, which comes from configuration. Today there is one flag:
+with no row has its default, which comes from configuration. The flags:
 
 ``dictation_enabled``
     Whether the dictation routes work (DIAAT-388). The default is the ``DICTATION_ENABLED``
     setting (true; the chart turns it off in prod). The ``dictation.use`` permission check
     (domain/auth/authorisation.py) refuses every dictation route with 403 ``dictation_disabled``
     when it is off, and audits the refusal. Hearing-recording routes do not look at it.
+
+``async_upload_preparation``
+    DIAAT-408. Whether POST /api/v1/uploads stores the original file and answers at once, the
+    worker transcoding it and submitting the job afterwards (stt/preparation_service.py), instead
+    of transcoding inside the request. Default: ``ASYNC_UPLOAD_PREPARATION`` (false).
+
+``long_recordings_enabled``
+    DIAAT-408. Whether recordings over 240 minutes (up to ``MAX_AUDIO_DURATION_SECONDS``) are
+    accepted. It takes effect only while ``async_upload_preparation`` is on as well
+    (stt/recording_limits.py). Default: ``LONG_RECORDINGS_ENABLED`` (false).
 
 A flag is read with a short in-process cache (``CACHE_TTL_SECONDS``, 5 s): the permission check
 reads ``dictation_enabled`` on every dictation request, and that is one database read per five
@@ -42,12 +52,26 @@ from transcribe_api.runtime.settings_dictation import get_settings
 logger = logging.getLogger(__name__)
 
 DICTATION_ENABLED = "dictation_enabled"
+ASYNC_UPLOAD_PREPARATION = "async_upload_preparation"
+LONG_RECORDINGS_ENABLED = "long_recordings_enabled"
 
 # Every flag, with the setting its default comes from.
-FLAG_DEFAULTS: dict[str, str] = {DICTATION_ENABLED: "DICTATION_ENABLED"}
+FLAG_DEFAULTS: dict[str, str] = {
+    DICTATION_ENABLED: "DICTATION_ENABLED",
+    ASYNC_UPLOAD_PREPARATION: "ASYNC_UPLOAD_PREPARATION",
+    LONG_RECORDINGS_ENABLED: "LONG_RECORDINGS_ENABLED",
+}
 # What each flag does, for the admin list.
 FLAG_DESCRIPTIONS: dict[str, str] = {
     DICTATION_ENABLED: "Whether dictation (recording and documents from dictation) is switched on for every user.",
+    ASYNC_UPLOAD_PREPARATION: (
+        "Whether a recording upload is accepted at once and prepared (converted and submitted) in the background, "
+        "instead of while the upload request waits."
+    ),
+    LONG_RECORDINGS_ENABLED: (
+        "Whether recordings longer than 4 hours (up to the configured maximum) are accepted. "
+        "Takes effect only while background upload preparation is on too."
+    ),
 }
 
 CACHE_TTL_SECONDS = 5.0
@@ -125,6 +149,16 @@ def flag_value(name: str) -> bool:
 def is_dictation_enabled() -> bool:
     """Whether the dictation routes are on (DIAAT-388)."""
     return flag_value(DICTATION_ENABLED)
+
+
+def is_async_upload_preparation_enabled() -> bool:
+    """Whether uploads are prepared in the background (DIAAT-408)."""
+    return flag_value(ASYNC_UPLOAD_PREPARATION)
+
+
+def is_long_recordings_enabled() -> bool:
+    """Whether recordings over 240 minutes are accepted (DIAAT-408); see stt/recording_limits.py."""
+    return flag_value(LONG_RECORDINGS_ENABLED)
 
 
 @dataclass(frozen=True)

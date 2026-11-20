@@ -229,7 +229,7 @@ class TestUploadAudio:
     def test_returns_413_when_upload_exceeds_the_cap(self, client, as_current_user, mocker):
         manager = self._mock_blob_manager(mocker)
         normalize = self._mock_normalize(mocker)
-        mocker.patch("transcribe_api.api.routes_recording._MAX_UPLOAD_BYTES", 10)
+        mocker.patch.object(get_settings(), "MAX_UPLOAD_BYTES", 10)
         mocker.patch("transcribe_api.api.routes_recording._UPLOAD_CHUNK_BYTES", 4)
 
         response = client.post(

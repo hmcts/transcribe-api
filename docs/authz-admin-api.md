@@ -231,7 +231,8 @@ A send that fails is logged with the exception's type only. Seeding the key in K
 
 `GET /api/admin/feature-flags` and `PUT /api/admin/feature-flags/{name}` body `{"value": true|false}` (`feature_flags.manage`: acting as SystemAdministrator
 only). Both answer `{"flags": [{name, value, description, updated_at, updated_by}]}`; `updated_by` is the email of whoever set it
-last (null while it has its default, which comes from configuration: `DICTATION_ENABLED`). The first flag is `dictation_enabled`. 404 `flag_not_found`;
+last (null while it has its default, which comes from configuration: `DICTATION_ENABLED`). The flags are `dictation_enabled`, and, from DIAAT-408, `async_upload_preparation` and
+`long_recordings_enabled` (both off by default; defaults `ASYNC_UPLOAD_PREPARATION`, `LONG_RECORDINGS_ENABLED`; see the README, "Long recordings"). 404 `flag_not_found`;
 a value that is not a JSON boolean is 422. Audited as `feature_flag.changed` with `flag`, `from`, `to` and `acted_as`.
 
 ```json
@@ -239,7 +240,8 @@ a value that is not a JSON boolean is 422. Audited as `feature_flag.changed` wit
             "updated_at": "2026-11-09T21:27:30Z", "updated_by": "sysadmin@localhost.test"}]}
 ```
 
-`GET /api/flags` (any signed-in user, no context needed) then answers `{"dictation_enabled": false}` at once, and every dictation route is 403
+`GET /api/flags` (any signed-in user, no context needed) then answers `{"dictation_enabled": false, "max_recording_seconds": 14400}` at once (`max_recording_seconds` is the
+longest recording the upload accepts now: 14400, or `MAX_AUDIO_DURATION_SECONDS` while both recording flags are on), and every dictation route is 403
 `dictation_disabled`. The flag is cached in each API process for 5 seconds (`feature_flags.CACHE_TTL_SECONDS`) so the per-request check is one database
 read per process per 5 seconds; the PUT clears the cache of the process that took it, other replicas see it within 5 seconds.
 

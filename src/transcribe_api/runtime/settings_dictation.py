@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     # ``dictation_enabled`` (set by a SystemAdministrator, DIAAT-392) does not exist. Off in
     # prod through the chart; hearing recordings are not affected (domain/feature_flags.py).
     DICTATION_ENABLED: bool = True
+    # DIAAT-408: the defaults of the flags `async_upload_preparation` (POST /uploads stores the
+    # original and answers at once; the worker transcodes it) and `long_recordings_enabled`
+    # (recordings over 240 minutes, up to MAX_AUDIO_DURATION_SECONDS; takes effect only with
+    # the first). Both off: behaviour is as before them. A system_feature_flag row set by a
+    # SystemAdministrator overrides them (domain/feature_flags.py).
+    ASYNC_UPLOAD_PREPARATION: bool = False
+    LONG_RECORDINGS_ENABLED: bool = False
     # DIAAT-373: signs the BenchNotes access token (domain/auth/app_token.py). Required
     # outside local and test (the API refuses to start without it): at least 32 characters.
     # Generate: python -c "import secrets; print(secrets.token_urlsafe(48))"

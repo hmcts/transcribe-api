@@ -98,6 +98,7 @@ from transcribe_api.stt import local_storage
 from transcribe_api.stt.accuracy import DEFAULT_CONFIDENCE_THRESHOLD, compute_accuracy
 from transcribe_api.stt.batch_client import BatchSubmissionError, delete_batch_job
 from transcribe_api.stt.preprocessing import AudioDecodeError, normalize_to_wav
+from transcribe_api.stt.recording_limits import current_limit_seconds
 from transcribe_api.stt.speech_auth import SpeechAuthError
 from transcribe_api.stt.submission import submit_and_queue_batch_job
 
@@ -107,15 +108,12 @@ router = APIRouter(prefix="/api/v1")
 _LOCALE_RE = re.compile(r"^[a-z]{2}-[A-Z]{2}$")
 _RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 _METADATA_MAX_BYTES = 4096
-# DIAAT-408: a backstop on the size of what is uploaded, not the limit on how long a
-# recording may be (that is MAX_AUDIO_DURATION_SECONDS, checked once the upload is
-# decoded). 1 GiB covers 4 hours (Azure's per-file limit with diarization) at any
-# usual MP3/M4A bitrate and as 16 kHz mono WAV (about 460 MB); CD-quality WAV is about
-# 635 MB an hour, so it hits this at about 100 minutes. Keep in step with
-# transcribe-web's app/api/upload/route.ts (MAX_UPLOAD_BYTES).
-_MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
-_TOO_LARGE_DETAIL = (
-    "The audio file is too large (the limit is 1 GB). "
+# DIAAT-408: the backstop on the size of what is uploaded is the MAX_UPLOAD_BYTES setting (1 GiB
+# by default), not the limit on how long a recording may be (stt/recording_limits.py, checked
+# once the upload is probed or decoded). transcribe-web's app/api/upload/route.ts reads the
+# same figure from its own MAX_UPLOAD_BYTES environment variable: the two must match.
+_TOO_LARGE_DETAIL_TEMPLATE = (
+    "The audio file is too large (the limit is {limit}). "
     "Uncompressed audio such as WAV is much larger for the same length: "
     "save long recordings as MP3 or M4A."
 )
@@ -695,6 +693,21 @@ async def _read_upload_capped(
     return b"".join(chunks)
 
 
+def _format_bytes(size: int) -> str:
+    """A size for a user-facing message: "1 GB", "512 MB" (binary units, as the web app words it)."""
+    gib = 1024**3
+    if size >= gib:
+        value, unit = size / gib, "GB"
+    else:
+        value, unit = size / 1024**2, "MB"
+    text = f"{value:.1f}".rstrip("0").rstrip(".")
+    return f"{text} {unit}"
+
+
+def _too_large_detail(max_bytes: int) -> str:
+    return _TOO_LARGE_DETAIL_TEMPLATE.format(limit=_format_bytes(max_bytes))
+
+
 async def _save_upload_capped(file: UploadFile, max_bytes: int, target: Path) -> int:
     """Write the upload to ``target`` in chunks, aborting once max_bytes is exceeded.
 
@@ -707,7 +720,7 @@ async def _save_upload_capped(file: UploadFile, max_bytes: int, target: Path) ->
         while chunk := await file.read(_UPLOAD_CHUNK_BYTES):
             total += len(chunk)
             if total > max_bytes:
-                raise HTTPException(status_code=413, detail=_TOO_LARGE_DETAIL)
+                raise HTTPException(status_code=413, detail=_too_large_detail(max_bytes))
             await out.write(chunk)
     return total
 
@@ -844,7 +857,7 @@ async def _upload_audio(
         input_path = Path(tmpdir) / f"input{extension}"
         wav_path = Path(tmpdir) / "output.wav"
         try:
-            size = await _save_upload_capped(file, _MAX_UPLOAD_BYTES, input_path)
+            size = await _save_upload_capped(file, get_settings().MAX_UPLOAD_BYTES, input_path)
         except HTTPException:  # _save_upload_capped raises only 413 (over the size limit)
             _reject(upload_stage, "upload.too_large")
             raise
@@ -888,7 +901,7 @@ async def _upload_audio(
             # wrote, so it is the length Azure will see. (None means the header could
             # not be read: the WAV is ffmpeg's own, so that is not expected, and it is
             # never a reason to fail the upload, as above.)
-            max_seconds = get_settings().MAX_AUDIO_DURATION_SECONDS
+            max_seconds = await asyncio.to_thread(current_limit_seconds)
             if duration > max_seconds:
                 _reject(upload_stage, "upload.too_long")
                 # After _reject: upload.validation_failed carries only the attributes
