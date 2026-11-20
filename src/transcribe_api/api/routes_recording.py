@@ -752,6 +752,18 @@ def _format_duration(seconds: float) -> str:
     return " ".join(parts)
 
 
+def _too_long_detail(duration: float, max_seconds: float) -> str:
+    """The 422 message for a recording over the limit (``duration`` > ``max_seconds``).
+
+    Durations are shown to the minute, so one only seconds over the limit would read
+    "4 hours long ... at most 4 hours": then it says it is a little over instead.
+    """
+    length, limit = _format_duration(duration), _format_duration(max_seconds)
+    if length == limit:
+        return f"The recording is a little over {limit} long. Recordings can be at most {limit}."
+    return f"The recording is {length} long. Recordings can be at most {limit}."
+
+
 def _upload_metadata(file: UploadFile, extension: str, file_count: int | None) -> dict[str, object]:
     """Safe technical metadata for the upload stage events. Never the file name."""
     attributes: dict[str, object] = {}
@@ -883,11 +895,7 @@ async def _upload_audio(
                 # its schema allows (not the duration); upload.failed does carry it.
                 upload_stage.set_attribute("audio.duration_seconds", duration)
                 raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"The recording is {_format_duration(duration)} long. "
-                        f"Recordings can be at most {_format_duration(max_seconds)}."
-                    ),
+                    status_code=422, detail=_too_long_detail(duration, max_seconds)
                 )
             upload_stage.set_attribute("audio.duration_seconds", duration)
 

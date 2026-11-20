@@ -163,6 +163,38 @@ def test_recording_longer_than_the_limit_is_a_too_long_validation_failure(tel, m
     assert tel.events("upload.completed") == []
 
 
+def test_recording_seconds_over_the_limit_is_not_described_as_within_it(tel, mocker):
+    # The message shows minutes, so a recording only seconds over the limit must not
+    # read "1 minute long ... at most 1 minute".
+    from transcribe_api.runtime.settings_recording import get_settings
+
+    mocker.patch.object(get_settings(), "MAX_AUDIO_DURATION_SECONDS", 60)
+    response = _post(_client(mocker, normalised=_wav(60.5)))
+    assert response.status_code == 422
+    assert (
+        response.json()["detail"]
+        == "The recording is a little over 1 minute long. Recordings can be at most 1 minute."
+    )
+    (failed,) = tel.events("upload.failed")
+    assert failed[c.ERROR_CODE] == "upload.too_long"
+    assert failed["audio.duration_seconds"] == 60.5
+
+
+@pytest.mark.parametrize(
+    ("seconds", "text"),
+    [
+        (14_400.5, "The recording is a little over 4 hours long. Recordings can be at most 4 hours."),
+        (14_459.9, "The recording is a little over 4 hours long. Recordings can be at most 4 hours."),
+        (14_460, "The recording is 4 hours 1 minute long. Recordings can be at most 4 hours."),
+        (15_120, "The recording is 4 hours 12 minutes long. Recordings can be at most 4 hours."),
+    ],
+)
+def test_too_long_message_at_the_default_limit(seconds, text):
+    from transcribe_api.api.routes_recording import _too_long_detail
+
+    assert _too_long_detail(seconds, 240 * 60) == text
+
+
 def test_recording_exactly_at_the_limit_is_accepted(tel, mocker):
     from transcribe_api.runtime.settings_recording import get_settings
 
