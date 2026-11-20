@@ -90,3 +90,24 @@ def add_job(engine, **fields) -> SpeechBatchJob:
 def reload_job(engine, job_id) -> SpeechBatchJob | None:
     with Session(engine) as session:
         return session.get(SpeechBatchJob, job_id)
+
+
+@cache
+def tone_and_silence(pattern: tuple[tuple[str, float], ...], *, sample_rate: int = 16000) -> bytes:
+    """A real 16 kHz mono 16-bit WAV of tones ("t") and silences ("s"), each the given seconds long,
+    e.g. (("t", 20), ("s", 2), ("t", 20)). Small: 32 kB per second."""
+    sources = []
+    for kind, seconds in pattern:
+        if kind == "t":
+            sources.append(f"sine=frequency=440:duration={seconds}:sample_rate={sample_rate}")
+        else:
+            sources.append(f"anullsrc=d={seconds}:r={sample_rate}:cl=mono")
+    command = ["ffmpeg", "-nostdin", "-v", "error"]
+    for source in sources:
+        command += ["-f", "lavfi", "-i", source]
+    inputs = "".join(f"[{i}]" for i in range(len(sources)))
+    command += ["-filter_complex", f"{inputs}concat=n={len(sources)}:v=0:a=1", "-ac", "1", "-c:a", "pcm_s16le"]
+    with tempfile.TemporaryDirectory(prefix="mix-") as tmp:
+        out = Path(tmp) / "mix.wav"
+        subprocess.run([*command, "-y", str(out)], check=True)
+        return out.read_bytes()
