@@ -13,6 +13,7 @@ On each interval the service:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -23,6 +24,7 @@ from hmcts_otel import StageHandle, journey, record_event, stage
 from hmcts_otel import conventions as c
 from sqlmodel import Session
 
+from transcribe_api.domain import interface_recording as jobs_db
 from transcribe_api.domain.interface_recording import (
     claim_webhook_dispatch,
     fetch_pending_batch_jobs,
@@ -31,7 +33,7 @@ from transcribe_api.domain.interface_recording import (
     save_job_results,
     update_job_batch_status,
 )
-from transcribe_api.domain.models_recording import BatchJobStatus
+from transcribe_api.domain.models_recording import BatchJobStatus, JobStatus
 from transcribe_api.domain.provenance_recording import TranscriptProvenance, build_provenance
 from transcribe_api.domain.webhook import dispatch
 from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
@@ -42,6 +44,7 @@ from transcribe_api.runtime.telemetry import (
     ATTR_SPEECH_ERROR_CODE,
     ATTR_WEBHOOK_NOTIFICATION,
     EVENT_JOB_FAILED_IN_SPEECH,
+    EVENT_JOB_PART_FINISHED,
     EVENT_JOB_POLL_FAILED,
     EVENT_WEBHOOK_DELIVERED,
     EVENT_WEBHOOK_DELIVERY_FAILED,
@@ -61,6 +64,8 @@ from transcribe_api.stt.batch_client import (
     get_batch_results,
     get_model_details,
 )
+from transcribe_api.stt.part_merge import PartResult, billed_seconds, merge_parts
+from transcribe_api.stt.part_submission import cleanup_job_parts
 from transcribe_api.stt.speakers_recording import process_speakers, speaker_step_report
 from transcribe_api.stt.speech_telemetry import speech_config_attributes
 
@@ -87,6 +92,31 @@ class _PendingJob:
     # OBS-5: the duration given when the job was submitted (an estimate), the fallback
     # for the Speech usage recorded when Azure's results do not carry one.
     audio_duration_seconds: float | None = None
+
+
+@dataclass(frozen=True)
+class _PendingPart:
+    """A part of a recording in parts, to be polled (DIAAT-408), with what its job's events need."""
+
+    id: UUID
+    job_id: UUID
+    part_index: int
+    part_count: int
+    batch_job_url: str
+    batch_job_status: str | None
+    job_created_datetime: datetime | None
+    audio_blob_path: str | None
+
+
+def _part_failed_message(index: int, count: int) -> str:
+    return f"Part {index} of {count} of the recording could not be transcribed. Please upload the recording again."
+
+
+def _part_results_message(index: int, count: int) -> str:
+    return (
+        f"The transcript of part {index} of {count} of the recording could not be retrieved. "
+        "Please upload the recording again."
+    )
 
 
 def _extract_model_identifier(status_data: dict, locale: str) -> str:
@@ -270,7 +300,429 @@ def _record_delivery(delivered: bool, notification: str) -> None:
         )
 
 
-class BatchPollingService:
+# DIAAT-408: recordings in parts ---------------------------------------------------------------------
+#
+# A recording over 240 minutes is several Azure jobs (transcription_job_part); the job has none of its
+# own, so it is polled through its part rows. Each poll takes the parts polled longest ago (SKIP
+# LOCKED, so two pollers take different parts; a poll stamps the part), records Running/Succeeded/
+# Failed, and then looks for jobs whose parts have all succeeded and assembles them. See
+# domain/interface_recording.py for the conditional writes that make a late answer harmless.
+
+
+class _PartPolling:
+    """The multipart half of BatchPollingService (a mixin: it uses its settings and webhook helpers)."""
+
+    settings: object
+    _resolve_webhook_secret: object
+
+    async def _poll_parts_once(self) -> None:
+        parts = await asyncio.to_thread(self._fetch_pending_parts)
+        if parts:
+            logger.info("Checking %d part(s) of recordings in parts", len(parts))
+            await asyncio.gather(*[self._process_part(part) for part in parts], return_exceptions=True)
+        for job_id in await asyncio.to_thread(self._fetch_ready_jobs):
+            try:
+                await self._assemble(job_id)
+            except Exception as exc:
+                self._poll_failed(job_id, None, exc)
+        for job_id in await asyncio.to_thread(self._fetch_leftovers):
+            await self._cleanup_parts(job_id)
+
+    # Reading ---------------------------------------------------------------------------------
+
+    def _fetch_pending_parts(self) -> list[_PendingPart]:
+        with Session(get_engine()) as session:
+            rows = jobs_db.fetch_pending_parts(session)
+            by_job: dict[UUID, object] = {}
+            result = []
+            for row in rows:
+                if row.job_id not in by_job:
+                    by_job[row.job_id] = jobs_db.get_job_by_id(session, row.job_id)
+                job = by_job[row.job_id]
+                result.append(
+                    _PendingPart(
+                        id=row.id,
+                        job_id=row.job_id,
+                        part_index=row.part_index,
+                        part_count=row.part_count,
+                        batch_job_url=row.batch_job_url,
+                        batch_job_status=row.batch_job_status,
+                        job_created_datetime=job.created_datetime if job else None,
+                        audio_blob_path=job.audio_blob_path if job else None,
+                    )
+                )
+            return result
+
+    def _fetch_ready_jobs(self) -> list[UUID]:
+        with Session(get_engine()) as session:
+            return jobs_db.fetch_jobs_ready_to_assemble(session)
+
+    def _fetch_leftovers(self) -> list[UUID]:
+        with Session(get_engine()) as session:
+            return jobs_db.fetch_jobs_with_part_leftovers(session)
+
+    # One part --------------------------------------------------------------------------------
+
+    def _poll_failed(self, job_id: UUID, speech_ref: dict | None, exc: BaseException) -> None:
+        logger.error("Error polling parts of job %s (%s)", job_id, type(exc).__name__, exc_info=exc)
+        code = job_telemetry.failure_code(exc, "speech")
+        failure = job_telemetry.failure_attributes(code, exc)
+        record_event(EVENT_JOB_POLL_FAILED, {**failure, **(speech_ref or {}), c.ERROR_CODE: code})
+
+    async def _process_part(self, part: _PendingPart) -> None:
+        # DIAAT-276: everything emitted while handling this part carries its job's journey.
+        with journey(JOURNEY_JOB, str(part.job_id), parent_id=upload_id_from_blob(part.audio_blob_path)):
+            speech_ref = {
+                c.DEPENDENCY_REF: batch_job_id_from_url(part.batch_job_url),
+                "job.part_index": part.part_index,
+                "job.part_count": part.part_count,
+            }
+            try:
+                status_data = await get_batch_job_status(part.batch_job_url)
+                azure_status = status_data.get("status", "")
+                if azure_status == BatchJobStatus.RUNNING:
+                    await self._part_running(part, status_data, speech_ref)
+                elif azure_status == BatchJobStatus.SUCCEEDED:
+                    await self._part_succeeded(part, status_data, speech_ref)
+                elif azure_status == BatchJobStatus.FAILED:
+                    await self._part_failed(part, status_data, speech_ref)
+                else:
+                    await asyncio.to_thread(self._stamp_part, part.id)  # still waiting: polled
+            except Exception as exc:
+                # The part stays as it was and is polled again (its stamp moves it behind the others).
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(self._stamp_part, part.id)
+                self._poll_failed(part.job_id, speech_ref, exc)
+
+    def _stamp_part(self, part_id: UUID) -> None:
+        with Session(get_engine()) as session:
+            jobs_db.record_part_polled(session, part_id)
+
+    def _record_part(self, part_id: UUID, status: str, batch_status: BatchJobStatus) -> bool:
+        with Session(get_engine()) as session:
+            return jobs_db.record_part_polled(session, part_id, status=status, batch_status=batch_status)
+
+    def _job_running(self, job_id: UUID, started: datetime) -> bool:
+        with Session(get_engine()) as session:
+            return jobs_db.mark_job_running(session, job_id, started)
+
+    async def _part_running(self, part: _PendingPart, status_data: dict, speech_ref: dict) -> None:
+        if part.batch_job_status != BatchJobStatus.NOT_STARTED.value:
+            await asyncio.to_thread(self._stamp_part, part.id)
+            return
+        started = job_telemetry.processing_started_at(status_data, part.job_created_datetime)
+        if not await asyncio.to_thread(self._record_part, part.id, JobStatus.RUNNING.value, BatchJobStatus.RUNNING):
+            return  # the job has finished or failed meanwhile
+        # The job runs from the first part that starts: its queue wait ends there, once.
+        if await asyncio.to_thread(self._job_running, part.job_id, started):
+            job_telemetry.record_processing_started(
+                {c.DEPENDENCY_REF: speech_ref[c.DEPENDENCY_REF]}, part.job_created_datetime, started
+            )
+
+    async def _part_succeeded(self, part: _PendingPart, status_data: dict, speech_ref: dict) -> None:
+        if not await asyncio.to_thread(self._record_part, part.id, JobStatus.SUCCEEDED.value, BatchJobStatus.SUCCEEDED):
+            return
+        processing = job_telemetry.seconds_between(
+            job_telemetry.processing_started_at(status_data, part.job_created_datetime),
+            job_telemetry.azure_last_action(status_data),
+        )
+        record_event(
+            EVENT_JOB_PART_FINISHED,
+            {**speech_ref, c.OUTCOME: "success"},
+            duration_ms=processing * 1000.0 if processing is not None else None,
+        )
+
+    async def _part_failed(self, part: _PendingPart, status_data: dict, speech_ref: dict) -> None:
+        """A part Azure reports as Failed fails the job at once (a late result of another part cannot
+        bring it back: every write of the job is conditional on it still being in flight)."""
+        failed = await asyncio.to_thread(
+            self._fail_job_for_part, part, _part_failed_message(part.part_index, part.part_count)
+        )
+        if not failed:
+            return
+        code = job_telemetry.failed_job_error_code(status_data)
+        azure_error = {ATTR_FAILURE_SOURCE: job_telemetry.failure_source("speech.job_failed")}
+        if code is not None:
+            azure_error[ATTR_SPEECH_ERROR_CODE] = code
+        record_event(
+            EVENT_JOB_FAILED_IN_SPEECH,
+            {**speech_ref, **azure_error, c.ERROR_CODE: "speech.job_failed"},
+        )
+        record_event(
+            EVENT_JOB_PART_FINISHED,
+            {**speech_ref, **azure_error, c.OUTCOME: "error", c.ERROR_CODE: "speech.job_failed"},
+        )
+        context = await asyncio.to_thread(self._job_context, part.job_id)
+        await self._finish_failed_job(
+            context, _part_failed_message(part.part_index, part.part_count), "speech.job_failed", part.part_count
+        )
+
+    def _fail_job_for_part(self, part: _PendingPart, message: str) -> bool:
+        with Session(get_engine()) as session:
+            if not jobs_db.fail_multipart_job(session, part.job_id, message):
+                return False
+            jobs_db.mark_part_failed(session, part.id, "speech.job_failed")
+            return True
+
+    # The job ---------------------------------------------------------------------------------
+
+    def _job_context(self, job_id: UUID) -> _PendingJob | None:
+        """The job's fields the telemetry and the webhook need, as the single-file poller has them."""
+        with Session(get_engine()) as session:
+            row = jobs_db.get_job_by_id(session, job_id)
+            if row is None:
+                return None
+            webhook_secret = None
+            if row.callback_url and row.caller_id:
+                try:
+                    webhook_secret = self._resolve_webhook_secret(row.caller_id)
+                except Exception as exc:
+                    logger.error("Cannot resolve webhook secret for job %s (%s)", row.id, type(exc).__name__)
+            return _PendingJob(
+                id=row.id,
+                batch_job_url="",
+                batch_job_status=row.batch_job_status or BatchJobStatus.NOT_STARTED,
+                callback_url=row.callback_url,
+                caller_id=row.caller_id,
+                metadata_=row.metadata_,
+                webhook_secret=webhook_secret,
+                trace_parent=row.trace_parent,
+                audio_blob_path=row.audio_blob_path,
+                locale=row.locale,
+                created_datetime=row.created_datetime,
+                processing_started_datetime=row.processing_started_datetime,
+                enable_diarization=row.enable_diarization,
+                audio_duration_seconds=row.audio_duration_seconds,
+            )
+
+    async def _finish_failed_job(
+        self, job: _PendingJob | None, message: str, code: str, part_count: int, *, exc: BaseException | None = None
+    ) -> None:
+        """What follows the job having been marked FAILED (only the call that marked it gets here):
+        job.finished, the WAV's blob metadata, the failure webhook, and the cleanup of every part."""
+        if job is None:
+            return
+        job_telemetry.record_job_finished(
+            "error",
+            code,
+            created_at=job.created_datetime,
+            processing_started=job.processing_started_datetime,
+            exc=exc,
+            attributes={
+                **speech_config_attributes(job.locale, job.enable_diarization),
+                "job.part_count": part_count,
+            },
+        )
+        if job.audio_blob_path:
+            try:
+                async with AsyncAzureBlobManager() as blob_manager:
+                    await blob_manager.set_blob_metadata(
+                        blob_name=job.audio_blob_path,
+                        metadata={
+                            "processed": "false",
+                            "status": "permanently_failed",
+                            "last_error": message[:1000],
+                            "failed_at": datetime.now(UTC).isoformat(),
+                        },
+                    )
+            except Exception as error:
+                logger.warning("Could not mark blob as failed for job %s (%s)", job.id, type(error).__name__)
+        await self._dispatch_failure(job, message)
+        await self._cleanup_parts(job.id)
+
+    async def _cleanup_parts(self, job_id: UUID) -> None:
+        """Delete every part blob and Azure job of a finished or failed job. Never fails the job: what
+        cannot be deleted is recorded on the job (needs_cleanup) and tried again by a later poll."""
+        try:
+            await cleanup_job_parts(job_id, engine=get_engine())
+        except Exception as exc:
+            logger.warning("Could not clean up the parts of job %s (%s)", job_id, type(exc).__name__)
+
+    async def _assemble(self, job_id: UUID) -> None:
+        """Every part has succeeded: fetch their results, merge them, save the transcript.
+
+        Exactly once: the transcript and the finished state are written in one conditional UPDATE
+        (complete_multipart_job); two pollers that assemble the same job at the same moment do the
+        same work, one UPDATE changes the row, and only that call records usage, finishes the job in
+        telemetry, dispatches the webhook and cleans up. A worker that dies before the UPDATE leaves
+        nothing behind (the transcript appears all at once or not at all) and the next poll assembles
+        the job again; one that dies after it leaves the part resources, which the leftover sweep
+        deletes."""
+        context = await asyncio.to_thread(self._job_context, job_id)
+        rows = await asyncio.to_thread(self._part_rows, job_id)
+        if context is None or not rows:
+            return
+        count = len(rows)
+        with journey(JOURNEY_JOB, str(job_id), parent_id=upload_id_from_blob(context.audio_blob_path)):
+            polled_at = datetime.now(UTC)
+            with stage(
+                "result_processing", attributes={"job.part_count": count}, link_from=context.trace_parent
+            ) as processing:
+                results: list[PartResult] = []
+                statuses: list[dict] = []
+                for row in rows:
+                    part_ref = {
+                        c.DEPENDENCY_REF: batch_job_id_from_url(row.batch_job_url),
+                        "job.part_index": row.part_index,
+                    }
+                    failure: tuple[str, BaseException] | None = None
+                    with stage(STAGE_RESULTS_RETRIEVAL, attributes=part_ref) as retrieval:
+                        try:
+                            status_data = await get_batch_job_status(row.batch_job_url)
+                            entries = await get_batch_results(row.batch_job_url, transcription_job_id=job_id)
+                        except BatchResultsInvalidError as exc:
+                            failure = ("speech.results_invalid", exc)
+                        except BatchResultError as exc:
+                            failure = ("speech.results_unavailable", exc)
+                        except Exception as exc:
+                            failure = ("speech.results_error", exc)
+                        if failure is not None:
+                            retrieval.error(failure[0])
+                    if failure is not None:
+                        await self._fail_assembly(context, row.part_index, count, processing, *failure)
+                        return
+                    statuses.append(status_data)
+                    results.append(
+                        PartResult(
+                            index=row.part_index,
+                            count=count,
+                            offset_seconds=row.offset_seconds,
+                            duration_seconds=row.duration_seconds,
+                            entries=list(entries),
+                            azure_duration_seconds=getattr(entries, "audio_duration_seconds", None),
+                        )
+                    )
+
+                with (
+                    stage(STAGE_POSTPROCESSING) as postprocessing,
+                    job_telemetry.failing_step(
+                        job_telemetry.CODE_POSTPROCESS_FAILED, stages=(postprocessing, processing)
+                    ),
+                ):
+                    with speaker_step_report() as speaker_steps:
+                        merged = merge_parts(results, lambda entries, _part: process_speakers(entries))
+                    first = statuses[0]
+                    model_identifier = _extract_model_identifier(first, context.locale)
+                    # The parts run at the same time: the job took as long as its slowest part.
+                    durations = [
+                        d
+                        for d in (
+                            _extract_transcription_duration_seconds(s, context.created_datetime) for s in statuses
+                        )
+                        if d is not None
+                    ]
+                    transcription_duration_seconds = max(durations) if durations else None
+
+                model_display_name = await _resolve_model_display_name(model_identifier)
+                provenance = build_provenance(
+                    locale=context.locale,
+                    diarization=context.enable_diarization,
+                    status_data=first,
+                    batch_job_url=rows[0].batch_job_url,  # the first part's Azure job stands for the model used
+                    model_display_name=model_display_name,
+                    speaker_steps=speaker_steps,
+                )
+                self._check_part_durations(job_id, context, rows)
+
+                with (
+                    stage(STAGE_PERSISTENCE) as persistence,
+                    job_telemetry.storage_write("transcript.save", stages=(persistence, processing)),
+                ):
+                    won = await asyncio.to_thread(
+                        self._complete,
+                        job_id,
+                        merged,
+                        transcription_duration_seconds,
+                        model_identifier,
+                        model_display_name,
+                        provenance,
+                    )
+            if not won:
+                logger.info("Job %s was already assembled or has failed: nothing more to do", job_id)
+                return
+            usage = (
+                {}
+                if self.settings.SPEECH_BACKEND == "mock"
+                else job_telemetry.record_speech_usage(*billed_seconds(results))
+            )
+            job_telemetry.record_transcript_available(
+                merged,
+                max((a for a in (job_telemetry.azure_last_action(s) for s in statuses) if a is not None), default=None),
+                polled_at,
+                {"job.part_count": count},
+            )
+            job_telemetry.record_job_finished(
+                "success",
+                None,
+                created_at=context.created_datetime,
+                processing_started=context.processing_started_datetime,
+                processing_ended=max(
+                    (a for a in (job_telemetry.azure_last_action(s) for s in statuses) if a is not None), default=None
+                ),
+                attributes={
+                    **speech_config_attributes(context.locale, context.enable_diarization, first),
+                    "job.part_count": count,
+                    **usage,
+                },
+            )
+            await self._dispatch_success(context, merged)
+            await self._cleanup_parts(job_id)
+
+    def _part_rows(self, job_id: UUID) -> list:
+        with Session(get_engine()) as session:
+            rows = jobs_db.get_job_parts(session, job_id)
+            for row in rows:
+                session.expunge(row)
+            return rows
+
+    def _check_part_durations(self, job_id: UUID, context: _PendingJob, rows: list) -> None:
+        """The recording's length (``audio_duration_seconds``, kept as it is) and the sum of its parts
+        agree by construction (the parts were cut from it and measured); if they ever do not, say so."""
+        total = sum(row.duration_seconds for row in rows)
+        recorded = context.audio_duration_seconds
+        if recorded is not None and abs(total - recorded) > 1.0:
+            logger.warning("Job %s: its parts add up to %.1f s, the recording is %.1f s", job_id, total, recorded)
+
+    def _complete(
+        self, job_id, merged, transcription_duration_seconds, model_identifier, model_display_name, provenance
+    ) -> bool:
+        with Session(get_engine()) as session:
+            return jobs_db.complete_multipart_job(
+                session,
+                job_id,
+                merged,
+                transcription_duration_seconds=transcription_duration_seconds,
+                model_identifier=model_identifier,
+                model_display_name=model_display_name,
+                provenance=provenance,
+            )
+
+    async def _fail_assembly(
+        self,
+        context: _PendingJob,
+        part_index: int,
+        count: int,
+        processing: StageHandle | None,
+        error_code: str,
+        exc: BaseException,
+    ) -> None:
+        """A part's results could not be retrieved: the job FAILED, like a part Azure failed."""
+        logger.error(
+            "Failed to retrieve results of part %d for job %s (%s)", part_index, context.id, type(exc).__name__
+        )
+        if processing is not None:
+            processing.error(error_code)
+        message = _part_results_message(part_index, count)
+        failed = await asyncio.to_thread(self._fail_job_for_job, context.id, message)
+        if failed:
+            await self._finish_failed_job(context, message, error_code, count, exc=exc)
+
+    def _fail_job_for_job(self, job_id: UUID, message: str) -> bool:
+        with Session(get_engine()) as session:
+            return jobs_db.fail_multipart_job(session, job_id, message)
+
+
+class BatchPollingService(_PartPolling):
     """Background service that polls Azure Batch Transcription job status."""
 
     def __init__(self, webhook_secret_resolver=None) -> None:
@@ -298,6 +750,7 @@ class BatchPollingService:
             while not self._shutdown:
                 try:
                     await self._poll_once()
+                    await self._poll_parts_once()  # DIAAT-408: jobs in parts, through their part rows
                     job_telemetry.poller_heartbeat.succeeded()
                 except Exception as exc:
                     logger.error(

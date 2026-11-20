@@ -983,22 +983,36 @@
         "speech.model_ref",
         "speech.diarization",
         "speech.audio_duration_s",
-        "speech.audio_duration_source"
+        "speech.audio_duration_source",
+        "job.part_count"
       ],
       "browser": false,
       "class": "operational",
       "description": "A job finished, once per job: hmcts.outcome success, error (counts towards the failed-jobs alert), failure (the user's input was rejected) or cancelled; hmcts.error.code says why. Dictation: an uploaded-audio transcription. Recording: a batch Speech job, with queue and processing times and the Speech details."
+    },
+    "job.part_finished": {
+      "attributes": [
+        "job.part_index",
+        "job.part_count",
+        "hmcts.failure.source",
+        "speech.error_code"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "One part of a recording in parts finished in Azure Speech: hmcts.outcome success or error (hmcts.error.code speech.job_failed); duration_ms: its processing time. The job's own job.finished comes once, when its transcript is assembled or a part has failed."
     },
     "job.poll_failed": {
       "attributes": [
         "hmcts.failure.source",
         "speech.error_code",
         "http.response.status_code",
-        "speech.retry_after_s"
+        "speech.retry_after_s",
+        "job.part_index",
+        "job.part_count"
       ],
       "browser": false,
       "class": "operational",
-      "description": "Polling the job failed; it stays unfinished and is polled again."
+      "description": "Polling the job failed; it stays unfinished and is polled again. For a recording in parts, job.part_index says which part."
     },
     "job.queued": {
       "attributes": [
@@ -1273,22 +1287,28 @@
       "description": "Downloading the transcript from Azure Speech was cancelled."
     },
     "results_retrieval.completed": {
-      "attributes": [],
+      "attributes": [
+        "job.part_index"
+      ],
       "browser": false,
       "class": "operational",
       "description": "Downloading the transcript from Azure Speech completed; duration_ms: its duration."
     },
     "results_retrieval.failed": {
-      "attributes": [],
+      "attributes": [
+        "job.part_index"
+      ],
       "browser": false,
       "class": "operational",
       "description": "Downloading the transcript from Azure Speech failed; hmcts.error.code says why, duration_ms: its duration."
     },
     "results_retrieval.started": {
-      "attributes": [],
+      "attributes": [
+        "job.part_index"
+      ],
       "browser": false,
       "class": "operational",
-      "description": "Downloading the transcript from Azure Speech started."
+      "description": "Downloading the transcript from Azure Speech started (job.part_index: of that part of a recording in parts)."
     },
     "security.jurisdiction_blocked": {
       "attributes": [
@@ -1359,11 +1379,13 @@
     "speech.job_failed": {
       "attributes": [
         "hmcts.failure.source",
-        "speech.error_code"
+        "speech.error_code",
+        "job.part_index",
+        "job.part_count"
       ],
       "browser": false,
       "class": "operational",
-      "description": "Azure Speech reported the job as failed; speech.error_code is Azure's code."
+      "description": "Azure Speech reported the job (or, with job.part_index, one part of a recording in parts) as failed; speech.error_code is Azure's code."
     },
     "speech.job_running": {
       "attributes": [],
@@ -1463,7 +1485,8 @@
       "attributes": [
         "transcript.segment_count",
         "transcript.speaker_count",
-        "dictation.transcription_id"
+        "dictation.transcription_id",
+        "job.part_count"
       ],
       "browser": false,
       "class": "operational",

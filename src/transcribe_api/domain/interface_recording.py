@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import and_, case, func, or_
+from sqlalchemy import and_, case, exists, func, or_
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import update as sa_update
 from sqlmodel import Session, col, select
@@ -211,13 +211,57 @@ def _stuck_waiting(cutoff: datetime):
     return and_(_waiting(), col(SpeechBatchJob.created_datetime) < cutoff)
 
 
+def _has_parts():
+    return exists().where(TranscriptionJobPart.job_id == SpeechBatchJob.id)
+
+
 def _stuck_running(cutoff: datetime):
     # Running jobs without a processing start (rows from before revision 0003) are
-    # measured from their creation.
+    # measured from their creation. DIAAT-408: a job in parts is measured against its longest
+    # part instead (multipart_stuck_running), not against the single-file threshold.
     running_since = func.coalesce(
         SpeechBatchJob.processing_started_datetime, SpeechBatchJob.created_datetime
     )
-    return and_(_running(), running_since < cutoff)
+    return and_(_running(), ~_has_parts(), running_since < cutoff)
+
+
+@dataclass(frozen=True)
+class RunningMultipartJob:
+    id: UUID
+    running_since: datetime
+    longest_part_seconds: float
+    reported: bool
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def multipart_stuck_running(session: Session, now: datetime) -> list[RunningMultipartJob]:
+    """DIAAT-408: the RUNNING jobs in parts that have run longer than ``JOB_STUCK_PART_FACTOR`` (1.5)
+    times their longest part. The parts run in parallel, so a job takes about as long as its longest
+    part; the single-file threshold (a fixed 6 hours) would be far too slow for a 2-hour part and is
+    not applied to a job in parts. Reported or not: the caller picks."""
+    factor = get_settings().JOB_STUCK_PART_FACTOR
+    rows = session.execute(
+        select(
+            SpeechBatchJob.id,
+            func.coalesce(SpeechBatchJob.processing_started_datetime, SpeechBatchJob.created_datetime),
+            func.max(TranscriptionJobPart.duration_seconds),
+            SpeechBatchJob.stuck_reported_at,
+        )
+        .join(TranscriptionJobPart, TranscriptionJobPart.job_id == SpeechBatchJob.id)
+        .where(_running())
+        .group_by(SpeechBatchJob.id)
+    ).all()
+    stuck = []
+    for job_id, since, longest, reported_at in rows:
+        if since is None or longest is None:
+            continue
+        since = _as_utc(since)
+        if (now - since).total_seconds() > factor * float(longest):
+            stuck.append(RunningMultipartJob(job_id, since, float(longest), reported_at is not None))
+    return stuck
 
 
 def _waiting_unreported():
@@ -232,7 +276,7 @@ def _count(condition):
 
 
 def count_job_states(
-    session: Session, *, waiting_cutoff: datetime, running_cutoff: datetime
+    session: Session, *, waiting_cutoff: datetime, running_cutoff: datetime, now: datetime | None = None
 ) -> JobStateCounts:
     """Database-wide waiting/running/stuck counts and the oldest waiting job, in one query.
 
@@ -251,7 +295,8 @@ def count_job_states(
         _count(_stuck_running(running_cutoff)),
     ).where(col(SpeechBatchJob.status).in_([*WAITING_STATUSES, JobStatus.RUNNING]))
     row = session.execute(stmt).one()
-    return JobStateCounts(int(row[0]), int(row[1]), row[2], int(row[3]), int(row[4]))
+    stuck_in_parts = len(multipart_stuck_running(session, now or datetime.now(UTC)))
+    return JobStateCounts(int(row[0]), int(row[1]), row[2], int(row[3]), int(row[4]) + stuck_in_parts)
 
 
 @dataclass(frozen=True)
@@ -265,7 +310,7 @@ class StuckJob:
 
 
 def claim_stuck_jobs(
-    session: Session, *, waiting_cutoff: datetime, running_cutoff: datetime
+    session: Session, *, waiting_cutoff: datetime, running_cutoff: datetime, now: datetime | None = None
 ) -> list[StuckJob]:
     """Mark newly stuck jobs as reported and return them. Each job is returned once.
 
@@ -290,7 +335,28 @@ def claim_stuck_jobs(
     )
     rows = session.execute(stmt).all()
     session.commit()
-    return [StuckJob(*row) for row in rows]
+    claimed = [StuckJob(*row) for row in rows]
+    # DIAAT-408: jobs in parts are stuck against their longest part, claimed the same way.
+    for job in multipart_stuck_running(session, now or datetime.now(UTC)):
+        if job.reported:
+            continue
+        done = session.execute(
+            sa_update(SpeechBatchJob)
+            .where(SpeechBatchJob.id == job.id, col(SpeechBatchJob.stuck_reported_at).is_(None))
+            .values(stuck_reported_at=datetime.now(UTC))
+            .returning(
+                SpeechBatchJob.id,
+                SpeechBatchJob.status,
+                SpeechBatchJob.audio_blob_path,
+                SpeechBatchJob.batch_job_id,
+                SpeechBatchJob.created_datetime,
+                SpeechBatchJob.processing_started_datetime,
+            )
+        ).first()
+        session.commit()
+        if done is not None:
+            claimed.append(StuckJob(*done))
+    return claimed
 
 
 def claim_webhook_dispatch(session: Session, job_id: UUID) -> bool:
@@ -308,9 +374,9 @@ def claim_webhook_dispatch(session: Session, job_id: UUID) -> bool:
         .values(webhook_dispatched_at=datetime.now(UTC))
         .returning(SpeechBatchJob.id)
     )
-    result = session.execute(stmt)
+    claimed = session.execute(stmt).first() is not None  # read before the commit: SQLite refuses otherwise
     session.commit()
-    return result.first() is not None
+    return claimed
 
 
 def record_correction_dataset_entry(
@@ -613,6 +679,16 @@ def clear_part_resources(session: Session, job_id: UUID) -> None:
     session.commit()
 
 
+def clear_needs_cleanup(session: Session, job_id: UUID) -> None:
+    """The job's leftovers have been deleted after all: forget the failure that was recorded."""
+    session.execute(
+        sa_update(SpeechBatchJob)
+        .where(SpeechBatchJob.id == job_id, SpeechBatchJob.needs_cleanup.is_(True))  # type: ignore[attr-defined]
+        .values(needs_cleanup=False, cleanup_failure_reason=None)
+    )
+    session.commit()
+
+
 def settle_parts_submitted(session: Session, job_id: UUID) -> bool:
     """Every part of the job is with Azure Speech: the job is SUBMITTED. Only a job still waiting for
     preparation changes (False if it is gone or was settled already)."""
@@ -624,3 +700,152 @@ def settle_parts_submitted(session: Session, job_id: UUID) -> bool:
     session.add(job)
     session.commit()
     return True
+
+
+# DIAAT-408: polling and assembling a recording in parts (stt/polling_service.py) ------------------
+#
+# A job in parts has no Azure job of its own: it is selected through its part rows. Every write that
+# moves the job on is conditional on the job still being SUBMITTED or RUNNING, so a part result that
+# arrives after the job failed (or was completed) changes nothing.
+
+_IN_FLIGHT_JOB = (JobStatus.SUBMITTED, JobStatus.RUNNING)
+_PART_IN_FLIGHT = (JobStatus.SUBMITTED.value, JobStatus.RUNNING.value)
+
+
+def fetch_pending_parts(session: Session, limit: int = _POLL_BATCH_SIZE) -> list[TranscriptionJobPart]:
+    """The parts to poll: submitted or running parts of jobs still in flight, the one polled longest
+    ago first (every poll stamps ``updated_datetime``), so many jobs in parts share the polling
+    fairly and none starves the single-file jobs, which are fetched by their own query. Locked with
+    SKIP LOCKED, as fetch_pending_batch_jobs does, so two pollers take different parts."""
+    in_flight_jobs = select(SpeechBatchJob.id).where(col(SpeechBatchJob.status).in_(_IN_FLIGHT_JOB))
+    stmt = (
+        select(TranscriptionJobPart)
+        .where(
+            col(TranscriptionJobPart.status).in_(_PART_IN_FLIGHT),
+            col(TranscriptionJobPart.batch_job_url).is_not(None),
+            col(TranscriptionJobPart.job_id).in_(in_flight_jobs),
+        )
+        .order_by(col(TranscriptionJobPart.updated_datetime).asc().nulls_first())
+        .with_for_update(skip_locked=True)
+        .limit(limit)
+    )
+    return list(session.exec(stmt).all())
+
+
+def record_part_polled(
+    session: Session, part_id: UUID, *, status: str | None = None, batch_status: BatchJobStatus | None = None
+) -> bool:
+    """Stamp a part as polled, and record its new state if it has one. Only a part of a job still in
+    flight changes (False otherwise: the job has failed, finished or gone, and a late answer is
+    ignored)."""
+    values: dict[str, object] = {"updated_datetime": datetime.now(UTC)}
+    if status is not None:
+        values["status"] = status
+    if batch_status is not None:
+        values["batch_job_status"] = batch_status.value
+    in_flight_jobs = select(SpeechBatchJob.id).where(col(SpeechBatchJob.status).in_(_IN_FLIGHT_JOB))
+    changed = session.execute(
+        sa_update(TranscriptionJobPart)
+        .where(TranscriptionJobPart.id == part_id, col(TranscriptionJobPart.job_id).in_(in_flight_jobs))
+        .values(**values)
+    )
+    session.commit()
+    return changed.rowcount == 1
+
+
+def mark_job_running(session: Session, job_id: UUID, started: datetime) -> bool:
+    """The first part has started processing: SUBMITTED -> RUNNING, with the processing start (the
+    end of the queue wait). True only for the call that made the change."""
+    changed = session.execute(
+        sa_update(SpeechBatchJob)
+        .where(SpeechBatchJob.id == job_id, SpeechBatchJob.status == JobStatus.SUBMITTED)
+        .values(status=JobStatus.RUNNING, processing_started_datetime=started, updated_datetime=datetime.now(UTC))
+    )
+    session.commit()
+    return changed.rowcount == 1
+
+
+def fetch_jobs_ready_to_assemble(session: Session, limit: int = _POLL_BATCH_SIZE) -> list[UUID]:
+    """Jobs in flight whose parts have all succeeded: ready to be assembled. Selected by state, not by
+    the poll that saw the last part succeed, so a poller that died between the two is picked up again."""
+    not_succeeded = exists().where(
+        TranscriptionJobPart.job_id == SpeechBatchJob.id,
+        TranscriptionJobPart.status != JobStatus.SUCCEEDED.value,
+    )
+    stmt = (
+        select(SpeechBatchJob.id)
+        .where(col(SpeechBatchJob.status).in_(_IN_FLIGHT_JOB), _has_parts(), ~not_succeeded)
+        .order_by(col(SpeechBatchJob.updated_datetime).asc().nulls_first())
+        .limit(limit)
+    )
+    return list(session.exec(stmt).all())
+
+
+def complete_multipart_job(
+    session: Session,
+    job_id: UUID,
+    entries: list[DialogueEntry],
+    *,
+    transcription_duration_seconds: float | None,
+    model_identifier: str | None,
+    model_display_name: str | None,
+    provenance: TranscriptProvenance | None,
+) -> bool:
+    """Save the assembled transcript and finish the job, in **one** UPDATE: either the whole
+    transcript is there with the job SUCCEEDED or nothing changed, so no half-assembled transcript is
+    ever visible. Conditional on the job still being SUBMITTED or RUNNING: when two pollers assemble
+    the same job (or the worker restarts and assembles it again) exactly one UPDATE changes a row and
+    only that caller returns True; the others did the same work for nothing and must do nothing more
+    (no telemetry, no webhook, no cleanup)."""
+    now = datetime.now(UTC)
+    values: dict[str, object] = {
+        "dialogue_entries": [e.model_dump() if hasattr(e, "model_dump") else e for e in entries],
+        "batch_job_status": BatchJobStatus.SUCCEEDED,
+        "status": JobStatus.SUCCEEDED,
+        "transcription_duration_seconds": transcription_duration_seconds,
+        "model_identifier": model_identifier,
+        "model_display_name": model_display_name,
+        "updated_datetime": now,
+    }
+    if provenance is not None:
+        values["provenance"] = provenance.model_copy(update={"generated_at": now}).model_dump(mode="json")
+    changed = session.execute(
+        sa_update(SpeechBatchJob)
+        .where(SpeechBatchJob.id == job_id, col(SpeechBatchJob.status).in_(_IN_FLIGHT_JOB))
+        .values(**values)
+    )
+    session.commit()
+    return changed.rowcount == 1
+
+
+def fail_multipart_job(session: Session, job_id: UUID, error_message: str) -> bool:
+    """A part failed: the job FAILED, with ``error_message``. Conditional like complete_multipart_job
+    (a job already finished or failed is left as it is), True only for the call that changed it."""
+    changed = session.execute(
+        sa_update(SpeechBatchJob)
+        .where(SpeechBatchJob.id == job_id, col(SpeechBatchJob.status).in_(_IN_FLIGHT_JOB))
+        .values(
+            status=JobStatus.FAILED,
+            batch_job_status=BatchJobStatus.FAILED,
+            error_message=error_message,
+            updated_datetime=datetime.now(UTC),
+        )
+    )
+    session.commit()
+    return changed.rowcount == 1
+
+
+def fetch_jobs_with_part_leftovers(session: Session, limit: int = 5) -> list[UUID]:
+    """Finished or failed jobs in parts whose part blobs or Azure jobs are still recorded: their
+    cleanup did not finish (a crash, or a delete that failed): tried again."""
+    leftover = exists().where(
+        TranscriptionJobPart.job_id == SpeechBatchJob.id,
+        or_(col(TranscriptionJobPart.blob_path).is_not(None), col(TranscriptionJobPart.batch_job_url).is_not(None)),
+    )
+    stmt = (
+        select(SpeechBatchJob.id)
+        .where(col(SpeechBatchJob.status).in_([JobStatus.SUCCEEDED, JobStatus.FAILED]), leftover)
+        .order_by(col(SpeechBatchJob.updated_datetime).asc().nulls_first())
+        .limit(limit)
+    )
+    return list(session.exec(stmt).all())

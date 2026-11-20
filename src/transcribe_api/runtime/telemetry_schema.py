@@ -459,6 +459,7 @@ def _shared_events(schema: TelemetrySchema) -> None:
             "speech.diarization",
             "speech.audio_duration_s",
             "speech.audio_duration_source",
+            "job.part_count",
         ),
         description="A job finished, once per job: hmcts.outcome success, error (counts towards the failed-jobs alert), failure (the user's input was rejected) or cancelled; hmcts.error.code says why. Dictation: an uploaded-audio transcription. Recording: a batch Speech job, with queue and processing times and the Speech details.",
     )
@@ -474,7 +475,12 @@ def _shared_events(schema: TelemetrySchema) -> None:
     )
     schema.event(
         "transcript.available",
-        attributes=("transcript.segment_count", "transcript.speaker_count", "dictation.transcription_id"),
+        attributes=(
+            "transcript.segment_count",
+            "transcript.speaker_count",
+            "dictation.transcription_id",
+            "job.part_count",
+        ),
         description="A transcript was saved and can be opened. Dictation: dictation.transcription_id is the transcription created (live submission). Recording: segment and speaker counts.",
     )
 
@@ -517,9 +523,26 @@ def _recording_events(schema: TelemetrySchema) -> None:
     """Recording service (heritage batch-audio-transcription)."""
     schema.event("job.created", description="Job row created: the upload is complete and the job exists.")
     schema.event(
+        "job.part_finished",
+        attributes=(
+            "job.part_index",
+            "job.part_count",
+            "hmcts.failure.source",
+            "speech.error_code",
+        ),
+        description="One part of a recording in parts finished in Azure Speech: hmcts.outcome success or error (hmcts.error.code speech.job_failed); duration_ms: its processing time. The job's own job.finished comes once, when its transcript is assembled or a part has failed.",
+    )
+    schema.event(
         "job.poll_failed",
-        attributes=("hmcts.failure.source", "speech.error_code", "http.response.status_code", "speech.retry_after_s"),
-        description="Polling the job failed; it stays unfinished and is polled again.",
+        attributes=(
+            "hmcts.failure.source",
+            "speech.error_code",
+            "http.response.status_code",
+            "speech.retry_after_s",
+            "job.part_index",
+            "job.part_count",
+        ),
+        description="Polling the job failed; it stays unfinished and is polled again. For a recording in parts, job.part_index says which part.",
     )
     schema.event(
         "job.queued",
@@ -588,17 +611,23 @@ def _recording_events(schema: TelemetrySchema) -> None:
     )
     schema.event(
         "results_retrieval.completed",
+        attributes=("job.part_index",),
         description="Downloading the transcript from Azure Speech completed; duration_ms: its duration.",
     )
     schema.event(
         "results_retrieval.failed",
+        attributes=("job.part_index",),
         description="Downloading the transcript from Azure Speech failed; hmcts.error.code says why, duration_ms: its duration.",
     )
-    schema.event("results_retrieval.started", description="Downloading the transcript from Azure Speech started.")
+    schema.event(
+        "results_retrieval.started",
+        attributes=("job.part_index",),
+        description="Downloading the transcript from Azure Speech started (job.part_index: of that part of a recording in parts).",
+    )
     schema.event(
         "speech.job_failed",
-        attributes=("hmcts.failure.source", "speech.error_code"),
-        description="Azure Speech reported the job as failed; speech.error_code is Azure's code.",
+        attributes=("hmcts.failure.source", "speech.error_code", "job.part_index", "job.part_count"),
+        description="Azure Speech reported the job (or, with job.part_index, one part of a recording in parts) as failed; speech.error_code is Azure's code.",
     )
     schema.event("speech.job_running", description="Azure Speech started processing; duration_ms: the queue wait.")
     schema.event(

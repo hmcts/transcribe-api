@@ -607,6 +607,7 @@ async def test_polling_loop_beats_only_on_a_successful_poll(monkeypatch):
     service = BatchPollingService()
     polls = AsyncMock(side_effect=[None, RuntimeError("boom")])
     monkeypatch.setattr(service, "_poll_once", polls)
+    monkeypatch.setattr(service, "_poll_parts_once", AsyncMock())  # DIAAT-408: reads the database
     monkeypatch.setattr(service, "_report_stuck_jobs", AsyncMock())
     monkeypatch.setattr(asyncio, "sleep", AsyncMock(side_effect=[None, asyncio.CancelledError()]))
 

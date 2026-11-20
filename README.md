@@ -190,15 +190,44 @@ fails exactly as before (the 4-hour sentence).
   accepted a part and before its row was updated: that part is submitted again and Azure keeps an Azure job nothing polls.
 - **Deleting a job** while its parts are in flight (`DELETE /jobs/{id}`) deletes the part blobs and Azure jobs and the rows; the worker
   finds the rows gone at its next write, deletes the blob and Azure job it had just made, and stops.
-- **Not yet built**: the batch poller does not yet read the parts' results, so a job in parts is submitted but its transcript is not
-  assembled (offsets are applied and results merged by the next change), and speakers are not labelled per part. Keep
-  `long_recordings_enabled` off in any environment until then.
+- **Polling and assembling** (`BatchPollingService`, beside its single-file polling): a job in parts has no Azure job of its own
+  (`batch_job_*` stay empty until it finishes), so it is polled through its part rows: the submitted or running parts of jobs
+  that are still in flight, the one polled longest ago first (`FOR UPDATE SKIP LOCKED`, so two pollers take different parts, and
+  a separate query from the single-file one, so neither starves the other). The job becomes `RUNNING` when its first part runs
+  (`speech.job_running` once, for the job). When every part has succeeded the job is assembled: each part's results are parsed as
+  for a single file, its speakers are grouped and numbered **within the part** (diarization is per file), every entry and word time
+  is moved by the part's `offset_seconds` (the offsets measured when the recording was cut), and the parts are concatenated in order.
+  The transcript and the SUCCEEDED state are written in **one conditional UPDATE** (`complete_multipart_job`): the transcript
+  appears all at once or not at all; when two pollers assemble the same job, or a worker restarts halfway, exactly one UPDATE
+  changes the row and only that call records usage, finishes the job in telemetry, sends the webhook and cleans up. A crash after
+  that UPDATE leaves the part blobs and Azure jobs recorded on the part rows; a sweep in every poll deletes them.
+- **A failed part fails the job at once** (a part Azure reports Failed, or whose results cannot be retrieved): "Part N of M of the
+  recording could not be transcribed. Please upload the recording again." Every write that moves a job on is conditional on the job
+  still being SUBMITTED or RUNNING, so a late result of another part cannot bring a failed job back. The Azure jobs and blobs of all
+  the parts are deleted. There is no user-facing retry or resubmit route for a job (none existed for single-file jobs either):
+  the clerk uploads the recording again. Resubmitting a part happens only while the job is being prepared (above).
+- **Billing and duration**: the Speech usage recorded for the job is the sum of the parts' durations as Azure reported them (a part
+  Azure gave no duration for counts at the length it was cut to, and the source is then `estimate`); the job's
+  `audio_duration_seconds` stays the recording's length (it equals the sum of the parts by construction; if they ever differ by more
+  than a second a warning is logged and the recording's length is kept). `transcription_duration_seconds` is the longest part's, as
+  the parts run at the same time; the provenance names the first part's Azure job and model.
+- **Cleanup**: on completion and on failure every part blob and Azure job is deleted with the same code (`cleanup_job_parts`); what
+  cannot be deleted is recorded on the job (`needs_cleanup`, `cleanup_failure_reason`), never fails a finished job, and is tried
+  again by a later poll (the flag is cleared when it succeeds). The part rows stay as the record, with the blob and Azure URLs cleared.
+- **Stuck jobs**: a job in parts is reported as stuck (and counted in `transcription.jobs.stuck`) once it has run longer than
+  `JOB_STUCK_PART_FACTOR` (1.5) times its **longest part**, not after the fixed `JOB_STUCK_RUNNING_SECONDS` (6 hours, which is for a
+  single file). Single-file jobs are judged as before. The gauges count a job in parts once, whatever its parts.
+- **Mock Speech** (`SPEECH_BACKEND=mock`) gives each part its own transcript ("Part 2 opens with speaker one." ...), so the merge and
+  its offsets can be seen end to end.
+- **Not yet built**: the speakers of the parts are numbered within each part, and nothing yet labels which part a speaker belongs to
+  (the next change), so keep `long_recordings_enabled` off until it is.
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `PART_TARGET_SECONDS` | 12600 | Longest part aimed for (above). |
 | `MAX_PARALLEL_PARTS` | 4 | Parts stored and submitted at once. Each in-flight part holds `BLOB_UPLOAD_CONCURRENCY` x 4 MiB of upload buffers. |
 | `PART_MAX_ATTEMPTS` / `PART_RETRY_BACKOFF_SECONDS` | 3 / 5 | Attempts at one part before the job fails, and the wait (times the attempt number) between them. |
+| `JOB_STUCK_PART_FACTOR` | 1.5 | A job in parts is stuck after this many times its longest part has run (above). |
 
 Temporary disk for a recording in parts: the converted WAV and its parts (about 115 MB per hour each, so about 1.8 GB for 8 hours)
 per job being prepared, beside the original while it is downloaded.

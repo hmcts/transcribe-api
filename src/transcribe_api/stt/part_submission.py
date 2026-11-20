@@ -107,6 +107,7 @@ async def cleanup_job_parts(
                 jobs.delete_job_parts(session, job_id)
             elif clean:
                 jobs.clear_part_resources(session, job_id)
+                jobs.clear_needs_cleanup(session, job_id)
             else:
                 jobs.mark_needs_cleanup(session, job_id, "A part's blob or Azure job could not be deleted")
 

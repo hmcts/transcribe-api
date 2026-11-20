@@ -107,6 +107,10 @@ class Settings(BaseSettings):
     # 4-hour recording has not been measured: revisit this once it has been.
     JOB_STUCK_WAITING_SECONDS: int = 30 * 60
     JOB_STUCK_RUNNING_SECONDS: int = 6 * 60 * 60
+    # DIAAT-408: a recording in parts (over 240 minutes) runs its parts at the same time, so it is
+    # reported as stuck once it has run longer than this many times its longest part, not after the
+    # fixed JOB_STUCK_RUNNING_SECONDS above (which is 1.5 x Azure's 4 hours per file).
+    JOB_STUCK_PART_FACTOR: float = 1.5
 
     # DIAAT-277: how often the background checker probes the database, Blob Storage
     # and Azure Speech (Speech at most once per 300 s whatever this is), and how long
@@ -254,6 +258,13 @@ class Settings(BaseSettings):
     def validate_recording_limit(cls, v: int, info: ValidationInfo) -> int:
         if v <= 0:
             raise ValueError(f"{info.field_name} must be greater than 0")
+        return v
+
+    @field_validator("JOB_STUCK_PART_FACTOR")
+    @classmethod
+    def validate_stuck_part_factor(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("JOB_STUCK_PART_FACTOR must be greater than 0")
         return v
 
     @field_validator("PART_TARGET_SECONDS")

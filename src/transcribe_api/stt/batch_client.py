@@ -92,6 +92,31 @@ _MOCK_DIALOGUE_ENTRIES: list[DialogueEntry] = [
     ),
 ]
 
+
+# DIAAT-408: the mock transcript of part N of a recording in parts: its own words and times, so a
+# merged transcript shows which part each entry came from and where it starts. Times are the part's
+# own (from 0), as Azure's are.
+def _mock_part_entries(part: int) -> list[DialogueEntry]:
+    def entry(speaker: str, words: list[str], start: float) -> DialogueEntry:
+        timed = [
+            WordInfo(text=w, start_time=start + i * 0.5, end_time=start + i * 0.5 + 0.4, confidence=0.9)
+            for i, w in enumerate(words)
+        ]
+        return DialogueEntry(
+            speaker=speaker,
+            text=" ".join(words),
+            start_time=timed[0].start_time,
+            end_time=timed[-1].end_time,
+            confidence=0.9,
+            words=timed,
+        )
+
+    return [
+        entry("1", ["Part", str(part), "opens", "with", "speaker", "one."], 0.0),
+        entry("2", ["Part", str(part), "answers", "with", "speaker", "two."], 4.0),
+    ]
+
+
 # Prefix for job URLs submit_batch_job returns under SPEECH_BACKEND=mock.
 # get_batch_job_status/get_batch_results/delete_batch_job check for it before
 # short-circuiting: SPEECH_BACKEND=mock alone isn't enough, because flipping
@@ -189,7 +214,10 @@ async def submit_batch_job(
     Raises BatchSubmissionError on non-201 response.
     """
     if get_settings().SPEECH_BACKEND == "mock":
-        return f"{_MOCK_JOB_URL_PREFIX}{uuid4()}"
+        # DIAAT-408: a part of a long recording ("batch-{job}-part-{n}") gets a job of its own whose
+        # transcript says which part it is (get_batch_results).
+        part = re.search(r"-part-(\d+)$", display_name)
+        return f"{_MOCK_JOB_URL_PREFIX}{uuid4()}" + (f"-part-{part.group(1)}" if part else "")
 
     payload: dict = {
         "contentUrls": [audio_sas_url],
@@ -381,6 +409,9 @@ async def get_batch_results(
     callers that only read the entries are unchanged).
     """
     if get_settings().SPEECH_BACKEND == "mock" and job_url.startswith(_MOCK_JOB_URL_PREFIX):
+        part = re.search(r"-part-(\d+)$", job_url)
+        if part:
+            return BatchResults(_mock_part_entries(int(part.group(1))), None)
         return BatchResults(list(_MOCK_DIALOGUE_ENTRIES), None)  # no Azure duration to report
 
     headers = await _auth_headers()

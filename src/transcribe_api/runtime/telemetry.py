@@ -91,6 +91,10 @@ EVENT_TRANSCRIPT_AVAILABLE = "transcript.available"
 EVENT_JOB_FINISHED = "job.finished"
 EVENT_JOB_RETRIED = "job.retried"
 EVENT_JOB_POLL_FAILED = "job.poll_failed"
+# DIAAT-408: a part of a recording in parts finished in Azure Speech (success or failure), with its
+# own processing time; the job's single job.finished comes once the transcript is assembled or a
+# part has failed.
+EVENT_JOB_PART_FINISHED = "job.part_finished"
 EVENT_JOB_STUCK = "job.stuck"
 EVENT_WEBHOOK_DELIVERY_FAILED = "webhook.delivery_failed"
 ATTR_JOB_STATE = "job.state"

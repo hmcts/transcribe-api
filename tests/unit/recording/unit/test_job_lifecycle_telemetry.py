@@ -289,6 +289,7 @@ def test_stuck_thresholds_must_be_positive(monkeypatch):
 async def test_polling_loop_checks_for_stuck_jobs_and_survives_errors(monkeypatch):
     service = BatchPollingService(webhook_secret_resolver=lambda _caller: "")
     service._poll_once = AsyncMock()
+    service._poll_parts_once = AsyncMock()  # DIAAT-408: the polling of jobs in parts reads the database
     service._claim_and_report_stuck_jobs = MagicMock(side_effect=ConnectionError("db down"))
 
     async def stop(_seconds):
