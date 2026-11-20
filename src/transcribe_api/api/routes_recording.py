@@ -107,9 +107,18 @@ router = APIRouter(prefix="/api/v1")
 _LOCALE_RE = re.compile(r"^[a-z]{2}-[A-Z]{2}$")
 _RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 _METADATA_MAX_BYTES = 4096
-# ~200MB comfortably covers a multi-hour hearing at typical speech bitrates
-# while bounding worst-case memory use for a single upload.
-_MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+# DIAAT-408: a backstop on the size of what is uploaded, not the limit on how long a
+# recording may be (that is MAX_AUDIO_DURATION_SECONDS, checked once the upload is
+# decoded). 1 GiB covers 4 hours (Azure's per-file limit with diarization) at any
+# usual MP3/M4A bitrate and as 16 kHz mono WAV (about 460 MB); CD-quality WAV is about
+# 635 MB an hour, so it hits this at about 100 minutes. Keep in step with
+# transcribe-web's app/api/upload/route.ts (MAX_UPLOAD_BYTES).
+_MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
+_TOO_LARGE_DETAIL = (
+    "The audio file is too large (the limit is 1 GB). "
+    "Uncompressed audio such as WAV is much larger for the same length: "
+    "save long recordings as MP3 or M4A."
+)
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 _ALLOWED_AUDIO_EXTENSIONS = {".mp3", ".wav", ".mp4", ".m4a", ".ogg", ".flac"}
 _VIDEO_EXTENSIONS = {".mp4"}
@@ -690,7 +699,7 @@ async def _save_upload_capped(file: UploadFile, max_bytes: int, target: Path) ->
     """Write the upload to ``target`` in chunks, aborting once max_bytes is exceeded.
 
     The audio upload goes to disk rather than memory: ffmpeg reads it from a
-    file anyway, and up to 200 MB per request would otherwise sit in the API's
+    file anyway, and up to 1 GiB per request would otherwise sit in the API's
     memory alongside the decoded WAV. Returns the number of bytes written.
     """
     total = 0
@@ -698,9 +707,7 @@ async def _save_upload_capped(file: UploadFile, max_bytes: int, target: Path) ->
         while chunk := await file.read(_UPLOAD_CHUNK_BYTES):
             total += len(chunk)
             if total > max_bytes:
-                raise HTTPException(
-                    status_code=413, detail="Audio file exceeds the maximum upload size"
-                )
+                raise HTTPException(status_code=413, detail=_TOO_LARGE_DETAIL)
             await out.write(chunk)
     return total
 
@@ -731,6 +738,30 @@ def _wav_duration_seconds(path: Path) -> float | None:
     except Exception:  # a malformed header must never fail the upload
         return None
     return round(frames / rate, 3) if rate > 0 else None
+
+
+def _format_duration(seconds: float) -> str:
+    """A length for a user-facing message: "4 hours", "4 hours 12 minutes", "45 minutes"."""
+    minutes = int(seconds // 60)
+    hours, minutes = divmod(minutes, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+    if minutes or not hours:
+        parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+    return " ".join(parts)
+
+
+def _too_long_detail(duration: float, max_seconds: float) -> str:
+    """The 422 message for a recording over the limit (``duration`` > ``max_seconds``).
+
+    Durations are shown to the minute, so one only seconds over the limit would read
+    "4 hours long ... at most 4 hours": then it says it is a little over instead.
+    """
+    length, limit = _format_duration(duration), _format_duration(max_seconds)
+    if length == limit:
+        return f"The recording is a little over {limit} long. Recordings can be at most {limit}."
+    return f"The recording is {length} long. Recordings can be at most {limit}."
 
 
 def _upload_metadata(file: UploadFile, extension: str, file_count: int | None) -> dict[str, object]:
@@ -851,6 +882,21 @@ async def _upload_audio(
             ) from exc
         duration = await asyncio.to_thread(_wav_duration_seconds, wav_path)
         if duration is not None:
+            # DIAAT-408: Azure batch transcription with diarization fails a file longer
+            # than 240 minutes, after the job was accepted. Refuse it here, with the
+            # reason, before it is stored. The duration is that of the WAV ffmpeg just
+            # wrote, so it is the length Azure will see. (None means the header could
+            # not be read: the WAV is ffmpeg's own, so that is not expected, and it is
+            # never a reason to fail the upload, as above.)
+            max_seconds = get_settings().MAX_AUDIO_DURATION_SECONDS
+            if duration > max_seconds:
+                _reject(upload_stage, "upload.too_long")
+                # After _reject: upload.validation_failed carries only the attributes
+                # its schema allows (not the duration); upload.failed does carry it.
+                upload_stage.set_attribute("audio.duration_seconds", duration)
+                raise HTTPException(
+                    status_code=422, detail=_too_long_detail(duration, max_seconds)
+                )
             upload_stage.set_attribute("audio.duration_seconds", duration)
 
         if get_settings().AUDIO_STORAGE_BACKEND == "local":
