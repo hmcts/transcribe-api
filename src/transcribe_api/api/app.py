@@ -180,10 +180,12 @@ async def _in_area(name: str, start: Callable[[], Coroutine[Any, Any, None]]) ->
 
 
 async def start_background_workers() -> list[asyncio.Task]:
-    """Start both pollers. Used by the worker entrypoint and, optionally, the web process."""
+    """Start the pollers and the upload preparation service. Used by the worker entrypoint and,
+    optionally, the web process."""
     from transcribe_api.runtime.telemetry import AREA_DICTATION, AREA_RECORDING
     from transcribe_api.stt.job_telemetry import register_job_gauges
     from transcribe_api.stt.polling_service import BatchPollingService
+    from transcribe_api.stt.preparation_service import PreparationService
     from transcribe_api.stt.work_poller import TranscriptionPollingService
 
     # DIAAT-281: waiting/running/stuck recording job gauges, read from the database on
@@ -192,8 +194,11 @@ async def start_background_workers() -> list[asyncio.Task]:
     tasks = [
         asyncio.create_task(_in_area(AREA_RECORDING, lambda: BatchPollingService().run_polling_loop())),
         asyncio.create_task(_in_area(AREA_DICTATION, lambda: TranscriptionPollingService().run_polling_loop())),
+        # DIAAT-408: converts and submits the uploads POST /uploads accepted without converting.
+        # Always running, harmless with none waiting: only the flag changes what the API does.
+        asyncio.create_task(_in_area(AREA_RECORDING, lambda: PreparationService().run_polling_loop())),
     ]
-    log.info("Started %d background poller(s)", len(tasks))
+    log.info("Started %d background task(s)", len(tasks))
     return tasks
 
 

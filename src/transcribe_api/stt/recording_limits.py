@@ -39,3 +39,27 @@ def current_limit_seconds() -> int:
         async_preparation=feature_flags.is_async_upload_preparation_enabled(),
         max_seconds=get_settings().MAX_AUDIO_DURATION_SECONDS,
     )
+
+
+def format_duration(seconds: float) -> str:
+    """A length for a user-facing message: "4 hours", "4 hours 12 minutes", "45 minutes"."""
+    minutes = int(seconds // 60)
+    hours, minutes = divmod(minutes, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+    if minutes or not hours:
+        parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+    return " ".join(parts)
+
+
+def too_long_detail(duration: float, max_seconds: float) -> str:
+    """The message for a recording over the limit (``duration`` > ``max_seconds``).
+
+    Durations are shown to the minute, so one only seconds over the limit would read
+    "4 hours long ... at most 4 hours": then it says it is a little over instead.
+    """
+    length, limit = format_duration(duration), format_duration(max_seconds)
+    if length == limit:
+        return f"The recording is a little over {limit} long. Recordings can be at most {limit}."
+    return f"The recording is {length} long. Recordings can be at most {limit}."

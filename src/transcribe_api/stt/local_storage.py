@@ -57,6 +57,11 @@ def _storage_root() -> Path:
     return root
 
 
+def path_of(blob_name: str) -> Path:
+    """Where a blob is on disk (it may not exist)."""
+    return _storage_root() / _flat_filename(blob_name)
+
+
 def save(content: bytes, blob_name: str) -> Path:
     target = _storage_root() / _flat_filename(blob_name)
     target.write_bytes(content)

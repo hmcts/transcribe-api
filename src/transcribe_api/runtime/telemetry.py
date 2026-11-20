@@ -132,6 +132,13 @@ SPEECH_CONFIG_ATTRIBUTES = (
 #   results_retrieval -> transcript_postprocessing -> transcript_persistence
 #   -> transcript.available -> job.finished (-> webhook.delivered / delivery_failed)
 STAGE_RESULTS_RETRIEVAL = "results_retrieval"
+# DIAAT-408: the worker converts an upload the API accepted without converting it: a stage of
+# the job journey (preparation.started / .completed / .failed), before speech_submission. Its
+# codes: upload.undecodable and upload.too_long (the upload request's), preparation.source_missing,
+# preparation.storage_failed, preparation.transcoder_unavailable, preparation.exhausted.
+STAGE_PREPARATION = "preparation"
+# job.retried's operation for a preparation attempt that will be repeated.
+JOB_PREPARE_OPERATION = "job.prepare"
 STAGE_POSTPROCESSING = "transcript_postprocessing"
 STAGE_PERSISTENCE = "transcript_persistence"
 POST_SPEECH_STAGES = (STAGE_RESULTS_RETRIEVAL, STAGE_POSTPROCESSING, STAGE_PERSISTENCE)
@@ -171,6 +178,7 @@ ATTR_SETTINGS_FEATURES_CHANGED_COUNT = "settings.features_changed_count"
 WEBHOOK_NOTIFICATIONS = ("succeeded", "failed")
 JOB_STATES = ("waiting", "running")
 RETRY_OPERATIONS = (
+    JOB_PREPARE_OPERATION,
     "speech.submit",
     "speech.status",
     "speech.results",

@@ -574,15 +574,33 @@ def test_five_hours_is_refused_with_the_flags_off_naming_the_4_hour_limit(tel, m
     assert response.json()["detail"] == "The recording is 5 hours long. Recordings can be at most 4 hours."
 
 
-def test_five_hours_is_accepted_with_both_flags_on(tel, mocker, monkeypatch):
+def _store_locally(monkeypatch, tmp_path) -> None:
+    """With async_upload_preparation on the upload stores the original through the audio storage."""
+    from transcribe_api.runtime import settings_recording
+
+    monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path / "audio"))
+    monkeypatch.setenv("LOCAL_AUDIO_BASE_URL", "http://api.test")
+    settings_recording.get_settings.cache_clear()
+
+
+def test_five_hours_is_accepted_with_both_flags_on(tel, mocker, monkeypatch, tmp_path):
+    # Both flags on is the asynchronous path: the length is the file header's (ffprobe).
     _both_flags(monkeypatch, True)
-    mocker.patch("transcribe_api.api.routes_recording._wav_duration_seconds", return_value=5 * 3600.0)
+    _store_locally(monkeypatch, tmp_path)
+    mocker.patch(
+        "transcribe_api.api.routes_recording.probe_duration_seconds", new=mocker.AsyncMock(return_value=5 * 3600.0)
+    )
     assert _post(_client(mocker)).status_code == 201
 
 
-def test_over_eight_hours_is_refused_with_both_flags_on_naming_the_8_hour_limit(tel, mocker, monkeypatch):
+def test_over_eight_hours_is_refused_with_both_flags_on_naming_the_8_hour_limit(tel, mocker, monkeypatch, tmp_path):
     _both_flags(monkeypatch, True)
-    mocker.patch("transcribe_api.api.routes_recording._wav_duration_seconds", return_value=8 * 3600.0 + 120)
+    _store_locally(monkeypatch, tmp_path)
+    mocker.patch(
+        "transcribe_api.api.routes_recording.probe_duration_seconds",
+        new=mocker.AsyncMock(return_value=8 * 3600.0 + 120),
+    )
     response = _post(_client(mocker))
     assert response.status_code == 422
     assert response.json()["detail"] == "The recording is 8 hours 2 minutes long. Recordings can be at most 8 hours."

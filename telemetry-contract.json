@@ -394,13 +394,14 @@
     },
     "job.retry.operation": {
       "allowed_values": [
+        "job.prepare",
         "speech.delete",
         "speech.results",
         "speech.status",
         "speech.submit",
         "webhook.deliver"
       ],
-      "description": "The call being retried.",
+      "description": "The call being retried: job.prepare is the worker's conversion of an uploaded recording.",
       "max_length": 128,
       "pattern": null,
       "type": "str"
@@ -1168,6 +1169,34 @@
       "browser": true,
       "class": "analytics",
       "description": "A page was viewed."
+    },
+    "preparation.cancelled": {
+      "attributes": [],
+      "browser": false,
+      "class": "operational",
+      "description": "Preparing an uploaded recording (worker) was cancelled."
+    },
+    "preparation.completed": {
+      "attributes": [
+        "audio.duration_seconds"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "The worker read, converted and stored an uploaded recording; duration_ms: its duration; audio.duration_seconds: the converted audio's length."
+    },
+    "preparation.failed": {
+      "attributes": [
+        "audio.duration_seconds"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "The worker could not prepare an uploaded recording; hmcts.error.code says why (upload.undecodable, upload.too_long, preparation.source_missing: the file's; preparation.storage_failed, preparation.transcoder_unavailable: ours, retried), duration_ms: its duration."
+    },
+    "preparation.started": {
+      "attributes": [],
+      "browser": false,
+      "class": "operational",
+      "description": "The worker started preparing an uploaded recording (reading, converting and storing it), before it is submitted to Azure Speech."
     },
     "recording.completed": {
       "attributes": [

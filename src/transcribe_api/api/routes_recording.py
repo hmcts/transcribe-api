@@ -7,7 +7,6 @@ import mimetypes
 import re
 import socket
 import tempfile
-import wave
 from collections import Counter
 from collections.abc import AsyncGenerator
 from contextlib import aclosing
@@ -38,6 +37,7 @@ from slowapi.util import get_remote_address
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 
+from transcribe_api.domain import feature_flags
 from transcribe_api.domain.audit_recording import (
     AuditRecord,
     AuditScope,
@@ -96,11 +96,23 @@ from transcribe_api.runtime.telemetry import (
 from transcribe_api.runtime.version import APP_VERSION
 from transcribe_api.stt import local_storage
 from transcribe_api.stt.accuracy import DEFAULT_CONFIDENCE_THRESHOLD, compute_accuracy
+from transcribe_api.stt.audio_storage import (
+    AUDIO_EXTENSIONS,
+    get_audio_storage,
+    source_blob_name,
+)
 from transcribe_api.stt.batch_client import BatchSubmissionError, delete_batch_job
-from transcribe_api.stt.preprocessing import AudioDecodeError, normalize_to_wav
+from transcribe_api.stt.preprocessing import (
+    AudioDecodeError,
+    normalize_to_wav,
+    probe_duration_seconds,
+)
+from transcribe_api.stt.preprocessing import wav_duration_seconds as _wav_duration_seconds
 from transcribe_api.stt.recording_limits import current_limit_seconds
+from transcribe_api.stt.recording_limits import format_duration as _format_duration  # noqa: F401  (tests import it from here)
+from transcribe_api.stt.recording_limits import too_long_detail as _too_long_detail
 from transcribe_api.stt.speech_auth import SpeechAuthError
-from transcribe_api.stt.submission import submit_and_queue_batch_job
+from transcribe_api.stt.submission import defer_batch_job, submit_and_queue_batch_job
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1")
@@ -118,7 +130,7 @@ _TOO_LARGE_DETAIL_TEMPLATE = (
     "save long recordings as MP3 or M4A."
 )
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
-_ALLOWED_AUDIO_EXTENSIONS = {".mp3", ".wav", ".mp4", ".m4a", ".ogg", ".flac"}
+_ALLOWED_AUDIO_EXTENSIONS = set(AUDIO_EXTENSIONS)
 _VIDEO_EXTENSIONS = {".mp4"}
 # DIAAT-280: the frontend sends one X-Hearing-Id for every file of a hearing, and the
 # number of files, so multi-file uploads can be related in telemetry.
@@ -743,40 +755,6 @@ def _hearing_file_count(raw: str | None) -> int | None:
     return None
 
 
-def _wav_duration_seconds(path: Path) -> float | None:
-    """Duration of a PCM WAV file, or None if it cannot be read (telemetry only)."""
-    try:
-        with wave.open(str(path), "rb") as wav:
-            frames, rate = wav.getnframes(), wav.getframerate()
-    except Exception:  # a malformed header must never fail the upload
-        return None
-    return round(frames / rate, 3) if rate > 0 else None
-
-
-def _format_duration(seconds: float) -> str:
-    """A length for a user-facing message: "4 hours", "4 hours 12 minutes", "45 minutes"."""
-    minutes = int(seconds // 60)
-    hours, minutes = divmod(minutes, 60)
-    parts = []
-    if hours:
-        parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
-    if minutes or not hours:
-        parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
-    return " ".join(parts)
-
-
-def _too_long_detail(duration: float, max_seconds: float) -> str:
-    """The 422 message for a recording over the limit (``duration`` > ``max_seconds``).
-
-    Durations are shown to the minute, so one only seconds over the limit would read
-    "4 hours long ... at most 4 hours": then it says it is a little over instead.
-    """
-    length, limit = _format_duration(duration), _format_duration(max_seconds)
-    if length == limit:
-        return f"The recording is a little over {limit} long. Recordings can be at most {limit}."
-    return f"The recording is {length} long. Recordings can be at most {limit}."
-
-
 def _upload_metadata(file: UploadFile, extension: str, file_count: int | None) -> dict[str, object]:
     """Safe technical metadata for the upload stage events. Never the file name."""
     attributes: dict[str, object] = {}
@@ -788,6 +766,12 @@ def _upload_metadata(file: UploadFile, extension: str, file_count: int | None) -
         attributes["audio.format"] = extension.lstrip(".")
         attributes["audio.format_category"] = "video" if extension in _VIDEO_EXTENSIONS else "audio"
     return attributes
+
+
+_UNDECODABLE_DETAIL = "The audio file could not be decoded. It may be corrupt or in an unsupported format."
+_TRANSCODER_UNAVAILABLE_DETAIL = (
+    "Audio conversion is unavailable on the server. Please try again later or contact support."
+)
 
 
 def _reject(upload_stage: StageHandle, error_code: str) -> None:
@@ -848,6 +832,8 @@ async def _upload_audio(
     safe_filename = _sanitize_filename(file.filename or "audio")
     wav_filename = f"{PurePosixPath(safe_filename).stem}.wav"
     blob_name = f"uploads/{current_user.id}/{upload_id}-{wav_filename}"
+    # DIAAT-408: with the flag on the request stores the original and answers; the worker converts it.
+    defer_preparation = await asyncio.to_thread(feature_flags.is_async_upload_preparation_enabled)
 
     # The upload and its WAV live in temp files and the WAV is streamed to
     # storage: the WAV is about 115 MB per hour of audio, and holding both in
@@ -863,6 +849,11 @@ async def _upload_audio(
             raise
         if "file.size_bytes" not in upload_stage.attributes:
             upload_stage.set_attribute("file.size_bytes", size)
+
+        if defer_preparation:
+            return await _accept_for_preparation(
+                input_path, extension, current_user, upload_id, blob_name, upload_stage
+            )
 
         # Transcode every accepted upload to 16 kHz mono PCM WAV — the format
         # Azure Speech handles most reliably — before storing. A file that
@@ -927,6 +918,53 @@ async def _upload_audio(
                 raise HTTPException(status_code=502, detail="Failed to store audio file")
             audio_url = blob_manager.build_blob_url(blob_name)
 
+    return UploadResponse(audio_url=audio_url, blob_name=blob_name)
+
+
+async def _accept_for_preparation(
+    input_path: Path,
+    extension: str,
+    current_user: AuthenticatedUser,
+    upload_id: UUID,
+    blob_name: str,
+    upload_stage: StageHandle,
+) -> UploadResponse:
+    """DIAAT-408: the upload with ``async_upload_preparation`` on. Answer within seconds, whatever
+    the recording's length: read its length from the file header (``ffprobe``), refuse what cannot be
+    read or is over the limit, store the original, and leave the conversion to the worker
+    (stt/preparation_service.py). The response is the one the converting upload gives: ``blob_name``
+    is the WAV's future name, so the ownership checks of POST /jobs are unchanged. The exact check on
+    the converted WAV stays in the worker."""
+    try:
+        probed = await probe_duration_seconds(input_path)
+    except AudioDecodeError as exc:
+        _reject(upload_stage, "upload.undecodable")
+        raise HTTPException(status_code=422, detail=_UNDECODABLE_DETAIL) from exc
+    except FileNotFoundError as exc:
+        upload_stage.error("upload.transcoder_unavailable")  # server-side: counts as an error
+        logger.error("Cannot read the upload, ffprobe is not available: %s", exc)
+        raise HTTPException(status_code=503, detail=_TRANSCODER_UNAVAILABLE_DETAIL) from exc
+    if probed is not None:
+        max_seconds = await asyncio.to_thread(current_limit_seconds)
+        if probed > max_seconds:
+            _reject(upload_stage, "upload.too_long")
+            upload_stage.set_attribute("audio.duration_seconds", probed)
+            raise HTTPException(status_code=422, detail=_too_long_detail(probed, max_seconds))
+        upload_stage.set_attribute("audio.duration_seconds", probed)
+
+    source_name = source_blob_name(current_user.id, upload_id, extension)
+    storage = get_audio_storage()
+    try:
+        stored = await storage.upload(input_path, source_name, concurrency=get_settings().BLOB_UPLOAD_CONCURRENCY)
+        audio_url = await storage.url(blob_name)
+    except ValueError as exc:  # the local backend has no LOCAL_AUDIO_BASE_URL
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Could not store the upload's original (%s)", type(exc).__name__)
+        stored = False
+    if not stored:
+        upload_stage.error("storage.write_failed")  # server-side: counts as an error
+        raise HTTPException(status_code=502, detail="Failed to store audio file")
     return UploadResponse(audio_url=audio_url, blob_name=blob_name)
 
 
@@ -1033,19 +1071,39 @@ async def _submit_job(
                 status_code=422, detail="This recording was not uploaded in this jurisdiction. Upload it again here."
             )
 
+    # DIAAT-408: with async_upload_preparation on, an upload whose original is waiting in storage
+    # (POST /uploads did not convert it) becomes a PENDING job that the worker prepares and
+    # submits. The original is found by the user's and the upload's ids, so nothing the client sent
+    # names a blob; no original (an upload from before the flag, or with it off) is submitted as before.
+    source_blob = await _waiting_source(body, current_user)
     try:
-        job = await submit_and_queue_batch_job(
-            session=session,
-            audio_url=body.audio_url,
-            locale=body.locale,
-            enable_diarization=body.enable_diarization,
-            idempotency_key=body.idempotency_key,
-            metadata=body.metadata,
-            audio_duration_seconds=body.audio_duration_seconds,
-            audio_blob_path=body.blob_name,
-            user_id=current_user.id,
-            jurisdiction_id=jurisdiction.id,  # DIAAT-334
-        )
+        if source_blob is not None:
+            job = defer_batch_job(
+                session,
+                body.audio_url,
+                source_blob,
+                locale=body.locale,
+                enable_diarization=body.enable_diarization,
+                idempotency_key=body.idempotency_key,
+                metadata=body.metadata,
+                audio_duration_seconds=body.audio_duration_seconds,
+                audio_blob_path=body.blob_name,
+                user_id=current_user.id,
+                jurisdiction_id=jurisdiction.id,  # DIAAT-334
+            )
+        else:
+            job = await submit_and_queue_batch_job(
+                session=session,
+                audio_url=body.audio_url,
+                locale=body.locale,
+                enable_diarization=body.enable_diarization,
+                idempotency_key=body.idempotency_key,
+                metadata=body.metadata,
+                audio_duration_seconds=body.audio_duration_seconds,
+                audio_blob_path=body.blob_name,
+                user_id=current_user.id,
+                jurisdiction_id=jurisdiction.id,  # DIAAT-334
+            )
     except IntegrityError:
         # Two concurrent requests with the same idempotency_key both passed the
         # check-then-act above; the second insert hit the unique constraint.
@@ -1070,6 +1128,25 @@ async def _submit_job(
         ) from None
 
     return job
+
+
+async def _waiting_source(body: SubmitJobRequest, current_user: AuthenticatedUser) -> str | None:
+    """The original an upload left for the worker, if the flag is on and there is one (DIAAT-408)."""
+    if body.blob_name is None:
+        return None
+    if not await asyncio.to_thread(feature_flags.is_async_upload_preparation_enabled):
+        return None
+    upload_id = _upload_uuid(body.blob_name)
+    if upload_id is None:
+        return None
+    try:
+        return await get_audio_storage().find_source(current_user.id, upload_id)
+    except Exception as exc:
+        # Not "there is none": submitting now would send Azure a WAV that does not exist.
+        logger.error("Could not look for the upload's original (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=502, detail="The uploaded recording could not be checked. Please try again."
+        ) from exc
 
 
 @router.get("/jobs", response_model=ListJobsResponse)
@@ -2009,6 +2086,13 @@ async def _delete_job(session: Session, job: SpeechBatchJob) -> None:
             raise HTTPException(
                 status_code=502, detail="Failed to delete the audio file; job not deleted"
             ) from exc
+
+    # DIAAT-408: a job deleted before the worker prepared it leaves its original in storage.
+    if job.source_blob_path:
+        try:
+            await get_audio_storage().delete(job.source_blob_path)
+        except Exception as exc:
+            logger.warning("Could not delete the original of job %s (%s)", job.id, type(exc).__name__)
 
     # Best-effort: an in-flight batch job would otherwise keep running on
     # Azure after its DB row is gone. Never blocks the delete.

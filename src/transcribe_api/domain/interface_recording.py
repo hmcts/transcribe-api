@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -369,3 +369,132 @@ def get_caller_by_lookup_hash(session: Session, lookup_hash: str) -> Caller | No
 def get_all_active_callers(session: Session) -> list[Caller]:
     stmt = select(Caller).where(Caller.is_active == True)  # noqa: E712
     return list(session.exec(stmt).all())
+
+
+# DIAAT-408: jobs whose audio is prepared by the worker (stt/preparation_service.py) -------------
+#
+# A job with ``source_blob_path`` set, ``PENDING`` and with no Azure job yet is waiting for
+# preparation. Claiming one adds 1 to ``preparation_attempts`` and stamps ``updated_datetime``
+# (the lease). While the worker prepares it the stamp is renewed; a job with attempts is claimed
+# again only once the stamp is older than the lease.
+
+
+def _awaiting_preparation():
+    return and_(
+        SpeechBatchJob.status == JobStatus.PENDING,
+        col(SpeechBatchJob.source_blob_path).is_not(None),
+        col(SpeechBatchJob.batch_job_id).is_(None),
+    )
+
+
+def _lease_free(cutoff: datetime):
+    """Never claimed, or claimed and not renewed since ``cutoff``."""
+    return or_(
+        SpeechBatchJob.preparation_attempts == 0,
+        col(SpeechBatchJob.updated_datetime) <= cutoff,
+    )
+
+
+def claim_job_for_preparation(
+    session: Session, *, max_attempts: int, lease_seconds: float, now: datetime | None = None
+) -> SpeechBatchJob | None:
+    """Claim the oldest job waiting for preparation whose lease is free and whose attempts are not
+    used up, or None. One conditional UPDATE per candidate (compare-and-swap on the attempt count),
+    so two workers never claim the same job. The job is returned with the attempt just started in
+    ``preparation_attempts``."""
+    now = now or datetime.now(UTC)
+    cutoff = now - timedelta(seconds=lease_seconds)
+    candidates = session.exec(
+        select(SpeechBatchJob.id, SpeechBatchJob.preparation_attempts)
+        .where(_awaiting_preparation(), SpeechBatchJob.preparation_attempts < max_attempts, _lease_free(cutoff))
+        .order_by(col(SpeechBatchJob.created_datetime))
+        .limit(_POLL_BATCH_SIZE)
+    ).all()
+    for job_id, attempts in candidates:
+        claimed = session.execute(
+            sa_update(SpeechBatchJob)
+            .where(
+                SpeechBatchJob.id == job_id,
+                _awaiting_preparation(),
+                SpeechBatchJob.preparation_attempts == attempts,
+                _lease_free(cutoff),
+            )
+            .values(preparation_attempts=attempts + 1, updated_datetime=now)
+        )
+        session.commit()
+        if claimed.rowcount == 1:
+            session.expire_all()
+            return session.get(SpeechBatchJob, job_id)
+    return None
+
+
+def renew_preparation(session: Session, job_id: UUID) -> bool:
+    """Stamp a job being prepared as alive, so its lease does not run out. False if it is no longer
+    waiting for preparation (deleted, or already submitted)."""
+    renewed = session.execute(
+        sa_update(SpeechBatchJob)
+        .where(SpeechBatchJob.id == job_id, _awaiting_preparation())
+        .values(updated_datetime=datetime.now(UTC))
+    )
+    session.commit()
+    return renewed.rowcount == 1
+
+
+def release_preparation(session: Session, job_id: UUID, *, retry_after_seconds: float, lease_seconds: float) -> None:
+    """Give a job back after a failed attempt: it is claimed again ``retry_after_seconds`` from now
+    (its lease is made to run out then; the attempt stays counted)."""
+    stamp = datetime.now(UTC) - timedelta(seconds=lease_seconds) + timedelta(seconds=retry_after_seconds)
+    session.execute(
+        sa_update(SpeechBatchJob)
+        .where(SpeechBatchJob.id == job_id, _awaiting_preparation())
+        .values(updated_datetime=stamp)
+    )
+    session.commit()
+
+
+def mark_preparation_failed(session: Session, job_id: UUID, message: str) -> bool:
+    """End a job that could not be prepared: FAILED with ``message``, its idempotency key released
+    (as for a submission Azure Speech refused: a retry with the key makes a new job). False if the
+    job is gone or is no longer waiting for preparation."""
+    job = session.get(SpeechBatchJob, job_id)
+    if job is None or job.status != JobStatus.PENDING or job.batch_job_id is not None:
+        return False
+    job.status = JobStatus.FAILED
+    job.error_message = message
+    job.idempotency_key = None
+    job.updated_datetime = datetime.now(UTC)
+    session.add(job)
+    session.commit()
+    return True
+
+
+@dataclass(frozen=True)
+class FailedPreparation:
+    """A job ``fail_exhausted_preparations`` ended, as it was (its row has since changed)."""
+
+    id: UUID
+    audio_blob_path: str | None
+    created_datetime: datetime
+    preparation_attempts: int
+
+
+def fail_exhausted_preparations(
+    session: Session, *, max_attempts: int, lease_seconds: float, message: str, now: datetime | None = None
+) -> list[FailedPreparation]:
+    """Fail the jobs that used up their attempts without being prepared and are not being worked on
+    (their lease has run out): the last attempt crashed. Returns them, once each."""
+    now = now or datetime.now(UTC)
+    cutoff = now - timedelta(seconds=lease_seconds)
+    rows = session.exec(
+        select(SpeechBatchJob)
+        .where(
+            _awaiting_preparation(),
+            SpeechBatchJob.preparation_attempts >= max_attempts,
+            col(SpeechBatchJob.updated_datetime) <= cutoff,
+        )
+        .limit(_POLL_BATCH_SIZE)
+    ).all()
+    seen = [
+        FailedPreparation(row.id, row.audio_blob_path, row.created_datetime, row.preparation_attempts) for row in rows
+    ]
+    return [job for job in seen if mark_preparation_failed(session, job.id, message)]

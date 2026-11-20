@@ -7,7 +7,10 @@ dynamic range compression, and loudness normalisation.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import math
+import wave
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -112,6 +115,67 @@ async def normalize_to_wav(input_path: Path, output_path: Path) -> None:
             f"FFmpeg could not decode the audio (exit {proc.returncode}): "
             f"{stderr.decode(errors='replace')[-500:]}"
         )
+
+
+def wav_duration_seconds(path: Path) -> float | None:
+    """Duration of a PCM WAV file, or None if it cannot be read."""
+    try:
+        with wave.open(str(path), "rb") as wav:
+            frames, rate = wav.getnframes(), wav.getframerate()
+    except Exception:  # a malformed header must never fail the upload
+        return None
+    return round(frames / rate, 3) if rate > 0 else None
+
+
+PROBE_TIMEOUT_SECONDS = 10.0
+
+
+def _parse_probed_duration(output: str) -> float | None:
+    """The duration ffprobe printed, or None when it printed none ("N/A") or nonsense."""
+    try:
+        seconds = float(output.strip().splitlines()[0])
+    except (ValueError, IndexError):
+        return None
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
+
+
+async def probe_duration_seconds(path: Path, *, timeout: float = PROBE_TIMEOUT_SECONDS) -> float | None:
+    """The duration in the file's header, from ``ffprobe`` (a read of the header, not a decode).
+
+    Returns None when the file is readable but states no length (some VBR MP3s, raw streams), or
+    when ffprobe takes longer than ``timeout``: the exact length is then known only once the file
+    is converted. For a VBR MP3 with no Xing/Info header the figure is an estimate (file size over
+    bitrate), usually within a minute: the exact check on the converted WAV is the backstop.
+
+    Raises:
+        AudioDecodeError: if ffprobe cannot read the file at all (not audio, or corrupt).
+        FileNotFoundError: if ffprobe is not installed (a server misconfiguration, as for ffmpeg).
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "csv=p=0",
+        str(path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        await proc.wait()
+        logger.warning("ffprobe did not answer within %.0f s: the length is checked after conversion", timeout)
+        return None
+    if proc.returncode != 0:
+        raise AudioDecodeError(
+            f"ffprobe could not read the audio (exit {proc.returncode}): {stderr.decode(errors='replace')[-300:]}"
+        )
+    return _parse_probed_duration(stdout.decode(errors="replace"))
 
 
 # Uploads are transcoded with ffmpeg (above); the worker probes and converts

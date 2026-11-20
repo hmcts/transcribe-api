@@ -210,11 +210,13 @@ async def test_the_pollers_start_with_the_gauges():
     """CNP: the pollers run in the worker (or, optionally, the web process); the
     process that polls also reports the queue."""
     from transcribe_api.api.app import start_background_workers, stop_background_workers
+    from transcribe_api.stt.preparation_service import PreparationService
     from transcribe_api.stt.work_poller import TranscriptionPollingService
 
     with (
         patch.object(job_telemetry, "register_job_gauges") as register,
         patch.object(BatchPollingService, "run_polling_loop", new=AsyncMock()),
+        patch.object(PreparationService, "run_polling_loop", new=AsyncMock()),
         patch.object(TranscriptionPollingService, "__init__", return_value=None),
         patch.object(TranscriptionPollingService, "run_polling_loop", new=AsyncMock()),
     ):

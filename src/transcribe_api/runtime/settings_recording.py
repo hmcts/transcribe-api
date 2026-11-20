@@ -84,6 +84,10 @@ class Settings(BaseSettings):
     PREPARE_HEARTBEAT_SECONDS: int = 30
     # How long before a storage failure is retried (multiplied by the attempt number).
     PREPARE_RETRY_BACKOFF_SECONDS: int = 30
+    # Parallel block uploads of a large file to Blob Storage (the SDK default is 1, about 30 MB/s
+    # measured on AAT, which would put a 1 GiB upload past the gateway's 30 s). Each in-flight
+    # block is held in memory: 8 x 4 MiB. Used by the asynchronous upload path only.
+    BLOB_UPLOAD_CONCURRENCY: int = 8
 
     # Polling
     BATCH_POLL_INTERVAL_SECONDS: int = 30
@@ -215,6 +219,7 @@ class Settings(BaseSettings):
         "PREPARE_LEASE_SECONDS",
         "PREPARE_HEARTBEAT_SECONDS",
         "PREPARE_RETRY_BACKOFF_SECONDS",
+        "BLOB_UPLOAD_CONCURRENCY",
         mode="before",
     )
     @classmethod
@@ -234,6 +239,7 @@ class Settings(BaseSettings):
         "PREPARE_LEASE_SECONDS",
         "PREPARE_HEARTBEAT_SECONDS",
         "PREPARE_RETRY_BACKOFF_SECONDS",
+        "BLOB_UPLOAD_CONCURRENCY",
     )
     @classmethod
     def validate_recording_limit(cls, v: int, info: ValidationInfo) -> int:

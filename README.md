@@ -128,6 +128,40 @@ are accepted.
 Both off: behaviour is as before DIAAT-408 (240 minutes, everything done inside the request). The effective limit is
 what `GET /api/flags` returns as `max_recording_seconds`, which the web app shows on the upload page.
 
+### Asynchronous upload preparation (`async_upload_preparation`)
+
+Converting a recording takes about 13-14 s per hour of audio, and the frontend Application Gateway gives a backend 30 s, so a
+long recording used to end in a 504 although the server finished. With the flag on, no request converts anything:
+
+1. `POST /api/v1/uploads` saves the body, reads the length from the file header with `ffprobe` (refusing, within seconds, a file
+   that is not audio, or longer than the effective limit, with the usual sentences), stores the **original** as
+   `incoming/{user_id}/{upload_id}{ext}` (blocks sent `BLOB_UPLOAD_CONCURRENCY` = 8 at a time) and answers 201 as before:
+   `blob_name` is still the WAV's future name under `uploads/{user_id}/`, so the ownership checks are unchanged.
+2. `POST /api/v1/jobs` finds that original by the user's and the upload's ids (never by anything the client sends) and creates the
+   job `PENDING` with `source_blob_path` set and **no Azure job**: it does not call Azure Speech. An upload with no original
+   (made before the flag was turned on) is submitted at once, as before.
+3. The worker's third task, `PreparationService` (`stt/preparation_service.py`, beside the batch poller and the dictation poller),
+   claims such jobs, converts the original (`normalize_to_wav`), checks the exact length of the WAV, stores it, submits the job
+   through the same code as a request (`submit_existing_job`) and deletes the original. A job that cannot be converted or is too
+   long by the exact check becomes `FAILED` with the sentence the upload gives for the same file (the web already shows
+   `error_message`); a storage failure is retried `PREPARE_MAX_ATTEMPTS` times and then fails the job; a crash or a restart
+   leaves the original and the job `PENDING`, and the job is claimed again once its lease (`PREPARE_LEASE_SECONDS`, renewed every
+   `PREPARE_HEARTBEAT_SECONDS`) has run out. A job is `PENDING` throughout; no new status exists.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `PREPARE_POLL_INTERVAL_SECONDS` | 5 | How often the worker looks for jobs to prepare. |
+| `PREPARE_MAX_CONCURRENT` | 2 | Jobs prepared at once. Each needs temporary disk for the original and the WAV (up to about 1.5 GB for a 1 GiB upload); the worker pod has no ephemeral-storage limit set. |
+| `PREPARE_MAX_ATTEMPTS` | 3 | Attempts before a job fails. A crashed attempt counts. |
+| `PREPARE_LEASE_SECONDS` / `PREPARE_HEARTBEAT_SECONDS` | 300 / 30 | A job being prepared is renewed every heartbeat; another attempt may take it over once the lease has run out. The lease must be at least twice the heartbeat. |
+| `PREPARE_RETRY_BACKOFF_SECONDS` | 30 | Wait before a failed attempt is repeated (times the attempt number). |
+| `BLOB_UPLOAD_CONCURRENCY` | 8 | Parallel blocks when storing the original or the WAV (memory: that many 4 MiB blocks). |
+
+Rollback: turn the flag off (admin > Feature flags, no deploy). Jobs already waiting are still prepared by the worker. The
+`incoming/` prefix holds originals no job claimed if a user uploads and never submits: a storage lifecycle rule on it (not in
+this repository) should delete them after a day. Recordings over 240 minutes are not split yet: until the part model is built,
+a job over 240 minutes fails in the worker with the 4-hour sentence even with `long_recordings_enabled` on, so leave that flag off.
+
 ## Database migrations
 
 One Alembic history in `alembic/`. Its first revision, `0001_baseline`, replaced

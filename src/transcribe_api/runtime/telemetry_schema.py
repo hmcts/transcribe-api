@@ -353,8 +353,15 @@ def _recording_attributes(schema: TelemetrySchema) -> None:
     schema.attribute("job.retry.attempt", int, description="Number of the attempt that failed (1 on the first retry).")
     schema.attribute(
         "job.retry.operation",
-        allowed_values=("speech.delete", "speech.results", "speech.status", "speech.submit", "webhook.deliver"),
-        description="The call being retried.",
+        allowed_values=(
+            "job.prepare",
+            "speech.delete",
+            "speech.results",
+            "speech.status",
+            "speech.submit",
+            "webhook.deliver",
+        ),
+        description="The call being retried: job.prepare is the worker's conversion of an uploaded recording.",
     )
     schema.attribute(
         "job.state",
@@ -531,6 +538,21 @@ def _recording_events(schema: TelemetrySchema) -> None:
         "job.stuck",
         attributes=("job.state", "hmcts.failure.source"),
         description="The job has waited or run longer than its threshold. Emitted once per job; duration_ms: time in that state so far.",
+    )
+    schema.event("preparation.cancelled", description="Preparing an uploaded recording (worker) was cancelled.")
+    schema.event(
+        "preparation.completed",
+        attributes=("audio.duration_seconds",),
+        description="The worker read, converted and stored an uploaded recording; duration_ms: its duration; audio.duration_seconds: the converted audio's length.",
+    )
+    schema.event(
+        "preparation.failed",
+        attributes=("audio.duration_seconds",),
+        description="The worker could not prepare an uploaded recording; hmcts.error.code says why (upload.undecodable, upload.too_long, preparation.source_missing: the file's; preparation.storage_failed, preparation.transcoder_unavailable: ours, retried), duration_ms: its duration.",
+    )
+    schema.event(
+        "preparation.started",
+        description="The worker started preparing an uploaded recording (reading, converting and storing it), before it is submitted to Azure Speech.",
     )
     schema.event(
         "results_retrieval.cancelled", description="Downloading the transcript from Azure Speech was cancelled."
