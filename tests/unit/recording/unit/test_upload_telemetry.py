@@ -144,6 +144,57 @@ def test_oversized_upload_is_a_too_large_validation_failure(tel, mocker):
     assert failed[c.OUTCOME] == "failure"
 
 
+def test_recording_longer_than_the_limit_is_a_too_long_validation_failure(tel, mocker):
+    # DIAAT-408: Azure fails a file over 240 minutes after accepting the job, so the
+    # upload is refused, with the reason, once its length is known.
+    from transcribe_api.runtime.settings_recording import get_settings
+
+    mocker.patch.object(get_settings(), "MAX_AUDIO_DURATION_SECONDS", 60)
+    response = _post(_client(mocker, normalised=_wav(121.0)))
+    assert response.status_code == 422
+    assert response.json()["detail"] == "The recording is 2 minutes long. Recordings can be at most 1 minute."
+    (invalid,) = tel.events("upload.validation_failed")
+    (failed,) = tel.events("upload.failed")
+    assert invalid[c.ERROR_CODE] == failed[c.ERROR_CODE] == "upload.too_long"
+    assert failed[c.OUTCOME] == "failure"
+    # The validation event's schema has no duration; the stage's failure event does.
+    assert "audio.duration_seconds" not in invalid
+    assert failed["audio.duration_seconds"] == 121.0
+    assert tel.events("upload.completed") == []
+
+
+def test_recording_exactly_at_the_limit_is_accepted(tel, mocker):
+    from transcribe_api.runtime.settings_recording import get_settings
+
+    mocker.patch.object(get_settings(), "MAX_AUDIO_DURATION_SECONDS", 60)
+    response = _post(_client(mocker, normalised=_wav(60.0)))
+    assert response.status_code == 201
+    assert tel.events("upload.validation_failed") == []
+
+
+def test_default_duration_limit_is_azures_240_minutes_per_file():
+    from transcribe_api.runtime.settings_recording import Settings
+
+    assert Settings.model_fields["MAX_AUDIO_DURATION_SECONDS"].default == 240 * 60
+
+
+@pytest.mark.parametrize(
+    ("seconds", "text"),
+    [
+        (14_400, "4 hours"),
+        (15_120, "4 hours 12 minutes"),
+        (14_459.9, "4 hours"),
+        (3_660, "1 hour 1 minute"),
+        (2_700, "45 minutes"),
+        (59, "0 minutes"),
+    ],
+)
+def test_durations_are_described_for_the_user(seconds, text):
+    from transcribe_api.api.routes_recording import _format_duration
+
+    assert _format_duration(seconds) == text
+
+
 def test_validation_failed_carries_the_stages_validated_error_code(tel, mocker):
     # An error code the schema rejects becomes the stage's invalid_error_code; the
     # validation_failed event must report that same code, never the raw value.

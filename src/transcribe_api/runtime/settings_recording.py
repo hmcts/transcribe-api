@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     # resource and no network access at all.
     SPEECH_BACKEND: Literal["azure", "mock"] = "azure"
 
+    # DIAAT-408: the longest recording accepted, as decoded. 240 minutes is Azure Speech's
+    # limit per file for batch transcription with diarization, which every job uses, so
+    # raising this past it needs the audio split before it is submitted: Azure would
+    # accept the job and then fail it.
+    MAX_AUDIO_DURATION_SECONDS: int = 4 * 60 * 60
+
     # Polling
     BATCH_POLL_INTERVAL_SECONDS: int = 30
     BATCH_TRANSCRIPTION_THRESHOLD_HOURS: float = 2.0
@@ -55,8 +61,12 @@ class Settings(BaseSettings):
     # gauge) once it has waited longer than this since it was created, or run longer
     # than this since Azure Speech started processing it. Observation only: nothing
     # is retried or failed automatically.
+    # DIAAT-408: the running threshold is 6 hours, 1.5 times the longest recording
+    # accepted (MAX_AUDIO_DURATION_SECONDS), so a job near that limit is not reported as
+    # stuck while it is still being processed. Azure's real processing time for a
+    # 4-hour recording has not been measured: revisit this once it has been.
     JOB_STUCK_WAITING_SECONDS: int = 30 * 60
-    JOB_STUCK_RUNNING_SECONDS: int = 3 * 60 * 60
+    JOB_STUCK_RUNNING_SECONDS: int = 6 * 60 * 60
 
     # DIAAT-277: how often the background checker probes the database, Blob Storage
     # and Azure Speech (Speech at most once per 300 s whatever this is), and how long

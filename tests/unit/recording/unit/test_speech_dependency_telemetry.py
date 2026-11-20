@@ -936,7 +936,7 @@ def test_blank_optional_settings_do_not_stop_the_service_starting(monkeypatch, b
     settings = Settings(_env_file=None)
     assert settings.SPEECH_CONCURRENT_JOBS_LIMIT is None
     assert settings.JOB_STUCK_WAITING_SECONDS == 30 * 60
-    assert settings.JOB_STUCK_RUNNING_SECONDS == 3 * 60 * 60
+    assert settings.JOB_STUCK_RUNNING_SECONDS == 6 * 60 * 60
 
 
 async def test_no_speech_token_finishes_the_job_only_once_failed_is_stored(tel, mocker):

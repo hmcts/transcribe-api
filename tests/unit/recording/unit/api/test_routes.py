@@ -241,7 +241,7 @@ class TestUploadAudio:
         manager.create_blob_from_file.assert_not_called()
 
     def test_writes_the_upload_with_an_async_file_api(self, client, as_current_user, mocker):
-        """Up to 200 MB is written per upload: the writes must not block the event loop."""
+        """Up to 1 GiB is written per upload: the writes must not block the event loop."""
         import aiofiles
 
         from transcribe_api.api import routes_recording
