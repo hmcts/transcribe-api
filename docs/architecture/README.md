@@ -241,9 +241,10 @@ config:
 flowchart TB
   start(["User chooses one or more recordings<br/>on the Hearing recordings page"])
   up["Web sends each file to the API<br/>POST /api/v1/uploads"]
-  check{"Allowed type<br/>and under 200 MB?"}
+  check{"Allowed type<br/>and under 1 GB?"}
   conv["API converts it to 16 kHz mono WAV<br/>with ffmpeg"]
   decode{"Audio<br/>decodable?"}
+  length{"Under 4 hours<br/>long?"}
   store[("Blob Storage<br/>uploads/user/id.wav")]
   job["Web creates a job<br/>POST /api/v1/jobs"]
   own{"File belongs<br/>to this user?"}
@@ -264,7 +265,9 @@ flowchart TB
   check -- no --> reject
   check -- yes --> conv --> decode
   decode -- no --> reject
-  decode -- yes --> store --> job --> own
+  decode -- yes --> length
+  length -- no --> reject
+  length -- yes --> store --> job --> own
   own -- no --> reject
   own -- yes --> submit --> accepted
   accepted -- no --> unavailable
@@ -304,7 +307,7 @@ sequenceDiagram
 
   U->>W: Upload recording (Hearing recordings page)
   W->>A: POST /api/v1/uploads with the user's token
-  A->>A: Check type and size, convert to WAV (ffmpeg)
+  A->>A: Check type and size, convert to WAV (ffmpeg), check it is under 4 hours
   A->>B: Store uploads/user/id.wav
   A-->>W: Blob name and URL
   W->>A: POST /api/v1/jobs

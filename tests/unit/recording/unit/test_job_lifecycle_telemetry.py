@@ -244,8 +244,8 @@ class _FakeSession:
 
 def test_stuck_job_is_reported_once_on_its_journey(tel, engine):
     waiting = _add(engine, JobStatus.SUBMITTED, timedelta(hours=1), batch_job_id=SPEECH_JOB_ID)
-    started = datetime.now(UTC) - timedelta(hours=4)
-    running = _add(engine, JobStatus.RUNNING, timedelta(hours=5), processing_started_datetime=started)
+    started = datetime.now(UTC) - timedelta(hours=7)  # past the 6 h running threshold
+    running = _add(engine, JobStatus.RUNNING, timedelta(hours=8), processing_started_datetime=started)
     _add(engine, JobStatus.PENDING, timedelta(minutes=1))  # not stuck yet
 
     with Session(engine) as session:
@@ -261,7 +261,7 @@ def test_stuck_job_is_reported_once_on_its_journey(tel, engine):
     assert 3600_000 <= w[c.DURATION_MS] < 3660_000
     r = events[str(running.id)]
     assert r["job.state"] == "running"
-    assert 4 * 3600_000 <= r[c.DURATION_MS] < 4 * 3600_000 + 60_000  # since processing began
+    assert 7 * 3600_000 <= r[c.DURATION_MS] < 7 * 3600_000 + 60_000  # since processing began
     tel.assert_no_prohibited_content(FILE_STEM)
 
 
