@@ -350,18 +350,23 @@ def _recording_attributes(schema: TelemetrySchema) -> None:
     schema.attribute(
         "job.queue_wait_ms", float, description="Queue wait: job created to Azure Speech processing started, in ms."
     )
+    schema.attribute(
+        "job.part_count", int, description="How many parts the recording was split into (recordings over 240 minutes)."
+    )
+    schema.attribute("job.part_index", int, description="Which part of a split recording (1 is the first).")
     schema.attribute("job.retry.attempt", int, description="Number of the attempt that failed (1 on the first retry).")
     schema.attribute(
         "job.retry.operation",
         allowed_values=(
             "job.prepare",
+            "part.submit",
             "speech.delete",
             "speech.results",
             "speech.status",
             "speech.submit",
             "webhook.deliver",
         ),
-        description="The call being retried: job.prepare is the worker's conversion of an uploaded recording.",
+        description="The call being retried: job.prepare is the worker's conversion of an uploaded recording, part.submit the storing and submission of one part of a long recording.",
     )
     schema.attribute(
         "job.state",
@@ -410,6 +415,10 @@ def _recording_attributes(schema: TelemetrySchema) -> None:
         allowed_values=("speaker_grouping", "speaker_labelling", "speaker_normalisation"),
         description="The speaker-processing step that failed.",
     )
+    schema.attribute(
+        "split.forced_cut_count", int, description="Cuts made at the ideal point because no silence was in the window."
+    )
+    schema.attribute("split.part_count", int, description="Parts a recording over 240 minutes was cut into.")
     schema.attribute("transcript.segment_count", int, description="Number of dialogue entries in the transcript.")
     schema.attribute("transcript.speaker_count", int, description="Number of distinct speakers in the transcript.")
     schema.attribute(
@@ -514,14 +523,22 @@ def _recording_events(schema: TelemetrySchema) -> None:
     )
     schema.event(
         "job.queued",
-        attributes=("speech.region", "speech.locale", "speech.api_version", "speech.model_ref", "speech.diarization"),
-        description="Azure Speech accepted the job; duration_ms: created to accepted.",
+        attributes=(
+            "speech.region",
+            "speech.locale",
+            "speech.api_version",
+            "speech.model_ref",
+            "speech.diarization",
+            "job.part_count",
+        ),
+        description="Azure Speech accepted the job (for a recording split into parts: every part); duration_ms: created to accepted.",
     )
     schema.event(
         "job.retried",
         attributes=(
             "job.retry.operation",
             "job.retry.attempt",
+            "job.part_index",
             "hmcts.failure.source",
             "speech.error_code",
             "http.response.status_code",
@@ -554,6 +571,18 @@ def _recording_events(schema: TelemetrySchema) -> None:
         "preparation.started",
         description="The worker started preparing an uploaded recording (reading, converting and storing it), before it is submitted to Azure Speech.",
     )
+    schema.event("splitting.cancelled", description="Cutting a long recording into parts was cancelled.")
+    schema.event(
+        "splitting.completed",
+        attributes=("audio.duration_seconds", "split.part_count", "split.forced_cut_count"),
+        description="A recording over 240 minutes was cut into parts at silences where there were any; duration_ms: its duration.",
+    )
+    schema.event(
+        "splitting.failed",
+        attributes=("audio.duration_seconds",),
+        description="Cutting a long recording into parts failed (hmcts.error.code: split.failed, preparation.split_mismatch); it is retried.",
+    )
+    schema.event("splitting.started", description="The worker started cutting a recording over 240 minutes into parts.")
     schema.event(
         "results_retrieval.cancelled", description="Downloading the transcript from Azure Speech was cancelled."
     )

@@ -102,6 +102,7 @@ from transcribe_api.stt.audio_storage import (
     source_blob_name,
 )
 from transcribe_api.stt.batch_client import BatchSubmissionError, delete_batch_job
+from transcribe_api.stt.part_submission import cleanup_job_parts
 from transcribe_api.stt.preprocessing import (
     AudioDecodeError,
     normalize_to_wav,
@@ -2087,12 +2088,17 @@ async def _delete_job(session: Session, job: SpeechBatchJob) -> None:
                 status_code=502, detail="Failed to delete the audio file; job not deleted"
             ) from exc
 
-    # DIAAT-408: a job deleted before the worker prepared it leaves its original in storage.
+    # DIAAT-408: a job deleted before the worker prepared it leaves its original in storage; one
+    # prepared in parts leaves the part blobs and their Azure jobs (the part rows go with the job).
     if job.source_blob_path:
         try:
             await get_audio_storage().delete(job.source_blob_path)
         except Exception as exc:
             logger.warning("Could not delete the original of job %s (%s)", job.id, type(exc).__name__)
+        try:
+            await cleanup_job_parts(job.id, engine=session.get_bind(), delete_rows=True)
+        except Exception as exc:
+            logger.warning("Could not delete the parts of job %s (%s)", job.id, type(exc).__name__)
 
     # Best-effort: an in-flight batch job would otherwise keep running on
     # Azure after its DB row is gone. Never blocks the delete.

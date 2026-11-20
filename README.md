@@ -157,10 +157,51 @@ long recording used to end in a 504 although the server finished. With the flag 
 | `PREPARE_RETRY_BACKOFF_SECONDS` | 30 | Wait before a failed attempt is repeated (times the attempt number). |
 | `BLOB_UPLOAD_CONCURRENCY` | 8 | Parallel blocks when storing the original or the WAV (memory: that many 4 MiB blocks). |
 
-Rollback: turn the flag off (admin > Feature flags, no deploy). Jobs already waiting are still prepared by the worker. The
-`incoming/` prefix holds originals no job claimed if a user uploads and never submits: a storage lifecycle rule on it (not in
-this repository) should delete them after a day. Recordings over 240 minutes are not split yet: until the part model is built,
-a job over 240 minutes fails in the worker with the 4-hour sentence even with `long_recordings_enabled` on, so leave that flag off.
+Rollback: turn the flag off (admin > Feature flags, no deploy). Jobs already deferred are still prepared by the worker. The
+one case that fails is an upload whose `POST /jobs` call lands **after** the flag was turned off: `/jobs` decides by the flag, so
+it ignores the waiting original and submits a WAV that was never made, and the job fails (the user uploads again). An upload takes
+as long as the file takes to arrive, so it is minutes for a large file; turn the flag off at a quiet time. The `incoming/` prefix
+holds originals no job claimed if a user uploads and never submits: a storage lifecycle rule on it, and an ephemeral-storage
+request and limit for the worker pod, are infrastructure asks that are not in this repository (see the rollout notes).
+
+### Recordings over 240 minutes (`long_recordings_enabled`, with `async_upload_preparation`)
+
+Azure fails a file over 240 minutes, so with **both flags on** a recording longer than that (up to `MAX_AUDIO_DURATION_SECONDS`,
+8 hours) is cut into parts by the worker, and each part is its own Azure batch job. A recording of 240 minutes or less is never cut:
+it keeps the single-file path above, with no part rows. With either flag off the limit is still 240 minutes, and a longer one
+fails exactly as before (the 4-hour sentence).
+
+- **Cutting** (`stt/splitter.py`): `n = ceil(duration / PART_TARGET_SECONDS)` parts of equal length are aimed for; each boundary
+  moves to the longest silence within about 10 minutes of its ideal point (ffmpeg `silencedetect`), or is cut at the ideal point if
+  there is none (`cut_kind` on the part row says which). The plan is checked: contiguous, covering the whole recording, no part over
+  14,400 s. The WAV is cut with `ffmpeg -c copy -f segment` (no re-encode); each part's offset and length are measured from the cut
+  files, because the muxer cuts at packet boundaries (about 0.06 s).
+- **Recording the parts**: one row per part in `transcription_job_part` (migration 0017): offset in the recording, length, cut kind,
+  blob (`uploads/{user_id}/{upload_id}-{name}.partNN.wav`, derived from the job's own WAV name, never client-supplied), Azure job,
+  status, attempts. The job stays one row; it keeps the idempotency key; it is `PENDING` while its parts are submitted and
+  `SUBMITTED` once all are.
+- **Submitting**: each part is stored and submitted as soon as its own blob is stored (part 1 does not wait for the others or for
+  the full WAV, which is stored beside them for playback), at most `MAX_PARALLEL_PARTS` at a time. A failed part is retried alone,
+  `PART_MAX_ATTEMPTS` times; then the job fails with "Part N of M of the recording could not be sent for transcription. Please
+  upload the recording again.", the part blobs and the Azure jobs already made are deleted, and the part rows stay as the record.
+- **Resuming**: the part rows are the record. A part whose Azure job is recorded is never stored or submitted again, so a crash or a
+  restart mid-way (the job's lease runs out, or the worker hands it back on shutdown) continues with the parts not yet submitted, cutting
+  the recording again at the recorded offsets and refusing a cut that no longer matches. The one window left is a crash after Azure
+  accepted a part and before its row was updated: that part is submitted again and Azure keeps an Azure job nothing polls.
+- **Deleting a job** while its parts are in flight (`DELETE /jobs/{id}`) deletes the part blobs and Azure jobs and the rows; the worker
+  finds the rows gone at its next write, deletes the blob and Azure job it had just made, and stops.
+- **Not yet built**: the batch poller does not yet read the parts' results, so a job in parts is submitted but its transcript is not
+  assembled (offsets are applied and results merged by the next change), and speakers are not labelled per part. Keep
+  `long_recordings_enabled` off in any environment until then.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `PART_TARGET_SECONDS` | 12600 | Longest part aimed for (above). |
+| `MAX_PARALLEL_PARTS` | 4 | Parts stored and submitted at once. Each in-flight part holds `BLOB_UPLOAD_CONCURRENCY` x 4 MiB of upload buffers. |
+| `PART_MAX_ATTEMPTS` / `PART_RETRY_BACKOFF_SECONDS` | 3 / 5 | Attempts at one part before the job fails, and the wait (times the attempt number) between them. |
+
+Temporary disk for a recording in parts: the converted WAV and its parts (about 115 MB per hour each, so about 1.8 GB for 8 hours)
+per job being prepared, beside the original while it is downloaded.
 
 ## Database migrations
 

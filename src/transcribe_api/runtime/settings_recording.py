@@ -88,6 +88,11 @@ class Settings(BaseSettings):
     # measured on AAT, which would put a 1 GiB upload past the gateway's 30 s). Each in-flight
     # block is held in memory: 8 x 4 MiB. Used by the asynchronous upload path only.
     BLOB_UPLOAD_CONCURRENCY: int = 8
+    # DIAAT-408: a part of a recording over 240 minutes is stored and submitted up to this many times
+    # (a failed part is retried alone) before the job fails, and waits this long (times the attempt
+    # number) between tries.
+    PART_MAX_ATTEMPTS: int = 3
+    PART_RETRY_BACKOFF_SECONDS: int = 5
 
     # Polling
     BATCH_POLL_INTERVAL_SECONDS: int = 30
@@ -220,6 +225,8 @@ class Settings(BaseSettings):
         "PREPARE_HEARTBEAT_SECONDS",
         "PREPARE_RETRY_BACKOFF_SECONDS",
         "BLOB_UPLOAD_CONCURRENCY",
+        "PART_MAX_ATTEMPTS",
+        "PART_RETRY_BACKOFF_SECONDS",
         mode="before",
     )
     @classmethod
@@ -240,6 +247,8 @@ class Settings(BaseSettings):
         "PREPARE_HEARTBEAT_SECONDS",
         "PREPARE_RETRY_BACKOFF_SECONDS",
         "BLOB_UPLOAD_CONCURRENCY",
+        "PART_MAX_ATTEMPTS",
+        "PART_RETRY_BACKOFF_SECONDS",
     )
     @classmethod
     def validate_recording_limit(cls, v: int, info: ValidationInfo) -> int:

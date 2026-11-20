@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import and_, case, func, or_
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import update as sa_update
 from sqlmodel import Session, col, select
 
@@ -16,6 +17,7 @@ from transcribe_api.domain.models_recording import (
     DialogueEntry,
     JobStatus,
     SpeechBatchJob,
+    TranscriptionJobPart,
 )
 from transcribe_api.runtime.settings_recording import get_settings
 
@@ -498,3 +500,127 @@ def fail_exhausted_preparations(
         FailedPreparation(row.id, row.audio_blob_path, row.created_datetime, row.preparation_attempts) for row in rows
     ]
     return [job for job in seen if mark_preparation_failed(session, job.id, message)]
+
+
+# DIAAT-408: the parts of a recording over 240 minutes (stt/preparation_service.py) ---------------
+
+
+@dataclass(frozen=True)
+class PartPlan:
+    """A part as the worker has cut it, to be recorded."""
+
+    part_index: int
+    part_count: int
+    offset_seconds: float
+    duration_seconds: float
+    cut_kind: str
+    blob_path: str
+
+
+def get_job_parts(session: Session, job_id: UUID) -> list[TranscriptionJobPart]:
+    """The job's parts, in order (empty for a job of 240 minutes or less)."""
+    return list(
+        session.exec(
+            select(TranscriptionJobPart)
+            .where(TranscriptionJobPart.job_id == job_id)
+            .order_by(col(TranscriptionJobPart.part_index))
+        ).all()
+    )
+
+
+def create_job_parts(session: Session, job_id: UUID, plans: list[PartPlan]) -> list[TranscriptionJobPart]:
+    """Record the job's parts (one transaction). If it already has parts (an attempt that was
+    interrupted after recording them) they are kept and returned: the plan the first attempt made is
+    the one the parts already submitted belong to."""
+    existing = get_job_parts(session, job_id)
+    if existing:
+        return existing
+    now = datetime.now(UTC)
+    for plan in plans:
+        session.add(
+            TranscriptionJobPart(
+                job_id=job_id,
+                part_index=plan.part_index,
+                part_count=plan.part_count,
+                offset_seconds=plan.offset_seconds,
+                duration_seconds=plan.duration_seconds,
+                cut_kind=plan.cut_kind,
+                blob_path=plan.blob_path,
+                updated_datetime=now,
+            )
+        )
+    session.commit()
+    return get_job_parts(session, job_id)
+
+
+def delete_job_parts(session: Session, job_id: UUID) -> None:
+    """Remove the job's part rows (the database also does it when the job row goes)."""
+    session.execute(sa_delete(TranscriptionJobPart).where(col(TranscriptionJobPart.job_id) == job_id))
+    session.commit()
+
+
+def start_part_attempt(session: Session, part_id: UUID) -> int | None:
+    """Count another submission attempt of a part that has not been submitted; returns the attempt
+    number, or None if the part is gone (its job was deleted) or is already submitted."""
+    stmt = (
+        sa_update(TranscriptionJobPart)
+        .where(TranscriptionJobPart.id == part_id, col(TranscriptionJobPart.batch_job_id).is_(None))
+        .values(attempts=TranscriptionJobPart.attempts + 1, updated_datetime=datetime.now(UTC))
+        .returning(TranscriptionJobPart.attempts)
+    )
+    row = session.execute(stmt).first()
+    session.commit()
+    return None if row is None else int(row[0])
+
+
+def mark_part_submitted(session: Session, part_id: UUID, batch_job_id: str, batch_job_url: str) -> bool:
+    """Record the Azure job of a part. False if the part is gone (the job was deleted meanwhile)."""
+    stmt = (
+        sa_update(TranscriptionJobPart)
+        .where(TranscriptionJobPart.id == part_id)
+        .values(
+            batch_job_id=batch_job_id,
+            batch_job_url=batch_job_url,
+            batch_job_status=BatchJobStatus.NOT_STARTED.value,
+            status=JobStatus.SUBMITTED.value,
+            error_message=None,
+            updated_datetime=datetime.now(UTC),
+        )
+    )
+    done = session.execute(stmt).rowcount == 1
+    session.commit()
+    return done
+
+
+def mark_part_failed(session: Session, part_id: UUID, message: str) -> None:
+    stmt = (
+        sa_update(TranscriptionJobPart)
+        .where(TranscriptionJobPart.id == part_id)
+        .values(status=JobStatus.FAILED.value, error_message=message[:500], updated_datetime=datetime.now(UTC))
+    )
+    session.execute(stmt)
+    session.commit()
+
+
+def clear_part_resources(session: Session, job_id: UUID) -> None:
+    """The part blobs and Azure jobs of the job have been deleted: forget where they were (the rows
+    stay as the record of the parts)."""
+    session.execute(
+        sa_update(TranscriptionJobPart)
+        .where(col(TranscriptionJobPart.job_id) == job_id)
+        .values(blob_path=None, batch_job_url=None, updated_datetime=datetime.now(UTC))
+    )
+    session.commit()
+
+
+def settle_parts_submitted(session: Session, job_id: UUID) -> bool:
+    """Every part of the job is with Azure Speech: the job is SUBMITTED. Only a job still waiting for
+    preparation changes (False if it is gone or was settled already)."""
+    job = session.get(SpeechBatchJob, job_id)
+    if job is None or job.status != JobStatus.PENDING or job.batch_job_id is not None:
+        return False
+    job.status = JobStatus.SUBMITTED
+    job.updated_datetime = datetime.now(UTC)
+    session.add(job)
+    session.commit()
+    return True

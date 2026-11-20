@@ -186,13 +186,14 @@ async def test_a_recording_over_the_limit_by_the_exact_check_fails_the_job_with_
     assert [e[c.ERROR_CODE] for e in tel.events("job.finished")] == ["upload.too_long"]
 
 
-async def test_until_recordings_are_split_a_job_over_azures_240_minutes_is_failed_whatever_the_flags(
+async def test_with_the_flags_off_a_job_over_azures_240_minutes_is_failed_with_the_4_hour_sentence(
     engine, no_azure, mocker, monkeypatch
 ):
-    # The effective limit is 8 hours with both flags on, but nothing can submit more than Azure's
-    # 240 minutes per file until parts exist: the job fails with the sentence, not at Azure.
+    # DIAAT-408: only both flags on let a recording over 240 minutes through (it is then split:
+    # tests/unit/recording/unit/audio/test_multipart_preparation.py). With either off this is the check
+    # that has always been, and nothing reaches Azure.
     monkeypatch.setenv("ASYNC_UPLOAD_PREPARATION", "true")
-    monkeypatch.setenv("LONG_RECORDINGS_ENABLED", "true")
+    monkeypatch.setenv("LONG_RECORDINGS_ENABLED", "false")
     settings_dictation.get_settings.cache_clear()
     mocker.patch.object(prep, "wav_duration_seconds", return_value=5 * 3600.0)
     job = _waiting(engine)

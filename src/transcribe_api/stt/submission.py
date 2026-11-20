@@ -136,6 +136,19 @@ def defer_batch_job(session: Session, audio_url: str, source_blob_path: str, **f
     return job
 
 
+def record_parts_queued(job: SpeechBatchJob, part_count: int) -> None:
+    """DIAAT-408: every part of a recording split into parts is with Azure Speech: the job is queued.
+    ``job.queued`` once, with the number of parts; each part's own submission is a
+    ``speech_submission`` stage."""
+    accepted = seconds_between(job.created_datetime, datetime.now(UTC))
+    with _job_journey(job):
+        record_event(
+            EVENT_JOB_QUEUED,
+            {**speech_config_attributes(job.locale, job.enable_diarization), "job.part_count": part_count},
+            duration_ms=accepted * 1000.0 if accepted is not None else None,
+        )
+
+
 async def submit_existing_job(session: Session, job: SpeechBatchJob, *, created: bool = False) -> SpeechBatchJob:
     """Submit a stored PENDING job to Azure Speech and record it as SUBMITTED.
 

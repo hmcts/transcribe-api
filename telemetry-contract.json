@@ -371,6 +371,20 @@
       "pattern": null,
       "type": "int"
     },
+    "job.part_count": {
+      "allowed_values": null,
+      "description": "How many parts the recording was split into (recordings over 240 minutes).",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "job.part_index": {
+      "allowed_values": null,
+      "description": "Which part of a split recording (1 is the first).",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
     "job.processing_ms": {
       "allowed_values": null,
       "description": "Processing: Azure Speech processing started to finished, in ms.",
@@ -395,13 +409,14 @@
     "job.retry.operation": {
       "allowed_values": [
         "job.prepare",
+        "part.submit",
         "speech.delete",
         "speech.results",
         "speech.status",
         "speech.submit",
         "webhook.deliver"
       ],
-      "description": "The call being retried: job.prepare is the worker's conversion of an uploaded recording.",
+      "description": "The call being retried: job.prepare is the worker's conversion of an uploaded recording, part.submit the storing and submission of one part of a long recording.",
       "max_length": 128,
       "pattern": null,
       "type": "str"
@@ -725,6 +740,20 @@
       "pattern": null,
       "type": "str"
     },
+    "split.forced_cut_count": {
+      "allowed_values": null,
+      "description": "Cuts made at the ideal point because no silence was in the window.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
+    "split.part_count": {
+      "allowed_values": null,
+      "description": "Parts a recording over 240 minutes was cut into.",
+      "max_length": 128,
+      "pattern": null,
+      "type": "int"
+    },
     "storage.operation": {
       "allowed_values": [
         "blob.mark_failed",
@@ -977,16 +1006,18 @@
         "speech.locale",
         "speech.api_version",
         "speech.model_ref",
-        "speech.diarization"
+        "speech.diarization",
+        "job.part_count"
       ],
       "browser": false,
       "class": "operational",
-      "description": "Azure Speech accepted the job; duration_ms: created to accepted."
+      "description": "Azure Speech accepted the job (for a recording split into parts: every part); duration_ms: created to accepted."
     },
     "job.retried": {
       "attributes": [
         "job.retry.operation",
         "job.retry.attempt",
+        "job.part_index",
         "hmcts.failure.source",
         "speech.error_code",
         "http.response.status_code",
@@ -1381,6 +1412,36 @@
       "browser": true,
       "class": "operational",
       "description": "Speech sessions collapsing repeatedly."
+    },
+    "splitting.cancelled": {
+      "attributes": [],
+      "browser": false,
+      "class": "operational",
+      "description": "Cutting a long recording into parts was cancelled."
+    },
+    "splitting.completed": {
+      "attributes": [
+        "audio.duration_seconds",
+        "split.part_count",
+        "split.forced_cut_count"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "A recording over 240 minutes was cut into parts at silences where there were any; duration_ms: its duration."
+    },
+    "splitting.failed": {
+      "attributes": [
+        "audio.duration_seconds"
+      ],
+      "browser": false,
+      "class": "operational",
+      "description": "Cutting a long recording into parts failed (hmcts.error.code: split.failed, preparation.split_mismatch); it is retried."
+    },
+    "splitting.started": {
+      "attributes": [],
+      "browser": false,
+      "class": "operational",
+      "description": "The worker started cutting a recording over 240 minutes into parts."
     },
     "support.error_report_copied": {
       "attributes": [
