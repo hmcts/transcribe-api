@@ -179,6 +179,7 @@ class PreparationService:
         self._storage = storage
         self._shutdown = False
         self._running: set[asyncio.Task] = set()
+        self._records: set[asyncio.Future] = set()
 
     @property
     def storage(self) -> AudioStorage:
@@ -537,6 +538,7 @@ class PreparationService:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(*list(self._records), return_exceptions=True)  # recordings already under way
             if isinstance(exc, JobGone):
                 await self._forget_deleted_job(job, len(rows))
             raise
@@ -602,13 +604,23 @@ class PreparationService:
                 job_telemetry.record_retry(PART_SUBMIT_OPERATION, attempt, code, {"job.part_index": row.part_index})
                 await asyncio.sleep(self.settings.PART_RETRY_BACKOFF_SECONDS * attempt)
                 continue
-            if not await asyncio.to_thread(self._record_part_submitted, row.id, *created):
-                # The job was deleted meanwhile: the Azure job and the blob just made belong to nobody.
-                with contextlib.suppress(Exception):
-                    await delete_batch_job(created[1])
-                await self._delete_quietly(row.blob_path, job.id)
-                raise JobGone
+            # Once Azure has accepted the part, recording it must not be cut short by a cancellation (the
+            # sibling parts are cancelled when one fails or the job is deleted): the shielded task finishes
+            # recording the Azure job, or deletes it if the job is gone, and _submit_parts waits for it.
+            record = asyncio.ensure_future(self._record_or_clean(job, row, created))
+            self._records.add(record)
+            record.add_done_callback(self._records.discard)
+            await asyncio.shield(record)
             return
+
+    async def _record_or_clean(self, job: ClaimedJob, row: jobs.TranscriptionJobPart, created: tuple[str, str]) -> None:
+        if await asyncio.to_thread(self._record_part_submitted, row.id, *created):
+            return
+        # The job was deleted meanwhile: the Azure job and the blob just made belong to nobody.
+        with contextlib.suppress(Exception):
+            await delete_batch_job(created[1])
+        await self._delete_quietly(row.blob_path, job.id)
+        raise JobGone
 
     def _locale_of(self, job_id: UUID) -> tuple[str, bool]:
         with Session(get_engine()) as session:

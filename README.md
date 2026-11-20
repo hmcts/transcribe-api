@@ -242,6 +242,126 @@ fails exactly as before (the 4-hour sentence).
 Temporary disk for a recording in parts: the converted WAV and its parts (about 115 MB per hour each, so about 1.8 GB for 8 hours)
 per job being prepared, beside the original while it is downloaded.
 
+### Long recordings: rollout, rollback and operation (DIAAT-408)
+
+**Why the background preparation exists.** The CFT frontend Application Gateway gives a backend 30 seconds to answer (setting
+`benchnotes`, read on AAT and demo and not on prod, where the same module's default of 30 s is expected: confirm with the platform
+team). Converting a recording inside `POST /uploads` takes about 13-14 s per hour of audio (measured from AAT telemetry), so a
+recording of about two hours or more got a 504 although the server finished. With `async_upload_preparation` on, every request the
+browser makes answers in seconds whatever the recording's length, up to the size backstop.
+
+**The two flags and every setting.** Both flags are system feature flags (admin > Feature flags, no deploy), default off
+(`ASYNC_UPLOAD_PREPARATION`, `LONG_RECORDINGS_ENABLED` set the defaults). Long recordings take effect only with both on.
+
+| Setting | Default | What it costs, or what to know |
+|---|---|---|
+| `MAX_UPLOAD_BYTES` | 1073741824 (1 GiB) | The backstop on one upload. **The web pod's `MAX_UPLOAD_BYTES` environment variable must be the same number** (the web refuses a declared size over its own before any of the body is read). A larger figure than 1 GiB also needs the resumable block upload (below): one request through the gateway chain is untested above it. |
+| `MAX_AUDIO_DURATION_SECONDS` | 28800 (8 h) | Applies in full only with both flags on; otherwise the limit is `min(this, 14400)`. |
+| `PART_TARGET_SECONDS` | 12600 (3 h 30 m) | Longest part aimed for; 1 to 14400. |
+| `MAX_PARALLEL_PARTS` | 4 | Parts stored and submitted at once: that many Azure batch jobs at once for one recording. Azure's concurrency quota for the Speech resource was not looked up (`SPEECH_CONCURRENT_JOBS_LIMIT` only drives a utilisation gauge and throttles nothing). |
+| `BLOB_UPLOAD_CONCURRENCY` | 8 | Blocks sent in parallel per blob: 8 x 4 MiB of memory per upload in flight (API pod: the original, 512 Mi limit; worker: per part and for the full WAV). Only the asynchronous path uses it. |
+| `PREPARE_POLL_INTERVAL_SECONDS` | 5 | How often the worker looks for jobs to prepare. |
+| `PREPARE_MAX_CONCURRENT` | 2 | Jobs prepared at once by one worker: each needs temporary disk for its WAV and parts (about 115 MB per hour of audio each, so about 2 x 0.9 GB for 8 h, plus the original while it is downloaded and converted, up to `MAX_UPLOAD_BYTES`). The worker pod has no ephemeral-storage limit set. |
+| `PREPARE_MAX_ATTEMPTS` | 3 | Attempts at a job before it fails (a crashed attempt counts). |
+| `PREPARE_LEASE_SECONDS` / `PREPARE_HEARTBEAT_SECONDS` | 300 / 30 | A job being prepared is renewed every heartbeat; another worker may take it over once the lease has run out. A crash is therefore retried after up to 5 minutes. The lease must be at least twice the heartbeat. |
+| `PREPARE_RETRY_BACKOFF_SECONDS` | 30 | Wait before a failed attempt is repeated (times the attempt number). |
+| `PART_MAX_ATTEMPTS` / `PART_RETRY_BACKOFF_SECONDS` | 3 / 5 | Attempts at one part before the job fails, and the wait between them. |
+| `JOB_STUCK_PART_FACTOR` | 1.5 | A job in parts is reported stuck after this many times its longest part has run (single-file jobs keep `JOB_STUCK_RUNNING_SECONDS`, 6 h). |
+
+**Rollout order.** (1) Deploy the API, the worker and the web with both flags off: migrations 0016 and 0017 are additive and run at
+startup, the previous release's pods keep working while it rolls out, and behaviour is exactly as before. (2) Ask the platform team
+for the two infrastructure items below. (3) On AAT turn on `async_upload_preparation`, run part A of the checklist below. (4) On AAT
+turn on `long_recordings_enabled`, run part B. (5) Repeat on prod once AAT has passed, with a few users first.
+
+**Rollback.** Turn the flags off (no deploy). Long recordings go first: with `long_recordings_enabled` off a job already in parts
+carries on (its worker and poller do not look at the flag), but a recording over 240 minutes uploaded later is refused. With
+`async_upload_preparation` off, jobs already waiting for preparation are still prepared by the worker. The one case that fails is an
+upload whose `POST /jobs` lands after the flag was turned off (see "Asynchronous upload preparation"). A job being prepared when the
+flag is turned off is not affected; a job whose preparation needs the effective limit is checked against it when the worker
+converts it: a recording over 240 minutes still waiting when `long_recordings_enabled` is turned off fails with the 4-hour sentence.
+
+**Infrastructure asks (not in this repository).** (a) An ephemeral-storage request and limit for the worker pod (its disk use is
+described above; none is set today). (b) A lifecycle rule on the `incoming/` prefix of the recordings storage account that deletes
+blobs after a day (originals of uploads that never became a job are otherwise kept: the shared-infrastructure repository). (c) A
+check of what disk the AKS nodes give the worker.
+
+**Follow-up not built: resumable block upload and 4 GB.** `MAX_UPLOAD_BYTES` is one setting read by the API and the web, so the
+planned move to 4 GB is that configuration plus an upload in blocks (start, block and complete calls, resumable after a drop). One
+request through Front Door, Traefik and Caddy has not been tried above 1 GiB.
+
+**Pilot-tuning constants.** Not measured on real hearings, so treat as first guesses: silence detection -35 dB for 0.5 s and a
+cut window of 600 s (`stt/splitter.py`; a recording with constant background noise may find no silence and be cut at the ideal
+point, which `cut_kind` records), the 1 s cutting slack, `PART_TARGET_SECONDS`, `PART_MAX_ATTEMPTS`, `PART_RETRY_BACKOFF_SECONDS`,
+`JOB_STUCK_PART_FACTOR`, the `PREPARE_*` values and `MAX_PARALLEL_PARTS`.
+
+**Known limitations.**
+- The same person is a separate speaker in each part until the clerk renames them (no automatic matching).
+- A crash after Azure accepted a part and before its row was updated submits that part again on resume and leaves an Azure job
+  nothing polls (the single-file path has the same window).
+- There is no retry or resubmit route for a failed job (single-file jobs never had one): the clerk uploads again.
+- A recording's transcript cannot be exported (there is no export of one; only the audio can be downloaded).
+- With the asynchronous path on, a file that `ffprobe` cannot judge is accepted by the upload and fails as a job. Observed with
+  ffmpeg 8.0.1: text named `.mp3` makes `ffprobe` exit 0 and report no duration (its MP3 detection is lenient), so the upload
+  cannot refuse it and the worker does: the job fails with "The audio file could not be decoded...". A file `ffprobe` refuses is
+  a 422 in the request. The length of a VBR MP3 with no Xing header is an estimate in the header; the exact check on the converted
+  WAV is the backstop.
+- Nothing here has been run against real Azure Speech or Blob Storage.
+
+**Measured locally (not on a pod, not with real hearings).** On a development machine (8 cores, ffmpeg 8.0.1), with synthetic
+8 kHz mono 8 kbps MP3 tone files (3.6 MB per hour; real recordings decode more slowly): an 8 h file (28.8 MB) converted to the 16 kHz
+mono WAV (922 MB) in about 10-16 s, silence detection over that WAV took about 11 s and cutting it into three parts about 4-5 s;
+ffmpeg's own peak memory was about 55 MB in each step. The browser-facing requests, with the real routes over local storage,
+answered in 0.35 s (`/uploads`, 3.6 MB) to 0.9 s (28.8 MB) and 0.03-0.13 s (`/jobs`). The heavy end-to-end test (opt-in, below) ran
+in 4 min 28 s with a peak of 507 MB resident for the whole test process (the API, the services and the test; ffmpeg is a separate
+process). AAT measured 13-14 s per hour of conversion on a pod for real uploads: expect the preparation of an 8 h recording to take
+minutes there, and size the worker's disk from the table above, not from these figures.
+
+**The end-to-end test.** `tests/unit/recording/long_e2e/` runs the real routes, the preparation service, the poller and real
+ffmpeg with the mock Speech backend over a 1 h, a 4 h (the limit), a 5 h and an 8 h recording, the three refusals (4 h 01 m with both
+flags off, with background preparation on and long recordings off, and 8 h 02 m), a corrupt file and a job deleted while its parts
+are in flight. Every scenario runs in the normal suite at a scaled-down size (30 s stands for 240 minutes); the real sizes are
+deselected unless `RUN_LONG_E2E=1` (`pytest tests/unit/recording/long_e2e -m long_e2e`, optionally `LONG_E2E_DIR` for the generated
+audio and `LONG_E2E_REPORT` for a JSON of the timings; about 4 GB of temporary disk and 5 minutes).
+
+### Operator checklist for the AAT validation (NOT YET EXECUTED)
+
+Nothing below has been run: it is what to do after the first AAT deploy. Record the browser's time for each request (developer
+tools), the job's status over time, and the App Insights events (`customEvents`, filtered on `hmcts.journey.id` = the job id).
+
+**Before:** both flags off; the web pod's `MAX_UPLOAD_BYTES` unset or equal to the API's; the infrastructure asks above in place or
+the risk accepted; `GET /api/flags` shows `max_recording_seconds: 14400`.
+
+**Part A, `async_upload_preparation` on** (long off): `max_recording_seconds` is still 14400.
+
+| File | Expected |
+|---|---|
+| `bad.mp3` (not audio) | A 422 "could not be decoded" in under 2 s, or (if `ffprobe` is lenient with it, as it was locally) a 201 and then a failed job with the same sentence. |
+| `over.mp3` (4 h 01 m), `just-over.mp3` | A 422 with the 4-hour sentence in under 10 s, nothing stored. (A VBR MP3 without a Xing header may be judged by an estimate: check each way.) |
+| `timing-60min.mp3`, `timing-75min`, `timing-120min.mp3` | 201 from `/uploads` and `/jobs` each in under 10 s, job `pending` ("being prepared"), then `processing`, then `completed`; no part rows. |
+| `timing-180min.mp3`, `timing-B-180min-32kbps.mp3`, `under-3h59m.mp3` | The same; previously a 504 and a duplicate job. |
+| `exact-240.mp3` (14,400 s) | Accepted, one Azure job, no part rows. What Azure does at exactly 240 minutes is unknown: record it. |
+| `wav-near-cap.wav` (988 MB) | `/uploads` answers inside the gateway limit, or `MAX_UPLOAD_BYTES` (web and API) must come down. Not measured anywhere yet. |
+| A job deleted while `pending` | No original left in `incoming/`; no WAV. |
+| Flip the flag off with an upload in flight | Jobs already deferred still complete; an upload whose `/jobs` lands after fails and is re-uploaded (documented). |
+| Telemetry | `preparation.started/completed` per job, no 504s, server time per request under 10 s; the stuck gauge does not trip for preparing jobs. |
+
+**Part B, `long_recordings_enabled` on as well** (`max_recording_seconds` 28800):
+
+| File | Expected |
+|---|---|
+| `over.mp3` (4 h 01 m) | Accepted; two parts; completes. |
+| A 5 h recording | Two parts; the transcript's second half starts at the second part's offset (about 2.5 h), times monotonic; speakers labelled `Part 1 · Speaker N`, `Part 2 · Speaker N`; one `job.finished` with `job.part_count` 2. |
+| An 8 h recording | Three parts, each at most 4 h (about 2 h 40 m with the defaults); record the wall clock of conversion, `splitting.completed`, each part's `job.part_finished` and the whole job; the worker pod's memory and disk while it prepares (`kubectl top` and ephemeral storage). |
+| An 8 h 02 m recording | A 422 with the 8-hour sentence in under 10 s. |
+| Speaker rename across parts | In the job page, rename `Part 1 · Speaker 0` and `Part 2 · Speaker 0` to the same name with "Replace all": one speaker. |
+| A job deleted mid-parts | No part blob, Azure job or row left. |
+| A part that fails (if one can be provoked) | The job fails at once naming the part; the others' Azure jobs and blobs are deleted. |
+| Rollback | Turn `long_recordings_enabled` off: a job in parts finishes; a new 5 h upload is refused with the 4-hour sentence. |
+| Both flags off | `over.mp3` is refused after the request converted it (slow: seconds per hour of audio), as before. |
+
+Also record: Azure's behaviour for parts of about 2 h 40 m and 3 h 30 m (time and cost), whether `silencedetect` found a silence
+in each cut window on real hearings (`split.forced_cut_count`), and whether `MAX_PARALLEL_PARTS` 4 hits an Azure concurrency limit.
+
 ## Database migrations
 
 One Alembic history in `alembic/`. Its first revision, `0001_baseline`, replaced

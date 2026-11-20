@@ -313,9 +313,17 @@ async def test_the_real_limits_240_minutes_with_the_flags_off_and_8_hours_with_b
 
 async def test_no_more_than_max_parallel_parts_are_stored_and_submitted_at_once(engine, azure, mocker):
     mocker.patch.object(get_settings(), "MAX_PARALLEL_PARTS", 2)
-    azure.delay = 0.15
     job = _waiting(engine, pattern=FIVE_PARTS)
+    two_in_flight = asyncio.Event()
 
+    async def hold_until_two_are_in_flight(name):
+        # No timing: every submission waits until two are in flight together. If the bound were 1 this never
+        # happens (the wait_for fails the test); if it were above 2 a third would get in (peak below).
+        if azure.in_flight >= 2:
+            two_in_flight.set()
+        await asyncio.wait_for(two_in_flight.wait(), 20)
+
+    azure.on_submit = hold_until_two_are_in_flight
     await _prepare()
 
     assert len(_parts(engine, job.id)) == 5
@@ -586,3 +594,80 @@ async def test_a_cleanup_that_cannot_delete_everything_says_so_and_marks_the_job
     row = reload_job(engine, job.id)
     assert row.needs_cleanup is True and row.cleanup_failure_reason
     assert all(p.batch_job_url for p in _parts(engine, job.id))  # still recorded: a later cleanup can try again
+
+
+@pytest.mark.parametrize("recorded_before_the_delete", [0, 1, 2])
+async def test_parts_accepted_by_azure_when_the_job_is_deleted_are_not_left_as_azure_jobs(
+    engine, azure, mocker, recorded_before_the_delete
+):
+    """The window, made to happen every time with events and no sleeps: all three parts are in flight at once
+    and accepted by Azure, none has been recorded yet; then ``recorded_before_the_delete`` of them are recorded,
+    the job is deleted (as DELETE /jobs/{id} does), and the rest try to record. Every Azure job made is deleted
+    (those recorded before the delete by the delete, the others by the worker that finds its row gone), and
+    no blob, row or job is left."""
+    import threading
+
+    mocker.patch.object(get_settings(), "MAX_PARALLEL_PARTS", 4)
+    job = _waiting(engine)
+    loop = asyncio.get_running_loop()
+    in_flight, accepted_all = set(), asyncio.Event()
+    arrived, all_arrived = [], asyncio.Event()
+    recorded_one = asyncio.Event()
+    permits = threading.Semaphore(0)
+    made: list[str] = []
+    real_submit = azure.submit
+
+    async def hold_until_all_three_are_in_flight(name):
+        in_flight.add(name)
+        if len(in_flight) == 3:
+            accepted_all.set()
+        await asyncio.wait_for(accepted_all.wait(), 20)
+
+    async def submit(audio_sas_url, display_name, locale, enable_diarization):
+        url = await real_submit(audio_sas_url, display_name, locale, enable_diarization)
+        made.append(url)
+        return url
+
+    real_record = PreparationService._record_part_submitted
+    recorded = []
+
+    def record(self, part_id, batch_job_id, batch_job_url):
+        arrived.append(part_id)
+        if len(arrived) == 3:
+            loop.call_soon_threadsafe(all_arrived.set)  # all three are accepted and about to be recorded
+        permits.acquire()  # held until the test lets this one through
+        done = real_record(self, part_id, batch_job_id, batch_job_url)
+        recorded.append(done)
+        if len(recorded) == recorded_before_the_delete:
+            loop.call_soon_threadsafe(recorded_one.set)
+        return done
+
+    async def the_delete():
+        await asyncio.wait_for(all_arrived.wait(), 20)
+        for _ in range(recorded_before_the_delete):
+            permits.release()
+        if recorded_before_the_delete:
+            await asyncio.wait_for(recorded_one.wait(), 20)
+        await cleanup_job_parts(job.id, engine=engine, delete_rows=True)  # what DELETE /jobs/{id} does
+        with Session(engine) as session:
+            session.delete(session.get(SpeechBatchJob, job.id))
+            session.commit()
+        for _ in range(3 - recorded_before_the_delete):
+            permits.release()
+
+    azure.on_submit = hold_until_all_three_are_in_flight
+    mocker.patch.object(part_submission, "submit_batch_job", new=submit)
+    mocker.patch.object(PreparationService, "_record_part_submitted", record)
+
+    deleting = asyncio.create_task(the_delete())
+    await _prepare()
+    await asyncio.wait_for(deleting, 20)
+
+    assert reload_job(engine, job.id) is None and _parts(engine, job.id) == []
+    assert len(made) == 3 and len(set(azure.deleted)) == 3 and sorted(azure.deleted) == sorted(made)
+    assert (
+        recorded.count(True) == recorded_before_the_delete
+    )  # the parts recorded after the delete found nothing to record on
+    assert not any(
+        _exists(n) for n in (job.audio_blob_path, *(part_blob_name(job.audio_blob_path, i) for i in (1, 2, 3)))
+    )

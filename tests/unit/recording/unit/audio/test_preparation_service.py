@@ -422,7 +422,10 @@ async def test_the_worker_renews_the_lease_while_it_prepares(engine, mocker):
     await service.poll_once()
     await asyncio.wait_for(started.wait(), 10)
     claimed_at = reload_job(engine, job.id).updated_datetime
-    await asyncio.sleep(0.4)
+    for _ in range(200):  # until the heartbeat has renewed it (a bound, not a wait: it takes a few 50 ms)
+        await asyncio.sleep(0.05)
+        if reload_job(engine, job.id).updated_datetime > claimed_at:
+            break
     assert reload_job(engine, job.id).updated_datetime > claimed_at
     release.set()
     await service.wait_idle()
@@ -436,11 +439,14 @@ async def test_no_more_than_the_configured_number_of_jobs_are_prepared_at_once(e
     mocker.patch.object(get_settings(), "PREPARE_MAX_CONCURRENT", 2)
     release = asyncio.Event()
     running = peak = 0
+    two_running = asyncio.Event()
 
     async def convert(input_path, wav_path):
         nonlocal running, peak
         running += 1
         peak = max(peak, running)
+        if running == 2:
+            two_running.set()
         await release.wait()
         running -= 1
         wav_path.write_bytes(tone(".wav", 1.0))
@@ -450,7 +456,7 @@ async def test_no_more_than_the_configured_number_of_jobs_are_prepared_at_once(e
     service = PreparationService()
 
     assert await service.poll_once() == 2
-    await asyncio.sleep(0.1)
+    await asyncio.wait_for(two_running.wait(), 20)
     assert peak == 2 and await service.poll_once() == 0  # the third waits for a free place
     release.set()
     await service.wait_idle()
@@ -513,7 +519,10 @@ async def test_a_database_error_in_the_loop_does_not_stop_it(engine, mocker, cap
 
     mocker.patch.object(PreparationService, "poll_once", flaky)
     task = asyncio.create_task(PreparationService().run_polling_loop())
-    await asyncio.sleep(0.4)
+    for _ in range(200):  # until the loop has polled again after the error
+        await asyncio.sleep(0.05)
+        if calls >= 2:
+            break
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task

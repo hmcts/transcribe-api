@@ -83,6 +83,8 @@ async def cleanup_job_parts(
 
     def read() -> list[tuple[str | None, str | None]]:
         with Session(engine) as session:
+            if delete_rows:  # one statement: the rows go and what they recorded comes back
+                return jobs.delete_job_parts(session, job_id)
             return [(p.blob_path, p.batch_job_url) for p in jobs.get_job_parts(session, job_id)]
 
     parts = await asyncio.to_thread(read)
@@ -103,14 +105,12 @@ async def cleanup_job_parts(
 
     def settle() -> None:
         with Session(engine) as session:
-            if delete_rows:
-                jobs.delete_job_parts(session, job_id)
-            elif clean:
+            if clean:
                 jobs.clear_part_resources(session, job_id)
                 jobs.clear_needs_cleanup(session, job_id)
             else:
                 jobs.mark_needs_cleanup(session, job_id, "A part's blob or Azure job could not be deleted")
 
-    if parts:
+    if parts and not delete_rows:
         await asyncio.to_thread(settle)
     return clean

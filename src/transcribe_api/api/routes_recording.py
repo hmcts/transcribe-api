@@ -1977,6 +1977,16 @@ async def get_job_audio(
         return await _job_audio_response(job, request, audit)
 
 
+# DIAAT-408: the audio of a job whose recording the worker has not prepared yet is not stored: still a 404
+# (the page never asks for it: it shows no player until the transcript is ready), but saying why.
+_AUDIO_BEING_PREPARED = "The audio is not ready yet: the recording is still being prepared"
+
+
+def _audio_missing(job: SpeechBatchJob) -> HTTPException:
+    waiting = job.status == JobStatus.PENDING and job.source_blob_path is not None
+    return HTTPException(status_code=404, detail=_AUDIO_BEING_PREPARED if waiting else "Audio file not found")
+
+
 async def _job_audio_response(job: SpeechBatchJob, request: Request, audit: AuditScope) -> Response:
     if not job.audio_blob_path:
         raise HTTPException(status_code=404, detail="Audio not available for this job")
@@ -1987,12 +1997,12 @@ async def _job_audio_response(job: SpeechBatchJob, request: Request, audit: Audi
         try:
             total_size = local_storage.size(job.audio_blob_path)
         except (FileNotFoundError, ValueError):
-            raise HTTPException(status_code=404, detail="Audio file not found") from None
+            raise _audio_missing(job) from None
     else:
         async with AsyncAzureBlobManager() as blob_manager:
             total_size = await blob_manager.get_blob_size(job.audio_blob_path)
         if total_size is None:
-            raise HTTPException(status_code=404, detail="Audio file not found")
+            raise _audio_missing(job)
 
     start, end, is_partial = _parse_range(request.headers.get("range"), total_size)
     audit.detail["partial"] = is_partial

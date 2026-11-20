@@ -5,48 +5,78 @@ config:
 flowchart TB
   start(["User chooses one or more recordings<br/>on the Hearing recordings page"])
   up["Web sends each file to the API<br/>POST /api/v1/uploads"]
-  check{"Allowed type<br/>and under 1 GB?"}
-  conv["API converts it to 16 kHz mono WAV<br/>with ffmpeg"]
+  check{"Allowed type and under<br/>MAX_UPLOAD_BYTES (1 GB)?"}
+  mode{"Flag async_upload_preparation<br/>on?"}
+  conv["API converts it to 16 kHz mono WAV<br/>with ffmpeg, inside the request"]
   decode{"Audio<br/>decodable?"}
-  length{"Under 4 hours<br/>long?"}
+  length{"Within the limit?<br/>4 hours; 8 hours if long_recordings_enabled<br/>is on as well (flag off: 4 hours)"}
   store[("Blob Storage<br/>uploads/user/id.wav")]
+  probe["API reads the length from the file header<br/>(ffprobe), stores nothing yet"]
+  probeok{"Readable and within<br/>the same limit?"}
+  raw[("Blob Storage<br/>incoming/user/id.ext (the original)")]
   job["Web creates a job<br/>POST /api/v1/jobs"]
   own{"File belongs<br/>to this user?"}
+  which{"Flag on and the original<br/>is waiting in storage?"}
   submit["API saves the job (pending) and submits<br/>an Azure Speech batch transcription"]
+  defer["API saves the job (pending) with the original's<br/>blob recorded and does not call Azure Speech"]
   accepted{"Speech<br/>accepted it?"}
   queued["Job status: submitted"]
-  speech["Azure Speech fetches the audio from Blob Storage<br/>and transcribes it"]
-  poll["Worker checks every pending job<br/>every 30 seconds"]
+  prep["Worker claims the pending job, downloads the original,<br/>converts it and checks the exact length"]
+  prepok{"Decodable and<br/>within the limit?"}
+  big{"Over 240 minutes<br/>(Azure limit per file)?"}
+  whole["Worker stores the WAV<br/>uploads/user/id.wav and submits the job"]
+  split["Worker cuts the WAV at silences into parts of at most 3 h 30 m,<br/>records them (transcription_job_part) and stores the full WAV"]
+  partsub["Each part is stored and submitted as its own Azure job,<br/>up to MAX_PARALLEL_PARTS at once; a failed part is retried alone"]
+  partok{"Every part<br/>submitted?"}
+  speech["Azure Speech fetches the audio from Blob Storage<br/>and transcribes it (each part separately)"]
+  poll["Worker checks every submitted job<br/>(and every submitted part) every 30 seconds"]
   status{"Speech job<br/>status"}
   running["Job status: running"]
   ok["Worker downloads the result, labels speakers,<br/>saves the transcript in Postgres,<br/>deletes the Speech job"]
+  merge["Once every part has succeeded the worker assembles<br/>the transcript once: part times moved by the part's offset,<br/>speakers labelled by part, then deletes the part blobs and Speech jobs"]
   fail["Job status: failed"]
-  view(["User opens the job: reads the transcript,<br/>plays the audio, corrects and accepts segments"])
+  partfail["Job failed: a part failed, the message names it;<br/>the other parts' Speech jobs and blobs are deleted"]
+  view(["User opens the job: reads the transcript,<br/>plays the audio, corrects and accepts segments.<br/>A pending job shows 'being prepared' and no player"])
   reject(["Rejected with an error message"])
   unavailable(["Job failed, user sees 'service unavailable'"])
+  prepfail(["Job failed with the same message the<br/>upload would have given (shown on the job)"])
 
   start --> up --> check
   check -- no --> reject
-  check -- yes --> conv --> decode
+  check -- yes --> mode
+  mode -- no --> conv --> decode
   decode -- no --> reject
   decode -- yes --> length
   length -- no --> reject
   length -- yes --> store --> job --> own
   own -- no --> reject
-  own -- yes --> submit --> accepted
+  own -- yes --> which
+  which -- no --> submit --> accepted
   accepted -- no --> unavailable
   accepted -- yes --> queued --> speech
+  mode -- yes --> probe --> probeok
+  probeok -- no --> reject
+  probeok -- yes --> raw --> job
+  which -- yes --> defer --> prep --> prepok
+  prepok -- no --> prepfail
+  prepok -- yes --> big
+  big -- no --> whole --> queued
+  big -- yes --> split --> partsub --> partok
+  partok -- no --> partfail
+  partok -- yes --> speech
   speech --> poll --> status
   status -- running --> running --> poll
   status -- not started --> poll
   status -- succeeded --> ok --> view
+  status -- every part succeeded --> merge --> view
   status -- failed --> fail
+  status -- a part failed --> partfail
 
   classDef user fill:#eae6ff,stroke:#403294,color:#172b4d
   classDef step fill:#e3fcef,stroke:#006644,color:#172b4d
   classDef bad fill:#ffebe6,stroke:#bf2600,color:#172b4d
   classDef ext fill:#fff7d6,stroke:#b65c02,color:#172b4d
   class start,view user
-  class up,conv,job,submit,queued,poll,running,ok step
-  class reject,unavailable,fail bad
-  class speech,store ext
+  class up,conv,probe,job,submit,defer,queued,prep,whole,split,partsub,poll,running,ok,merge step
+  class reject,unavailable,fail,partfail,prepfail bad
+  class speech,store,raw ext

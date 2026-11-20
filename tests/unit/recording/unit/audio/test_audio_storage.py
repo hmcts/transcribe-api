@@ -5,6 +5,7 @@ what is checked is the SDK's real behaviour (parallel blocks) rather than a mock
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from uuid import uuid4
 
 import pytest
@@ -74,10 +75,14 @@ class _Response(AsyncHttpResponse):
 class CountingTransport(AsyncHttpTransport):
     """Answers every request with 201 after a short delay, and records how many were in flight at once."""
 
-    def __init__(self) -> None:
+    def __init__(self, hold_until: int = 0) -> None:
         self.in_flight = 0
         self.peak = 0
         self.requests: list[str] = []
+        # Block every request until this many are in flight together (no sleeping): the SDK's parallelism
+        # is then observed, not timed. 0: answer at once.
+        self.hold_until = hold_until
+        self._together = asyncio.Event()
 
     async def open(self):
         pass
@@ -95,7 +100,13 @@ class CountingTransport(AsyncHttpTransport):
         self.in_flight += 1
         self.peak = max(self.peak, self.in_flight)
         self.requests.append(request.method)
-        await asyncio.sleep(0.05)
+        if self.hold_until:
+            if self.in_flight >= self.hold_until:
+                self._together.set()
+            # The last blocks and the block list come when fewer than hold_until are left: let them through.
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._together.wait(), 2)
+        await asyncio.sleep(0)
         self.in_flight -= 1
         return _Response(request)
 
@@ -123,6 +134,7 @@ async def _upload(tmp_path, blocks: int, **kwargs) -> bool:
 
 
 async def test_blocks_are_sent_in_parallel_when_asked_to(transport, tmp_path):
+    transport.hold_until = 8  # every request waits until eight are in flight together: the SDK's limit is observed
     assert await _upload(tmp_path, 20, max_concurrency=8)
     assert transport.peak == 8  # the SDK's max_concurrency, at its memory cost of 8 x 4 MiB
     assert transport.requests.count("PUT") == 21  # 20 blocks and the block list

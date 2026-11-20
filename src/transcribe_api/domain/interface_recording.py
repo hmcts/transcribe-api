@@ -619,10 +619,18 @@ def create_job_parts(session: Session, job_id: UUID, plans: list[PartPlan]) -> l
     return get_job_parts(session, job_id)
 
 
-def delete_job_parts(session: Session, job_id: UUID) -> None:
-    """Remove the job's part rows (the database also does it when the job row goes)."""
-    session.execute(sa_delete(TranscriptionJobPart).where(col(TranscriptionJobPart.job_id) == job_id))
+def delete_job_parts(session: Session, job_id: UUID) -> list[tuple[str | None, str | None]]:
+    """Remove the job's part rows (the database also does it when the job row goes) and return, in the
+    same statement, the blob and Azure job each had recorded: what is left to delete. A part recorded
+    after this has nothing to be recorded on (its worker finds the row gone and deletes what it made),
+    so no resource can slip between "read what to delete" and "delete the rows"."""
+    rows = session.execute(
+        sa_delete(TranscriptionJobPart)
+        .where(col(TranscriptionJobPart.job_id) == job_id)
+        .returning(TranscriptionJobPart.blob_path, TranscriptionJobPart.batch_job_url)
+    ).all()
     session.commit()
+    return [(row[0], row[1]) for row in rows]
 
 
 def start_part_attempt(session: Session, part_id: UUID) -> int | None:
