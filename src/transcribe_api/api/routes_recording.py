@@ -111,7 +111,7 @@ _METADATA_MAX_BYTES = 4096
 # recording may be (that is MAX_AUDIO_DURATION_SECONDS, checked once the upload is
 # decoded). 1 GiB covers 4 hours (Azure's per-file limit with diarization) at any
 # usual MP3/M4A bitrate and as 16 kHz mono WAV (about 460 MB); CD-quality WAV is about
-# 640 MB an hour, so it hits this at about 26 minutes. Keep in step with
+# 635 MB an hour, so it hits this at about 100 minutes. Keep in step with
 # transcribe-web's app/api/upload/route.ts (MAX_UPLOAD_BYTES).
 _MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
 _TOO_LARGE_DETAIL = (
