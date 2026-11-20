@@ -219,8 +219,18 @@ fails exactly as before (the 4-hour sentence).
   single file). Single-file jobs are judged as before. The gauges count a job in parts once, whatever its parts.
 - **Mock Speech** (`SPEECH_BACKEND=mock`) gives each part its own transcript ("Part 2 opens with speaker one." ...), so the merge and
   its offsets can be seen end to end.
-- **Not yet built**: the speakers of the parts are numbered within each part, and nothing yet labels which part a speaker belongs to
-  (the next change), so keep `long_recordings_enabled` off until it is.
+- **Speakers are labelled by part**: diarization is per file, so "Speaker 0" of one part is not known to be "Speaker 0" of another,
+  and the service never joins speakers across parts (it also never merges the last section of one part into the first of the
+  next). Every speaker of a recording in parts carries its part: `Part 1 · Speaker 0`, `Part 1 · Speaker 1`, `Part 2 · Speaker 0`
+  ... (the part number is zero-padded to the width of the part count, `Part 02 · ` of 12, so the labels sort in part order; the first
+  part is labelled too, so that no label reads as spanning the recording). A recording in one piece is labelled exactly as before
+  (`Speaker 0`). The clerk maps the speakers onto roles with the existing speaker editor (rename one section, or every section by
+  that speaker); giving the labels of several parts the same name merges them into one speaker.
+  **Limitation**: the same person is a separate speaker in each part until the clerk renames them, and the service does not try to
+  match speakers between parts (an overlap-and-match heuristic was considered and left out: it needs a measured accuracy before it
+  can be trusted). Cutting at silences such as adjournments helps, because roles often change there anyway.
+  There is no Word or other export of a recording's transcript in this service or in the web app (the only export is the audio
+  download, `audio.export`), so the labels reach no template.
 
 | Setting | Default | Meaning |
 |---|---|---|

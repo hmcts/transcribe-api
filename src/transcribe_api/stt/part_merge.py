@@ -31,6 +31,18 @@ class PartResult:
     azure_duration_seconds: float | None  # what Azure reported for the part's audio, if it did
 
 
+def part_speaker_prefix(index: int, count: int) -> str:
+    """What goes before the speaker labels of part ``index`` of ``count``: ``"Part 2 · "``.
+
+    Diarization is per file: "Speaker 0" of one part is not known to be "Speaker 0" of another, so each
+    part's speakers carry their part. Every part is labelled, the first too, so that no label reads as
+    spanning the recording. The part number is zero-padded to the width of the part count ("Part 02 · "
+    of 12), so the labels sort in part order. One label form for the whole job: the speaker editor
+    renames by the exact label, so renaming the labels of several parts to the same name merges them.
+    """
+    return f"Part {index:0{len(str(count))}d} · "
+
+
 def offset_entry(entry: DialogueEntry, offset: float) -> DialogueEntry:
     """A copy of ``entry`` with its times (and its words') moved by ``offset`` seconds."""
     words = (
@@ -56,11 +68,22 @@ def merge_parts(
     process: Callable[[list[DialogueEntry], PartResult], list[DialogueEntry]] | None = None,
 ) -> list[DialogueEntry]:
     """The recording's dialogue entries: each part processed on its own (``process``, by default
-    ``process_speakers``), offset, and the parts concatenated in order."""
+    ``process_speakers`` with the part's label prefix), offset, and the parts concatenated in order.
+    Speakers are never joined across parts, and every label says which part it is from, even if a
+    speaker-processing step failed and left a label unlabelled."""
     merged: list[DialogueEntry] = []
     for part in sorted(parts, key=lambda p: p.index):
-        processed = process(part.entries, part) if process else process_speakers(part.entries)
-        merged.extend(offset_entry(entry, part.offset_seconds) for entry in processed)
+        prefix = part_speaker_prefix(part.index, part.count)
+        processed = process(part.entries, part) if process else process_speakers(part.entries, label_prefix=prefix)
+        merged.extend(
+            offset_entry(
+                entry
+                if entry.speaker.startswith(prefix)
+                else entry.model_copy(update={"speaker": prefix + entry.speaker}),
+                part.offset_seconds,
+            )
+            for entry in processed
+        )
     return merged
 
 

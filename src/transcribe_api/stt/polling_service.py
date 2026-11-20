@@ -600,7 +600,7 @@ class _PartPolling:
                     ),
                 ):
                     with speaker_step_report() as speaker_steps:
-                        merged = merge_parts(results, lambda entries, _part: process_speakers(entries))
+                        merged = merge_parts(results)
                     first = statuses[0]
                     model_identifier = _extract_model_identifier(first, context.locale)
                     # The parts run at the same time: the job took as long as its slowest part.
