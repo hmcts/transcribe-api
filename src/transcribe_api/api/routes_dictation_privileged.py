@@ -62,7 +62,6 @@ from transcribe_api.domain.auth.permissions import assignable_roles
 from transcribe_api.domain.jurisdictions import (
     STAGE_DRAFT,
     STAGE_LIVE,
-    TEMPLATE_IAC_DECISION,
     WORDING_KEYS,
     ActiveJurisdiction,
 )
@@ -193,8 +192,6 @@ def _legal_wording_scope(
     jurisdiction: ActiveJurisdiction = Depends(get_active_jurisdiction),
 ) -> LegalWordingScope:
     response.headers["Cache-Control"] = "no-store"
-    if jurisdiction.settings.template != TEMPLATE_IAC_DECISION:
-        raise HTTPException(status_code=404, detail="Not available in this jurisdiction")
     return LegalWordingScope(user=current_user, jurisdiction=jurisdiction)
 
 

@@ -242,7 +242,7 @@ def _dictation_attributes(schema: TelemetrySchema) -> None:
     )
     schema.attribute(
         "live_draft.trigger",
-        allowed_values=("interval", "late-finalisation", "pause", "retry", "unmount"),
+        allowed_values=("edit", "interval", "late-finalisation", "pause", "retry", "unmount"),
         description="What triggered the autosave.",
     )
     schema.attribute("minutes.citation_index", int, description="Which citation was clicked.")

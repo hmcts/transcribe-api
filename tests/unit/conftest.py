@@ -166,7 +166,7 @@ def every_user_is_an_iac_judge(request: pytest.FixtureRequest, monkeypatch: pyte
     )
     monkeypatch.setattr(jurisdictions, "_assigned_jurisdiction_ids", lambda user_id: [IAC_JURISDICTION_ID])
     # Every record is in the IAC too (DIAAT-334): left to the ownership checks.
-    monkeypatch.setattr(jurisdictions, "_owned_transcription_jurisdiction", lambda transcription_id, user_id: (False, None))
+    monkeypatch.setattr(jurisdictions, "_transcription_owner_and_jurisdiction", lambda transcription_id: (None, None))
     monkeypatch.setattr(jurisdictions, "_job_owner_and_jurisdiction", lambda job_id: (False, None, None))
     # And every upload was made in the IAC.
     monkeypatch.setattr(jurisdictions, "_record_upload_jurisdiction", lambda upload_id, jurisdiction_id: None)

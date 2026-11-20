@@ -365,6 +365,74 @@ def test_judges_see_an_enabled_template_with_the_fields_they_fill(jurisdiction_d
         {"value": "wages", "label": "Unlawful deductions"},
     ]
     assert draft["id"] != available["id"]
+    assert available["sections"] == [{"tag": "JudgmentText", "label": "Judgment text"}]
+
+
+def test_the_judges_form_says_when_to_ask_and_what_to_start_with(as_admin, as_et_judge, et):
+    template = upload(as_admin).json()
+    body = complete(template)
+    changes = {
+        "Party2Rep": {"show_when": {"tag": "Party2Title", "answers": ["Respondent"]}, "empty_text": "No one"},
+        "Party1": {"prefill": "judge_name"},
+    }
+    body["fields"] = [{**f, **changes.get(f["tag"], {})} for f in body["fields"]]
+    saved = as_admin.put(f"/api/admin/jurisdictions/ET/templates/{template['id']}", json=body)
+    assert saved.status_code == 200, saved.json()
+
+    stored = {f["tag"]: f for f in saved.json()["fields"]}
+    assert stored["Party2Rep"]["empty_text"] == "No one"
+    # Kept out until set, for a pod still on the release before these settings.
+    assert "show_when" not in stored["Reference"]
+
+    (available,) = as_et_judge.get("/api/jurisdictions/templates").json()
+    fields = {f["tag"]: f for f in available["fields"]}
+    assert fields["Party2Rep"]["show_when"] == {"tag": "Party2Title", "answers": ["Respondent"]}
+    assert fields["Party1"]["prefill"] == "judge_name"
+    # What a box prints when empty is the document's business, not the form's.
+    assert "empty_text" not in fields["Party2Rep"]
+
+    body["fields"] = [
+        {**f, "show_when": {"tag": "Party2Title", "answers": ["Witness"]}} if f["tag"] == "Party2Rep" else f
+        for f in body["fields"]
+    ]
+    body["version"] = saved.json()["version"]
+    refused = as_admin.put(f"/api/admin/jurisdictions/ET/templates/{template['id']}", json=body)
+    assert refused.status_code == 400
+    assert "no longer has: choose again" in str(refused.json())
+
+
+def test_hearing_type_and_anonymity_offer_the_document_content_and_each_section_is_named(as_admin, as_et_judge, et):
+    save_document_content(
+        et.id,
+        {
+            "legal_frameworks": [],
+            "hearing_types": [{"id": "cvp", "title": "Video", "hearing_title": "H", "hearing_description": "D"}],
+            "anonymity": {"statuses": [{"id": "granted", "identifier": "Yes"}, {"id": "not_sought", "title": "No"}]},
+        },
+    )
+    template = upload(as_admin).json()
+    body = complete(template)
+    changed = {
+        "Party2Rep": {"type": "hearing_type"},
+        "Party2": {"type": "anonymity"},
+        "Reference": {"type": "dictated"},
+    }
+    body["fields"] = [{**f, **changed.get(f["tag"], {})} for f in body["fields"]]
+    response = as_admin.put(f"/api/admin/jurisdictions/ET/templates/{template['id']}", json=body)
+    assert response.status_code == 200, response.text
+
+    (available,) = as_et_judge.get("/api/jurisdictions/templates").json()
+    fields = {f["tag"]: f for f in available["fields"]}
+    assert fields["Party2Rep"]["options"] == [{"value": "cvp", "label": "Video"}]
+    assert fields["Party2"]["options"] == [
+        {"value": "granted", "label": "Yes"},
+        {"value": "not_sought", "label": "No"},
+    ]
+    # In the template's order: the first is where dictation goes until the judge picks.
+    assert available["sections"] == [
+        {"tag": "Reference", "label": "Reference"},
+        {"tag": "JudgmentText", "label": "Judgment text"},
+    ]
 
 
 def test_judges_of_another_jurisdiction_never_see_it(jurisdiction_db, as_admin, judge_app):
@@ -403,7 +471,7 @@ def _submission(template_id: str, values: dict) -> dict:
     return {
         "template_id": template_id,
         "values": values,
-        "messages": {"background": [{"speaker": "Judge", "text": "The claim succeeds.", "timestamp": "00:01"}]},
+        "messages": {"JudgmentText": [{"speaker": "Judge", "text": "The claim succeeds.", "timestamp": "00:01"}]},
         "notes": "<p>Costs are reserved.</p>",
     }
 
@@ -423,11 +491,17 @@ def test_a_judge_gets_a_document_from_the_template_with_no_release(jurisdiction_
         "Case Number: 1234/2026",
         "Heard on 12 February 2026",
         "A Smith (Claimant)",
-        "The claim succeeds.\n\nCosts are reserved.",
+        "The claim succeeds.",
+        "Your notes",
+        "Costs are reserved.",
         f"© Crown copyright {document_year()}",
     ]
     submission = json.loads(stored[response.json()["blob_path"]])
     assert submission["form_data"] == {"template_id": template["id"], "template_name": "ET judgment", "values": VALUES}
+    # By the template's sections, and all of it where the hearing viewers read it.
+    message = {"speaker": "Judge", "text": "The claim succeeds.", "timestamp": "00:01"}
+    assert submission["sections"] == [{"tag": "JudgmentText", "label": "Judgment text", "messages": [message]}]
+    assert submission["messages"] == {"background": [message], "evidence": [], "facts": []}
     with Session(jurisdiction_db) as session:
         transcription = session.get(Transcription, UUID(response.json()["transcription_id"]))
         assert transcription.title == "ET judgment: 1234/2026"
@@ -566,11 +640,13 @@ def test_the_previous_release_cannot_switch_on_a_template_that_is_not_live(juris
     assert (listed["stage"], listed["enabled"], listed["version"]) == (stage, False, template["version"])
 
 
-def test_a_submission_is_either_the_decision_form_or_a_template(as_admin, as_et_judge, stored):
+def test_a_submission_is_of_a_template_only(as_admin, as_et_judge, stored):
+    """The built-in IAC decision form is gone: every jurisdiction's judges choose one of
+    its uploaded templates."""
     template = _enabled_template(as_admin)
     body = {**_submission(template["id"], VALUES), "form_data": {"location": "x"}}
     assert as_et_judge.post("/api/live-transcription/submission", json=body).status_code == 422
-    neither = {"messages": {"background": [], "evidence": [], "facts": []}}
+    neither = {"form_data": {"location": "x"}, "messages": {"background": [], "evidence": [], "facts": []}}
     assert as_et_judge.post("/api/live-transcription/submission", json=neither).status_code == 422
     no_values = {k: v for k, v in _submission(template["id"], VALUES).items() if k != "values"}
     assert as_et_judge.post("/api/live-transcription/submission", json=no_values).status_code == 422
@@ -610,9 +686,10 @@ def test_a_template_is_previewed_as_a_judge_would_get_it_before_judges_see_it(as
         "Case Number: 1234/2026",
         "Heard on 12 February 2026",
         "A Smith (Claimant)",
+        "This is where the judge's dictation for this section goes.",
         (
-            "This is where the judge's dictated text goes.\n\n"
-            "Each paragraph the judge dictates or types appears here, in this box's style."
+            "Each paragraph the judge dictates appears here, in this box's style, then the judge's notes under"
+            " this section's heading."
         ),
         f"© Crown copyright {document_year()}",
     ]

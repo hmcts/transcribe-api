@@ -93,6 +93,48 @@ def test_a_link_changed_to_another_jurisdictions_record_finds_nothing(
         assert session.get(Transcription, in_sscs.id) is not None  # nothing deleted
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "resource", "action"),
+    [
+        ("GET", "/api/transcriptions/{id}", "transcription", "read"),
+        ("GET", "/api/transcriptions/{id}/document-download", "document", "read"),
+        ("GET", "/api/download?transcription_id={id}", "document", "read"),
+        ("DELETE", "/api/transcriptions/{id}", "transcription", "delete"),
+        ("GET", "/api/transcriptions/{id}/jobs", "transcription_job", "read"),
+        ("GET", "/api/transcriptions/{id}/jobs/{other}/audio", "audio", "read"),
+        ("GET", "/api/transcriptions/{id}/sectioned-transcript", "transcription", "read"),
+    ],
+)
+def test_another_users_record_finds_nothing_and_alerts_security(
+    jurisdiction_db, judge_in_two, jurisdiction_app, method, path, resource, action
+):
+    """DIAAT-285: walking other users' IDs, on any route naming a record, is a blocked
+    ownership violation, not only on the tag routes; the answer is an unknown ID's."""
+    _judge, iac, _sscs, in_iac, _in_sscs = judge_in_two
+    other = add_user(jurisdiction_db)
+    add_member(jurisdiction_db, other, iac)
+    client = client_as(jurisdiction_app, jurisdiction_db, other)
+
+    with capture_telemetry() as telemetry:
+        response = client.request(method, path.format(id=in_iac.id, other=uuid4()), headers={"X-Jurisdiction": "IAC"})
+        unknown = client.request(method, path.format(id=uuid4(), other=uuid4()), headers={"X-Jurisdiction": "IAC"})
+
+    assert (response.status_code, unknown.status_code) == (404, 404)
+    assert response.json() == unknown.json()
+    [event] = [dict(e) for e in telemetry.events("security.ownership_violation")]
+    assert (event["security.resource_type"], event["security.action"], event["security.outcome"]) == (
+        resource,
+        action,
+        "blocked",
+    )
+    assert str(in_iac.id) not in str(event)
+    # One denied record of the attempt, who and which record (the unknown ID's too).
+    [row] = [r for r in _denied_rows(jurisdiction_db) if r.object_id == str(in_iac.id)]
+    assert row.user_id == str(other.id)
+    with Session(jurisdiction_db) as session:
+        assert session.get(Transcription, in_iac.id) is not None  # nothing deleted
+
+
 def test_the_same_record_is_reached_in_its_own_jurisdiction(jurisdiction_db, judge_in_two, jurisdiction_app):
     judge, _iac, _sscs, _in_iac, in_sscs = judge_in_two
     client = client_as(jurisdiction_app, jurisdiction_db, judge)

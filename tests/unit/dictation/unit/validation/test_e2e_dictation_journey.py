@@ -49,6 +49,7 @@ from tests.unit.dictation.unit.validation.pii_scan import (
     TRANSCRIPT_TEXT,
 )
 from tests.unit.jurisdiction_fixtures import IAC_JURISDICTION_ID
+from transcribe_api.documents.uploaded_templates import TemplateField
 from transcribe_api.domain.models_dictation import User
 from transcribe_api.runtime.browser_telemetry import JOURNEY_DICTATION_SESSION
 from transcribe_api.runtime.telemetry import JOURNEY_SUBMISSION
@@ -56,25 +57,32 @@ from transcribe_api.runtime.telemetry import JOURNEY_SUBMISSION
 OID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 SPEECH_SESSION_1 = "0f" * 16  # Speech SDK session IDs: 32 hex
 SPEECH_SESSION_2 = "1e" * 16
+TEMPLATE_FIELDS = [
+    TemplateField(tag="Appellant", label="Appellant", type="text"),
+    TemplateField(tag="Respondent", label="Respondent", type="text"),
+    TemplateField(tag="Judge", label="Judge", type="text"),
+    TemplateField(tag="HearingDate", label="Hearing date", type="date"),
+    TemplateField(tag="Background", label="Background", type="dictated", required=False),
+    TemplateField(tag="Evidence", label="Evidence", type="dictated", required=False),
+]
 SUBMISSION = {
-    "form_data": {
-        "location": "Birmingham",
-        "hearingDate": "2026-01-15",
-        "judgeName": PII_JUDGE,
-        "appellantName": PII_APPELLANT,
-        "respondent": PII_RESPONDENT,
-        "hearingType": "substantive",
-        "appealableDecisionDate": "2025-06-01",
-        "documentType": "determination",
+    "template_id": "6f0b2a8e-3c41-4d7a-9e12-5b8c0d4f7a21",
+    "values": {
+        "Appellant": PII_APPELLANT,
+        "Respondent": PII_RESPONDENT,
+        "Judge": PII_JUDGE,
+        "HearingDate": "2026-01-15",
     },
     "messages": {
-        "background": [{"speaker": "Judge", "text": TRANSCRIPT_TEXT, "timestamp": "00:00:00", "timestampMs": 0}],
-        "evidence": [{"speaker": "Judge", "text": f"Email {APPELLANT_EMAIL}", "timestamp": "00:01:00"}],
-        "facts": [],
+        "Background": [{"speaker": "Judge", "text": TRANSCRIPT_TEXT, "timestamp": "00:00:00", "timestampMs": 0}],
+        "Evidence": [{"speaker": "Judge", "text": f"Email {APPELLANT_EMAIL}", "timestamp": "00:01:00"}],
     },
     "notes": NOTE_TEXT,
 }
-DRAFT = {"transcript": SUBMISSION["messages"], "form_data": SUBMISSION["form_data"]}
+DRAFT = {
+    "transcript": SUBMISSION["messages"],
+    "form_data": {"template_id": SUBMISSION["template_id"], "values": SUBMISSION["values"]},
+}
 
 
 # The application, as create_app builds it ------------------------------------------------
@@ -148,7 +156,8 @@ class Services:
         )
         mocker.patch("transcribe_api.api.routes_dictation.get_settings", return_value=settings)
         mocker.patch("transcribe_api.api.routes_dictation.AsyncAzureBlobManager", side_effect=self._blob_manager)
-        mocker.patch("transcribe_api.api.routes_dictation.render_hearing_document", side_effect=self._render)
+        mocker.patch("transcribe_api.api.routes_dictation._chosen_template", side_effect=self._chosen_template)
+        mocker.patch("transcribe_api.api.routes_dictation._render_uploaded_template", side_effect=self._render)
         mocker.patch("transcribe_api.api.routes_dictation.save_transcription", side_effect=self._save_transcription)
         mocker.patch("transcribe_api.api.routes_dictation.save_transcription_job", side_effect=self._save_job)
         mocker.patch("transcribe_api.api.routes_dictation.get_transcription_by_id", side_effect=self._get_transcription)
@@ -173,11 +182,14 @@ class Services:
         context.__aexit__ = AsyncMock(return_value=False)
         return context
 
-    def _render(self, request, output_dir, user_email, jurisdiction_id=None):
+    def _chosen_template(self, jurisdiction_id, template_id, user_id):
         self.rendered_in.append(jurisdiction_id)
+        return TEMPLATE_FIELDS, b"template", "0123456789abcdef" * 4, "Decision"
+
+    def _render(self, content, texts, output_dir):
         if not self.document_renders:
             # Exception text can quote content: it must never be exported.
-            message = f"template field missing for {request.form_data.appellant_name}"
+            message = f"template field missing for {texts['Appellant']}"
             raise RuntimeError(message)
         path = MagicMock(spec=Path)
         path.__str__ = lambda _: "/tmp/hearing-document.docx"
@@ -207,7 +219,7 @@ class Services:
     def _upsert_draft(self, user_id, jurisdiction_id, transcript, form_data):
         if not self.draft_store_up:
             # A database error that quotes the row, as drivers do.
-            message = f"could not write draft: {form_data['appellantName']} {transcript['background'][0]['text']}"
+            message = f"could not write draft: {form_data['values']['Appellant']} {transcript['Background'][0]['text']}"
             raise ConnectionError(message)
 
     # Speech STS and the storage HTTP client (both httpx in api.routes)
@@ -577,7 +589,7 @@ def test_successful_dictation_submission_and_download_is_one_traceable_journey(
     assert not [e for e in _named(events, *SUBMISSION_SUCCESS) if e not in submission_events]
 
     (available,) = _named(journey, "document.available")
-    assert available["document.template"] == "decision"
+    assert available["document.template"] == "uploaded"
     (transcript,) = _named(journey, "transcript.available")
     assert transcript["dictation.transcription_id"] == transcription_id
     (stopped, _) = _named(journey, "speech.session_stopped")

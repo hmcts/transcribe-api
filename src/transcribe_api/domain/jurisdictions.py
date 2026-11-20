@@ -62,10 +62,6 @@ ROLES = (ROLE_JUDGE, ROLE_ADMIN)
 NO_JURISDICTION = "no_jurisdiction"
 NOT_AVAILABLE = "jurisdiction_not_available"
 
-# The IAC decision document (documents/): the hearing form, submission and the
-# document_content it uses. A jurisdiction without a template dictates into the
-# general section and copies its text out (DIAAT-333); templates are DIAAT-323.
-TEMPLATE_IAC_DECISION = "iac_decision"
 
 # The screen text a jurisdiction sets (DIAAT-330). The web app has a neutral default
 # for each; a jurisdiction's settings override it. Keep in step with the web app's
@@ -118,6 +114,8 @@ class JurisdictionSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     wording: dict[str, str] = Field(default_factory=dict)
+    # No longer used: every jurisdiction's judges choose from its uploaded templates.
+    # Still accepted from an older release's admin page during a rollout, never kept.
     template: Literal["iac_decision"] | None = None
     features: JurisdictionFeatures = Field(default_factory=JurisdictionFeatures)
 
@@ -134,31 +132,33 @@ class JurisdictionSettings(BaseModel):
             raise ValueError(msg)
         return wording
 
+    @field_validator("template")
+    @classmethod
+    def _not_kept(cls, _template: str | None) -> None:
+        return None
+
 
 _warned_about: set[str] = set()
 
 
 def parse_settings(raw: dict | None, code: str = "") -> JurisdictionSettings:
     """A stored row's settings, read leniently: what this release does not know (a key
-    a newer release or a hand edit added, a template it lacks) is dropped and logged,
-    and everything else is kept, so one bad value cannot take a jurisdiction's whole
-    setup (its template, its wording) away."""
+    a newer release or a hand edit added) is dropped and logged, and everything else is
+    kept, so one bad value cannot take a jurisdiction's whole setup (its wording) away.
+    A stored ``template`` (the built-in IAC decision, no longer used) is dropped."""
     raw = raw if isinstance(raw, dict) else {}
     wording = raw.get("wording") if isinstance(raw.get("wording"), dict) else {}
     kept = {key: value for key, value in wording.items() if key in WORDING_KEYS and isinstance(value, str)}
-    template = raw.get("template")
     features = raw.get("features") if isinstance(raw.get("features"), dict) else {}
     hearing_recordings = features.get("hearing_recordings", False)
     if (
-        len(kept) != len(wording)
-        or template not in (None, TEMPLATE_IAC_DECISION)
-        or not isinstance(hearing_recordings, bool)
+        len(kept) != len(wording) or not isinstance(hearing_recordings, bool)
     ) and code not in _warned_about:  # once per jurisdiction: this runs on every request
         _warned_about.add(code)
         logger.warning("Jurisdiction %s settings have values this release does not know; ignored", code)
     return JurisdictionSettings.model_construct(
         wording=kept,
-        template=template if template == TEMPLATE_IAC_DECISION else None,
+        template=None,
         features=JurisdictionFeatures(hearing_recordings=hearing_recordings is True),
     )
 
@@ -292,21 +292,18 @@ def jurisdiction_id_for_code(code: str) -> UUID | None:
     return found
 
 
-def _owned_transcription_jurisdiction(transcription_id: UUID, user_id: UUID) -> tuple[bool, UUID | None]:
+def _transcription_owner_and_jurisdiction(transcription_id: UUID) -> tuple[UUID | None, UUID | None]:
     with Session(get_engine()) as session:
         row = session.exec(
-            select(Transcription.id, Transcription.jurisdiction_id).where(
-                Transcription.id == transcription_id, Transcription.user_id == user_id
-            )
+            select(Transcription.user_id, Transcription.jurisdiction_id).where(Transcription.id == transcription_id)
         ).first()
-    return (False, None) if row is None else (True, row[1])
+    return (None, None) if row is None else (row[0], row[1])
 
 
-def owned_transcription_jurisdiction(transcription_id: UUID, user_id: UUID) -> tuple[bool, UUID | None]:
-    """DIAAT-334: whether the user owns this transcription, and its jurisdiction (None
-    for a record in none). (False, None) when it is not theirs or does not exist: the
-    ownership checks answer for those."""
-    return _owned_transcription_jurisdiction(transcription_id, user_id)
+def transcription_owner_and_jurisdiction(transcription_id: UUID) -> tuple[UUID | None, UUID | None]:
+    """The transcription's owner and its jurisdiction (None for a record in none);
+    (None, None) when it does not exist."""
+    return _transcription_owner_and_jurisdiction(transcription_id)
 
 
 def _job_owner_and_jurisdiction(job_id: UUID) -> tuple[bool, UUID | None, UUID | None]:

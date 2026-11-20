@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -26,7 +27,10 @@ from tests.unit.jurisdiction_fixtures import (
     add_user,
     client_as,
 )
+from tests.unit.template_docx import Sdt, document_text, make_template
+from transcribe_api import jurisdiction_templates
 from transcribe_api.documents import content_loader
+from transcribe_api.documents.uploaded_templates import SectionText, TemplateField, fill_template
 from transcribe_api.domain.models_dictation import AuditLog, DocumentContent
 
 pytestmark = pytest.mark.real_jurisdictions
@@ -34,7 +38,6 @@ pytestmark = pytest.mark.real_jurisdictions
 BUNDLED = json.loads(
     (Path(__file__).parents[2] / "src" / "transcribe_api" / "data" / "document_content.json").read_text()
 )
-TEMPLATE = {"template": "iac_decision"}
 ET_FRAMEWORK = {
     "id": "et_unfair_dismissal",
     "title": "Unfair dismissal",
@@ -57,11 +60,11 @@ def _app() -> FastAPI:
 
 @pytest.fixture
 def world(jurisdiction_db):
-    """The IAC and the ET (both on the decision template), the SSCS (no template), and a
+    """The IAC, the ET and the SSCS, and a
     user of each kind. The "admin" users are LegalTextManagers: legal_text.manage is theirs alone."""
     engine = jurisdiction_db
     iac = add_iac_as_migrated(engine)
-    et = add_jurisdiction(engine, "ET", settings=TEMPLATE)
+    et = add_jurisdiction(engine, "ET")
     sscs = add_jurisdiction(engine, "SSCS")
 
     class World:
@@ -91,7 +94,7 @@ def world(jurisdiction_db):
     add_member(engine, w.et_judge, et)
     w.ltm_et_only = add_user(engine)
     add_member(engine, w.ltm_et_only, et, role="LegalTextManager")
-    # An IAC judge, and an admin of the SSCS (which has no decision template).
+    # An IAC judge, and the SSCS's LegalTextManager.
     w.iac_judge = add_user(engine)
     add_member(engine, w.iac_judge, iac)
     w.sscs_admin = add_user(engine)
@@ -234,9 +237,10 @@ def test_a_refusal_is_audited_without_the_wording(world):
     assert denied.resource == "GET /api/admin/document-content"
 
 
-def test_a_jurisdiction_without_the_decision_template_has_no_legal_wording_to_edit(world):
+def test_every_jurisdiction_has_legal_wording_to_edit(world):
+    """Its uploaded templates are filled from it: no jurisdiction is left out."""
     response = client(world, world.sscs_admin).get("/api/admin/document-content", headers={"X-Jurisdiction": "SSCS"})
-    assert (response.status_code, response.json()) == (404, {"detail": "Not available in this jurisdiction"})
+    assert response.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -383,38 +387,35 @@ def test_only_the_iac_falls_back_to_the_bundled_file_when_the_database_is_down(w
 _W_T = re.compile(r"<w:t(?: [^>]*)?>([^<]*)</w:t>")
 
 
-def _submission(legal_issues: list[str]):
-    from transcribe_api.api.routes_dictation import LiveTranscriptionSubmissionRequest
-
-    form = {
-        "caseId": "PA/1/2026",
-        "location": "Taylor House",
-        "hearingDate": "2026-03-04",
-        "judgeName": "A Judge",
-        "anonymityOrder": "not_sought",
-        "appellantName": "A B",
-        "respondent": "Secretary of State",
-        "hearingType": "face_to_face",
-        "appealableDecisionDate": "2026-01-02",
-        "documentType": "decision",
-        "jurisdiction": "First-tier Tribunal Immigration and Asylum Chamber",  # free text: never used
-        "legalIssues": legal_issues,
-    }
-    messages = {"background": [{"speaker": "Judge", "text": "Background words.", "timestamp": "10:01"}]}
-    return LiveTranscriptionSubmissionRequest.model_validate({"form_data": form, "messages": messages})
+# An uploaded template filled from the jurisdiction's Document Content.
+_FIELDS = [
+    TemplateField(tag="Issues", label="Legal issues", type="legal_issues", required=False),
+    TemplateField(tag="Framework", label="Legal framework", type="benchnotes", source="legal_framework"),
+    TemplateField(tag="Hearing", label="Hearing type", type="hearing_type"),
+    TemplateField(tag="HearingText", label="Hearing", type="benchnotes", source="hearing_description"),
+    TemplateField(tag="Background", label="Background", type="dictated"),
+]
 
 
 def _render(tmp_path, jurisdiction_id, legal_issues):
-    from transcribe_api.documents.template_renderer import render_hearing_document
-
-    return render_hearing_document(_submission(legal_issues), tmp_path, "judge@example.test", jurisdiction_id)
+    values = {"Hearing": "face_to_face", "Issues": legal_issues}
+    _, texts = jurisdiction_templates.template_texts(
+        _FIELDS,
+        values,
+        jurisdiction_id=jurisdiction_id,
+        jurisdiction_name="A jurisdiction",
+        sections={"Background": SectionText(transcript=["Background words."])},
+    )
+    data = make_template([[Sdt(f.tag)] for f in _FIELDS])
+    return fill_template(data, texts, tmp_path / f"{uuid.uuid4()}.docx")
 
 
 def _all_text(path: Path) -> dict[str, list[str]]:
     """Every piece of text in the .docx: body paragraphs, tables, headers and footers (python-docx),
     and the w:t text of every XML part (content controls, text boxes, notes)."""
     document = Document(str(path))
-    paragraphs = [p.text for p in document.paragraphs]
+    # Every body paragraph, those in boxes too (python-docx's paragraphs skip them).
+    paragraphs = document_text(path.read_bytes())
     for table in document.tables:
         for cell_row in table.rows:
             for cell in cell_row.cells:
@@ -440,8 +441,8 @@ def _all_text(path: Path) -> dict[str, list[str]]:
 
 def test_after_a_save_the_next_document_uses_the_new_wording(world, tmp_path):
     c = client(world, world.et_admin)
-    before = _all_text(_render(tmp_path, world.et.id, ["et_unfair_dismissal"]))
-    assert not any("ZEBRA" in t for t in before["raw"])
+    before = _all_text(_render(tmp_path, world.et.id, []))
+    assert not any("ZEBRA" in t or "QUOKKA" in t for t in before["raw"])
 
     assert c.post("/api/admin/document-content/legal-frameworks", json=ET_FRAMEWORK, headers=ET).status_code == 201
     hearing = {
@@ -453,9 +454,8 @@ def test_after_a_save_the_next_document_uses_the_new_wording(world, tmp_path):
     assert c.put("/api/admin/document-content/hearing-types/face_to_face", json=hearing, headers=ET).status_code == 200
 
     after = _all_text(_render(tmp_path, world.et.id, ["et_unfair_dismissal"]))
-    assert "Issues" in after["paragraphs"] and "Legal Framework" in after["paragraphs"]
     assert any("ZEBRA-FRAMEWORK-TEXT" in p for p in after["paragraphs"])
-    assert any("ZEBRA-ISSUE" in p for p in after["paragraphs"])
+    assert "(a) ZEBRA-ISSUE: was the reason for dismissal a fair one?" in after["paragraphs"]
     assert any("QUOKKA-HEARING-TEXT" in p for p in after["paragraphs"])
 
     # The IAC's next document does not: it still has its own wording.
@@ -464,53 +464,26 @@ def test_after_a_save_the_next_document_uses_the_new_wording(world, tmp_path):
     assert BUNDLED["legal_frameworks"][0]["issues"][0] in " ".join(iac["raw"])
 
 
-def test_the_documents_wording_is_the_active_jurisdictions_not_the_form_field(world, tmp_path):
-    """The form says IAC (as every form does by default); the document is the ET's."""
+def test_a_legal_issue_is_one_of_the_active_jurisdictions(world, tmp_path):
+    """Another jurisdiction's framework (a stale tab, a draft from before) is refused, not
+    printed, and not quietly dropped."""
     client(world, world.et_admin).post("/api/admin/document-content/legal-frameworks", json=ET_FRAMEWORK, headers=ET)
-    text = _all_text(_render(tmp_path, world.et.id, ["et_unfair_dismissal", BUNDLED["legal_frameworks"][0]["id"]]))
-    assert any("ZEBRA-FRAMEWORK-TEXT" in p for p in text["paragraphs"])
-    # The IAC's framework, named by a stale form value, is not the ET's: not rendered.
-    assert BUNDLED["legal_frameworks"][0]["content"][:40] not in " ".join(text["raw"])
+    with pytest.raises(jurisdiction_templates.TemplateValuesError, match="not one of its options"):
+        _render(tmp_path, world.et.id, ["et_unfair_dismissal", BUNDLED["legal_frameworks"][0]["id"]])
 
 
-NO_WORDING_ABSENT = (
-    "Legal Framework",
-    "The parties agreed that the issues",
-    "THIS IS BASED ON A STANDARD LIST",
-    "[No legal issues selected]",
-    "[No legal frameworks selected]",
-    "[Legal frameworks not found]",
-)
-
-
-@pytest.mark.parametrize("legal_issues", [[], ["asylum_pre_naba"], ["et_unfair_dismissal", "gone"]])
-def test_a_document_without_legal_wording_has_no_issues_or_legal_framework_section(world, tmp_path, legal_issues):
-    """The ET has no legal framework: whatever legal issues a form still carries (a draft
-    from before, a stale tab), no heading, intro or placeholder of those sections is in
-    the body, a table, a header or a footer."""
-    text = _all_text(_render(tmp_path, world.et.id, legal_issues))
-    everything = text["paragraphs"] + text["headers_footers"] + text["raw"]
-    for absent in NO_WORDING_ABSENT:
-        assert not any(absent in t for t in everything), absent
-    assert "Issues" not in everything  # the heading of the Issues section
+def test_a_document_without_legal_wording_has_no_issues_or_legal_framework_text(world, tmp_path):
+    """The ET has no legal framework: no legal issue can be chosen, and no issue or
+    framework text of any jurisdiction is in the body, a table, a header or a footer."""
+    with pytest.raises(jurisdiction_templates.TemplateValuesError):
+        _render(tmp_path, world.et.id, ["asylum_pre_naba"])
+    text = _all_text(_render(tmp_path, world.et.id, []))
+    everything = " ".join(text["paragraphs"] + text["headers_footers"] + text["raw"])
     for framework in BUNDLED["legal_frameworks"]:
-        assert framework["content"][:40] not in " ".join(everything)
+        assert framework["content"][:40] not in everything
         for issue in framework["issues"]:
-            assert issue not in " ".join(everything)
-    # Everything else is there.
-    for kept in ("Background", "Evidence", "Facts", "Determination of the Issues", "Notice of Decision", "Signature"):
-        assert kept in text["paragraphs"], kept
-    assert any("Background words." in p for p in text["paragraphs"])
-
-
-def test_the_document_without_legal_wording_is_the_one_with_it_minus_those_sections(world, tmp_path):
-    client(world, world.et_admin).post("/api/admin/document-content/legal-frameworks", json=ET_FRAMEWORK, headers=ET)
-    with_wording = _all_text(_render(tmp_path, world.et.id, ["et_unfair_dismissal"]))["paragraphs"]
-    client(world, world.et_admin).delete("/api/admin/document-content/legal-frameworks/et_unfair_dismissal", headers=ET)
-    without = _all_text(_render(tmp_path, world.et.id, ["et_unfair_dismissal"]))["paragraphs"]
-    removed = [p for p in with_wording if p not in without]
-    assert "Issues" in removed and "Legal Framework" in removed
-    assert [p for p in without if p not in with_wording] == []
+            assert issue not in everything
+    assert "Background words." in text["paragraphs"]
 
 
 def test_concurrent_renders_in_two_jurisdictions_do_not_see_each_others_wording(world, tmp_path):

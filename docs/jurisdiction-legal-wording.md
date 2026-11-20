@@ -43,16 +43,14 @@ Errors (same shapes as the screen wording editor):
   may not edit legal wording (was `jurisdiction_admin_required`). The refusal is audited
   (`ACCESS_DENIED`).
 - `403 context_required` (no context chosen) / `403 no_jurisdiction` (a global role): as everywhere else.
-- `404 {"detail": "Not available in this jurisdiction"}`: the jurisdiction does not use
-  the `iac_decision` template (it has no legal wording, as for its judges' form).
 
 Responses are `Cache-Control: no-store`.
 
 ## How the UI learns what to show
 
-- `GET /api/me/permissions` says what the user is acting as (`active.role`), and
-  `GET /api/jurisdictions/current` that the jurisdiction's `template == "iac_decision"`, which means
-  it has legal wording at all. Show the legal wording editor for a LegalTextManager (`legal_text.manage`) when it does.
+- `GET /api/me/permissions` says what the user is acting as (`active.role`). Every
+  jurisdiction has legal wording to edit (its uploaded templates are filled from it):
+  show the editor for a LegalTextManager (`legal_text.manage`).
 - The editor's own `GET /api/admin/document-content` says which jurisdiction it edits
   (`jurisdiction`) and whether it has legal wording (`has_legal_wording`).
 
@@ -108,22 +106,19 @@ jurisdiction's** wording, with one new field:
 ```
 
 When `has_legal_wording` is `false` the form must have **no legal issues step or field**
-(the hearing types and anonymity are still there). Still 404 for a jurisdiction without
-the `iac_decision` template. The judge reads the new wording on the very next request
+(the hearing types and anonymity are still there). The judge reads the new wording on the very next request
 (the server's cache is keyed on the row's `updated_at`).
 
 ## The document
 
-`POST /api/live-transcription/submission` renders with the **active jurisdiction's** legal
-wording (the `form_data.jurisdiction` free-text field is ignored). When it has no legal
-wording the document **omits the Issues and Legal Framework sections entirely**: no
-headings, no "The parties agreed ..." intro, no placeholders, whatever `legalIssues` the
-form still carries. IAC documents are byte-identical to before (pinned by
-`tests/unit/dictation/unit/app/documents/test_iac_document_unchanged.py`).
+`POST /api/live-transcription/submission` fills the judge's uploaded template with the
+**active jurisdiction's** legal wording (docs/jurisdictions/README.md, "Uploaded Word
+templates"): a legal issue, hearing type or anonymity answer must be one of its own, and
+the boxes that follow them are filled from its wording. With no legal framework, no legal
+issue can be chosen and no issue or framework text is printed.
 
-Only the structured renderer (the one the API uses) was changed. The older
-template-based renderer (`render_document(DocumentData)`, not used by the API) still
-fills the bundled template's Issues and Legal Framework controls and was left alone.
+The built-in IAC decision (the structured renderer, `render_document(DocumentData)`) is
+no longer used by the API.
 
 ## Data
 

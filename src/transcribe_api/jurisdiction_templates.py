@@ -27,14 +27,19 @@ from sqlmodel import Session, select
 from transcribe_api import setting_history
 from transcribe_api.documents.content_loader import get_document_content
 from transcribe_api.documents.uploaded_templates import (
+    CONTENT_TYPES,
     NOT_ASKED,
+    SOURCE_FOLLOWS,
     Box,
+    BoxContent,
     FillContext,
+    SectionText,
     TemplateField,
     Value,
     box_text,
     check_template_file,
     check_values,
+    content_choices,
     field_problems,
     fill_template,
     find_boxes,
@@ -162,7 +167,7 @@ def add_template(
         content=data,
         sha256=hashlib.sha256(data).hexdigest(),
         boxes=[b.to_record() for b in boxes],
-        fields=[propose_field(b).model_dump() for b in boxes],
+        fields=[propose_field(b).to_record() for b in boxes],
         stage=STAGE_DRAFT,
         enabled=False,
     )
@@ -195,7 +200,7 @@ def replace_file(
     row.content = data
     row.sha256 = hashlib.sha256(data).hexdigest()
     row.boxes = [b.to_record() for b in boxes]
-    row.fields = [f.model_dump() for f in fields]
+    row.fields = [f.to_record() for f in fields]
     if field_problems(boxes, fields):
         _move(row, STAGE_DRAFT, None)
     row.updated_datetime = datetime.now(UTC)
@@ -243,7 +248,7 @@ def update_template(
         raise TemplateProblemsError(problems)
     row.name = _name(name)
     row.service = (service or "").strip()[:MAX_NAME_LENGTH] or None
-    row.fields = [f.model_dump() for f in normalise_fields(fields)]
+    row.fields = [f.to_record() for f in normalise_fields(fields)]
     if stage not in STAGES:
         msg = f"The stage must be one of {', '.join(STAGES)}"
         raise AdminError(msg)
@@ -389,20 +394,11 @@ def judge_fields(row: JurisdictionTemplate) -> list[TemplateField]:
 # Filling a template: a judge's submission and the admin's preview (DIAAT-346) -----------
 
 
-def legal_frameworks(jurisdiction_id: UUID) -> dict[str, str]:
-    """The jurisdiction's legal frameworks, as its Legal Text Manager keeps them: id ->
-    title, in their order. What a legal issues field offers."""
-    frameworks = get_document_content(jurisdiction_id).get("legal_frameworks") or []
-    return {
-        str(f["id"]): str(f.get("title") or f["id"])
-        for f in sorted(frameworks, key=lambda f: f.get("rank", 0))
-        if f.get("id")
-    }
-
-
-def legal_issue_titles(jurisdiction_id: UUID, fields: list[TemplateField]) -> dict[str, str]:
-    """legal_frameworks, looked up only when a field asks for legal issues."""
-    return legal_frameworks(jurisdiction_id) if any(f.type == "legal_issues" for f in fields) else {}
+def document_content(jurisdiction_id: UUID, fields: list[TemplateField]) -> dict[str, Any]:
+    """The jurisdiction's Document Content, as its Legal Text Manager keeps it: read only
+    when a field answers from it or fills from it."""
+    uses = any(f.type in CONTENT_TYPES or (f.type == "benchnotes" and f.source in SOURCE_FOLLOWS) for f in fields)
+    return get_document_content(jurisdiction_id) if uses else {}
 
 
 def template_texts(
@@ -411,12 +407,13 @@ def template_texts(
     *,
     jurisdiction_id: UUID,
     jurisdiction_name: str,
-    dictated: str,
-) -> tuple[dict[str, Value], dict[str, str]]:
-    """The values kept, and the text for each box. TemplateValuesError names each value
+    sections: dict[str, SectionText],
+) -> tuple[dict[str, Value], dict[str, BoxContent]]:
+    """The values kept, and what goes in each box. TemplateValuesError names each value
     that does not fit its field."""
-    titles = legal_issue_titles(jurisdiction_id, fields)
-    kept, problems = check_values(fields, values, list(titles))
+    content = document_content(jurisdiction_id, fields)
+    choices = {kind: list(options) for kind, options in content_choices(content).items()}
+    kept, problems = check_values(fields, values, choices)
     if problems:
         raise TemplateValuesError(problems)
     texts = box_text(
@@ -425,18 +422,25 @@ def template_texts(
         FillContext(
             jurisdiction_name=jurisdiction_name,
             year=datetime.now(UTC).year,
-            dictated_text=dictated,
-            legal_issue_titles=titles,
+            sections=sections,
+            content=content,
         ),
     )
     return kept, texts
 
 
-# What the preview puts where the judge's dictation goes.
+# What the preview puts where the judge's dictation goes, in each section.
 PREVIEW_DICTATED_TEXT = (
-    "This is where the judge's dictated text goes.\n\n"
-    "Each paragraph the judge dictates or types appears here, in this box's style."
+    "This is where the judge's dictation for this section goes.",
+    (
+        "Each paragraph the judge dictates appears here, in this box's style, then the judge's notes under"
+        " this section's heading."
+    ),
 )
+
+
+def preview_sections(fields: list[TemplateField]) -> dict[str, SectionText]:
+    return {f.tag: SectionText(transcript=list(PREVIEW_DICTATED_TEXT)) for f in fields if f.type == "dictated"}
 
 
 def template_of(session: Session, code: str, template_id: UUID) -> JurisdictionTemplate:
@@ -469,7 +473,7 @@ def preview_template(
         values,
         jurisdiction_id=jurisdiction.id,
         jurisdiction_name=jurisdiction.display_name or jurisdiction.name,
-        dictated=PREVIEW_DICTATED_TEXT,
+        sections=preview_sections(fields_of(row)),
     )
     try:
         return fill_template(row.content, texts, directory / "preview.docx")

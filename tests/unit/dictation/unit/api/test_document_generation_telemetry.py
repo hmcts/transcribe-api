@@ -123,7 +123,7 @@ def test_a_generated_document_is_traceable_and_reported_available(client, as_use
         (completed,) = telemetry.events("document_generation.completed")
         (available,) = telemetry.events("document.available")
         for event in (completed, available):
-            assert event["document.template"] == "decision"
+            assert event["document.template"] == "uploaded"
             assert re.fullmatch(r"[0-9a-f]{12}|unknown", event["document.template_version"])
         assert completed[c.OUTCOME] == "success"
         assert completed[c.DURATION_MS] >= 0  # generation duration
@@ -138,7 +138,9 @@ def test_a_generated_document_is_traceable_and_reported_available(client, as_use
 def test_a_rendering_failure_says_where_and_is_traceable(client, as_user, mocker):
     as_user(_make_user(roles=["Judge"]))
     _patch_submission_deps(mocker)
-    mocker.patch("transcribe_api.api.routes_dictation.render_hearing_document", side_effect=RuntimeError(PII_APPELLANT))
+    mocker.patch(
+        "transcribe_api.api.routes_dictation._render_uploaded_template", side_effect=RuntimeError(PII_APPELLANT)
+    )
     with capture_telemetry() as telemetry:
         assert _submit(client).status_code == 500
         (failed,) = telemetry.events("document_generation.failed")
@@ -162,7 +164,7 @@ def test_a_document_that_cannot_be_stored_is_a_failed_generation(client, as_user
         (failed,) = telemetry.events("document_generation.failed")
         assert failed[c.OUTCOME] == "error"
         assert failed[c.ERROR_CODE] == "document.store_failed"
-        assert failed["document.template"] == "decision"
+        assert failed["document.template"] == "uploaded"
         assert failed[c.JOURNEY_PARENT_ID] == SESSION
         assert telemetry.events("submission.failed")[0][c.ERROR_CODE] == "document.store_failed"
         assert telemetry.events("document.available") == []

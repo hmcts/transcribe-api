@@ -337,7 +337,8 @@ def test_0004_iac_settings_are_valid_and_set_every_wording_key():
 
     settings = JurisdictionSettings.model_validate(module.IAC_SETTINGS)
     assert set(settings.wording) == set(WORDING_KEYS)
-    assert settings.template == "iac_decision"
+    assert module.IAC_SETTINGS["template"] == "iac_decision"  # no longer used: not kept
+    assert settings.template is None
     assert settings.features.hearing_recordings is True
     assert module.IAC_ID == IAC_ID
 

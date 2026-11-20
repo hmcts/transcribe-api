@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -6,7 +7,7 @@ import tempfile
 import threading
 import urllib.parse
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,7 @@ import pytz
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from hmcts_otel import StageHandle, background_span, journey, record_event, stage
 from hmcts_otel import conventions as c
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlmodel import Session
 from starlette.responses import JSONResponse, StreamingResponse
 
@@ -47,10 +48,8 @@ from transcribe_api.documents.minutes.types import (
     UploadUrlRequest,
     UploadUrlResponse,
 )
-from transcribe_api.documents.models import DEFAULT_JURISDICTION
-from transcribe_api.documents.template_renderer import render_hearing_document
-from transcribe_api.documents.uploaded_templates import dictated_text, fill_template
-from transcribe_api.documents.versioning import DECISION_TEMPLATE, track_render
+from transcribe_api.documents.uploaded_templates import BoxContent, TemplateField, dictated_sections, fill_template
+from transcribe_api.documents.versioning import track_render
 from transcribe_api.domain.audit import (
     SECTIONED_TRANSCRIPT,
     TRANSCRIPT,
@@ -94,10 +93,9 @@ from transcribe_api.domain.interface_dictation import (
     upsert_live_draft,
 )
 from transcribe_api.domain.jurisdictions import (
-    TEMPLATE_IAC_DECISION,
     ActiveJurisdiction,
-    owned_transcription_jurisdiction,
     record_upload_jurisdiction,
+    transcription_owner_and_jurisdiction,
 )
 from transcribe_api.domain.models_dictation import (
     DialogueEntry,
@@ -198,9 +196,15 @@ def _refuse_other_jurisdiction(
 ) -> None:
     """DIAAT-334: the caller's record, but in a jurisdiction this request is not working
     in, is refused with the 404 of an unknown record, and recorded. Someone else's
-    record, or none, is left to the ownership checks."""
-    owned, record_jurisdiction = owned_transcription_jurisdiction(UUID(str(transcription_id)), current_user.id)
-    if owned and record_jurisdiction != jurisdiction.id:
+    record gets the same 404 and is recorded as a blocked ownership violation
+    (DIAAT-285), on every route naming one; an unknown ID is left to the route."""
+    owner, record_jurisdiction = transcription_owner_and_jurisdiction(UUID(str(transcription_id)))
+    if owner is None:
+        return
+    if owner != current_user.id:
+        record_ownership_violation(resource_type, action, actor_id=current_user.id, object_id=transcription_id)
+        raise HTTPException(status_code=404, detail="Transcription not found")
+    if record_jurisdiction != jurisdiction.id:
         record_jurisdiction_blocked(resource_type, action, actor_id=current_user.id, object_id=transcription_id)
         raise HTTPException(status_code=404, detail="Transcription not found")
 
@@ -306,18 +310,6 @@ async def health_check_legacy():
     return JSONResponse(status_code=200, content={"status": "ok", "version": APP_VERSION})
 
 
-# The 404 of a template a jurisdiction does not use (not a 403: no access is refused).
-TEMPLATE_NOT_AVAILABLE = "Not available in this jurisdiction"
-
-
-def _require_decision_template(jurisdiction: ActiveJurisdiction) -> None:
-    """404 unless the jurisdiction uses the IAC decision template (DIAAT-322): its
-    form, document content and document. A jurisdiction without it dictates into the
-    general section and copies its text out (DIAAT-333)."""
-    if jurisdiction.settings.template != TEMPLATE_IAC_DECISION:
-        raise HTTPException(status_code=404, detail=TEMPLATE_NOT_AVAILABLE)
-
-
 @router.get("/document-content", response_model=DocumentContentResponse)
 async def get_document_content_route(
     response: Response,
@@ -326,13 +318,11 @@ async def get_document_content_route(
 ) -> DocumentContentResponse:
     """Return editable document content for allowlisted recorder users.
 
-    It is the IAC decision template's (legal frameworks, hearing types): a jurisdiction
-    without that template never sees it (DIAAT-330). It is the active jurisdiction's
-    own legal wording (DIAAT-342); ``has_legal_wording`` is false when it has no legal
-    framework, and the form then has no legal issues step.
+    It is the active jurisdiction's own legal wording (DIAAT-342), which its uploaded
+    templates' legal issues, hearing type and anonymity boxes are filled from;
+    ``has_legal_wording`` is false when it has no legal framework.
     """
     response.headers["Cache-Control"] = "no-store"
-    _require_decision_template(jurisdiction)
     data = get_document_content(jurisdiction.id)
     return DocumentContentResponse(
         hearing_types=data.get("hearing_types", []),
@@ -838,13 +828,10 @@ async def get_document_download_url(
 
 
 async def _document_download_url(transcription_id: UUID, current_user: User, audit: AuditedAction) -> dict[str, str]:
-    try:
-        tz = UK_TIMEZONE
-        transcription = get_transcription_by_id(transcription_id, current_user.id, tz)
-    except Exception:
-        raise HTTPException(status_code=404, detail="Transcription not found")
+    # Not found or another user's: 404, a refusal. A database failure is not: it
+    # propagates, audited as failed (a 5xx), rather than looking like a denial.
+    transcription = _owned_transcription(transcription_id, current_user, DOCUMENT)
     audit.authorised()
-    _assert_owned(transcription, current_user, DOCUMENT)
 
     # Get the blob path from the transcription job
     blob_path: str | None = None
@@ -910,12 +897,8 @@ async def download_document(
 async def _stream_document(
     transcription_id: UUID, request: Request, current_user: User, audit: AuditedAction
 ) -> StreamingResponse:
-    try:
-        transcription = get_transcription_by_id(transcription_id, current_user.id, UK_TIMEZONE)
-    except Exception:
-        raise HTTPException(status_code=404, detail="Transcription not found")
+    transcription = _owned_transcription(transcription_id, current_user, DOCUMENT)  # as _document_download_url
     audit.authorised()
-    _assert_owned(transcription, current_user, DOCUMENT)
 
     blob_path: str | None = None
     if transcription.transcription_jobs:
@@ -1221,58 +1204,17 @@ class SectionedMessages(BaseModel):
         return self.background + self.evidence + self.facts
 
 
-class LiveTranscriptionFormRequest(BaseModel):
-    """Form submission payload from the live transcription page."""
-
-    model_config = ConfigDict(populate_by_name=True, extra="allow")
-
-    case_id: str | None = Field(default=None, alias="caseId")
-    location: str
-    location_other: str | None = Field(default=None, alias="locationOther")
-    jurisdiction: str = Field(default=DEFAULT_JURISDICTION)
-    hearing_date: str = Field(alias="hearingDate")
-    judge_name: str = Field(alias="judgeName")
-    anonymity_order: str | None = Field(default=None, alias="anonymityOrder")
-    appellant_name: str = Field(alias="appellantName")
-    respondent: str
-    hearing_type: str = Field(alias="hearingType")
-    # Appellant representation fields
-    appellant_rep_type: str | None = Field(default=None, alias="appellantRepType")
-    appellant_rep_details: str | None = Field(default=None, alias="appellantRepDetails")
-    # Respondent representation fields
-    respondent_rep_type: str | None = Field(default=None, alias="respondentRepType")
-    respondent_rep_name: str | None = Field(default=None, alias="respondentRepName")
-    appealable_decision_date: str = Field(alias="appealableDecisionDate")
-    legal_issues: list[str] = Field(default_factory=list, alias="legalIssues")
-    document_type: str = Field(alias="documentType")
-    next_hearing_type: str | None = Field(default=None, alias="nextHearingType")
-    next_hearing_adjudicator: str | None = Field(default=None, alias="nextHearingAdjudicator")
-
-
 class LiveTranscriptionSubmissionRequest(BaseModel):
-    """Request model that accepts either sectioned or flat message formats.
-
-    Either the IAC decision's ``form_data``, or (DIAAT-344) an uploaded template's
-    ``template_id`` and the judge's ``values`` for its fields, by box tag.
-    """
+    """One of the jurisdiction's uploaded templates (DIAAT-344), the judge's ``values``
+    for its fields by box tag, and what they dictated: by section (a dictated box's
+    tag), or one list for its first section."""
 
     model_config = ConfigDict(extra="forbid")
 
-    form_data: LiveTranscriptionFormRequest | None = None
-    template_id: uuid.UUID | None = None
-    values: dict[str, str | bool | list[str] | None] | None = Field(default=None, max_length=500)
-    messages: SectionedMessages | list[LiveTranscriptMessage]
+    template_id: uuid.UUID
+    values: dict[str, str | bool | list[str] | None] = Field(max_length=500)
+    messages: dict[str, list[LiveTranscriptMessage]] | list[LiveTranscriptMessage] = Field(max_length=100_000)
     notes: str | None = Field(default=None, max_length=200_000)
-
-    @model_validator(mode="after")
-    def _one_form(self) -> "LiveTranscriptionSubmissionRequest":
-        if (self.form_data is None) == (self.template_id is None):
-            msg = "Send either form_data, or template_id with values."
-            raise ValueError(msg)
-        if (self.template_id is None) != (self.values is None):
-            msg = "Send template_id and values together."
-            raise ValueError(msg)
-        return self
 
     @field_validator("notes")
     @classmethod
@@ -1282,12 +1224,9 @@ class LiveTranscriptionSubmissionRequest(BaseModel):
         normalized = notes.strip()
         return normalized or None
 
-    def get_sectioned_messages(self) -> SectionedMessages:
-        """Get messages in sectioned format, converting if necessary."""
-        if isinstance(self.messages, SectionedMessages):
-            return self.messages
-        # Legacy format: put all messages in background section
-        return SectionedMessages(background=self.messages)
+    def by_section(self) -> dict[str, list[LiveTranscriptMessage]]:
+        """The messages by section tag; a list is the first section's ("")."""
+        return self.messages if isinstance(self.messages, dict) else {"": self.messages}
 
 
 class LiveTranscriptionSubmissionResponse(BaseModel):
@@ -1392,8 +1331,8 @@ class _RenderHandoff:
         self.abandoned = False
         self.path: Path | None = None
 
-    def render(self, renderer=None, **kwargs) -> Path:
-        path = (renderer or render_hearing_document)(**kwargs)
+    def render(self, renderer, **kwargs) -> Path:
+        path = renderer(**kwargs)
         with self.lock:
             if self.abandoned:
                 path.unlink(missing_ok=True)
@@ -1433,13 +1372,9 @@ async def save_live_transcription_submission(
 ) -> LiveTranscriptionSubmissionResponse:
     """Persist live transcription form and transcript data as JSON in the audio uploads bucket.
 
-    The document is the IAC decision (``form_data``) or, DIAAT-344, one of the
-    jurisdiction's uploaded templates filled with the judge's ``values``."""
-    if request.template_id is None:
-        _require_decision_template(jurisdiction)
-        plan = None
-    else:
-        plan = await asyncio.to_thread(_uploaded_template_plan, request, jurisdiction, current_user.id)
+    The document is one of the jurisdiction's uploaded templates (DIAAT-344), filled
+    with the judge's ``values`` and their dictation, section by section."""
+    plan = await asyncio.to_thread(_uploaded_template_plan, request, jurisdiction, current_user.id)
     # DIAAT-276: the submission is a journey; the transcription it creates is related
     # on the transcript.available event.
     submission_id = uuid.uuid4()
@@ -1482,6 +1417,8 @@ class _DocumentPlan:
     download_filename: str
     # An uploaded template's: its file's hash. The decision's comes from the render.
     version: str | None = None
+    # Its dictated sections: tag -> name.
+    sections: dict[str, str] = field(default_factory=dict)
 
 
 def _filename_part(name: str) -> str:
@@ -1492,30 +1429,19 @@ def _filename_part(name: str) -> str:
 _HEARING_DOCUMENTS_DIR = Path(tempfile.gettempdir()) / "hearing_documents"
 
 
-def _decision_plan(
-    request: LiveTranscriptionSubmissionRequest, current_user: User, jurisdiction: ActiveJurisdiction
-) -> _DocumentPlan:
-    form = request.form_data
-    assert form is not None  # checked by the request model
-    # Format: "[{date}] {Appellant} v {Respondent}.docx"
-    return _DocumentPlan(
-        template=DECISION_TEMPLATE,
-        render_kwargs={
-            "request": request,
-            "output_dir": _HEARING_DOCUMENTS_DIR,
-            "user_email": current_user.email,
-            # DIAAT-342: the active jurisdiction's legal wording, not the form's
-            # free-text jurisdiction.
-            "jurisdiction_id": jurisdiction.id,
-        },
-        form_record=form.model_dump(by_alias=True, exclude_none=True),
-        title=f"{form.appellant_name} v {form.respondent}",
-        download_filename=f"[{form.hearing_date}] {_filename_part(form.appellant_name)} v {_filename_part(form.respondent)}.docx",
-    )
-
-
-def _render_uploaded_template(*, content: bytes, texts: dict[str, str], output_dir: Path) -> Path:
+def _render_uploaded_template(*, content: bytes, texts: dict[str, BoxContent], output_dir: Path) -> Path:
     return fill_template(content, texts, output_dir / f"hearing-document-{uuid.uuid4()}.docx")
+
+
+def _chosen_template(
+    jurisdiction_id: UUID, template_id: UUID, user_id: UUID
+) -> tuple[list[TemplateField], bytes, str, str] | None:
+    """The template's fields, file, file hash and name, if the user can choose it."""
+    with Session(get_engine()) as session:
+        row = jurisdiction_templates.available_template(session, jurisdiction_id, template_id, user_id)
+        if row is None:
+            return None
+        return jurisdiction_templates.fields_of(row), row.content, row.sha256, row.name
 
 
 def _uploaded_template_plan(
@@ -1524,22 +1450,20 @@ def _uploaded_template_plan(
     """The judge's chosen template, filled with their values: 404 when they cannot
     choose it (a draft, or in test and they are not in the test group: DIAAT-347),
     400 (``template_values_invalid``, ``problems``) for values that do not fit its fields."""
-    assert request.template_id is not None
-    with Session(get_engine()) as session:
-        row = jurisdiction_templates.available_template(session, jurisdiction.id, request.template_id, user_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="This template is not available in this jurisdiction.")
-        fields = jurisdiction_templates.fields_of(row)
-        content, sha256, name = row.content, row.sha256, row.name
-    transcript = [m.text for m in request.get_sectioned_messages().get_all_messages()]
+    chosen = _chosen_template(jurisdiction.id, request.template_id, user_id)
+    if chosen is None:
+        raise HTTPException(status_code=404, detail="This template is not available in this jurisdiction.")
+    fields, content, sha256, name = chosen
+    transcripts = {tag: [m.text for m in messages] for tag, messages in request.by_section().items()}
     try:
-        values, texts = jurisdiction_templates.template_texts(
-            fields,
-            request.values or {},
-            jurisdiction_id=jurisdiction.id,
-            jurisdiction_name=jurisdiction.current.shown_name,
-            dictated=dictated_text(transcript, request.notes),
-        )
+        with track_render() as render:
+            values, texts = jurisdiction_templates.template_texts(
+                fields,
+                request.values,
+                jurisdiction_id=jurisdiction.id,
+                jurisdiction_name=jurisdiction.current.shown_name,
+                sections=dictated_sections(fields, transcripts, request.notes),
+            )
     except jurisdiction_templates.TemplateValuesError as exc:
         raise HTTPException(
             status_code=400,
@@ -1559,9 +1483,15 @@ def _uploaded_template_plan(
             "output_dir": _HEARING_DOCUMENTS_DIR,
         },
         form_record={"template_id": str(request.template_id), "template_name": name, "values": values},
+        sections={f.tag: f.label for f in fields if f.type == "dictated"},
         title=f"{name}: {first_text}" if first_text else name,
         download_filename=f"[{today}] {_filename_part(name) or 'Document'}.docx",
-        version=sha256[:12],
+        # The file, and the Document Content its boxes were filled from (DIAAT-286).
+        version=(
+            hashlib.sha256(f"{sha256}:{render.version}".encode()).hexdigest()[:12]
+            if render.used_content
+            else sha256[:12]
+        ),
     )
 
 
@@ -1581,9 +1511,8 @@ async def _save_live_transcription_submission(  # NOSONAR
     jurisdiction: ActiveJurisdiction,
     submission_id: uuid.UUID,
     submission_stage: StageHandle,
-    plan: _DocumentPlan | None = None,
+    plan: _DocumentPlan,
 ) -> LiveTranscriptionSubmissionResponse:
-    plan = plan or _decision_plan(request, current_user, jurisdiction)
     # DIAAT-279: on the document events; the version is added once rendering has
     # loaded the document content: the content of this render only (DIAAT-286, see
     # documents/versioning.py), also stored as the document's provenance.
@@ -1591,18 +1520,34 @@ async def _save_live_transcription_submission(  # NOSONAR
     blob_filename = f"live-transcription-submission-{submission_id}.json"
     blob_path = get_file_blob_path(str(current_user.azure_user_id), blob_filename)
 
-    # Get sectioned messages (handles both sectioned and legacy flat formats)
-    sectioned_messages = request.get_sectioned_messages()
+    by_section = {
+        tag: [msg.model_dump(by_alias=True, exclude_none=True) for msg in messages]
+        for tag, messages in request.by_section().items()
+    }
 
-    # Session data payload on "Submit hearing" button click
-    # Store messages in sectioned format for document generation
+    # Session data payload on "Submit hearing" button click. "messages" keeps the
+    # earlier Background/Evidence/Facts shape, which the hearing viewers read: all of it
+    # under background, as before sections; "sections" has it by the template's.
     payload = {
         "form_data": plan.form_record,
         "messages": {
-            "background": [msg.model_dump(by_alias=True, exclude_none=True) for msg in sectioned_messages.background],
-            "evidence": [msg.model_dump(by_alias=True, exclude_none=True) for msg in sectioned_messages.evidence],
-            "facts": [msg.model_dump(by_alias=True, exclude_none=True) for msg in sectioned_messages.facts],
+            "background": [msg for messages in by_section.values() for msg in messages],
+            "evidence": [],
+            "facts": [],
         },
+        "sections": [
+            {
+                "tag": tag,
+                "label": label,
+                "messages": [
+                    msg
+                    for source_tag, messages in by_section.items()
+                    if source_tag == tag or (index == 0 and source_tag not in plan.sections)
+                    for msg in messages
+                ],
+            }
+            for index, (tag, label) in enumerate(plan.sections.items())
+        ],
         "notes": request.notes,
         "submitted_at": datetime.now(UTC).isoformat(),
         "user_email": current_user.email,
@@ -1720,7 +1665,7 @@ async def _save_live_transcription_submission(  # NOSONAR
             doc_download_url = f"{_settings.APP_URL.rstrip('/')}/api/download?transcription_id={saved_transcription.id}"
 
         # Convert live transcript messages to DialogueEntry format (all sections combined)
-        all_messages = sectioned_messages.get_all_messages()
+        all_messages = [msg for messages in request.by_section().values() for msg in messages]
         dialogue_entries = [
             DialogueEntry(
                 speaker=msg.speaker,

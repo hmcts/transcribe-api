@@ -274,10 +274,15 @@ def test_incomplete_fields_say_what_is_missing():
     assert t.field_problems(boxes, changed) == [
         "“Reference” needs at least one option.",
         "Choose what BenchNotes fills “Year” with.",
-        "Link one box to the dictated text (the judgment).",
+        "Link at least one box to the dictated text (the judgment).",
     ]
+    # Several dictated boxes are sections, told apart by their names.
     two = [f.model_copy(update={"type": "dictated"}) if f.tag == "Party2Rep" else f for f in fields]
-    assert t.field_problems(boxes, two) == ["Only one box can take the dictated text: “Party2Rep”, “Judgment text”."]
+    assert t.field_problems(boxes, two) == []
+    same_name = [f.model_copy(update={"label": "Judgment text"}) if f.tag == "Party2Rep" else f for f in two]
+    assert t.field_problems(boxes, same_name) == [
+        ("Two dictated boxes are both called “Judgment text”: judges pick a section by its name, so give each its own.")
+    ]
 
 
 def test_after_a_new_file_only_the_boxes_it_still_has_keep_their_fields():
@@ -301,7 +306,7 @@ def test_the_judges_values_are_checked_against_the_fields():
     kept, problems = t.check_values(
         fields,
         {"Reference": " 1234/2026 ", "HearingDate": "2026-02-31", "Party1": "", "Party1Title": "Judge", "Extra": "x"},
-        [],
+        {},
     )
     assert problems == [
         "“Extra” is not a field of this template.",
@@ -312,20 +317,23 @@ def test_the_judges_values_are_checked_against_the_fields():
     assert kept == {"Reference": "1234/2026"}
 
 
-def _filled(fields, values, **context):
-    kept, problems = t.check_values(fields, values, list(context.get("legal_issue_titles", {})))
+def _filled(fields, values, content=None, transcripts=None, notes="<p>Costs are <strong>reserved</strong>.</p>"):
+    content = content or {}
+    choices = {kind: list(options) for kind, options in t.content_choices(content).items()}
+    kept, problems = t.check_values(fields, values, choices)
     assert problems == []
-    texts = t.box_text(
+    first = next(f.tag for f in fields if f.type == "dictated")
+    transcripts = {first: ["The claim succeeds."]} if transcripts is None else transcripts
+    return t.box_text(
         fields,
         kept,
         t.FillContext(
             jurisdiction_name="Employment Tribunals (ET)",
             year=2026,
-            dictated_text=t.dictated_text(["The claim succeeds."], "<p>Costs are <strong>reserved</strong>.</p>"),
-            **context,
+            sections=t.dictated_sections(fields, transcripts, notes),
+            content=content,
         ),
     )
-    return texts
 
 
 def test_the_document_has_the_values_and_unused_optional_lines_are_removed(tmp_path):
@@ -340,7 +348,9 @@ def test_the_document_has_the_values_and_unused_optional_lines_are_removed(tmp_p
         "Case Number: 1234/2026",
         "Heard on 12 February 2026",
         "A Smith (Claimant)",
-        "The claim succeeds.\n\nCosts are reserved.",
+        "The claim succeeds.",
+        "Your notes",
+        "Costs are reserved.",
         "© Crown copyright 2026",
     ]
     assert document_text(document, header_part(document)) == ["Case Number: 1234/2026"]
@@ -375,13 +385,16 @@ def test_every_field_type_is_written_as_text(tmp_path):
     ]
     assert t.field_problems(boxes, fields) == []
     values = {"Count": "3", "Agreed": False, "Reliefs": ["Interest", "Costs"], "Issues": ["unfair", "wages"]}
-    titles = {"wages": "Unlawful deductions", "unfair": "Unfair dismissal", "other": "Other"}
-    output = t.fill_template(data, _filled(fields, values, legal_issue_titles=titles), tmp_path / "out.docx")
-    assert document_text(output.read_bytes())[:4] == [
+    output = t.fill_template(data, _filled(fields, values, content=CONTENT), tmp_path / "out.docx")
+    # Legal issues as the built-in decision listed them: each chosen framework's
+    # questions, (a), (b)..., in the Legal Text Manager's order.
+    assert document_text(output.read_bytes())[:6] == [
         "3",
         "No",
         "Interest, Costs",
-        "Unlawful deductions, Unfair dismissal",  # in the jurisdiction's order
+        "(a) Were wages deducted?",
+        "(b) Was the dismissal fair?",
+        "(c) Was there a fair procedure?",
     ]
 
 
@@ -393,7 +406,7 @@ def test_choices_must_be_the_fields_options():
         t.TemplateField(tag="Count", label="Count", type="number"),
     ]
     _, problems = t.check_values(
-        fields, {"Reliefs": ["Fees"], "Issues": ["x"], "Agreed": "yes", "Count": "three"}, ["y"]
+        fields, {"Reliefs": ["Fees"], "Issues": ["x"], "Agreed": "yes", "Count": "three"}, {"legal_issues": ["y"]}
     )
     assert problems == [
         "“Reliefs” has a choice that is not one of its options.",
@@ -403,9 +416,318 @@ def test_choices_must_be_the_fields_options():
     ]
 
 
-def test_the_dictated_text_is_the_transcript_then_the_judges_own_text():
-    html = "<h2>Reasons</h2><p>First.<br>Same paragraph.</p><ul><li>One</li><li>Two</li></ul><p></p>"
-    assert t.dictated_text([" Spoken. ", ""], html) == "Spoken.\n\nReasons\n\nFirst.\nSame paragraph.\n\n• One\n\n• Two"
+def _location_fields(**other):
+    return [
+        t.TemplateField(tag="Location", label="Hearing location", type="dropdown", options=["Taylor House", "Other"]),
+        t.TemplateField(
+            tag="LocationOther",
+            label="Specify location",
+            show_when=t.ShowWhen(tag="Location", answers=["Other"]),
+            **other,
+        ),
+        t.TemplateField(tag="JudgmentText", label="Judgment", type="dictated"),
+    ]
+
+
+def test_a_question_is_asked_only_after_the_answers_chosen_for_it():
+    fields = _location_fields()
+    # Not asked: not required, and an answer sent anyway is dropped.
+    kept, problems = t.check_values(fields, {"Location": "Taylor House", "LocationOther": "Leeds"}, {})
+    assert (kept, problems) == ({"Location": "Taylor House"}, [])
+    # Asked: as any other question.
+    kept, problems = t.check_values(fields, {"Location": "Other"}, {})
+    assert problems == ["“Specify location” is required."]
+    kept, problems = t.check_values(fields, {"Location": "Other", "LocationOther": "Leeds"}, {})
+    assert (kept, problems) == ({"Location": "Other", "LocationOther": "Leeds"}, [])
+
+
+def test_a_question_asked_after_one_not_asked_is_not_asked_either():
+    fields = [
+        t.TemplateField(tag="Attended", label="Attended", type="yes_no"),
+        t.TemplateField(
+            tag="Rep",
+            label="Representation",
+            type="dropdown",
+            options=["Represented", "Themselves"],
+            show_when=t.ShowWhen(tag="Attended", answers=["yes"]),
+        ),
+        t.TemplateField(
+            tag="RepName", label="Representative", show_when=t.ShowWhen(tag="Rep", answers=["Represented"])
+        ),
+    ]
+    assert t.hidden_fields(fields, {"Attended": False, "Rep": "Represented"}) == {"Rep", "RepName"}
+    assert t.hidden_fields(fields, {"Attended": True, "Rep": "Represented"}) == set()
+    assert t.hidden_fields(fields, {"Attended": True, "Rep": "Themselves"}) == {"RepName"}
+
+
+def test_a_show_when_must_name_a_question_with_set_answers():
+    data = make_template([[Sdt("Location")], [Sdt("LocationOther")], [Sdt("Notes")], [Sdt("JudgmentText")]])
+    boxes = t.find_boxes(data)
+    fields = [*_location_fields(), t.TemplateField(tag="Notes", label="Notes")]
+    assert t.field_problems(boxes, fields) == []
+
+    def changed(rule):
+        return [f.model_copy(update={"show_when": rule}) if f.tag == "LocationOther" else f for f in fields]
+
+    assert t.field_problems(boxes, changed(t.ShowWhen(tag="Notes", answers=["x"]))) == [
+        "“Specify location” can only be asked after a question with set answers: choose another."
+    ]
+    assert t.field_problems(boxes, changed(t.ShowWhen(tag="Location", answers=[]))) == [
+        "Choose which answers to “Hearing location” ask “Specify location”."
+    ]
+    assert t.field_problems(boxes, changed(t.ShowWhen(tag="Location", answers=["Leeds"]))) == [
+        "“Specify location” is asked after an answer “Hearing location” no longer has: choose again."
+    ]
+    looped = [
+        f.model_copy(
+            update={"type": "dropdown", "options": ["a"], "show_when": t.ShowWhen(tag="Location", answers=["a"])}
+        )
+        if f.tag == "Notes"
+        else f.model_copy(update={"show_when": t.ShowWhen(tag="Notes", answers=["a"])})
+        if f.tag == "Location"
+        else f
+        for f in fields
+    ]
+    assert "“Hearing location” waits on a question that waits on it: one of them must be asked first." in (
+        t.field_problems(boxes, looped)
+    )
+
+
+def test_a_box_left_empty_or_not_asked_prints_its_empty_text(tmp_path):
+    fields = [
+        *_location_fields(empty_text="Not applicable"),
+        t.TemplateField(tag="Fee", label="Fee award", required=False, empty_text="No fee award is made."),
+    ]
+    data = make_template([[Sdt("Location")], [Sdt("LocationOther")], [Sdt("Fee")], [Sdt("JudgmentText")]])
+    output = t.fill_template(data, _filled(fields, {"Location": "Taylor House"}, notes=""), tmp_path / "out.docx")
+    assert document_text(output.read_bytes()) == [
+        "Taylor House",
+        "Not applicable",
+        "No fee award is made.",
+        "The claim succeeds.",
+    ]
+
+
+def test_settings_that_do_not_fit_the_type_are_dropped():
+    rule = t.ShowWhen(tag="Location", answers=["Other"])
+    fields = t.normalise_fields(
+        [
+            t.TemplateField(tag="Name", label="Judge", prefill="judge_name", empty_text=" ", show_when=rule),
+            t.TemplateField(tag="Day", label="Day", type="date", prefill="judge_name", empty_text="Not known"),
+            t.TemplateField(tag="Year", label="Year", type="benchnotes", source="year", empty_text="x", show_when=rule),
+        ]
+    )
+    assert [(f.prefill, f.empty_text, f.show_when) for f in fields] == [
+        ("judge_name", None, rule),
+        (None, "Not known", None),
+        (None, None, None),
+    ]
+
+
+def test_each_dictated_section_gets_its_dictation_then_the_notes_under_its_heading():
+    fields = [
+        t.TemplateField(tag="Background", label="Background", type="dictated"),
+        t.TemplateField(tag="Evidence", label="Evidence", type="dictated"),
+        t.TemplateField(tag="Facts", label="Findings of fact", type="dictated"),
+    ]
+    notes = (
+        "<p>Before any heading.</p><h3>Evidence</h3><ul><li><p><strong>Bold</strong> point</p></li></ul>"
+        "<h3>Other</h3><blockquote><p>Quoted.</p></blockquote><h3>Facts</h3><ol><li><p>One</p></li></ol>"
+    )
+    sections = t.dictated_sections(
+        fields, {"Background": [" Spoken. ", ""], "Evidence": ["Heard."], "background": ["From an older page."]}, notes
+    )
+    texts = t.box_text(fields, {}, t.FillContext(jurisdiction_name="ET", year=2026, sections=sections))
+    assert [p.shown_text for p in texts["Background"]] == [
+        "Spoken.",
+        "From an older page.",  # a section the template does not have: its first
+        "Your notes",
+        "Before any heading.",
+    ]
+    evidence = texts["Evidence"]
+    assert [p.shown_text for p in evidence] == ["Heard.", "Your notes", "(a) Bold point", "Other", "Quoted."]
+    assert evidence[2].bold and evidence[3].bold and evidence[4].italic
+    # "Facts" is the IAC's name for findings of fact: its notes still go there.
+    assert [p.shown_text for p in texts["Facts"]] == ["(a) One"]
+    empty = t.dictated_sections(fields, {}, None)
+    texts = t.box_text(fields, {}, t.FillContext(jurisdiction_name="ET", year=2026, sections=empty))
+    assert [p.shown_text for p in texts["Facts"]] == ["[No findings of fact content]"]
+
+
+# Document Content: legal issues, hearing type and anonymity ----------------------------
+
+CONTENT = {
+    "legal_frameworks": [
+        {
+            "id": "unfair",
+            "title": "Unfair dismissal",
+            "rank": 2,
+            "content": "## Unfair dismissal\n\nSection 98 **applies**.\n\n1. Reason\n2. Fairness",
+            "issues": ["Was the dismissal fair?", "Was there a fair procedure?"],
+        },
+        {
+            "id": "wages",
+            "title": "Unlawful deductions",
+            "rank": 1,
+            "content": "Part II.",
+            "issues": ["Were wages deducted?"],
+        },
+        {"id": "other", "title": "Other", "rank": 3, "content": "Other law.", "issues": []},
+    ],
+    "hearing_types": [
+        {"id": "cvp", "title": "Video", "hearing_title": "The Hearing", "hearing_description": "Heard by **video**."},
+        {
+            "id": "papers",
+            "title": "On the papers",
+            "hearing_title": "Without a hearing",
+            "hearing_description": "None.",
+        },
+    ],
+    "anonymity": {
+        "statuses": [
+            {
+                "id": "granted",
+                "identifier": "Yes",
+                "header": "(ANONYMITY ORDER MADE)",
+                "content": "I have made an order.",
+                "order_header": "ANONYMITY ORDER",
+                "order_text": "No one shall identify the appellant.",
+            },
+            {
+                "id": "not_sought",
+                "identifier": "No",
+                "header": "[DELETE]",
+                "content": "[DELETE]",
+                "order_header": "[DELETE]",
+                "order_text": "[DELETE]",
+            },
+        ]
+    },
+}
+
+CONTENT_FIELDS = [
+    t.TemplateField(tag="Issues", label="Legal issues", type="legal_issues"),
+    t.TemplateField(tag="Framework", label="Legal framework", type="benchnotes", source="legal_framework"),
+    t.TemplateField(tag="Hearing", label="Hearing type", type="hearing_type"),
+    t.TemplateField(tag="HearingText", label="Hearing", type="benchnotes", source="hearing_description"),
+    t.TemplateField(tag="Anonymity", label="Anonymity", type="anonymity"),
+    t.TemplateField(tag="Reasons", label="Reasons", type="benchnotes", source="anonymity_reasons"),
+    t.TemplateField(tag="OrderHeading", label="Order heading", type="benchnotes", source="anonymity_order_heading"),
+    t.TemplateField(tag="Order", label="Order", type="benchnotes", source="anonymity_order"),
+    t.TemplateField(tag="Background", label="Background", type="dictated"),
+]
+
+
+def test_the_document_content_options_are_what_the_judge_chooses_from():
+    assert t.content_choices(CONTENT) == {
+        "legal_issues": {"wages": "Unlawful deductions", "unfair": "Unfair dismissal", "other": "Other"},
+        "hearing_type": {"cvp": "Video", "papers": "On the papers"},
+        "anonymity": {"granted": "Yes", "not_sought": "No"},
+    }
+    choices = {kind: list(options) for kind, options in t.content_choices(CONTENT).items()}
+    _, problems = t.check_values(CONTENT_FIELDS, {"Issues": ["gone"], "Hearing": "x", "Anonymity": "maybe"}, choices)
+    assert problems == [
+        "“Legal issues” has a choice that is not one of its options.",
+        "“Hearing type” has a choice that is not one of its options.",
+        "“Anonymity” has a choice that is not one of its options.",
+    ]
+
+
+def test_boxes_are_filled_from_the_document_content_as_the_built_in_decision_was(tmp_path):
+    data = make_template([[Sdt(f.tag)] for f in CONTENT_FIELDS])
+    values = {"Issues": ["unfair"], "Hearing": "cvp", "Anonymity": "granted"}
+    output = t.fill_template(data, _filled(CONTENT_FIELDS, values, content=CONTENT), tmp_path / "out.docx")
+    assert document_text(output.read_bytes()) == [
+        "(a) Was the dismissal fair?",
+        "(b) Was there a fair procedure?",
+        "Unfair dismissal",
+        "Section 98 applies.",
+        "(a) Reason",
+        "(b) Fairness",
+        "The Hearing",
+        "Heard by video.",
+        "(ANONYMITY ORDER MADE)",
+        "I have made an order.",
+        "ANONYMITY ORDER",
+        "No one shall identify the appellant.",
+        "The claim succeeds.",
+        "Your notes",
+        "Costs are reserved.",
+    ]
+
+
+def test_wording_the_answer_leaves_out_takes_its_line_with_it(tmp_path):
+    data = make_template([["Before"], *[[Sdt(f.tag)] for f in CONTENT_FIELDS], ["After"]])
+    values = {"Issues": ["other"], "Hearing": "papers", "Anonymity": "not_sought"}
+    output = t.fill_template(data, _filled(CONTENT_FIELDS, values, content=CONTENT), tmp_path / "out.docx")
+    assert document_text(output.read_bytes()) == [
+        "Before",
+        # "other" has no questions: no list.
+        "Other law.",
+        "Without a hearing",
+        "None.",
+        "The claim succeeds.",
+        "Your notes",
+        "Costs are reserved.",
+        "After",
+    ]
+
+
+def test_wording_follows_an_answer_the_template_must_ask_for():
+    boxes = [t.Box(key=f.tag, label=f.label, kind="text") for f in CONTENT_FIELDS]
+    assert t.field_problems(boxes, CONTENT_FIELDS) == []
+    without = [f for f in CONTENT_FIELDS if f.type not in t.CONTENT_TYPES]
+    assert t.field_problems(boxes, [*without, *CONTENT_FIELDS[:1]]) == [
+        "The box “Hearing type” (Hearing) has no field linked to it.",
+        "The box “Anonymity” (Anonymity) has no field linked to it.",
+        "“Hearing” follows the judge's hearing type answer: link a box to Hearing type too.",
+        "“Reasons” follows the judge's anonymity answer: link a box to Anonymity too.",
+        "“Order heading” follows the judge's anonymity answer: link a box to Anonymity too.",
+        "“Order” follows the judge's anonymity answer: link a box to Anonymity too.",
+    ]
+    twice = [*CONTENT_FIELDS, t.TemplateField(tag="Issues2", label="More issues", type="legal_issues")]
+    boxes2 = [*boxes, t.Box(key="Issues2", label="More issues", kind="text")]
+    assert t.field_problems(boxes2, twice) == ["Only one box can be Legal issues: “Legal issues”, “More issues”."]
+
+
+def test_a_box_inside_a_line_keeps_its_line_and_the_formatting(tmp_path):
+    data = make_template([["Framework: ", Sdt("Framework"), "."], [Sdt("Issues")], [Sdt("Background")]])
+    fields = [CONTENT_FIELDS[0], CONTENT_FIELDS[1], CONTENT_FIELDS[-1]]
+    output = t.fill_template(data, _filled(fields, {"Issues": ["wages"]}, content=CONTENT), tmp_path / "out.docx")
+    text = document_text(output.read_bytes())
+    assert text[0] == "Framework: Part II.."
+    assert text[1] == "(a) Were wages deducted?"
+
+
+def test_the_proposed_types_know_the_iac_template_s_boxes():
+    proposed = {
+        tag: (f.type, f.source)
+        for tag in (
+            "LegalIssues",
+            "LegalFrameworkContent",
+            "HearingType",
+            "HearingDescription",
+            "AnonymityHead",
+            "AnonymityReasonsText",
+            "AnonymityOrderText",
+            "Background",
+            "Evidence",
+            "Facts",
+        )
+        for f in [t.propose_field(t.Box(key=tag, label=tag, kind="text"))]
+    }
+    assert proposed == {
+        "LegalIssues": ("legal_issues", None),
+        "LegalFrameworkContent": ("benchnotes", "legal_framework"),
+        "HearingType": ("hearing_type", None),
+        "HearingDescription": ("benchnotes", "hearing_description"),
+        "AnonymityHead": ("anonymity", None),
+        "AnonymityReasonsText": ("benchnotes", "anonymity_reasons"),
+        "AnonymityOrderText": ("benchnotes", "anonymity_order"),
+        "Background": ("dictated", None),
+        "Evidence": ("dictated", None),
+        "Facts": ("dictated", None),
+    }
 
 
 def test_a_damaged_part_of_the_file_is_reported_as_damaged():

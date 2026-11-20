@@ -20,6 +20,7 @@ from hmcts_otel import conventions as c
 from hmcts_otel import default_schema, request_id_context
 from hmcts_otel.fastapi import RequestIdMiddleware
 from hmcts_otel.testing import capture_telemetry
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
@@ -1174,3 +1175,18 @@ def test_rows_built_elsewhere_are_written_by_the_shared_writer(audit_log):
         ("job.delete", "success"),
         ("audio.export", "denied"),
     ]
+
+
+@pytest.mark.parametrize("path", ["/api/transcriptions/{id}/document-download", "/api/download?transcription_id={id}"])
+def test_a_database_failure_on_a_document_route_is_a_failure_not_a_refusal(client, as_user, mocker, audit_log, path):
+    """An outage must not look like refused access (a burst of denials) nor reach the
+    client as "not found": it is a 5xx, audited as failed."""
+    user = _make_user(roles=["Judge"])
+    as_user(user)
+    mocker.patch(
+        "transcribe_api.api.routes_dictation.get_transcription_by_id",
+        side_effect=OperationalError("SELECT", {}, ConnectionError("down")),
+    )
+    response = client.get(path.format(id=uuid.uuid4()))
+    assert response.status_code == 500
+    assert _row(audit_log).outcome == "failed"

@@ -23,7 +23,7 @@ pytestmark = pytest.mark.real_jurisdictions
 
 @pytest.fixture
 def judge_in_both(jurisdiction_db):
-    iac = add_jurisdiction(jurisdiction_db, "IAC", settings={"template": "iac_decision"})
+    iac = add_jurisdiction(jurisdiction_db, "IAC")
     et = add_jurisdiction(jurisdiction_db, "ET")
     judge = add_user(jurisdiction_db)
     add_member(jurisdiction_db, judge, iac)
@@ -31,21 +31,24 @@ def judge_in_both(jurisdiction_db):
     return judge, iac, et
 
 
-def test_the_template_follows_the_context_the_judge_switched_to(
+def test_the_document_content_follows_the_context_the_judge_switched_to(
     jurisdiction_db, judge_in_both, jurisdiction_app, monkeypatch
 ):
-    judge, _iac, _et = judge_in_both
+    judge, iac, et = judge_in_both
+    hearing_types = {
+        j.id: [{"id": j.code.lower(), "title": "T", "hearing_title": "H", "hearing_description": "D"}] for j in (iac, et)
+    }
     monkeypatch.setattr(
         "transcribe_api.api.routes_dictation.get_document_content",
-        lambda _jurisdiction_id: {"hearing_types": [], "legal_frameworks": [], "anonymity": {}},
+        lambda jurisdiction_id: {"hearing_types": hearing_types[jurisdiction_id], "legal_frameworks": [], "anonymity": {}},
     )
-    # In the ET the IAC's document content is not theirs...
+    # In the ET, the ET's document content...
     et_client = client_as(jurisdiction_app, jurisdiction_db, judge, ctx=("ET", "Judge"))
-    assert et_client.get("/api/document-content").status_code == 404
-    # ...and it is again once they have switched back (a new token, a new context).
+    assert et_client.get("/api/document-content").json()["hearing_types"][0]["id"] == "et"
+    # ...and the IAC's once they have switched back (a new token, a new context).
     iac_client = client_as(jurisdiction_app, jurisdiction_db, judge, ctx=("IAC", "Judge"))
     assert iac_client.get("/api/jurisdictions/current").json()["code"] == "IAC"
-    assert iac_client.get("/api/document-content").status_code == 200
+    assert iac_client.get("/api/document-content").json()["hearing_types"][0]["id"] == "iac"
 
 
 def test_a_user_with_no_context_chosen_works_in_none(jurisdiction_db, judge_in_both, jurisdiction_app, mocker):

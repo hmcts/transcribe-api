@@ -15,6 +15,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from transcribe_api.documents.uploaded_templates import TemplateField
 from transcribe_api.domain.models_dictation import User
 
 # Sentinel strings that must NEVER appear in any log record.
@@ -24,19 +25,26 @@ PII_JUDGE = "HHJ-Blackwood-DIAAT298"
 PII_NOTE = "PrivateJudicialNote-DIAAT298"
 PII_TRANSCRIPT = "AppellantStatesDIAAT298sentinel"
 
+TEMPLATE_ID = "6f0b2a8e-3c41-4d7a-9e12-5b8c0d4f7a21"
+# A template with no Document Content field: filling it reads no database.
+_TEMPLATE_FIELDS = [
+    TemplateField(tag="Appellant", label="Appellant", type="text"),
+    TemplateField(tag="Respondent", label="Respondent", type="text"),
+    TemplateField(tag="Judge", label="Judge", type="text"),
+    TemplateField(tag="HearingDate", label="Hearing date", type="date"),
+    TemplateField(tag="Background", label="Background", type="dictated", required=False),
+]
+
 _MINIMAL_BODY = {
-    "form_data": {
-        "location": "Birmingham",
-        "hearingDate": "2026-01-15",
-        "judgeName": PII_JUDGE,
-        "appellantName": PII_APPELLANT,
-        "respondent": PII_RESPONDENT,
-        "hearingType": "substantive",
-        "appealableDecisionDate": "2025-06-01",
-        "documentType": "determination",
+    "template_id": TEMPLATE_ID,
+    "values": {
+        "Appellant": PII_APPELLANT,
+        "Respondent": PII_RESPONDENT,
+        "Judge": PII_JUDGE,
+        "HearingDate": "2026-01-15",
     },
     "messages": {
-        "background": [
+        "Background": [
             {
                 "speaker": "Judge",
                 "text": PII_TRANSCRIPT,
@@ -44,8 +52,6 @@ _MINIMAL_BODY = {
                 "timestampMs": 0,
             }
         ],
-        "evidence": [],
-        "facts": [],
     },
     "notes": PII_NOTE,
 }
@@ -99,7 +105,11 @@ def _patch_submission_deps(mocker, *, direct_sdk_access: bool = False):
     mock_doc_path = MagicMock(spec=Path)
     mock_doc_path.__str__ = lambda _: "/tmp/test-doc.docx"
     mock_doc_path.exists.return_value = False
-    mocker.patch("transcribe_api.api.routes_dictation.render_hearing_document", return_value=mock_doc_path)
+    mocker.patch(
+        "transcribe_api.api.routes_dictation._chosen_template",
+        return_value=(_TEMPLATE_FIELDS, b"template", "0123456789abcdef" * 4, "Decision"),
+    )
+    mocker.patch("transcribe_api.api.routes_dictation._render_uploaded_template", return_value=mock_doc_path)
 
     saved_transcription = MagicMock()
     saved_transcription.id = uuid.uuid4()
