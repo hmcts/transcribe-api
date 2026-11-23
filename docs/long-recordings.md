@@ -70,7 +70,9 @@ recording that is within the limit.
    `incoming/{user_id}/{upload_id}{ext}` (blocks sent `BLOB_UPLOAD_CONCURRENCY` = 8 at a time) and answers 201 as before:
    `blob_name` is still the WAV's future name under `uploads/{user_id}/`, so the ownership checks are unchanged.
 2. `POST /api/v1/jobs` finds that original and creates the job `PENDING` with `source_blob_path` set and **no Azure job**: it
-   does not call Azure Speech (below, for what it does whatever the flag).
+   does not call Azure Speech (below, for what it does whatever the flag). The job's own WAV is named from the job as well as the
+   upload: `uploads/{user_id}/{upload_id}-{job_id}-{stem}.wav` (`job_wav_name`), still under `uploads/{user_id}/` for the ownership
+   check and still starting with the upload's ID, and its part blobs are derived from that name, so no two jobs share a blob.
 3. The worker's third task, `PreparationService` (`stt/preparation_service.py`, beside the batch poller and the dictation poller),
    claims such jobs, converts the original (`normalize_to_wav`), checks the exact length of the WAV, stores it, submits the job
    through the same code as a request (`submit_existing_job`) and deletes the original. A job that cannot be converted or is too
@@ -129,8 +131,21 @@ conversion), or by the worker for a job that was deferred.
   for those packets and is kept) and cuts in the middle of a silence of at least half a second. A cancelled preparation stops the
   copy within a chunk and waits for the thread to end before the cut raises, however often the task is cancelled meanwhile (a
   further cancellation is remembered and raised after the wait), so the temporary directory is never removed under a writing thread.
+- **One job at a time from an upload, and blobs that are never shared.** Every blob a job uses is named from its upload, and
+  `blob_name` is the only thing `POST /jobs` is given, so two jobs from one upload used to share them: a converted upload's WAV
+  (on master too: deleting one job deleted the other's audio), and, with this feature, the original and the worker's WAV and parts
+  (one job's submission overwrote, and its cleanup, failure or delete removed, the other's, and the first job to finish deleted the
+  original the second was still waiting for). Now: (1) `POST /jobs` answers **409** ("A job has already been made from this
+  upload...") when the user already has a job from the upload that has not failed; a **failed** job does not count, so submitting the
+  upload again is still how a job that Azure refused is retried (a deferred job that failed has lost its original: that upload is
+  uploaded again); an idempotent resubmission (same key) still returns the same job; (2) a deferred job's WAV and parts carry the job's id,
+  as above (jobs made before this release keep the names they have); (3) a job's delete never removes a WAV another job still records
+  (a failed job and its retry from one converted upload share the WAV), nor an original another job is still `PENDING` on, and the
+  worker keeps the original until no other job needs it; (4) cleanup only ever deletes a part blob derived from the job's own WAV
+  name. The check in (1) is a lookup, not a database constraint, so two requests at the very same moment can both pass it: they then
+  have blobs of their own and share only the original, which (3) protects.
 - **Recording the parts**: one row per part in `transcription_job_part` (migration 0018): offset in the recording, length, cut kind,
-  blob (`uploads/{user_id}/{upload_id}-{name}.partNN.wav`, derived from the job's own WAV name, never client-supplied), Azure job,
+  blob (`uploads/{user_id}/{upload_id}-{job_id}-{name}.partNN.wav`, derived from the job's own WAV name, never client-supplied), Azure job,
   status, attempts. The job stays one row; it keeps the idempotency key; it is `PENDING` while its parts are submitted and
   `SUBMITTED` once all are.
 - **Submitting**: each part is stored and submitted as soon as its own blob is stored (part 1 does not wait for the others or for

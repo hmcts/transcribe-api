@@ -583,6 +583,43 @@ class PartPlan:
     blob_path: str
 
 
+def has_live_job_for_upload(session: Session, user_id: UUID, upload_id: UUID) -> bool:
+    """Whether the user already has a job made from this upload that has not failed (it is waiting,
+    running or done). The blobs of an upload are named from it, so a second job from it would share them;
+    a failed job does not count: submitting the upload again is how it is retried."""
+    prefix = f"uploads/{user_id}/{upload_id}-"
+    stmt = select(
+        exists().where(
+            col(SpeechBatchJob.user_id) == user_id,
+            col(SpeechBatchJob.audio_blob_path).startswith(prefix),
+            col(SpeechBatchJob.status) != JobStatus.FAILED,
+        )
+    )
+    return bool(session.exec(stmt).one())
+
+
+def blob_used_by_another_job(
+    session: Session, job_id: UUID, *, audio_blob_path: str | None = None, source_blob_path: str | None = None
+) -> bool:
+    """Whether another job still needs this blob: its WAV (any other job recording the same
+    ``audio_blob_path``: a failed job and its retry from one converted upload share it), or its original (a
+    job still PENDING with the same ``source_blob_path``). Nothing a job deletes may be another job's."""
+    conditions = []
+    if audio_blob_path:
+        conditions.append(col(SpeechBatchJob.audio_blob_path) == audio_blob_path)
+    if source_blob_path:
+        conditions.append(
+            and_(
+                col(SpeechBatchJob.source_blob_path) == source_blob_path,
+                col(SpeechBatchJob.status) == JobStatus.PENDING,
+            )
+        )
+    if not conditions:
+        return False
+    stmt = select(exists().where(col(SpeechBatchJob.id) != job_id, or_(*conditions)))
+    return bool(session.exec(stmt).one())
+
+
 def get_job_parts(session: Session, job_id: UUID) -> list[TranscriptionJobPart]:
     """The job's parts, in order (empty for a job of 240 minutes or less)."""
     return list(

@@ -222,6 +222,26 @@ def azure_audio_storage_is_never_reached(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(audio_storage, "AsyncAzureBlobManager", lambda *_args, **_kwargs: _EmptyBlobStore())
 
 
+@pytest.fixture(autouse=True)
+def a_mock_session_has_no_other_jobs(monkeypatch: pytest.MonkeyPatch):
+    """DIAAT-408: POST /jobs looks for a live job from the same upload, and DELETE /jobs/{id} for another job
+    that uses the job's blobs. A test whose database session is a ``MagicMock`` (no database) has none: its
+    "answer" would otherwise be a truthy mock. A real session gets the real query."""
+    from unittest.mock import MagicMock
+
+    from transcribe_api.api import routes_recording
+
+    def only_for_a_real_session(real):
+        def wrapper(session, *args, **kwargs):
+            return False if isinstance(session, MagicMock) else real(session, *args, **kwargs)
+
+        return wrapper
+
+    for name in ("has_live_job_for_upload", "blob_used_by_another_job"):
+        monkeypatch.setattr(routes_recording, name, only_for_a_real_session(getattr(routes_recording, name)))
+    yield
+
+
 @pytest.fixture
 def jurisdiction_db(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
     """DIAAT-322: an in-memory SQLite database with the jurisdiction tables, used by the

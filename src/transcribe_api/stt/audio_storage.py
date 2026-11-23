@@ -40,6 +40,21 @@ def source_blob_name(user_id: UUID | str, upload_id: UUID | str, extension: str)
     return f"{SOURCE_PREFIX}/{user_id}/{upload_id}{extension}"
 
 
+def job_wav_name(upload_blob_name: str, job_id: UUID | str) -> str:
+    """The WAV a deferred job's worker stores, named from the job as well as the upload:
+    ``uploads/{user_id}/{upload_id}-{stem}.wav`` becomes ``uploads/{user_id}/{upload_id}-{job_id}-{stem}.wav``.
+
+    A job made from an upload used to share every blob with any other job made from it (the WAV and the
+    parts named from it): one job's submission overwrote, and its cleanup or delete removed, the other's.
+    Still under ``uploads/{user_id}/`` (the ownership check) and still starting with the upload's ID (its
+    journey), and the part blobs derived from it (``part_blob_name``) are the job's own too."""
+    directory, _, name = upload_blob_name.rpartition("/")
+    upload_id, separator, stem = name[:36], name[36:37], name[37:]
+    if separator != "-":  # not an upload's name: nothing to derive it from
+        raise ValueError("not the blob name of an upload")
+    return f"{directory}/{upload_id}-{job_id}-{stem}"
+
+
 def source_extension(source_blob: str) -> str:
     """The extension of a source blob's name (the original's, so ffmpeg can sniff its format)."""
     match = re.search(r"(\.[A-Za-z0-9]{1,8})$", source_blob)

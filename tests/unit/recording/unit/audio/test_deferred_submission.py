@@ -14,6 +14,7 @@ from transcribe_api.domain.models_recording import BatchJobStatus, JobStatus, Sp
 from transcribe_api.runtime import settings_recording
 from transcribe_api.runtime.telemetry import configure_telemetry
 from transcribe_api.stt import submission
+from transcribe_api.stt.audio_storage import job_wav_name
 from transcribe_api.stt.batch_client import BatchSubmissionError
 
 UPLOAD_ID = "6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f"
@@ -63,7 +64,11 @@ def test_a_deferred_job_is_stored_pending_with_its_source_and_nothing_is_sent_to
     sent.assert_not_called()
     stored = session.get(SpeechBatchJob, job.id)
     assert stored.status == JobStatus.PENDING
-    assert (stored.source_blob_path, stored.audio_blob_path, stored.preparation_attempts) == (SOURCE, BLOB, 0)
+    assert (stored.source_blob_path, stored.audio_blob_path, stored.preparation_attempts) == (
+        SOURCE,
+        job_wav_name(BLOB, job.id),
+        0,
+    )
     assert stored.batch_job_id is None and stored.batch_job_status is None
     assert (stored.idempotency_key, stored.audio_duration_seconds, stored.user_id) == ("k", 7.5, USER_ID)
     # job.created, once, on the job's journey whose parent is the upload.

@@ -54,8 +54,10 @@ from transcribe_api.domain.auth.authorisation import public_endpoint, signed_url
 from transcribe_api.domain.auth.context import context_of
 from transcribe_api.domain.auth.dependencies_recording import get_active_jurisdiction, require_permission
 from transcribe_api.domain.interface_recording import (
+    blob_used_by_another_job,
     get_job_by_id,
     get_job_by_idempotency_key_for_user,
+    has_live_job_for_upload,
     list_jobs_paginated,
     record_correction_dataset_entry,
 )
@@ -1099,6 +1101,19 @@ async def _submit_job(
                 status_code=422, detail="This recording was not uploaded in this jurisdiction. Upload it again here."
             )
 
+    # DIAAT-408: one job at a time from an upload. Every blob a job uses is named from its upload, so a
+    # second job would share them with the first (one's cleanup or delete would take the other's audio, and
+    # the deferred ones would race for the one original). A job that FAILED does not count: submitting the
+    # upload again is how a failed job is retried. (An idempotent resubmission returned above.)
+    if body.blob_name is not None:
+        upload_id = _upload_uuid(body.blob_name)
+        if upload_id and has_live_job_for_upload(session, current_user.id, upload_id):
+            audit.skip()
+            raise HTTPException(
+                status_code=409,
+                detail="A job has already been made from this upload. Upload the recording again to transcribe it again.",
+            )
+
     # DIAAT-408: an upload whose original is waiting in storage (POST /uploads did not convert it)
     # becomes a PENDING job that the worker prepares and submits, whatever the flag says now: turning
     # async_upload_preparation off must not fail the jobs of uploads made while it was on. The original
@@ -2127,7 +2142,12 @@ async def _delete_own_batch_job(job: SpeechBatchJob) -> None:
 
 
 async def _delete_job(session: Session, job: SpeechBatchJob) -> None:
-    if job.audio_blob_path:
+    # A blob another job still records is not this job's to delete (a failed job and its retry from one
+    # converted upload share the WAV).
+    audio_in_use = bool(job.audio_blob_path) and blob_used_by_another_job(
+        session, job.id, audio_blob_path=job.audio_blob_path
+    )
+    if job.audio_blob_path and not audio_in_use:
         try:
             if get_settings().AUDIO_STORAGE_BACKEND == "local":
                 local_storage.delete(job.audio_blob_path)
@@ -2146,7 +2166,8 @@ async def _delete_job(session: Session, job: SpeechBatchJob) -> None:
     # is left, so the delete can be repeated: nothing is orphaned behind a deleted row.
     if job.source_blob_path:
         try:
-            await get_audio_storage().delete(job.source_blob_path)
+            if not blob_used_by_another_job(session, job.id, source_blob_path=job.source_blob_path):
+                await get_audio_storage().delete(job.source_blob_path)
         except Exception as exc:
             logger.error("Could not delete the original of job %s (%s)", job.id, type(exc).__name__)
             raise HTTPException(status_code=502, detail="Failed to delete the audio file; job not deleted") from exc

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from hmcts_otel import (
     Outcome,
@@ -29,6 +29,7 @@ from transcribe_api.runtime.telemetry import (
     upload_id_from_blob,
 )
 from transcribe_api.stt import job_telemetry
+from transcribe_api.stt.audio_storage import job_wav_name
 from transcribe_api.stt.batch_client import BatchSubmissionError, submit_batch_job
 from transcribe_api.stt.job_telemetry import record_job_finished, seconds_between
 from transcribe_api.stt.speech_auth import SpeechAuthError
@@ -51,6 +52,7 @@ def create_job(
     user_id: UUID | None = None,
     jurisdiction_id: UUID | None = None,
     source_blob_path: str | None = None,
+    job_id: UUID | None = None,
 ) -> SpeechBatchJob:
     """Create and store the job record, PENDING, and nothing else.
 
@@ -58,6 +60,7 @@ def create_job(
     (stt/preparation_service.py); the submission to Azure Speech is a separate step.
     """
     job = SpeechBatchJob(
+        **({"id": job_id} if job_id else {}),
         caller_id=caller_id,
         user_id=user_id,
         jurisdiction_id=jurisdiction_id,
@@ -130,7 +133,12 @@ def defer_batch_job(session: Session, audio_url: str, source_blob_path: str, **f
     original and submits it (stt/preparation_service.py, through ``submit_existing_job``).
     ``job.created`` is recorded here, once, as for a job submitted at once.
     """
-    job = create_job(session, audio_url, source_blob_path=source_blob_path, **fields)
+    # The WAV the worker stores (and the parts cut from it) is named from this job as well as the upload, so
+    # that two jobs made from one upload never share a blob (stt/audio_storage.py, job_wav_name).
+    job_id = uuid4()
+    if fields.get("audio_blob_path"):
+        fields["audio_blob_path"] = job_wav_name(fields["audio_blob_path"], job_id)
+    job = create_job(session, audio_url, source_blob_path=source_blob_path, job_id=job_id, **fields)
     with _job_journey(job):
         record_event(EVENT_JOB_CREATED)
     return job

@@ -93,6 +93,11 @@ async def _release(
         blob = ref.blob_path or (
             part_blob_name(audio_blob_path, ref.part_index) if ref.batch_job_url and audio_blob_path else None
         )
+        if blob and audio_blob_path and blob != part_blob_name(audio_blob_path, ref.part_index):
+            # Only ever a blob derived from this job's own WAV name (which has its id in it). A part row
+            # naming anything else is not this job's to delete.
+            logger.error("A part of job %s records a blob that is not derived from the job (not deleted)", job_id)
+            blob = None
         if blob:
             try:
                 await storage.delete(blob)

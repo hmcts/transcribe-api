@@ -298,7 +298,7 @@ class PreparationService:
                         await self._retry_or_fail(job, exc.code)
                     except JobGone:
                         logger.info("Job %s was deleted while it was being prepared", job.id)
-                        await self._delete_quietly(job.source_blob_path, job.id)
+                        await self._delete_original(job)
                     except asyncio.CancelledError:
                         # A worker stopping: hand the job back at once, so the next start takes it up.
                         await asyncio.shield(asyncio.to_thread(self._release, job.id, 0))
@@ -464,7 +464,7 @@ class PreparationService:
         except Exception as exc:
             logger.error("Submitting job %s failed (%s)", job.id, type(exc).__name__, exc_info=exc)
         if await asyncio.to_thread(self._is_settled, job.id):
-            await self._delete_quietly(job.source_blob_path, job.id)
+            await self._delete_original(job)
 
     def _attach_audio(self, job: ClaimedJob, prepared: PreparedAudio) -> bool:
         """Record the server's own URL and the exact length on the job. False if the job is gone or
@@ -659,6 +659,18 @@ class PreparationService:
         with Session(get_engine()) as session:
             jobs.mark_part_failed(session, part_id, code)
 
+    async def _delete_original(self, job: ClaimedJob) -> None:
+        """Remove the upload's original, unless another job from the same upload is still waiting for it
+        (the routes allow one live job per upload, but two requests can race): that job deletes it when it
+        is settled."""
+        needed = await asyncio.to_thread(self._original_is_needed, job)
+        if not needed:
+            await self._delete_quietly(job.source_blob_path, job.id)
+
+    def _original_is_needed(self, job: ClaimedJob) -> bool:
+        with Session(get_engine()) as session:
+            return jobs.blob_used_by_another_job(session, job.id, source_blob_path=job.source_blob_path)
+
     async def _delete_quietly(self, blob_name: str, job_id: UUID) -> None:
         try:
             await self.storage.delete(blob_name)
@@ -676,7 +688,7 @@ class PreparationService:
             outcome = "failure" if code in (CODE_UNDECODABLE, CODE_TOO_LONG, CODE_SOURCE_MISSING) else "error"
             job_telemetry.record_job_finished(outcome, code, created_at=job.created_datetime)
         await self._cleanup_parts(job.id)
-        await self._delete_quietly(job.source_blob_path, job.id)
+        await self._delete_original(job)
 
     async def _cleanup_parts(self, job_id: UUID) -> None:
         """A failed job's part blobs and Azure jobs are deleted (best effort: a job that has none, as

@@ -28,7 +28,7 @@ from transcribe_api.runtime.db_recording import get_session
 from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.runtime.telemetry import configure_telemetry
 from transcribe_api.stt import audio_storage, local_storage, submission
-from transcribe_api.stt.audio_storage import source_blob_name
+from transcribe_api.stt.audio_storage import job_wav_name, source_blob_name
 from transcribe_api.stt.preprocessing import ProbedDuration
 from transcribe_api.stt.recording_limits import HEADER_TOLERANCE_SECONDS
 
@@ -516,7 +516,8 @@ def test_the_job_is_created_pending_with_its_original_and_azure_is_not_called(
         (job,) = session.exec(select(SpeechBatchJob)).all()
     assert job.status == JobStatus.PENDING
     assert job.source_blob_path == source
-    assert job.audio_blob_path == f"uploads/{USER_ID}/{upload_id}-hearing.wav"
+    # The WAV the worker will store is named from the job too: two jobs from one upload never share it.
+    assert job.audio_blob_path == job_wav_name(f"uploads/{USER_ID}/{upload_id}-hearing.wav", job.id)
     assert job.batch_job_id is None and job.batch_job_url is None and job.batch_job_status is None
     assert job.preparation_attempts == 0
     assert job.user_id == USER_ID and job.audio_duration_seconds == 12.5
@@ -575,7 +576,7 @@ def test_with_the_flag_off_a_waiting_original_still_defers_the_job_and_azure_is_
     with Session(engine) as session:
         (job,) = session.exec(select(SpeechBatchJob)).all()
     assert job.status == JobStatus.PENDING and job.source_blob_path == source
-    assert job.audio_blob_path == f"uploads/{USER_ID}/{upload_id}-hearing.wav"
+    assert job.audio_blob_path == job_wav_name(f"uploads/{USER_ID}/{upload_id}-hearing.wav", job.id)
 
 
 def test_with_the_flag_off_and_no_original_the_job_is_submitted_as_before(client, engine, monkeypatch, mocker):
@@ -666,7 +667,8 @@ async def test_the_rollback_sequence_an_upload_made_with_the_flag_on_is_prepared
         row = session.get(SpeechBatchJob, job.id)
     assert row.status == JobStatus.SUBMITTED and row.batch_job_id
     azure.assert_called_once()
-    assert local_storage.size(blob_name) > 0  # the WAV the upload promised now exists
+    assert local_storage.size(row.audio_blob_path) > 0  # the job's own WAV now exists
+    assert row.audio_blob_path != blob_name and str(job.id) in row.audio_blob_path
     with pytest.raises(FileNotFoundError):
         local_storage.size(source)  # and the original is removed
 

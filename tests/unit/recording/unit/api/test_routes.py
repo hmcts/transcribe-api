@@ -947,6 +947,7 @@ class TestSubmitJob:
         mocker.patch(
             "transcribe_api.api.routes_recording.get_job_by_idempotency_key_for_user", return_value=None
         )
+        mocker.patch("transcribe_api.api.routes_recording.has_live_job_for_upload", return_value=False)
 
         # as_current_user's id is 00000000-0000-0000-0000-000000000002 (see _make_user).
         # As upload_audio names it: the upload's ID, then the file name.
