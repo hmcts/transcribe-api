@@ -194,6 +194,27 @@ def test_check_plan_fails_loudly_for_each_broken_invariant():
         assert name
 
 
+def test_check_plan_allows_rounding_but_refuses_a_gap_or_overlap_beyond_the_tolerance():
+    from transcribe_api.stt.splitter import PLAN_TOLERANCE_SECONDS
+
+    near = PLAN_TOLERANCE_SECONDS / 10
+    rounding = [PlannedPart(1, near, 10.0 + near, CUT_START), PlannedPart(2, 10.0, 20.0 - near, CUT_SILENCE)]
+    assert check_plan(rounding, 20.0, 15.0) == rounding  # touching and covering to within rounding
+
+    far = PLAN_TOLERANCE_SECONDS * 10
+    refused = {
+        "gap": [PlannedPart(1, 0.0, 10.0, CUT_START), PlannedPart(2, 10.0 + far, 20.0, CUT_SILENCE)],
+        "overlap": [PlannedPart(1, 0.0, 10.0, CUT_START), PlannedPart(2, 10.0 - far, 20.0, CUT_SILENCE)],
+        "starts late": [PlannedPart(1, far, 10.0, CUT_START), PlannedPart(2, 10.0, 20.0, CUT_SILENCE)],
+        "ends early": [PlannedPart(1, 0.0, 10.0, CUT_START), PlannedPart(2, 10.0, 20.0 - far, CUT_SILENCE)],
+        "ends late": [PlannedPart(1, 0.0, 10.0, CUT_START), PlannedPart(2, 10.0, 20.0 + far, CUT_SILENCE)],
+    }
+    for name, plan in refused.items():
+        with pytest.raises(SplitError):
+            check_plan(plan, 20.0, 15.0)
+        assert name
+
+
 # silencedetect parsing ------------------------------------------------------------------------
 
 REAL_FFMPEG_OUTPUT = """\

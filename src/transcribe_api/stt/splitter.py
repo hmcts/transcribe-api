@@ -207,13 +207,19 @@ def plan_parts(
     return check_plan(parts, duration, limit)
 
 
+# The plan's own arithmetic (cuts are floats) may leave parts touching to within rounding, so "contiguous"
+# and "covering" are checked to this tolerance, a microsecond; a real gap or overlap is far larger (cuts
+# are at least a sample, 62 microseconds, apart, and the checks that follow measure the cut files).
+PLAN_TOLERANCE_SECONDS = 1e-6
+
+
 def check_plan(parts: list[PlannedPart], duration: float, limit: float) -> list[PlannedPart]:
-    """Assert the plan's invariants, loudly: contiguous, covering [0, duration] exactly, every part
+    """Assert the plan's invariants, loudly: contiguous, covering [0, duration] (to ``PLAN_TOLERANCE_SECONDS``), every part
     positive and at most ``limit`` seconds, indices 1..n, the first part's start not a cut. Returns
     the plan."""
     if not parts:
         raise SplitError("empty plan")
-    if parts[0].start != 0.0 or parts[-1].end != duration:
+    if abs(parts[0].start) > PLAN_TOLERANCE_SECONDS or abs(parts[-1].end - duration) > PLAN_TOLERANCE_SECONDS:
         raise SplitError("the plan does not cover the recording")
     for i, part in enumerate(parts):
         if part.index != i + 1:
@@ -222,7 +228,7 @@ def check_plan(parts: list[PlannedPart], duration: float, limit: float) -> list[
             raise SplitError(f"part {part.index} is empty or reversed")
         if part.duration > limit:
             raise SplitError(f"part {part.index} is {part.duration:.1f} s, over the limit of {limit:.0f} s")
-        if i and part.start != parts[i - 1].end:
+        if i and abs(part.start - parts[i - 1].end) > PLAN_TOLERANCE_SECONDS:
             raise SplitError(f"part {part.index} does not start where part {i} ends")
         if (part.cut_kind == CUT_START) != (i == 0):
             raise SplitError(f"part {part.index} has the wrong cut kind")
