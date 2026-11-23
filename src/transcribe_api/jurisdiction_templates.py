@@ -36,6 +36,7 @@ from transcribe_api.documents.uploaded_templates import (
     box_text,
     check_template_file,
     check_values,
+    dictation_sections,
     field_problems,
     fill_template,
     find_boxes,
@@ -420,7 +421,7 @@ def template_texts(
     *,
     jurisdiction_id: UUID,
     jurisdiction_name: str,
-    dictated: str,
+    dictated: dict[str, str],
 ) -> tuple[dict[str, Value], dict[str, BoxContent]]:
     """The values kept, and what goes in each box. TemplateValuesError names each value
     that does not fit its field."""
@@ -434,7 +435,7 @@ def template_texts(
         FillContext(
             jurisdiction_name=jurisdiction_name,
             year=datetime.now(UTC).year,
-            dictated_text=dictated,
+            dictated_texts=dictated,
             legal_issue_titles=titles,
             legal_framework_texts=framework_texts,
         ),
@@ -442,11 +443,16 @@ def template_texts(
     return kept, texts
 
 
-# What the preview puts where the judge's dictation goes.
-PREVIEW_DICTATED_TEXT = (
-    "This is where the judge's dictated text goes.\n\n"
-    "Each paragraph the judge dictates or types appears here, in this box's style."
-)
+def preview_dictated_texts(fields: list[TemplateField]) -> dict[str, str]:
+    """What the preview puts where the judge's dictation goes: in each section's box,
+    which section's (DIAAT-416)."""
+    return {
+        f.tag: (
+            f"This is where the judge's dictation for “{f.label}” goes.\n\n"
+            "Each paragraph the judge dictates appears here, in this box's style."
+        )
+        for f in dictation_sections(fields)
+    }
 
 
 def template_of(session: Session, code: str, template_id: UUID) -> JurisdictionTemplate:
@@ -479,7 +485,7 @@ def preview_template(
         values,
         jurisdiction_id=jurisdiction.id,
         jurisdiction_name=jurisdiction.display_name or jurisdiction.name,
-        dictated=PREVIEW_DICTATED_TEXT,
+        dictated=preview_dictated_texts(fields_of(row)),
     )
     try:
         return fill_template(row.content, texts, directory / "preview.docx")

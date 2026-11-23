@@ -611,8 +611,8 @@ def test_a_template_is_previewed_as_a_judge_would_get_it_before_judges_see_it(as
         "Heard on 12 February 2026",
         "A Smith (Claimant)",
         (
-            "This is where the judge's dictated text goes.\n\n"
-            "Each paragraph the judge dictates or types appears here, in this box's style."
+            "This is where the judge's dictation for “Judgment text” goes.\n\n"
+            "Each paragraph the judge dictates appears here, in this box's style."
         ),
         f"© Crown copyright {document_year()}",
     ]
@@ -954,3 +954,134 @@ def test_a_legal_framework_box_cannot_be_saved_without_a_legal_issues_question(a
         "“Legal framework” prints the text of the legal frameworks the judge chooses: link a box"
         " to a Legal issues question for them to choose from." in response.json()["detail"]["problems"]
     )
+
+
+# Dictation sections (DIAAT-416) ---------------------------------------------------
+
+SECTIONS_TEMPLATE = make_template(
+    [
+        ["Case Number: ", Sdt("Reference")],
+        [Sdt("Background", "Background")],
+        [Sdt("Findings", "Findings of fact")],
+        [Sdt("Decision", "Decision")],
+    ]
+)
+SECTION_TAGS = ("Background", "Findings", "Decision")
+
+
+def _sections_template(as_admin) -> dict:
+    """A template whose admin made three of its boxes dictation sections."""
+    template = upload(as_admin, data=SECTIONS_TEMPLATE, name="Sections.docx").json()
+    body = complete(template)
+    body["fields"] = [
+        {**f, "type": "dictated", "required": False} if f["tag"] in SECTION_TAGS else {**f, "type": "text"}
+        for f in body["fields"]
+    ]
+    response = as_admin.put(f"/api/admin/jurisdictions/ET/templates/{template['id']}", json=body)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _said(text: str) -> list[dict]:
+    return [{"speaker": "Judge", "text": text, "timestamp": "00:01"}]
+
+
+def test_judges_are_given_the_templates_sections_in_its_order(as_admin, as_et_judge):
+    _sections_template(as_admin)
+
+    (available,) = as_et_judge.get("/api/jurisdictions/templates").json()
+    assert available["sections"] == [
+        {"tag": "Background", "label": "Background"},
+        {"tag": "Findings", "label": "Findings of fact"},
+        {"tag": "Decision", "label": "Decision"},
+    ]
+    # Dictated, not asked on the Hearing Details form.
+    assert [f["tag"] for f in available["fields"]] == ["Reference"]
+
+
+def test_each_sections_dictation_goes_in_its_own_box_and_an_empty_one_leaves_no_line(as_admin, as_et_judge, stored):
+    template = _sections_template(as_admin)
+    body = {
+        **_submission(template["id"], {"Reference": "1234/2026"}),
+        "messages": {"background": _said("Heard today.") + _said("The claim succeeds.")},
+        "sections": {"Background": _said("Heard today."), "Decision": _said("The claim succeeds.")},
+    }
+
+    response = as_et_judge.post("/api/live-transcription/submission", json=body)
+
+    assert response.status_code == 200, response.text
+    # Nothing was dictated for the findings: that line is gone. The typed notes follow
+    # the last section's dictation, as they followed the one box's before sections.
+    assert document_text(stored[response.json()["document_blob_path"]]) == [
+        "Case Number: 1234/2026",
+        "Heard today.",
+        "The claim succeeds.\n\nCosts are reserved.",
+    ]
+    submission = json.loads(stored[response.json()["blob_path"]])
+    assert {tag: [m["text"] for m in said] for tag, said in submission["sections"].items()} == {
+        "Background": ["Heard today."],
+        "Decision": ["The claim succeeds."],
+    }
+
+
+def test_dictation_for_a_section_the_template_no_longer_has_is_refused(as_admin, as_et_judge, stored):
+    template = _sections_template(as_admin)
+    body = {**_submission(template["id"], {"Reference": "1234/2026"}), "sections": {"Evidence": _said("Seen.")}}
+
+    response = as_et_judge.post("/api/live-transcription/submission", json=body)
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "template_sections_changed"
+    assert response.json()["detail"]["problems"] == ["No dictation section “Evidence” in this template."]
+    assert stored == {}
+
+
+def test_a_page_from_before_sections_has_its_dictation_put_in_the_first(as_admin, as_et_judge, stored):
+    template = _sections_template(as_admin)
+
+    response = as_et_judge.post(
+        "/api/live-transcription/submission", json=_submission(template["id"], {"Reference": "1234/2026"})
+    )
+
+    assert response.status_code == 200, response.text
+    assert document_text(stored[response.json()["document_blob_path"]]) == [
+        "Case Number: 1234/2026",
+        "The claim succeeds.\n\nCosts are reserved.",
+    ]
+    assert "sections" not in json.loads(stored[response.json()["blob_path"]])
+
+
+def test_sections_that_do_not_hold_all_the_dictation_are_refused(as_admin, as_et_judge, stored):
+    template = _sections_template(as_admin)
+    body = {
+        **_submission(template["id"], {"Reference": "1234/2026"}),
+        "messages": {"background": _said("Heard today.") + _said("Left out of every section.")},
+        "sections": {"Background": _said("Heard today.")},
+    }
+
+    response = as_et_judge.post("/api/live-transcription/submission", json=body)
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "template_sections_mismatch"
+    assert stored == {}
+
+
+def test_sections_are_only_for_a_template():
+    from pydantic import ValidationError
+
+    from transcribe_api.api.routes_dictation import LiveTranscriptionSubmissionRequest
+
+    form = {
+        "location": "Taylor House",
+        "hearingDate": "2026-02-12",
+        "judgeName": "Judge",
+        "appellantName": "A Person",
+        "respondent": "SSHD",
+        "hearingType": "Substantive",
+        "appealableDecisionDate": "2026-01-01",
+        "documentType": "Decision",
+    }
+    body = {"form_data": form, "messages": {"background": _said("Heard.")}}
+    LiveTranscriptionSubmissionRequest.model_validate(body)  # the IAC decision, as before
+    with pytest.raises(ValidationError, match="Send sections only with a template_id"):
+        LiveTranscriptionSubmissionRequest.model_validate({**body, "sections": {"Background": _said("Heard.")}})

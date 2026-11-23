@@ -99,11 +99,21 @@ class TemplateFormField(BaseModel):
     options: list[TemplateOption]
 
 
+class TemplateSection(BaseModel):
+    """A dictation section (DIAAT-416): a box the judge's dictation goes in."""
+
+    tag: str
+    label: str
+
+
 class AvailableTemplate(BaseModel):
     id: str
     name: str
     service: str | None
     fields: list[TemplateFormField]
+    # The sections the judge dictates into, in the template's order: with several,
+    # the judge chooses which they are dictating.
+    sections: list[TemplateSection]
 
 
 def template_forms(rows: list[JurisdictionTemplate], jurisdiction_id: UUID) -> list[AvailableTemplate]:
@@ -125,7 +135,13 @@ def template_forms(rows: list[JurisdictionTemplate], jurisdiction_id: UUID) -> l
             form_fields.append(
                 TemplateFormField(tag=f.tag, label=f.label, type=f.type, required=f.required, options=options)
             )
-        result.append(AvailableTemplate(id=str(row.id), name=row.name, service=row.service, fields=form_fields))
+        sections = [
+            TemplateSection(tag=f.tag, label=f.label)
+            for f in jurisdiction_templates.dictation_sections(jurisdiction_templates.fields_of(row))
+        ]
+        result.append(
+            AvailableTemplate(id=str(row.id), name=row.name, service=row.service, fields=form_fields, sections=sections)
+        )
     return result
 
 

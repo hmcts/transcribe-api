@@ -49,7 +49,13 @@ from transcribe_api.documents.minutes.types import (
 )
 from transcribe_api.documents.models import DEFAULT_JURISDICTION
 from transcribe_api.documents.template_renderer import render_hearing_document
-from transcribe_api.documents.uploaded_templates import BoxContent, dictated_text, fill_template
+from transcribe_api.documents.uploaded_templates import (
+    BoxContent,
+    dictated_texts,
+    fill_template,
+    sections_cover,
+    unknown_sections,
+)
 from transcribe_api.documents.versioning import DECISION_TEMPLATE, track_render
 from transcribe_api.domain.audit import (
     SECTIONED_TRANSCRIPT,
@@ -1253,7 +1259,9 @@ class LiveTranscriptionSubmissionRequest(BaseModel):
     """Request model that accepts either sectioned or flat message formats.
 
     Either the IAC decision's ``form_data``, or (DIAAT-344) an uploaded template's
-    ``template_id`` and the judge's ``values`` for its fields, by box tag.
+    ``template_id`` and the judge's ``values`` for its fields, by box tag. With a
+    template, ``sections`` (DIAAT-416) is what was dictated for each of its dictation
+    sections, by box tag; without it, all of ``messages`` goes in its first one.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -1262,6 +1270,7 @@ class LiveTranscriptionSubmissionRequest(BaseModel):
     template_id: uuid.UUID | None = None
     values: dict[str, str | bool | list[str] | None] | None = Field(default=None, max_length=500)
     messages: SectionedMessages | list[LiveTranscriptMessage]
+    sections: dict[str, list[LiveTranscriptMessage]] | None = Field(default=None, max_length=100)
     notes: str | None = Field(default=None, max_length=200_000)
 
     @model_validator(mode="after")
@@ -1271,6 +1280,9 @@ class LiveTranscriptionSubmissionRequest(BaseModel):
             raise ValueError(msg)
         if (self.template_id is None) != (self.values is None):
             msg = "Send template_id and values together."
+            raise ValueError(msg)
+        if self.sections is not None and self.template_id is None:
+            msg = "Send sections only with a template_id."
             raise ValueError(msg)
         return self
 
@@ -1532,13 +1544,38 @@ def _uploaded_template_plan(
         fields = jurisdiction_templates.fields_of(row)
         content, sha256, name = row.content, row.sha256, row.name
     transcript = [m.text for m in request.get_sectioned_messages().get_all_messages()]
+    sections = (
+        None
+        if request.sections is None
+        else {tag: [m.text for m in messages] for tag, messages in request.sections.items()}
+    )
+    if sections is not None and (unknown := unknown_sections(fields, sections)):
+        # Dictation is never put in another section's box (DIAAT-416).
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "template_sections_changed",
+                "message": "This template's dictation sections have changed. Reload the page, then submit again.",
+                "problems": [f"No dictation section “{tag}” in this template." for tag in unknown],
+            },
+        )
+    if sections is not None and not sections_cover(fields, sections, transcript):
+        # The document is made from the sections, the stored transcript from the
+        # messages: they must hold the same dictation, or some would be lost from one.
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "template_sections_mismatch",
+                "message": "What was dictated could not be put in its sections. Reload the page, then submit again.",
+            },
+        )
     try:
         values, texts = jurisdiction_templates.template_texts(
             fields,
             request.values or {},
             jurisdiction_id=jurisdiction.id,
             jurisdiction_name=jurisdiction.current.shown_name,
-            dictated=dictated_text(transcript, request.notes),
+            dictated=dictated_texts(fields, sections, transcript, request.notes),
         )
     except jurisdiction_templates.TemplateValuesError as exc:
         raise HTTPException(
@@ -1603,6 +1640,17 @@ async def _save_live_transcription_submission(  # NOSONAR
             "evidence": [msg.model_dump(by_alias=True, exclude_none=True) for msg in sectioned_messages.evidence],
             "facts": [msg.model_dump(by_alias=True, exclude_none=True) for msg in sectioned_messages.facts],
         },
+        # DIAAT-416: an uploaded template's dictation, kept by section (box tag).
+        **(
+            {}
+            if request.sections is None
+            else {
+                "sections": {
+                    tag: [msg.model_dump(by_alias=True, exclude_none=True) for msg in messages]
+                    for tag, messages in request.sections.items()
+                }
+            }
+        ),
         "notes": request.notes,
         "submitted_at": datetime.now(UTC).isoformat(),
         "user_email": current_user.email,
