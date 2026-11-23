@@ -301,6 +301,18 @@ def _cut_wav(wav_path: Path, cut_times: list[float], out_dir: Path, stop: thread
         raise SplitError(f"the recording could not be cut ({type(exc).__name__})") from exc
 
 
+async def _wait_until_done(work: asyncio.Future) -> None:
+    """Return once ``work`` has finished. A cancellation of this task while it waits is not acted on until
+    ``work`` has finished: the wait carries on first (a further cancellation nests another wait), and the
+    cancellation is then raised, as it must be."""
+    while not work.done():
+        try:
+            await asyncio.wait({work})
+        except asyncio.CancelledError:
+            await _wait_until_done(work)
+            raise
+
+
 async def cut_segments(
     wav_path: Path,
     cut_times: list[float],
@@ -324,17 +336,10 @@ async def cut_segments(
         stop.set()
         # The thread stops at the next chunk (or has already ended). Wait until it HAS, however often this
         # task is cancelled meanwhile: the caller removes the directory (and lets go of the job) as soon as
-        # this raises. A further cancellation is remembered and raised, after the wait, in place of the first.
-        later: asyncio.CancelledError | None = None
-        while not work.done():
-            try:
-                await asyncio.wait({work})
-            except asyncio.CancelledError as again:
-                later = again
+        # this raises.
+        await _wait_until_done(work)
         if not work.cancelled():
             work.exception()  # its own outcome (_Stopped, an error) is not wanted: mark it retrieved
-        if later is not None:
-            raise later
         raise
     if len(files) != len(cut_times) + 1:
         raise SplitError(f"expected {len(cut_times) + 1} parts, wrote {len(files)}")
