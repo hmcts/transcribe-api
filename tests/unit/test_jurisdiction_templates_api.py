@@ -9,6 +9,9 @@ judge, a LegalTextManager, the JurisdictionSuperAdministrator, nor a SystemAdmin
 
 DIAAT-346: the product team previews a template with sample details before any judge
 sees it, and is told in plain words when the preview fails.
+
+DIAAT-336: a jurisdiction starts a template from a copy of one shared as a base.
+DIAAT-339: changes to a template do not disrupt a judge's drafts or finished documents.
 """
 
 from __future__ import annotations
@@ -36,7 +39,14 @@ from tests.unit.jurisdiction_fixtures import (
 from tests.unit.template_docx import JUDGMENT, Sdt, document_text, make_template
 from transcribe_api.documents.content_loader import save_document_content
 from transcribe_api.domain.assignments import add_assignment
-from transcribe_api.domain.models_dictation import AuditLog, JurisdictionTemplate, Transcription, TranscriptionJob
+from transcribe_api.domain.models_dictation import (
+    AuditLog,
+    JurisdictionTemplate,
+    SettingVersion,
+    Transcription,
+    TranscriptionJob,
+)
+from transcribe_api.jurisdiction_templates import revision_of
 
 pytestmark = pytest.mark.real_jurisdictions
 
@@ -427,7 +437,14 @@ def test_a_judge_gets_a_document_from_the_template_with_no_release(jurisdiction_
         f"© Crown copyright {document_year()}",
     ]
     submission = json.loads(stored[response.json()["blob_path"]])
-    assert submission["form_data"] == {"template_id": template["id"], "template_name": "ET judgment", "values": VALUES}
+    (offered,) = as_et_judge.get("/api/jurisdictions/templates").json()
+    assert submission["form_data"] == {
+        "template_id": template["id"],
+        "template_name": "ET judgment",
+        # DIAAT-339: the version it was made from.
+        "template_revision": offered["revision"],
+        "values": VALUES,
+    }
     with Session(jurisdiction_db) as session:
         transcription = session.get(Transcription, UUID(response.json()["transcription_id"]))
         assert transcription.title == "ET judgment: 1234/2026"
@@ -1100,3 +1117,406 @@ def test_a_submission_takes_a_section_for_every_box_a_template_can_have():
     LiveTranscriptionSubmissionRequest.model_validate(body(500))
     with pytest.raises(ValidationError):
         LiveTranscriptionSubmissionRequest.model_validate(body(501))
+
+
+# A shared base template (DIAAT-336) ------------------------------------------------------
+# AC1: a jurisdiction that changes one field label changes only its own version.
+# AC2: when the base is updated, a jurisdiction's own version is kept.
+
+
+def _admin_of(jurisdiction_db, admin_app, code: str, jurisdiction=None):
+    """An administrator of jurisdiction ``code`` (new unless given): a client signed in
+    afresh for each use, since signing one in signs in every client of the app."""
+    jurisdiction = jurisdiction or add_jurisdiction(jurisdiction_db, code)
+    admin = add_user(jurisdiction_db, f"admin@{code.lower()}.test")
+    add_member(jurisdiction_db, admin, jurisdiction, role="admin")
+    return lambda: client_as(admin_app, jurisdiction_db, admin, ctx=(code, "JurisdictionAdministrator"))
+
+
+def _labels(template: dict) -> dict[str, str]:
+    return {f["tag"]: f["label"] for f in template["fields"]}
+
+
+def _relabel(template: dict, tag: str, label: str, **changes) -> dict:
+    body = complete(template, **changes)
+    body["fields"] = [{**f, "label": label} if f["tag"] == tag else f for f in body["fields"]]
+    return body
+
+
+def _shared_base(as_admin) -> dict:
+    template = upload(as_admin, name="Generic judgment.docx").json()
+    saved = as_admin.put(
+        f"/api/admin/jurisdictions/ET/templates/{template['id']}", json=complete(template, shared_as_base=True)
+    )
+    assert saved.status_code == 200, saved.text
+    return saved.json()
+
+
+def _start_from(client, code: str, base: dict):
+    return client.post(f"/api/admin/jurisdictions/{code}/templates/from-base", json={"template_id": base["id"]})
+
+
+def test_a_shared_template_is_offered_to_every_jurisdictions_admin(jurisdiction_db, admin_app, et):
+    as_et = _admin_of(jurisdiction_db, admin_app, "ET", et)
+    as_sscs = _admin_of(jurisdiction_db, admin_app, "SSCS")
+    upload(as_et(), name="Not shared.docx")
+    base = _shared_base(as_et())
+    assert base["shared_as_base"] is True
+
+    offered = as_sscs().get("/api/admin/jurisdictions/SSCS/base-templates")
+
+    assert offered.status_code == 200
+    assert offered.json() == [
+        {
+            "id": base["id"],
+            "name": "Generic judgment",
+            "service": None,
+            "jurisdiction": "ET",
+            "jurisdiction_name": "ET name",
+            "field_count": len(base["fields"]),
+        }
+    ]
+
+
+def test_a_jurisdiction_starts_from_a_copy_and_its_changes_are_its_own(jurisdiction_db, admin_app, et):
+    """AC1."""
+    as_et = _admin_of(jurisdiction_db, admin_app, "ET", et)
+    as_sscs = _admin_of(jurisdiction_db, admin_app, "SSCS")
+    as_cic = _admin_of(jurisdiction_db, admin_app, "CIC")
+    base = _shared_base(as_et())
+
+    response = _start_from(as_sscs(), "SSCS", base)
+
+    assert response.status_code == 201, response.text
+    copy = response.json()
+    assert copy["id"] != base["id"]
+    assert (copy["name"], copy["file_name"], copy["stage"], copy["shared_as_base"], copy["problems"]) == (
+        "Generic judgment",
+        "Generic judgment.docx",
+        "draft",  # for the admin to check before any judge sees it
+        False,
+        [],
+    )
+    assert copy["fields"] == base["fields"]
+    assert copy["boxes"] == base["boxes"]
+    assert {k: v for k, v in copy["started_from"].items() if k != "copied_at"} == {
+        "template_id": base["id"],
+        "name": "Generic judgment",
+        "jurisdiction": "ET",
+        "jurisdiction_name": "ET name",
+    }
+
+    relabelled = as_sscs().put(
+        f"/api/admin/jurisdictions/SSCS/templates/{copy['id']}",
+        json=_relabel(copy, "Reference", "Appeal reference"),
+    )
+    assert relabelled.status_code == 200, relabelled.text
+    assert _labels(relabelled.json())["Reference"] == "Appeal reference"
+
+    # Only SSCS's version has it: not the base, nor another jurisdiction's copy.
+    (et_base,) = as_et().get("/api/admin/jurisdictions/ET/templates").json()
+    assert _labels(et_base)["Reference"] == _labels(base)["Reference"]
+    cic_copy = _start_from(as_cic(), "CIC", base).json()
+    assert _labels(cic_copy)["Reference"] == _labels(base)["Reference"]
+
+
+def test_updating_the_base_keeps_each_jurisdictions_own_version(jurisdiction_db, admin_app, et):
+    """AC2: copies are the jurisdiction's own; the base changing does not change them."""
+    as_et = _admin_of(jurisdiction_db, admin_app, "ET", et)
+    as_sscs = _admin_of(jurisdiction_db, admin_app, "SSCS")
+    base = _shared_base(as_et())
+    copy = _start_from(as_sscs(), "SSCS", base).json()
+    own = as_sscs().put(
+        f"/api/admin/jurisdictions/SSCS/templates/{copy['id']}",
+        json=_relabel(copy, "Reference", "Appeal reference", stage="draft", sign_off=None),
+    )
+    assert own.status_code == 200, own.text
+
+    updated = as_et().put(
+        f"/api/admin/jurisdictions/ET/templates/{base['id']}", json=_relabel(base, "Reference", "Case number")
+    )
+    assert updated.status_code == 200, updated.text
+    new_file = make_template([*JUDGMENT, ["Costs: ", Sdt("Costs")]])
+    replaced = upload(as_et(), new_file, "v2.docx", replace=base["id"], version=updated.json()["version"])
+    assert replaced.status_code == 200
+
+    (kept,) = as_sscs().get("/api/admin/jurisdictions/SSCS/templates").json()
+    assert kept["version"] == own.json()["version"]
+    assert (kept["file_name"], kept["fields"], kept["problems"]) == ("Generic judgment.docx", own.json()["fields"], [])
+    assert _labels(kept)["Reference"] == "Appeal reference"
+
+
+def test_a_base_must_be_complete_and_shared_to_be_copied(jurisdiction_db, admin_app, et):
+    as_et = _admin_of(jurisdiction_db, admin_app, "ET", et)
+    as_sscs = _admin_of(jurisdiction_db, admin_app, "SSCS")
+    base = _shared_base(as_et())
+
+    # A new file with a box not linked yet: no longer shared, so neither offered nor
+    # copied, until its admin has completed it and shares it again.
+    new_file = make_template([*JUDGMENT, ["Costs: ", Sdt("Costs")]])
+    incomplete = upload(as_et(), new_file, "v2.docx", replace=base["id"], version=base["version"]).json()
+    assert incomplete["shared_as_base"] is False
+    assert as_sscs().get("/api/admin/jurisdictions/SSCS/base-templates").json() == []
+    gone = _start_from(as_sscs(), "SSCS", base)
+    assert gone.status_code == 404
+    assert gone.json()["detail"] == "That template is no longer shared as a base."
+
+    fields = [*complete(incomplete)["fields"], {**incomplete["fields"][0], "tag": "Costs", "label": "Costs"}]
+    shared = as_et().put(
+        f"/api/admin/jurisdictions/ET/templates/{base['id']}",
+        json=complete(incomplete, fields=fields, shared_as_base=True, sign_off=None, stage="draft"),
+    )
+    assert shared.status_code == 200, shared.text
+    assert [t["id"] for t in as_sscs().get("/api/admin/jurisdictions/SSCS/base-templates").json()] == [base["id"]]
+
+    # Going back to a version with a box unlinked (a draft may): not offered, nor copied.
+    restored = _restore(as_et(), shared.json(), 3)
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["problems"]
+    assert as_sscs().get("/api/admin/jurisdictions/SSCS/base-templates").json() == []
+    refused = _start_from(as_sscs(), "SSCS", base)
+    assert refused.status_code == 400
+    assert refused.json()["detail"]["problems"] == ["The box “Costs” (Costs) has no field linked to it."]
+
+
+def test_a_save_from_the_previous_web_release_keeps_it_shared(as_admin):
+    base = _shared_base(as_admin)
+    body = complete(base)  # no shared_as_base
+    assert "shared_as_base" not in body
+    saved = as_admin.put(f"/api/admin/jurisdictions/ET/templates/{base['id']}", json=body)
+    assert saved.json()["shared_as_base"] is True
+
+
+def test_a_copy_has_a_name_of_its_own_and_a_new_file_makes_it_an_ordinary_template(
+    jurisdiction_db, admin_app, as_admin
+):
+    base = _shared_base(as_admin)
+    copy = _start_from(as_admin, "ET", base).json()
+    assert copy["name"] == "Generic judgment (2)"
+    assert copy["started_from"]["template_id"] == base["id"]
+
+    replaced = upload(as_admin, TEMPLATE, "Own layout.docx", replace=copy["id"], version=copy["version"]).json()
+    assert replaced["started_from"] is None
+
+
+def test_a_template_with_no_history_yet_can_still_be_finished_once_deleted(
+    jurisdiction_db, as_admin, as_et_judge, stored
+):
+    """DIAAT-339 AC3: one not saved since before the history began (DIAAT-348) is
+    recorded as it was when it is deleted."""
+    template = _enabled_template(as_admin)
+    with Session(jurisdiction_db) as session:
+        for version in session.exec(select(SettingVersion)).all():
+            session.delete(version)
+        session.commit()
+    started = _offered(as_et_judge)
+
+    assert as_admin.delete(f"/api/admin/jurisdictions/ET/templates/{template['id']}").status_code == 204
+
+    response = _finish(as_et_judge, started)
+    assert response.status_code == 200, response.text
+    assert "Case Number: 1234/2026" in document_text(stored[response.json()["document_blob_path"]])
+
+
+def test_a_copy_is_recorded_in_the_new_templates_history(jurisdiction_db, as_admin):
+    base = _shared_base(as_admin)
+    copy = _start_from(as_admin, "ET", base).json()
+    (version,) = _template_history(as_admin, copy["id"])
+    assert version["number"] == 1
+    assert any(
+        event == "template.add" and detail.get("change") == "from_base" and detail["base"]["template_id"] == base["id"]
+        for event, detail in _audit(jurisdiction_db)
+    )
+
+
+def test_only_an_administrator_of_the_jurisdiction_starts_one_there(jurisdiction_db, admin_app, et, judge_app):
+    as_et = _admin_of(jurisdiction_db, admin_app, "ET", et)
+    as_sscs = _admin_of(jurisdiction_db, admin_app, "SSCS")
+    base = _shared_base(as_et())
+
+    into_et = _start_from(as_sscs(), "ET", base)
+    assert into_et.status_code == 403
+    assert into_et.json()["detail"]["code"] == "jurisdiction_not_in_scope"
+    assert as_sscs().get("/api/admin/jurisdictions/ET/base-templates").status_code == 403
+
+    judge = add_user(jurisdiction_db, "judge@sscs.test")
+    add_member(jurisdiction_db, judge, add_jurisdiction(jurisdiction_db, "CIC"))
+    as_judge = client_as(admin_app, jurisdiction_db, judge, ctx=("CIC", "Judge"))
+    assert as_judge.get("/api/admin/jurisdictions/CIC/base-templates").status_code == 403
+    assert _start_from(as_judge, "CIC", base).status_code == 403
+
+
+# Template changes do not disrupt a judge's work (DIAAT-339) -------------------------------
+# AC1: a finished document stays exactly as it was.
+# AC2: a draft keeps the version of the template it was started with.
+# AC3: a template switched off cannot be picked for a new document, but drafts already
+# started with it can be finished.
+
+COSTS_TEMPLATE = make_template([*JUDGMENT, ["Costs: ", Sdt("Costs")]])
+
+
+def _offered(as_judge) -> dict:
+    (offered,) = as_judge.get("/api/jurisdictions/templates").json()
+    return offered
+
+
+def _finish(as_judge, offered: dict, values: dict = VALUES, **changes):
+    body = {**_submission(offered["id"], values), "template_revision": offered["revision"], **changes}
+    return as_judge.post("/api/live-transcription/submission", json=body)
+
+
+def _change_the_template(as_admin, template: dict) -> dict:
+    """A new file with a Costs box the judge must fill, and Reference relabelled."""
+    replaced = upload(as_admin, COSTS_TEMPLATE, "v2.docx", replace=template["id"], version=template["version"]).json()
+    fields = [
+        *replaced["fields"],
+        {"tag": "Costs", "label": "Costs order", "type": "text", "required": True, "options": [], "source": None},
+    ]
+    saved = as_admin.put(
+        f"/api/admin/jurisdictions/ET/templates/{template['id']}",
+        json=_relabel(replaced, "Reference", "Claim number", fields=fields),
+    )
+    assert saved.status_code == 200, saved.text
+    return saved.json()
+
+
+def test_a_finished_document_stays_as_it_was_made(jurisdiction_db, as_admin, as_et_judge, stored):
+    """AC1: the document is filled once, when it is submitted, and stored; nothing fills
+    it again from the template."""
+    template = _enabled_template(as_admin)
+    response = _finish(as_et_judge, _offered(as_et_judge))
+    assert response.status_code == 200, response.text
+    document_path = response.json()["document_blob_path"]
+    made = stored[document_path]
+
+    changed = _change_the_template(as_admin, template)
+    assert as_admin.delete(f"/api/admin/jurisdictions/ET/templates/{changed['id']}").status_code == 204
+
+    assert stored[document_path] == made
+    assert "Case Number: 1234/2026" in document_text(made)
+    with Session(jurisdiction_db) as session:
+        job = session.exec(select(TranscriptionJob)).one()
+    assert job.provenance["template_version"] == hashlib.sha256(TEMPLATE).hexdigest()[:12]
+
+
+def test_a_draft_is_finished_with_the_version_it_was_started_with(as_admin, as_et_judge, stored):
+    """AC2."""
+    template = _enabled_template(as_admin)
+    started = _offered(as_et_judge)
+    _change_the_template(as_admin, template)
+    now = _offered(as_et_judge)
+    assert now["revision"] != started["revision"]
+    assert "Costs" in [f["tag"] for f in now["fields"]]
+
+    # The draft's form, as it started.
+    form = as_et_judge.get(f"/api/jurisdictions/templates/{started['id']}/revisions/{started['revision']}")
+    assert form.status_code == 200
+    assert form.json() == started
+
+    response = _finish(as_et_judge, started)
+    assert response.status_code == 200, response.text
+    text = document_text(stored[response.json()["document_blob_path"]])
+    assert "Case Number: 1234/2026" in text
+    assert not any(line.startswith("Costs") for line in text)
+    submission = json.loads(stored[response.json()["blob_path"]])
+    assert submission["form_data"]["template_revision"] == started["revision"]
+
+    # A new document, and a page from before DIAAT-339, have the template as it is now.
+    refused = as_et_judge.post("/api/live-transcription/submission", json=_submission(template["id"], VALUES))
+    assert refused.status_code == 400
+    assert "Costs order" in refused.text
+    current = _finish(as_et_judge, now, {**VALUES, "Costs": "None"})
+    assert current.status_code == 200, current.text
+    assert "Costs: None" in document_text(stored[current.json()["document_blob_path"]])
+
+
+@pytest.mark.parametrize("switch_off", ["draft", "delete"])
+def test_a_template_switched_off_cannot_be_picked_but_its_drafts_can_be_finished(
+    as_admin, as_et_judge, stored, switch_off
+):
+    """AC3."""
+    template = _enabled_template(as_admin)
+    started = _offered(as_et_judge)
+    if switch_off == "draft":
+        off = as_admin.put(
+            f"/api/admin/jurisdictions/ET/templates/{template['id']}",
+            json=complete(template, stage="draft", sign_off=None),
+        )
+        assert off.status_code == 200, off.text
+    else:
+        assert as_admin.delete(f"/api/admin/jurisdictions/ET/templates/{template['id']}").status_code == 204
+
+    assert as_et_judge.get("/api/jurisdictions/templates").json() == []
+    new = as_et_judge.post("/api/live-transcription/submission", json=_submission(template["id"], VALUES))
+    assert new.status_code == 404
+
+    form = as_et_judge.get(f"/api/jurisdictions/templates/{started['id']}/revisions/{started['revision']}")
+    assert form.status_code == 200
+    response = _finish(as_et_judge, started)
+    assert response.status_code == 200, response.text
+    assert "Case Number: 1234/2026" in document_text(stored[response.json()["document_blob_path"]])
+
+
+def test_a_version_the_judge_could_never_choose_is_not_used(jurisdiction_db, as_admin, as_et_judge, stored):
+    template = upload(as_admin).json()
+    # Saved as a draft, then a test: never live, and the judge is not a tester.
+    draft = as_admin.put(
+        f"/api/admin/jurisdictions/ET/templates/{template['id']}",
+        json=complete(template, stage="draft", sign_off=None),
+    ).json()
+    as_admin.put(
+        f"/api/admin/jurisdictions/ET/templates/{template['id']}",
+        json=complete(draft, stage="test", sign_off=None),
+    )
+    with Session(jurisdiction_db) as session:
+        row = session.get(JurisdictionTemplate, UUID(template["id"]))
+        revision = revision_of(row.sha256, row.fields)
+    guessed = {"id": template["id"], "revision": revision}
+
+    assert as_et_judge.get(f"/api/jurisdictions/templates/{template['id']}/revisions/{revision}").status_code == 404
+    assert _finish(as_et_judge, guessed).status_code == 404
+    unknown = {"id": template["id"], "revision": "0" * 32}
+    assert _finish(as_et_judge, unknown).status_code == 404
+    assert _finish(as_et_judge, {"id": str(uuid4()), "revision": revision}).status_code == 404
+
+
+def test_a_version_of_another_jurisdictions_template_is_not_used(jurisdiction_db, admin_app, judge_app, et, stored):
+    as_sscs = _admin_of(jurisdiction_db, admin_app, "SSCS")
+    uploaded = as_sscs().post(
+        "/api/admin/jurisdictions/SSCS/templates",
+        content=TEMPLATE,
+        headers={"Content-Type": "application/octet-stream", "X-Upload-Filename": "SSCS.docx"},
+    )
+    shared = uploaded.json()
+    live = as_sscs().put(f"/api/admin/jurisdictions/SSCS/templates/{shared['id']}", json=complete(shared))
+    assert live.status_code == 200, live.text
+    with Session(jurisdiction_db) as session:
+        row = session.get(JurisdictionTemplate, UUID(shared["id"]))
+        revision = revision_of(row.sha256, row.fields)
+
+    judge = add_user(jurisdiction_db, "judge@et.test")
+    add_member(jurisdiction_db, judge, et)
+    as_et_judge = client_as(judge_app, jurisdiction_db, judge, ctx=("ET", "Judge"))
+    as_et_judge.headers["X-Jurisdiction"] = "ET"
+    assert _finish(as_et_judge, {"id": shared["id"], "revision": revision}).status_code == 404
+
+
+def test_a_revision_is_only_for_a_template():
+    from pydantic import ValidationError
+
+    from transcribe_api.api.routes_dictation import LiveTranscriptionSubmissionRequest
+
+    form = {
+        "location": "Taylor House",
+        "hearingDate": "2026-02-12",
+        "judgeName": "Judge",
+        "appellantName": "A Person",
+        "respondent": "SSHD",
+        "hearingType": "Substantive",
+        "appealableDecisionDate": "2026-01-01",
+        "documentType": "Decision",
+    }
+    body = {"form_data": form, "messages": {"background": _said("Heard.")}}
+    LiveTranscriptionSubmissionRequest.model_validate(body)
+    with pytest.raises(ValidationError, match="Send template_revision only with a template_id"):
+        LiveTranscriptionSubmissionRequest.model_validate({**body, "template_revision": "abc"})

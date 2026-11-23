@@ -1262,12 +1262,15 @@ class LiveTranscriptionSubmissionRequest(BaseModel):
     ``template_id`` and the judge's ``values`` for its fields, by box tag. With a
     template, ``sections`` (DIAAT-416) is what was dictated for each of its dictation
     sections, by box tag; without it, all of ``messages`` goes in its first one.
+    ``template_revision`` (DIAAT-339) is the version of the template the draft started
+    with, which fills the document; without it, the template as it is now.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     form_data: LiveTranscriptionFormRequest | None = None
     template_id: uuid.UUID | None = None
+    template_revision: str | None = Field(default=None, max_length=64)
     values: dict[str, str | bool | list[str] | None] | None = Field(default=None, max_length=500)
     messages: SectionedMessages | list[LiveTranscriptMessage]
     # One per dictated box: as many as a template can have fields (TemplateWrite).
@@ -1284,6 +1287,9 @@ class LiveTranscriptionSubmissionRequest(BaseModel):
             raise ValueError(msg)
         if self.sections is not None and self.template_id is None:
             msg = "Send sections only with a template_id."
+            raise ValueError(msg)
+        if self.template_revision is not None and self.template_id is None:
+            msg = "Send template_revision only with a template_id."
             raise ValueError(msg)
         return self
 
@@ -1536,14 +1542,17 @@ def _uploaded_template_plan(
 ) -> _DocumentPlan:
     """The judge's chosen template, filled with their values: 404 when they cannot
     choose it (a draft, or in test and they are not in the test group: DIAAT-347),
-    400 (``template_values_invalid``, ``problems``) for values that do not fit its fields."""
+    400 (``template_values_invalid``, ``problems``) for values that do not fit its fields.
+    DIAAT-339: the version their draft started with (``template_revision``), even once
+    the template has changed or been switched off, if they could choose that version."""
     assert request.template_id is not None
     with Session(get_engine()) as session:
-        row = jurisdiction_templates.available_template(session, jurisdiction.id, request.template_id, user_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="This template is not available in this jurisdiction.")
-        fields = jurisdiction_templates.fields_of(row)
-        content, sha256, name = row.content, row.sha256, row.name
+        template = jurisdiction_templates.template_version(
+            session, jurisdiction.id, request.template_id, user_id, request.template_revision
+        )
+    if template is None or template.content is None:
+        raise HTTPException(status_code=404, detail="This template is not available in this jurisdiction.")
+    fields, content, sha256, name = template.fields, template.content, template.sha256, template.name
     transcript = [m.text for m in request.get_sectioned_messages().get_all_messages()]
     sections = (
         None
@@ -1596,7 +1605,12 @@ def _uploaded_template_plan(
             "texts": texts,
             "output_dir": _HEARING_DOCUMENTS_DIR,
         },
-        form_record={"template_id": str(request.template_id), "template_name": name, "values": values},
+        form_record={
+            "template_id": str(request.template_id),
+            "template_name": name,
+            "template_revision": template.revision,
+            "values": values,
+        },
         title=f"{name}: {first_text}" if first_text else name,
         download_filename=f"[{today}] {_filename_part(name) or 'Document'}.docx",
         version=sha256[:12],

@@ -353,6 +353,12 @@ class JurisdictionTemplate(SQLModel, table=True):
     signed_off_by: str | None = Field(default=None, max_length=200)
     signed_off_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
     signed_off_recorded_by: UUID | None = Field(default=None)
+    # DIAAT-336 (0016): shared as a base, so admins of any jurisdiction can start a
+    # template of their own from a copy of it.
+    shared_as_base: bool = Field(default=False, sa_column_kwargs={"server_default": text("false")})
+    # The shared template it was copied from, as it was then: {template_id, name,
+    # jurisdiction, jurisdiction_name, copied_at}. None for one uploaded here.
+    started_from: dict | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
     created_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
     updated_datetime: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_type=DateTime(timezone=True))
 
