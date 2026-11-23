@@ -276,10 +276,19 @@ def test_incomplete_fields_say_what_is_missing():
     assert t.field_problems(boxes, changed) == [
         "“Reference” needs at least one option.",
         "Choose what BenchNotes fills “Year” with.",
-        "Link one box to the dictated text (the judgment).",
+        "Link at least one box to the dictated text.",
     ]
+    # DIAAT-416: several boxes can take dictation, each a section named by its label...
     two = [f.model_copy(update={"type": "dictated"}) if f.tag == "Party2Rep" else f for f in fields]
-    assert t.field_problems(boxes, two) == ["Only one box can take the dictated text: “Party2Rep”, “Judgment text”."]
+    assert t.field_problems(boxes, two) == []
+    # ...which judges choose it by, so no two can share one.
+    same = [f.model_copy(update={"label": " judgment TEXT"}) if f.tag == "Party2Rep" else f for f in two]
+    assert t.field_problems(boxes, same) == [
+        (
+            "Each box for the dictated text is a section judges choose by its name, so each needs its own:"
+            " “ judgment TEXT”, “Judgment text”."
+        )
+    ]
 
 
 def test_after_a_new_file_only_the_boxes_it_still_has_keep_their_fields():
@@ -323,7 +332,9 @@ def _filled(fields, values, **context):
         t.FillContext(
             jurisdiction_name="Employment Tribunals (ET)",
             year=2026,
-            dictated_text=t.dictated_text(["The claim succeeds."], "<p>Costs are <strong>reserved</strong>.</p>"),
+            dictated_texts=t.dictated_texts(
+                fields, None, ["The claim succeeds."], "<p>Costs are <strong>reserved</strong>.</p>"
+            ),
             **context,
         ),
     )
@@ -785,3 +796,60 @@ def test_a_bookmark_inside_a_box_around_a_paragraph_is_kept(tmp_path):
         xml.index("w:bookmarkEnd"),
     )
     assert start < first < last < end
+
+
+# Dictation sections (DIAAT-416) --------------------------------------------------------
+
+SECTION_FIELDS = [
+    t.TemplateField(tag="Reference", label="Case number", type="text"),
+    t.TemplateField(tag="Background", label="Background", type="dictated"),
+    t.TemplateField(tag="Findings", label="Findings of fact", type="dictated"),
+    t.TemplateField(tag="Decision", label="Decision", type="dictated"),
+]
+
+
+def test_the_templates_dictated_boxes_are_its_sections_in_order():
+    assert [f.tag for f in t.dictation_sections(SECTION_FIELDS)] == ["Background", "Findings", "Decision"]
+    assert t.unknown_sections(SECTION_FIELDS, {"Background": [], "Evidence": []}) == ["Evidence"]
+
+
+def test_each_section_gets_only_its_own_dictation_and_the_notes_follow_the_last():
+    texts = t.dictated_texts(
+        SECTION_FIELDS,
+        {"Background": ["Heard today."], "Decision": [" The claim succeeds. "]},
+        ["(not used: the sections are)"],
+        "<p>Costs are reserved.</p>",
+    )
+    assert texts == {
+        "Background": "Heard today.",
+        "Findings": "",  # nothing dictated: its box is removed
+        "Decision": "The claim succeeds.\n\nCosts are reserved.",
+    }
+
+
+def test_without_sections_all_of_the_dictation_goes_in_the_first_box():
+    one_box = [f for f in SECTION_FIELDS if f.tag in ("Reference", "Decision")]
+    # One box, as before sections: the dictation and then the notes.
+    assert t.dictated_texts(one_box, None, ["Spoken."], "<p>Typed.</p>") == {"Decision": "Spoken.\n\nTyped."}
+    # A page from before sections, with a template that has several: all in the first,
+    # the notes too, rather than split from the dictation they follow.
+    assert t.dictated_texts(SECTION_FIELDS, None, ["Spoken."], "<p>Typed.</p>") == {
+        "Background": "Spoken.\n\nTyped.",
+        "Findings": "",
+        "Decision": "",
+    }
+
+
+def test_the_sections_must_hold_what_was_dictated_in_the_templates_order():
+    sections = {"Decision": ["Second."], "Background": ["First."]}
+    assert t.sections_cover(SECTION_FIELDS, sections, ["First.", "Second."])
+    assert not t.sections_cover(SECTION_FIELDS, sections, ["First.", "Second.", "Left out."])
+    assert not t.sections_cover(SECTION_FIELDS, {}, ["Spoken."])
+
+
+def test_the_preview_names_each_sections_box():
+    from transcribe_api.jurisdiction_templates import preview_dictated_texts
+
+    texts = preview_dictated_texts(SECTION_FIELDS)
+    assert list(texts) == ["Background", "Findings", "Decision"]
+    assert texts["Findings"].startswith("This is where the judge's dictation for “Findings of fact” goes.")
