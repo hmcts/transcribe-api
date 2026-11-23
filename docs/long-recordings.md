@@ -146,8 +146,15 @@ conversion), or by the worker for a job that was deferred.
   as above (jobs made before this release keep the names they have); (3) a job's delete never removes a WAV another job still records
   (a failed job and its retry from one converted upload share the WAV), nor an original another job is still `PENDING` on, and the
   worker keeps the original until no other job needs it; (4) cleanup only ever deletes a part blob derived from the job's own WAV
-  name. The check in (1) is a lookup, not a database constraint, so two requests at the very same moment can both pass it: they then
-  have blobs of their own and share only the original, which (3) protects.
+  name. The check in (1) is race-free on PostgreSQL: `POST /jobs` first takes `pg_advisory_xact_lock` on (user, upload)
+  (`lock_upload_for_submission`), held in the same transaction until the job row is committed, so a second request for the same
+  upload waits and then finds the job (409); one that cannot get the lock within 15 s is refused with a 409 "Concurrent submission
+  conflict; retry". Tested on a real Postgres with two clients posting at the same moment, many times (one 201, one 409, one job, one
+  Azure submission). What it does **not** cover: it is a lock, not a constraint (no unique index, which would not build where
+  production already holds several jobs for one upload), so anything that creates jobs without going through `POST /jobs` is not
+  held to it; on another database (SQLite, the unit tests) it does nothing; the key is hashed to 64 bits, so unrelated uploads
+  may rarely wait for each other; and the lock is held while the request looks for the original in storage. Should it ever fail,
+  the jobs have blobs of their own and share only the original, which (3) protects.
 - **Recording the parts**: one row per part in `transcription_job_part` (migration 0018): offset in the recording, length, cut kind,
   blob (`uploads/{user_id}/{upload_id}-{job_id}-{name}.partNN.wav`, derived from the job's own WAV name, never client-supplied), Azure job,
   status, attempts. The job stays one row; it keeps the idempotency key; it is `PENDING` while its parts are submitted and

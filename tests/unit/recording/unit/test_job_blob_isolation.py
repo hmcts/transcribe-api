@@ -348,3 +348,10 @@ def test_a_part_row_naming_a_blob_that_is_not_derived_from_its_job_is_never_dele
     assert asyncio.run(part_submission.cleanup_job_parts(mine.id, engine=engine)) is True
 
     assert _exists(others_blob)
+
+
+def test_the_upload_lock_does_nothing_on_a_database_that_is_not_postgres(engine):
+    """SQLite (these tests) has no advisory locks: the call is a no-op and touches nothing."""
+    with Session(engine) as session:
+        jobs.lock_upload_for_submission(session, USER_ID, uuid4())
+        assert not session.in_transaction()  # no statement was run

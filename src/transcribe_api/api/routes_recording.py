@@ -34,7 +34,7 @@ from hmcts_otel import conventions as c
 from pydantic import BaseModel, Field, field_validator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlmodel import Session
 
 from transcribe_api.domain import feature_flags
@@ -59,6 +59,7 @@ from transcribe_api.domain.interface_recording import (
     get_job_by_idempotency_key_for_user,
     has_live_job_for_upload,
     list_jobs_paginated,
+    lock_upload_for_submission,
     record_correction_dataset_entry,
 )
 from transcribe_api.domain.job_history import job_history
@@ -1107,6 +1108,16 @@ async def _submit_job(
     # upload again is how a failed job is retried. (An idempotent resubmission returned above.)
     if body.blob_name is not None:
         upload_id = _upload_uuid(body.blob_name)
+        if upload_id:
+            # The lock is held until this session's transaction ends: the job row's commit (create_job). It is taken
+            # in a thread because it may wait for another request that is itself waiting on this event loop.
+            try:
+                await asyncio.to_thread(lock_upload_for_submission, session, current_user.id, upload_id)
+            except OperationalError as exc:
+                if getattr(exc.orig, "pgcode", None) != "55P03":  # lock_not_available: any other error is not ours
+                    raise
+                session.rollback()
+                raise HTTPException(status_code=409, detail="Concurrent submission conflict; retry") from exc
         if upload_id and has_live_job_for_upload(session, current_user.id, upload_id):
             audit.skip()
             raise HTTPException(

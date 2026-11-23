@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import and_, case, exists, func, or_
+from sqlalchemy import and_, case, exists, func, or_, text
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import update as sa_update
 from sqlmodel import Session, col, select
@@ -581,6 +581,31 @@ class PartPlan:
     duration_seconds: float
     cut_kind: str
     blob_path: str
+
+
+# How long a submission waits for another submission of the same upload before it is refused (409).
+UPLOAD_LOCK_TIMEOUT = "15s"
+
+
+def lock_upload_for_submission(session: Session, user_id: UUID, upload_id: UUID) -> None:
+    """Take a lock on (user, upload) that is held until this session's transaction ends (commit or rollback).
+
+    Two requests for one upload that both look for a live job (``has_live_job_for_upload``) before either has
+    inserted its own would both find none and both create one, and both be submitted to Azure and billed. With
+    this lock taken first, the second request waits until the first one has committed its job row, and then
+    finds it. PostgreSQL only (``pg_advisory_xact_lock``): any other database (the SQLite of the unit tests)
+    does nothing here, and a unique index is not an option, since production may already hold several jobs
+    for one upload. The key is hashed to the 64 bits the lock takes, so unrelated uploads may share a lock
+    (they wait for each other, nothing worse). Raises ``sqlalchemy.exc.OperationalError`` (SQLSTATE 55P03)
+    after ``UPLOAD_LOCK_TIMEOUT``.
+
+    The caller must not commit this session between this call and the insert of the job."""
+    if session.get_bind().dialect.name != "postgresql":
+        return
+    session.execute(text(f"SET LOCAL lock_timeout = '{UPLOAD_LOCK_TIMEOUT}'"))
+    session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": f"{user_id}:{upload_id}"}
+    )
 
 
 def has_live_job_for_upload(session: Session, user_id: UUID, upload_id: UUID) -> bool:
