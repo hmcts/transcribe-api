@@ -78,6 +78,10 @@ class Paragraph(BaseModel):
     # (uploaded templates): ``bold`` and ``italic`` say only whether any of it is.
     # Never dumped, so nothing that stores or hashes blocks changes.
     runs: list[TextRun] = Field(default_factory=list, exclude=True)
+    # For a list item: whether its list is ordered and how deep it is nested (0: not
+    # nested), as ``list_level`` alone does not say. Never dumped either.
+    list_ordered: bool | None = Field(default=None, exclude=True)
+    list_depth: int | None = Field(default=None, exclude=True)
 
 
 class Heading(BaseModel):

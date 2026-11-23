@@ -626,3 +626,102 @@ def test_bold_and_italic_within_a_line_stay_on_their_words(tmp_path):
         ("real", True, False),
         (" risk", False, False),
     ]
+
+
+def _box_lines(markdown: str) -> list[tuple[str | None, float | None]]:
+    from transcribe_api.documents.lib.markdown_to_blocks import markdown_to_blocks
+
+    return [(p.label, p.left_indent_pt) for p in t.box_paragraphs(markdown_to_blocks(markdown))]
+
+
+def test_list_labels_go_on_past_z_and_x_rather_than_starting_again():
+    labels = [label for label, _ in _box_lines("\n".join(f"{i}. item" for i in range(1, 29)))]
+    assert labels[25:] == ["(z)", "(aa)", "(ab)"]
+    nested = _box_lines("1. top\n" + "\n".join(f"   {i}. item" for i in range(1, 12)))
+    assert [label for label, _ in nested[-2:]] == ["(x)", "(xi)"]
+
+
+def test_a_nested_bulleted_list_stays_bulleted_and_indented_further():
+    assert _box_lines("- First\n  - Nested\n- Second") == [("•", 36.0), ("•", 72.0), ("•", 36.0)]
+    assert _box_lines("1. one\n   - point\n2. two") == [("(a)", 36.0), ("•", 72.0), ("(b)", 36.0)]
+
+
+def test_in_a_quote_bold_stays_on_its_words_and_the_quote_is_italic_throughout():
+    from transcribe_api.documents.lib.markdown_to_blocks import markdown_to_blocks
+
+    item, heading = t.box_paragraphs(markdown_to_blocks("> 1. a **real** risk\n\n> **Scope**"))
+    assert [(r.text, r.bold, r.italic) for r in item.runs] == [
+        ("(a)\t", False, True),
+        ("a ", False, True),
+        ("real", True, True),
+        (" risk", False, True),
+    ]
+    assert [(r.text, r.bold, r.italic) for r in heading.runs] == [("Scope", True, True)]
+
+
+def _framework_box_xml(data: bytes, change) -> bytes:
+    """``data`` with the paragraph holding the LegalFramework box changed by ``change(p)``."""
+    from lxml import etree
+
+    def transform(content: bytes) -> bytes:
+        root = etree.fromstring(content)
+        w = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        (paragraph,) = root.xpath("//w:p[w:sdt/w:sdtPr/w:tag[@w:val='LegalFramework']]", namespaces=w)
+        change(paragraph, w)
+        return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+    return replace_part(data, "word/document.xml", transform)
+
+
+def test_bold_is_written_even_where_the_template_turns_it_off(tmp_path):
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+    from lxml import etree
+
+    def plain(paragraph, w):
+        (run,) = paragraph.xpath("w:sdt/w:sdtContent/w:r", namespaces=w)
+        run.insert(0, parse_xml(f'<w:rPr {nsdecls("w")}><w:b w:val="0"/><w:u w:val="none"/></w:rPr>'))
+
+    data, fields = _framework_template()
+    document = _framework_filled(tmp_path, fields, {"Issues": ["protection"]}, _framework_box_xml(data, plain))
+    root = etree.fromstring(zipfile.ZipFile(io.BytesIO(document)).read("word/document.xml"))
+    w = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+
+    def formatting(text):
+        (run,) = root.xpath(f"//w:r[w:t='{text}']", namespaces=w)
+        return [
+            (e.tag.split("}")[1], e.get(f"{{{w['w']}}}val")) for e in run.xpath("w:rPr/w:b | w:rPr/w:u", namespaces=w)
+        ]
+
+    assert formatting("Protection claims") == [("b", None), ("u", "none")]
+    assert formatting("The appellant must show:") == [("b", "0"), ("u", "none")]
+
+
+def test_a_bookmark_around_the_framework_box_is_kept(tmp_path):
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    def bookmarked(paragraph, w):
+        (sdt,) = paragraph.xpath("w:sdt", namespaces=w)
+        sdt.addprevious(parse_xml(f'<w:bookmarkStart {nsdecls("w")} w:id="7" w:name="Framework"/>'))
+        sdt.addnext(parse_xml(f'<w:bookmarkEnd {nsdecls("w")} w:id="7"/>'))
+
+    data, fields = _framework_template()
+    document = _framework_filled(tmp_path, fields, {"Issues": ["demo_rule"]}, _framework_box_xml(data, bookmarked))
+    xml = zipfile.ZipFile(io.BytesIO(document)).read("word/document.xml").decode()
+    start, box, end = xml.index('w:name="Framework"'), xml.index("The Demo Rule applies."), xml.index("w:bookmarkEnd")
+    assert start < box < end
+    assert document_text(document)[1:4] == ["The Demo Rule applies.", "• first point", "• second point"]
+
+
+def test_underline_and_italic_are_written_even_where_the_template_turns_them_off():
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls, qn
+
+    from transcribe_api.documents.word_document import WordDocument
+
+    template = parse_xml(f'<w:rPr {nsdecls("w")}><w:i w:val="false"/><w:u w:val="none"/></w:rPr>')
+    rpr = WordDocument._formatted_rpr(template, bold=False, italic=True, underline=True)
+    assert rpr.find(qn("w:i")).get(qn("w:val")) is None
+    assert rpr.find(qn("w:u")).get(qn("w:val")) == "single"
+    assert rpr.find(qn("w:b")) is None

@@ -265,29 +265,45 @@ class WordDocument:
 
     @staticmethod
     def _formatted_rpr(template_rpr: _Element | None, *, bold: bool, italic: bool, underline: bool) -> _Element:
-        """The box's run formatting, made bold, italic or underlined as asked."""
+        """The box's run formatting, made bold, italic or underlined as asked, even where
+        the template's run turns that off (``<w:b w:val="0"/>``, ``<w:u w:val="none"/>``)."""
         rpr = deepcopy(template_rpr) if template_rpr is not None else OxmlElement("w:rPr")
         for wanted, on in (("w:b", bold), ("w:i", italic), ("w:u", underline)):
-            if on and rpr.find(qn(wanted)) is None:
+            if not on:
+                continue
+            element = rpr.find(qn(wanted))
+            if element is None:
                 element = OxmlElement(wanted)
-                if wanted == "w:u":
-                    element.set(qn("w:val"), "single")
                 rpr.append(element)
+            if wanted == "w:u":
+                if element.get(qn("w:val")) in (None, "none"):
+                    element.set(qn("w:val"), "single")
+            elif element.get(qn("w:val")) in ("0", "false", "off"):
+                del element.attrib[qn("w:val")]
         return rpr
 
     @staticmethod
     def _promote_to_paragraph_box(sdt: _Element) -> _Element | None:
         """A box inside a line that is all its paragraph holds becomes a box around that
         paragraph, which can then hold several: returns the paragraph, now in the box.
-        None when the paragraph has anything else (text, another box)."""
+        None when the paragraph has anything else (text, another box). Bookmarks around
+        the box stay around it, so links and fields that point at them still work."""
         paragraph = sdt.getparent()
         if paragraph is None or paragraph.tag != qn("w:p") or paragraph.getparent() is None:
             return None
-        ignorable = {qn("w:pPr"), qn("w:bookmarkStart"), qn("w:bookmarkEnd"), qn("w:proofErr")}
+        markers = {qn("w:bookmarkStart"), qn("w:bookmarkEnd")}
+        ignorable = {qn("w:pPr"), qn("w:proofErr"), *markers}
         if any(child is not sdt and child.tag not in ignorable for child in paragraph):
             return None
         sdt_content = sdt.find(qn("w:sdtContent"))
+        index = paragraph.index(sdt)
+        before = [child for child in paragraph[:index] if child.tag in markers]
+        after = [child for child in paragraph[index + 1 :] if child.tag in markers]
         paragraph.addprevious(sdt)
+        for marker in before:
+            sdt.addprevious(marker)
+        for marker in reversed(after):
+            sdt.addnext(marker)
         new_paragraph = OxmlElement("w:p")
         ppr = paragraph.find(qn("w:pPr"))
         if ppr is not None:

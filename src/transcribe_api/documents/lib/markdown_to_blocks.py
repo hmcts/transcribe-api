@@ -86,11 +86,11 @@ def _collect_runs(token: object, *, bold: bool = False, italic: bool = False) ->
     return [TextRun(text=content, bold=bold, italic=italic)] if isinstance(content, str) and content else []
 
 
-def _paragraph_runs(token: object, text: str) -> list[TextRun]:
+def _paragraph_runs(token: object, text: str, *, italic: bool = False) -> list[TextRun]:
     """The paragraph's runs, trimmed and without <u> tags as its text is, neighbours of
     the same formatting joined; empty when they do not spell out ``text``."""
     runs: list[TextRun] = []
-    for run in _collect_runs(token):
+    for run in _collect_runs(token, italic=italic):
         piece = _UNDERLINE_TAG_RE.sub("", run.text)
         if runs and (runs[-1].bold, runs[-1].italic) == (run.bold, run.italic):
             runs[-1] = runs[-1].model_copy(update={"text": runs[-1].text + piece})
@@ -128,6 +128,8 @@ class _ParseContext:
     quote_depth: int = 0
     list_level: int = -1
     list_item_label: str | None = None  # pre-computed "(a)" etc. for ordered items in blockquotes
+    list_depth: int = -1
+    list_ordered: bool = False
 
     def enter_quote(self) -> _ParseContext:
         return replace(self, quote_depth=self.quote_depth + 1)
@@ -136,7 +138,9 @@ class _ParseContext:
         # NumNormal level 0 is decimal. Ordered lists start at level 1 (a),
         # then level 2 (i). Unordered lists keep the existing base level.
         next_level = (1 if ordered else 0) if self.list_level < 0 else self.list_level + 1
-        return replace(self, list_level=next_level, list_item_label=None)
+        return replace(
+            self, list_level=next_level, list_item_label=None, list_depth=self.list_depth + 1, list_ordered=ordered
+        )
 
 
 class _MarkdownBlockVisitor:
@@ -168,7 +172,17 @@ class _MarkdownBlockVisitor:
         emitted = len(self._blocks)
         self._emit_paragraph(text=text, context=context, bold=bold, italic=italic, underline=underline)
         if len(self._blocks) > emitted and isinstance(self._blocks[-1], Paragraph):
-            self._blocks[-1].runs = _paragraph_runs(token, self._blocks[-1].text)
+            block = self._blocks[-1]
+            # A quote is italic throughout, its runs too. A label written into the text,
+            # such as "(a)\t" in a quote, is a run of its own.
+            quoted = context.quote_depth > 0
+            runs = _paragraph_runs(token, text, italic=quoted)
+            label = block.text.removesuffix(text)
+            if runs and label and block.text.endswith(text):
+                runs.insert(0, TextRun(text=label, italic=quoted))
+            block.runs = runs if "".join(r.text for r in runs) == block.text else []
+            if block.list_level is not None:
+                block.list_ordered, block.list_depth = context.list_ordered, context.list_depth
 
     @visit.register
     def _visit_heading(self, token: MarkdownHeadingToken, _context: _ParseContext) -> None:

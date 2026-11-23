@@ -536,22 +536,42 @@ def _legal_framework_paragraphs(
     return paragraphs
 
 
-_ROMAN = ("i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x")
+_ROMAN = (
+    (1000, "m"), (900, "cm"), (500, "d"), (400, "cd"), (100, "c"), (90, "xc"),
+    (50, "l"), (40, "xl"), (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i"),
+)  # fmt: skip
 _LIST_INDENT_PT = 36.0
+
+
+def _alphabetic(number: int) -> str:
+    """1 → a, 26 → z, 27 → aa: never back to a."""
+    letters = ""
+    while number > 0:
+        number, rest = divmod(number - 1, 26)
+        letters = chr(ord("a") + rest) + letters
+    return letters
+
+
+def _roman(number: int) -> str:
+    numeral = ""
+    for value, letters in _ROMAN:
+        count, number = divmod(number, value)
+        numeral += letters * count
+    return numeral
 
 
 def _list_label(level: int, number: int) -> str:
     if level == 1:
-        return f"({chr(ord('a') + (number - 1) % 26)})"
+        return f"({_alphabetic(number)})"
     if level == 2:
-        return f"({_ROMAN[(number - 1) % len(_ROMAN)]})"
+        return f"({_roman(number)})"
     return "•"
 
 
 def box_paragraphs(blocks: list[ContentBlock]) -> list[BoxParagraph]:
     """Document blocks (from the Legal Text Manager's Markdown) as a box's paragraphs.
     Lists are written out, (a) then (i), or a bullet, as the template's own numbering
-    would not match them."""
+    would not match them; each list nested in another is indented further."""
     paragraphs: list[BoxParagraph] = []
     counters: dict[int, int] = {}
     for block in blocks:
@@ -565,27 +585,30 @@ def box_paragraphs(blocks: list[ContentBlock]) -> list[BoxParagraph]:
         if level is None or level < 0:
             counters.clear()
             label, indent = None, block.left_indent_pt
-        elif level == 0:
-            counters.clear()
-            label, indent = "•", block.left_indent_pt or _LIST_INDENT_PT
         else:
-            for deeper in [k for k in counters if k > level]:
+            ordered = block.list_ordered if block.list_ordered is not None else level > 0
+            depth = block.list_depth if block.list_depth is not None else level
+            for deeper in [k for k in counters if k > depth]:
                 del counters[deeper]
-            counters[level] = counters.get(level, 0) + 1
-            label, indent = _list_label(level, counters[level]), block.left_indent_pt or _LIST_INDENT_PT * level
-        # Formatted within the line: each run keeps its own bold and italic, rather than
-        # one bold word making the whole paragraph bold. Formatting no run has (a quote's
-        # italic) is the paragraph's, for all of it.
-        mixed = len({(r.bold, r.italic) for r in block.runs}) > 1
+            if ordered:
+                counters[depth] = counters.get(depth, 0) + 1
+                label = _list_label(level, counters[depth])
+            else:
+                counters.pop(depth, None)
+                label = "•"
+            indent = block.left_indent_pt or _LIST_INDENT_PT * (depth + 1)
+        # Formatted within the line: the runs carry all of its bold and italic (a
+        # quote's too), rather than one bold word making the whole paragraph bold.
+        runs = tuple(BoxRun(r.text, r.bold, r.italic) for r in block.runs)
         paragraphs.append(
             BoxParagraph(
                 text=block.text,
                 label=label,
-                bold=block.bold and not (mixed and any(r.bold for r in block.runs)),
-                italic=block.italic and not (mixed and any(r.italic for r in block.runs)),
+                bold=block.bold and not runs,
+                italic=block.italic and not runs,
                 underline=block.underline,
                 left_indent_pt=indent,
-                runs=tuple(BoxRun(r.text, r.bold, r.italic) for r in block.runs) if mixed else (),
+                runs=runs,
             )
         )
     return paragraphs
