@@ -1084,10 +1084,11 @@ async def _submit_job(
                 status_code=422, detail="This recording was not uploaded in this jurisdiction. Upload it again here."
             )
 
-    # DIAAT-408: with async_upload_preparation on, an upload whose original is waiting in storage
-    # (POST /uploads did not convert it) becomes a PENDING job that the worker prepares and
-    # submits. The original is found by the user's and the upload's ids, so nothing the client sent
-    # names a blob; no original (an upload from before the flag, or with it off) is submitted as before.
+    # DIAAT-408: an upload whose original is waiting in storage (POST /uploads did not convert it)
+    # becomes a PENDING job that the worker prepares and submits, whatever the flag says now: turning
+    # async_upload_preparation off must not fail the jobs of uploads made while it was on. The original
+    # is found by the user's and the upload's ids, so nothing the client sent names a blob; no original
+    # (an upload that was converted in the request) is submitted as before.
     source_blob = await _waiting_source(body, current_user)
     try:
         if source_blob is not None:
@@ -1144,10 +1145,14 @@ async def _submit_job(
 
 
 async def _waiting_source(body: SubmitJobRequest, current_user: AuthenticatedUser) -> str | None:
-    """The original an upload left for the worker, if the flag is on and there is one (DIAAT-408)."""
+    """The original an upload left for the worker, if there is one (DIAAT-408).
+
+    Looked up whatever the flag now says: an upload made with ``async_upload_preparation`` on has no
+    WAV yet, so a job made after the flag was turned off must still wait for the worker to prepare it
+    (the worker does so whatever the flag) instead of being sent to Azure with a WAV that is not there.
+    When the lookup itself fails: with the flag on, the upload may be one of those, so the request
+    fails (502) rather than guess; with it off, it is logged and treated as "no original", as before."""
     if body.blob_name is None:
-        return None
-    if not await asyncio.to_thread(feature_flags.is_async_upload_preparation_enabled):
         return None
     upload_id = _upload_uuid(body.blob_name)
     if upload_id is None:
@@ -1155,11 +1160,13 @@ async def _waiting_source(body: SubmitJobRequest, current_user: AuthenticatedUse
     try:
         return await get_audio_storage().find_source(current_user.id, upload_id)
     except Exception as exc:
-        # Not "there is none": submitting now would send Azure a WAV that does not exist.
         logger.error("Could not look for the upload's original (%s)", type(exc).__name__)
-        raise HTTPException(
-            status_code=502, detail="The uploaded recording could not be checked. Please try again."
-        ) from exc
+        if await asyncio.to_thread(feature_flags.is_async_upload_preparation_enabled):
+            # Not "there is none": submitting now would send Azure a WAV that does not exist.
+            raise HTTPException(
+                status_code=502, detail="The uploaded recording could not be checked. Please try again."
+            ) from exc
+        return None
 
 
 @router.get("/jobs", response_model=ListJobsResponse)

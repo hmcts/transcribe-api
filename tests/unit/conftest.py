@@ -193,6 +193,35 @@ def feature_flags_are_not_stored(request: pytest.FixtureRequest, monkeypatch: py
     feature_flags.invalidate_cache()
 
 
+class _EmptyBlobStore:
+    """The audio storage's Azure manager as an empty store: looking for an upload's original finds none
+    (POST /jobs looks for it whatever the flag says, DIAAT-408); anything else is a test that has not
+    said what its storage holds."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+    async def find_blob_names(self, _prefix):
+        return []
+
+    def __getattr__(self, name):
+        if name.startswith("_"):  # introspection, not a call on the store
+            raise AttributeError(name)
+        raise AssertionError(f"a test reached Azure Blob Storage ({name}): patch audio_storage.AsyncAzureBlobManager")
+
+
+@pytest.fixture(autouse=True)
+def azure_audio_storage_is_never_reached(monkeypatch: pytest.MonkeyPatch):
+    """No test connects to Azure Blob Storage through the audio storage (stt/audio_storage.py): it holds
+    nothing unless the test patches ``audio_storage.AsyncAzureBlobManager`` itself."""
+    from transcribe_api.stt import audio_storage
+
+    monkeypatch.setattr(audio_storage, "AsyncAzureBlobManager", lambda *_args, **_kwargs: _EmptyBlobStore())
+
+
 @pytest.fixture
 def jurisdiction_db(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
     """DIAAT-322: an in-memory SQLite database with the jurisdiction tables, used by the

@@ -412,18 +412,111 @@ def test_an_upload_with_no_original_is_submitted_at_once_as_before(client, engin
     assert submit.call_args.kwargs["audio_blob_path"] == f"uploads/{USER_ID}/{upload_id}-hearing.wav"
 
 
-def test_with_the_flag_off_a_waiting_original_is_ignored_and_the_job_is_submitted_as_before(
-    client, engine, monkeypatch, mocker
+def test_with_the_flag_off_a_waiting_original_still_defers_the_job_and_azure_is_not_called(
+    client, engine, monkeypatch, no_azure
 ):
+    """An upload made while the flag was on has no WAV: a rollback must not send Azure a missing file."""
     _flag(monkeypatch, False)
     upload_id = uuid4()
-    _store_original(upload_id)
+    source = _store_original(upload_id)
+
+    response = client.post("/api/v1/jobs", json=_job_body(upload_id))
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "pending"
+    no_azure.assert_not_called()
+    with Session(engine) as session:
+        (job,) = session.exec(select(SpeechBatchJob)).all()
+    assert job.status == JobStatus.PENDING and job.source_blob_path == source
+    assert job.audio_blob_path == f"uploads/{USER_ID}/{upload_id}-hearing.wav"
+
+
+def test_with_the_flag_off_and_no_original_the_job_is_submitted_as_before(client, engine, monkeypatch, mocker):
+    _flag(monkeypatch, False)
+    upload_id = uuid4()
     submit = mocker.patch(
         "transcribe_api.api.routes_recording.submit_and_queue_batch_job",
         new=mocker.AsyncMock(return_value=add_job(engine, source_blob_path=None)),
     )
     assert client.post("/api/v1/jobs", json=_job_body(upload_id)).status_code == 201
     submit.assert_called_once()
+    assert submit.call_args.kwargs["audio_blob_path"] == f"uploads/{USER_ID}/{upload_id}-hearing.wav"
+    with Session(engine) as session:
+        assert session.exec(select(SpeechBatchJob).where(SpeechBatchJob.source_blob_path.is_not(None))).all() == []
+
+
+def test_with_the_flag_off_a_failed_lookup_is_logged_and_the_job_is_submitted_as_before(
+    client, engine, monkeypatch, mocker, caplog
+):
+    """With the flag off the lookup failing is not a reason to fail the request: as before, no original."""
+    _flag(monkeypatch, False)
+    submit = _broken_lookup(mocker, engine)
+
+    with caplog.at_level("ERROR"):
+        response = client.post("/api/v1/jobs", json=_job_body(uuid4()))
+
+    assert response.status_code == 201
+    submit.assert_called_once()
+    assert "Could not look for the upload's original (StorageError)" in caplog.text
+
+
+def _broken_lookup(mocker, engine):
+    class Broken(audio_storage.LocalAudioStorage):
+        async def find_source(self, user_id, upload_id):
+            raise audio_storage.StorageError("storage down")
+
+    mocker.patch("transcribe_api.api.routes_recording.get_audio_storage", return_value=Broken())
+    return mocker.patch(
+        "transcribe_api.api.routes_recording.submit_and_queue_batch_job",
+        new=mocker.AsyncMock(side_effect=lambda **_kw: add_job(engine, source_blob_path=None)),
+    )
+
+
+async def test_the_rollback_sequence_an_upload_made_with_the_flag_on_is_prepared_after_it_is_turned_off(
+    client, engine, monkeypatch, mocker, normalize, local_storage_dir
+):
+    """Upload with the flag on, turn it off, POST /jobs: the job waits (it is not sent to Azure with a
+    WAV that does not exist), then the worker, which does not read the flag, prepares and submits it."""
+    from transcribe_api.stt import preparation_service as prep
+
+    monkeypatch.setenv("SPEECH_BACKEND", "mock")
+    get_settings.cache_clear()
+    mocker.patch.object(prep, "get_engine", new=lambda: engine)
+    azure = mocker.spy(submission, "submit_batch_job")  # the mock Speech backend answers it
+    _flag(monkeypatch, True)
+    uploaded = _upload(client, extension_seconds=3.0)
+    assert uploaded.status_code == 201
+    blob_name = uploaded.json()["blob_name"]
+    source = source_blob_name(USER_ID, _upload_id(blob_name), ".mp3")
+
+    _flag(monkeypatch, False)  # the rollback
+    response = client.post(
+        "/api/v1/jobs", json={"audio_url": uploaded.json()["audio_url"], "blob_name": blob_name, "metadata": {}}
+    )
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "pending"
+    with Session(engine) as session:
+        (job,) = session.exec(select(SpeechBatchJob)).all()
+    assert job.status == JobStatus.PENDING and job.source_blob_path == source
+    assert job.batch_job_id is None
+    azure.assert_not_called()
+    local_storage.read(source)  # the original is still there for the worker
+    with pytest.raises(FileNotFoundError):
+        local_storage.size(blob_name)
+
+    # The worker, with the flag still off.
+    service = prep.PreparationService()
+    assert await service.poll_once() == 1
+    await service.wait_idle()
+
+    with Session(engine) as session:
+        row = session.get(SpeechBatchJob, job.id)
+    assert row.status == JobStatus.SUBMITTED and row.batch_job_id
+    azure.assert_called_once()
+    assert local_storage.size(blob_name) > 0  # the WAV the upload promised now exists
+    with pytest.raises(FileNotFoundError):
+        local_storage.size(source)  # and the original is removed
 
 
 def test_a_replay_with_the_same_idempotency_key_returns_the_same_pending_job(client, engine, monkeypatch, no_azure):
@@ -443,14 +536,10 @@ def test_a_storage_failure_while_looking_for_the_original_is_a_502_and_creates_n
 ):
     """Not "there is none": submitting would send Azure a WAV that does not exist."""
     _flag(monkeypatch, True)
-
-    class Broken(audio_storage.LocalAudioStorage):
-        async def find_source(self, user_id, upload_id):
-            raise audio_storage.StorageError("storage down")
-
-    mocker.patch("transcribe_api.api.routes_recording.get_audio_storage", return_value=Broken())
+    submit = _broken_lookup(mocker, engine)
     response = client.post("/api/v1/jobs", json=_job_body(uuid4()))
     assert response.status_code == 502
+    submit.assert_not_called()
     with Session(engine) as session:
         assert session.exec(select(SpeechBatchJob)).all() == []
 
