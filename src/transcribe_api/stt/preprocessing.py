@@ -166,7 +166,8 @@ def parse_probe(output: str) -> ProbedDuration | None:
     one that counts: a video track longer than its audio (MP4, MKV) is not the recording's length. A
     stream that states no duration (Matroska does not) falls back to the container's, but only when the
     file has no video stream; with a video stream the length is unknown (None: the exact check after the
-    conversion decides). No audio stream at all is also None: the conversion refuses it."""
+    conversion decides). A file ffprobe could read that has no audio stream at all raises AudioDecodeError
+    (a video-only MP4 is not a recording); None is only for audio whose length is not stated."""
     try:
         data = json.loads(output)
     except ValueError:
@@ -176,6 +177,10 @@ def parse_probe(output: str) -> ProbedDuration | None:
     streams = [s for s in data.get("streams") or [] if isinstance(s, dict)]
     audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
     if audio is None:
+        if isinstance(data.get("streams"), list):
+            # ffprobe read the file and it holds no audio (a video-only MP4): not "audio of unknown length",
+            # which is None below. The conversion would refuse it, so refuse it before it is stored.
+            raise AudioDecodeError("the file has no audio stream")
         return None
     fmt = data.get("format") if isinstance(data.get("format"), dict) else {}
     seconds = _seconds(audio.get("duration"))
@@ -191,12 +196,13 @@ def parse_probe(output: str) -> ProbedDuration | None:
 async def probe_audio_duration(path: Path, *, timeout: float = PROBE_TIMEOUT_SECONDS) -> ProbedDuration | None:
     """The length of the audio in the file's header, from ``ffprobe`` (a read of the header, not a decode).
 
-    Returns None when the file is readable but states no usable length (some VBR MP3s, raw streams, a
-    video with an audio track that states none), or when ffprobe takes longer than ``timeout``: the exact
+    Returns None when the file has an audio stream but states no usable length (some VBR MP3s, raw
+    streams, a video with an audio track that states none), or when ffprobe takes longer than ``timeout``: the exact
     length is then known only once the file is converted. See ``ProbedDuration`` for an estimate.
 
     Raises:
-        AudioDecodeError: if ffprobe cannot read the file at all (not audio, or corrupt).
+        AudioDecodeError: if ffprobe cannot read the file at all (not audio, or corrupt), or reads it and
+            finds no audio stream (a video without sound).
         FileNotFoundError: if ffprobe is not installed (a server misconfiguration, as for ffmpeg).
     """
     try:

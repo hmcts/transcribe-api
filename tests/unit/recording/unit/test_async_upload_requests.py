@@ -324,6 +324,31 @@ def test_audio_shorter_than_its_video_is_not_refused_for_the_length_of_the_video
         assert response.status_code == 201, response.text
 
 
+@pytest.mark.parametrize("flag_on", [False, True], ids=["flag_off", "flag_on"])
+def test_a_video_without_sound_is_a_422_and_nothing_is_stored_or_queued(
+    client, engine, monkeypatch, tmp_path, local_storage_dir, flag_on
+):
+    """ffprobe reads a video-only MP4 happily; it is not a recording. With async preparation on it used to be
+    stored and answered 201, and the job failed later: it is refused before anything is stored, as with the flag off."""
+    import subprocess
+
+    path = tmp_path / "video.mp4"
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=64x64:r=5:d=3", "-c:v", "mpeg4",
+         "-y", str(path)],
+        check=True,
+    )  # fmt: skip
+    _flag(monkeypatch, flag_on)
+
+    response = client.post("/api/v1/uploads", files={"file": ("video.mp4", path.read_bytes(), "video/mp4")})
+
+    assert response.status_code == 422
+    assert response.json()["detail"].startswith("The audio file could not be decoded")
+    assert not local_storage_dir.exists() or not any(local_storage_dir.iterdir())
+    with Session(engine) as session:
+        assert session.exec(select(SpeechBatchJob)).all() == []
+
+
 def test_a_synchronous_upload_is_capped_at_azures_limit_when_the_flags_come_on_while_it_is_in_flight(
     client, monkeypatch, mocker, converting, tel
 ):

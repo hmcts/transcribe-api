@@ -155,9 +155,26 @@ def test_an_audio_only_file_with_no_stream_duration_takes_the_containers():
     assert parse_probe(_json(fmt="matroska,webm", container=None, streams=[_audio(None)])) is None
 
 
-@pytest.mark.parametrize("output", ["", "not json", "[]", '{"streams": [], "format": {"duration": "5"}}'])
-def test_no_audio_stream_or_no_json_is_unknown(output):
+@pytest.mark.parametrize("output", ["", "not json", "[]", "{}"])
+def test_no_json_from_ffprobe_is_unknown(output):
     assert parse_probe(output) is None
+
+
+@pytest.mark.parametrize(
+    "streams",
+    [[], [{"index": 0, "codec_type": "video", "duration": "20.0"}], [{"index": 0, "codec_type": "subtitle"}]],
+    ids=["no_streams", "video_only", "subtitles_only"],
+)
+def test_a_file_ffprobe_read_that_has_no_audio_stream_is_not_a_recording(streams):
+    with pytest.raises(AudioDecodeError, match="no audio stream"):
+        parse_probe(_json(fmt="mov,mp4,m4a,3gp,3g2,mj2", container=20.0, streams=streams))
+
+
+async def test_a_video_only_mp4_is_refused_by_the_probe(tmp_path):
+    path = tmp_path / "video.mp4"
+    _ffmpeg("-f", "lavfi", "-i", "color=c=black:s=64x64:r=5:d=3", "-c:v", "mpeg4", str(path))
+    with pytest.raises(AudioDecodeError):
+        await probe_audio_duration(path)
 
 
 @pytest.mark.parametrize("duration", ["N/A", "nan", "inf", "-3", "abc"])

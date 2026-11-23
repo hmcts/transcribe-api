@@ -49,6 +49,8 @@ limit is refused here (`stt/recording_limits.py`, `stt/preprocessing.py`):
   quarter (`ESTIMATE_MARGIN` 1.25). An MP3 counts as exact only when `ffprobe` reports a non-zero start time, which is the encoder
   delay from the Xing/LAME header (verified on files made with `ffmpeg -write_xing 0` and without); one with a Xing header but no
   delay counts as an estimate, which only refuses less.
+- A file `ffprobe` reads that has **no audio stream at all** (a video-only MP4) is a 422 "could not be decoded", with the flag on or
+  off, before anything is stored; "no audio stream" is not "audio of unknown length".
 - A file that states no length passes, and so does anything between the limit and these bounds: the exact check after the
   conversion (in the request, or in the worker) decides.
 
