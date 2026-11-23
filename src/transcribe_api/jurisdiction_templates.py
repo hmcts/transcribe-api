@@ -11,17 +11,31 @@ judges (``stage``), live only with the service lead's sign-off (set_stage).
 
 DIAAT-348: every save is kept as a version (setting_history.py), and an earlier one's
 content can be saved again (restore_template).
+
+DIAAT-336: a jurisdiction's admin can share a complete template as a base; an admin of
+any jurisdiction can then start a template of their own from a copy of it
+(add_from_base) and change its fields there. The copy is theirs: later changes to the
+shared one do not change it.
+
+DIAAT-339: a judge's work is not disrupted by changes to a template. A document is
+filled once, when it is submitted, and kept as it was made. A draft keeps the version of
+the template it was started with (its ``revision``): submitting it fills that version
+from the history, even once the template has changed or been switched off, provided
+the judge could choose that version (template_version).
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import defer
 from sqlmodel import Session, select
 
 from transcribe_api import setting_history
@@ -36,6 +50,7 @@ from transcribe_api.documents.uploaded_templates import (
     box_text,
     check_template_file,
     check_values,
+    dictation_sections,
     field_problems,
     fill_template,
     find_boxes,
@@ -45,7 +60,7 @@ from transcribe_api.documents.uploaded_templates import (
 )
 from transcribe_api.domain.auth.permissions import ROLE_JURISDICTION_ADMIN
 from transcribe_api.domain.jurisdiction_stages import STAGE_DRAFT, STAGE_LIVE, STAGE_TEST, STAGES, sees_template
-from transcribe_api.domain.models_dictation import Jurisdiction, JurisdictionTemplate, RoleAssignment
+from transcribe_api.domain.models_dictation import Jurisdiction, JurisdictionTemplate, RoleAssignment, SettingVersion
 from transcribe_api.jurisdictions_admin import (
     AdminError,
     ConflictError,
@@ -138,17 +153,11 @@ def _default_name(file_name: str) -> str:
     return stem.strip()[:MAX_NAME_LENGTH] or "Template"
 
 
-def add_template(
-    session: Session, code: str, file_name: str, data: bytes, *, saved_by: UUID | None = None
-) -> JurisdictionTemplate:
-    """A new template from an upload, with a proposed field for each box: a draft, not
-    available to judges until the admin has checked its fields and moved it on."""
-    jurisdiction = _jurisdiction(session, code)
-    boxes = _read_file(data)
-    name = _default_name(file_name)
+def _unique_name(session: Session, jurisdiction_id: UUID, name: str) -> str:
+    """``name``, or with " (2)", " (3)"... when the jurisdiction has a template called it."""
     taken = set(
         session.exec(
-            select(JurisdictionTemplate.name).where(JurisdictionTemplate.jurisdiction_id == jurisdiction.id)
+            select(JurisdictionTemplate.name).where(JurisdictionTemplate.jurisdiction_id == jurisdiction_id)
         ).all()
     )
     unique, n = name, 2
@@ -156,6 +165,17 @@ def add_template(
         suffix = f" ({n})"
         unique = f"{name[: MAX_NAME_LENGTH - len(suffix)]}{suffix}"
         n += 1
+    return unique
+
+
+def add_template(
+    session: Session, code: str, file_name: str, data: bytes, *, saved_by: UUID | None = None
+) -> JurisdictionTemplate:
+    """A new template from an upload, with a proposed field for each box: a draft, not
+    available to judges until the admin has checked its fields and moved it on."""
+    jurisdiction = _jurisdiction(session, code)
+    boxes = _read_file(data)
+    unique = _unique_name(session, jurisdiction.id, _default_name(file_name))
     row = JurisdictionTemplate(
         jurisdiction_id=jurisdiction.id,
         name=unique,
@@ -186,7 +206,9 @@ def replace_file(
 ) -> JurisdictionTemplate:
     """A new file for a template: fields kept for the boxes it still has; a new box
     has no field until the admin links one. Until it is complete it is a draft again,
-    which judges do not see, and goes live again only with a new sign-off."""
+    which judges do not see, and goes live again only with a new sign-off; and, if it
+    was shared as a base, it is no longer shared until its admin shares it again. One
+    started from a shared base no longer has the base's layout, so no longer says it did."""
     boxes = _read_file(data)
     row = _template(session, code, template_id, lock=True)
     _check_version(row, expected_version)
@@ -197,8 +219,10 @@ def replace_file(
     row.sha256 = hashlib.sha256(data).hexdigest()
     row.boxes = [b.to_record() for b in boxes]
     row.fields = [f.stored() for f in fields]
+    row.started_from = None
     if field_problems(boxes, fields):
         _move(row, STAGE_DRAFT, None)
+        row.shared_as_base = False
     row.updated_datetime = datetime.now(UTC)
     session.add(row)
     setting_history.record(session, row, saved_by)
@@ -231,11 +255,14 @@ def update_template(
     stage: str,
     expected_version: str,
     sign_off: SignOff | None = None,
+    shared_as_base: bool | None = None,
     saved_by: UUID | None = None,
 ) -> JurisdictionTemplate:
     """Save the admin's fields and who can choose it (``stage``): every box linked and
     every field complete, or nothing is saved (TemplateProblemsError names what is
-    missing). It goes live only with ``sign_off`` (NotSignedOffError)."""
+    missing). It goes live only with ``sign_off`` (NotSignedOffError). ``shared_as_base``
+    shares it with other jurisdictions or stops sharing it (DIAAT-336); None leaves it
+    as it is."""
     row = _template(session, code, template_id, lock=True)
     _check_version(row, expected_version)
     setting_history.catch_up(session, row)
@@ -249,6 +276,8 @@ def update_template(
         msg = f"The stage must be one of {', '.join(STAGES)}"
         raise AdminError(msg)
     _move(row, stage, sign_off)
+    if shared_as_base is not None:
+        row.shared_as_base = shared_as_base
     row.updated_datetime = datetime.now(UTC)
     session.add(row)
     setting_history.record(session, row, saved_by)
@@ -306,9 +335,81 @@ def restore_template(
     return row
 
 
+def shared_templates(session: Session) -> list[tuple[JurisdictionTemplate, Jurisdiction]]:
+    """The templates shared as a base (DIAAT-336), each with its jurisdiction: complete
+    ones only, so a copy starts from one that works."""
+    rows = session.exec(
+        select(JurisdictionTemplate, Jurisdiction)
+        .join(Jurisdiction, Jurisdiction.id == JurisdictionTemplate.jurisdiction_id)  # type: ignore[arg-type]
+        .where(JurisdictionTemplate.shared_as_base)
+        .order_by(JurisdictionTemplate.name, Jurisdiction.code)
+        # Listed by name: the files are not read.
+        .options(defer(JurisdictionTemplate.content))  # type: ignore[arg-type]
+    ).all()
+    return [(row, jurisdiction) for row, jurisdiction in rows if not problems_of(row)]
+
+
+def shared_template_record(row: JurisdictionTemplate, jurisdiction: Jurisdiction) -> dict[str, Any]:
+    """What an admin chooses a base by."""
+    return {
+        "id": str(row.id),
+        "name": row.name,
+        "service": row.service,
+        "jurisdiction": jurisdiction.code,
+        "jurisdiction_name": jurisdiction.display_name or jurisdiction.name,
+        "field_count": len(row.fields),
+    }
+
+
+def add_from_base(session: Session, code: str, base_id: UUID, *, saved_by: UUID | None = None) -> JurisdictionTemplate:
+    """A new template of the jurisdiction from a copy of a shared one (DIAAT-336): its
+    file, boxes, name and fields, as they are now. A draft, as an upload is, for the
+    admin to change and move on; later changes to the shared one do not change it."""
+    jurisdiction = _jurisdiction(session, code)
+    shared = session.exec(
+        select(JurisdictionTemplate, Jurisdiction)
+        .join(Jurisdiction, Jurisdiction.id == JurisdictionTemplate.jurisdiction_id)  # type: ignore[arg-type]
+        .where(JurisdictionTemplate.id == base_id, JurisdictionTemplate.shared_as_base)
+    ).first()
+    if shared is None:
+        msg = "That template is no longer shared as a base."
+        raise NotFoundError(msg)
+    base, home = shared
+    problems = problems_of(base)
+    if problems:
+        raise TemplateProblemsError(problems, action="copied")
+    unique = _unique_name(session, jurisdiction.id, base.name)
+    row = JurisdictionTemplate(
+        jurisdiction_id=jurisdiction.id,
+        name=unique,
+        file_name=base.file_name,
+        content=base.content,
+        sha256=base.sha256,
+        boxes=base.boxes,
+        fields=base.fields,
+        stage=STAGE_DRAFT,
+        enabled=False,
+        started_from={
+            "template_id": str(base.id),
+            "name": base.name,
+            "jurisdiction": home.code,
+            "jurisdiction_name": home.display_name or home.name,
+            "copied_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    session.add(row)
+    setting_history.record(session, row, saved_by)
+    _commit(session, unique)
+    session.refresh(row)
+    return row
+
+
 def delete_template(session: Session, code: str, template_id: UUID) -> str:
+    """Delete a template. Its history is kept, with it as it was last (catch_up), so a
+    judge's draft started with it can still be finished (DIAAT-339)."""
     row = _template(session, code, template_id, lock=True)
     name = row.name
+    setting_history.catch_up(session, row)
     session.delete(row)
     session.commit()
     return name
@@ -340,6 +441,9 @@ def template_record(row: JurisdictionTemplate) -> dict[str, Any]:
         "fields": row.fields,
         "problems": problems_of(row),
         "version": version(row),  # type: ignore[arg-type]
+        # DIAAT-336.
+        "shared_as_base": row.shared_as_base,
+        "started_from": row.started_from,
     }
 
 
@@ -382,9 +486,98 @@ def available_template(
     return row if sees_template(row.stage, testing) else None
 
 
-def judge_fields(row: JurisdictionTemplate) -> list[TemplateField]:
+def judge_fields(fields: list[TemplateField]) -> list[TemplateField]:
     """The fields a judge fills, in the admin's order."""
-    return [f for f in fields_of(row) if f.type not in NOT_ASKED]
+    return [f for f in fields if f.type not in NOT_ASKED]
+
+
+# A version of a template as a judge's draft started with it (DIAAT-339) ------------------
+
+
+def revision_of(sha256: str, fields: list[dict[str, Any]]) -> str:
+    """What a template fills a document from, in short: its file and its fields. The
+    same for a version whose name, stage or sign-off alone changed."""
+    content = json.dumps({"sha256": sha256, "fields": fields}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(content.encode()).hexdigest()[:32]
+
+
+@dataclass
+class TemplateVersion:
+    """A template as it is now or as it was: what a judge's form and document are made from."""
+
+    id: UUID
+    name: str
+    service: str | None
+    sha256: str
+    fields: list[TemplateField]
+    revision: str
+    content: bytes | None = None
+
+    @classmethod
+    def of(cls, row: JurisdictionTemplate) -> TemplateVersion:
+        return cls(
+            id=row.id,
+            name=row.name,
+            service=row.service,
+            sha256=row.sha256,
+            fields=fields_of(row),
+            revision=revision_of(row.sha256, row.fields),
+            content=row.content,
+        )
+
+
+def template_version(
+    session: Session, jurisdiction_id: UUID, template_id: UUID, user_id: UUID, revision: str | None
+) -> TemplateVersion | None:
+    """The template a judge's work is made from: as it is now and only while they can
+    choose it, with no ``revision`` (a page from before DIAAT-339); else the version
+    ``revision`` names, as its draft started with it. That is the one now while they can
+    choose it, else an earlier one from the history: kept once the template has changed
+    or been switched off, so long as they could choose that version then (live, or in
+    test while they are in its test group) and it was complete. None when there is none
+    they may use. The file is read with it."""
+    current = available_template(session, jurisdiction_id, template_id, user_id)
+    if current is not None and (revision is None or revision_of(current.sha256, current.fields) == revision):
+        return TemplateVersion.of(current)
+    if revision is None:
+        return None
+    versions = session.exec(
+        select(SettingVersion)
+        .where(
+            SettingVersion.kind == setting_history.KIND_TEMPLATE,
+            SettingVersion.object_id == template_id,
+            SettingVersion.jurisdiction_id == jurisdiction_id,
+        )
+        .order_by(SettingVersion.number.desc())  # type: ignore[attr-defined]
+    ).all()
+    matching = [v.snapshot for v in versions if revision_of(v.snapshot["sha256"], v.snapshot["fields"]) == revision]
+    testing: bool | None = None
+    for snapshot in matching:
+        stage = snapshot.get("stage")
+        if stage == STAGE_TEST and testing is None:
+            testing = in_test_group(session, user_id, jurisdiction_id)
+        if not sees_template(stage, bool(testing)):
+            continue
+        # Every match has the same file and fields: one that cannot be used, none can.
+        try:
+            fields = [TemplateField.model_validate(f) for f in snapshot["fields"]]
+        except ValueError:
+            return None
+        if field_problems([Box.from_record(b) for b in snapshot["boxes"]], fields):
+            return None
+        content = setting_history.file_of(session, snapshot["sha256"])
+        if content is None:
+            return None
+        return TemplateVersion(
+            id=template_id,
+            name=snapshot["name"],
+            service=snapshot.get("service"),
+            sha256=snapshot["sha256"],
+            fields=fields,
+            revision=revision,
+            content=content,
+        )
+    return None
 
 
 # Filling a template: a judge's submission and the admin's preview (DIAAT-346) -----------
@@ -420,7 +613,7 @@ def template_texts(
     *,
     jurisdiction_id: UUID,
     jurisdiction_name: str,
-    dictated: str,
+    dictated: dict[str, str],
 ) -> tuple[dict[str, Value], dict[str, BoxContent]]:
     """The values kept, and what goes in each box. TemplateValuesError names each value
     that does not fit its field."""
@@ -434,7 +627,7 @@ def template_texts(
         FillContext(
             jurisdiction_name=jurisdiction_name,
             year=datetime.now(UTC).year,
-            dictated_text=dictated,
+            dictated_texts=dictated,
             legal_issue_titles=titles,
             legal_framework_texts=framework_texts,
         ),
@@ -442,11 +635,16 @@ def template_texts(
     return kept, texts
 
 
-# What the preview puts where the judge's dictation goes.
-PREVIEW_DICTATED_TEXT = (
-    "This is where the judge's dictated text goes.\n\n"
-    "Each paragraph the judge dictates or types appears here, in this box's style."
-)
+def preview_dictated_texts(fields: list[TemplateField]) -> dict[str, str]:
+    """What the preview puts where the judge's dictation goes: in each section's box,
+    which section's (DIAAT-416)."""
+    return {
+        f.tag: (
+            f"This is where the judge's dictation for “{f.label}” goes.\n\n"
+            "Each paragraph the judge dictates appears here, in this box's style."
+        )
+        for f in dictation_sections(fields)
+    }
 
 
 def template_of(session: Session, code: str, template_id: UUID) -> JurisdictionTemplate:
@@ -479,7 +677,7 @@ def preview_template(
         values,
         jurisdiction_id=jurisdiction.id,
         jurisdiction_name=jurisdiction.display_name or jurisdiction.name,
-        dictated=PREVIEW_DICTATED_TEXT,
+        dictated=preview_dictated_texts(fields_of(row)),
     )
     try:
         return fill_template(row.content, texts, directory / "preview.docx")

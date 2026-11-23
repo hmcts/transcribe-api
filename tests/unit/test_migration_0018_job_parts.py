@@ -1,4 +1,4 @@
-"""Migration 0017 (DIAAT-408): the ``transcription_job_part`` table.
+"""Migration 0018 (DIAAT-408): the ``transcription_job_part`` table.
 
 Runs the migration's own upgrade() and downgrade() through Alembic's operations on SQLite, so it is
 part of every run (the Postgres checks are in tests/unit/test_migrations.py, which needs
@@ -20,11 +20,11 @@ from sqlalchemy.exc import IntegrityError
 
 from transcribe_api.domain.models_recording import TranscriptionJobPart
 
-MIGRATION = Path(__file__).resolve().parents[2] / "alembic" / "versions" / "0017_job_parts.py"
+MIGRATION = Path(__file__).resolve().parents[2] / "alembic" / "versions" / "0018_job_parts.py"
 
 
 def _load():
-    spec = importlib.util.spec_from_file_location("migration_0017", MIGRATION)
+    spec = importlib.util.spec_from_file_location("migration_0018", MIGRATION)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -64,9 +64,9 @@ def _insert(connection, **values) -> None:
     )
 
 
-def test_it_follows_0016():
+def test_it_follows_0017():
     module = _load()
-    assert (module.revision, module.down_revision) == ("0017", "0016")
+    assert (module.revision, module.down_revision) == ("0018", "0017")
 
 
 def test_upgrade_creates_the_table_with_the_columns_the_parts_need(connection):

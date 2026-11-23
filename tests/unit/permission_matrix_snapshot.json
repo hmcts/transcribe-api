@@ -46,6 +46,9 @@
   "GET /api/admin/jurisdictions/wording-keys": [
     "jurisdictions.manage"
   ],
+  "GET /api/admin/jurisdictions/{code}/base-templates": [
+    "templates.manage"
+  ],
   "GET /api/admin/jurisdictions/{code}/history": [
     "jurisdictions.manage"
   ],
@@ -108,6 +111,10 @@
     "exempt:signed_in"
   ],
   "GET /api/jurisdictions/templates": [
+    "dictation.use",
+    "recording.own"
+  ],
+  "GET /api/jurisdictions/templates/{template_id}/revisions/{revision}": [
     "dictation.use",
     "recording.own"
   ],
@@ -219,6 +226,9 @@
     "jurisdictions.manage"
   ],
   "POST /api/admin/jurisdictions/{code}/templates": [
+    "templates.manage"
+  ],
+  "POST /api/admin/jurisdictions/{code}/templates/from-base": [
     "templates.manage"
   ],
   "POST /api/admin/jurisdictions/{code}/templates/{template_id}/history/{number}/restore": [

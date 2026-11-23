@@ -1,4 +1,4 @@
-"""Migration 0016 (DIAAT-408): ``transcription_job.source_blob_path`` and ``preparation_attempts``.
+"""Migration 0017 (DIAAT-408): ``transcription_job.source_blob_path`` and ``preparation_attempts``.
 
 Runs the migration's own upgrade() and downgrade() through Alembic's operations on SQLite, so it is
 part of every run (the Postgres checks are in tests/unit/test_migrations.py, which needs
@@ -18,11 +18,11 @@ from sqlalchemy import create_engine, inspect, text
 
 from transcribe_api.domain.models_recording import SpeechBatchJob
 
-MIGRATION = Path(__file__).resolve().parents[2] / "alembic" / "versions" / "0016_job_preparation.py"
+MIGRATION = Path(__file__).resolve().parents[2] / "alembic" / "versions" / "0017_job_preparation.py"
 
 
 def _load():
-    spec = importlib.util.spec_from_file_location("migration_0016", MIGRATION)
+    spec = importlib.util.spec_from_file_location("migration_0017", MIGRATION)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -47,9 +47,9 @@ def _columns(connection) -> dict[str, dict]:
     return {column["name"]: column for column in inspect(connection).get_columns("transcription_job")}
 
 
-def test_it_follows_0015_and_nothing_follows_it():
+def test_it_follows_0016():
     module = _load()
-    assert (module.revision, module.down_revision) == ("0016", "0015")
+    assert (module.revision, module.down_revision) == ("0017", "0016")
 
 
 def test_upgrade_adds_a_nullable_path_and_a_non_null_attempt_count_defaulting_to_zero(connection):

@@ -9,14 +9,19 @@ fields on the Hearing Details form. No code change or release is needed.
   boxes with the same tag are one field and are all filled with its value. The title
   is the field's starting label.
 - Fields can only be the template's boxes: none can be added, and every box needs one.
-- Exactly one box takes the dictated text (the judgment). "Filled by BenchNotes" boxes
-  take the jurisdiction's name or the year, and the judge is not asked for them.
+- At least one box takes the dictated text. Each such box is a dictation section
+  (DIAAT-416), named by its label: with several, the judge chooses the section they are
+  dictating, and each box gets only its own section's dictation. The judge's typed
+  notes follow the dictation in the last such box (in the admin's field order); with
+  one box, or a page that sends no sections, everything goes in the first, as before.
+  "Filled by BenchNotes" boxes take the jurisdiction's name or the year, and the judge
+  is not asked for them.
 - A "Filled by BenchNotes" box can take the legal framework text (DIAAT-415): the text the
   jurisdiction's Legal Text Manager keeps for each legal framework the judge chose in the
   template's Legal issues question, in the Legal Text Manager's order, each once, with its
   paragraphs, lists and bold kept. Nothing about any one jurisdiction is in the code.
-- A box left empty (an optional field, or legal framework text with no framework chosen)
-  is removed with its paragraph when every box in that paragraph is empty, so an unused
+- A box left empty (an optional field, a section with nothing dictated, or legal
+  framework text with no framework chosen) is removed with its paragraph when every box in that paragraph is empty, so an unused
   party or panel member leaves no line behind. A legal framework box can have "when left
   empty" text instead.
 
@@ -380,9 +385,14 @@ def field_problems(boxes: list[Box], fields: list[TemplateField]) -> list[str]:
             )
     dictated = [f.label for f in fields if f.type == "dictated"]
     if not dictated:
-        problems.append("Link one box to the dictated text (the judgment).")
-    elif len(dictated) > 1:
-        problems.append("Only one box can take the dictated text: " + ", ".join(f"“{d}”" for d in dictated) + ".")
+        problems.append("Link at least one box to the dictated text.")
+    names = [d.strip().casefold() for d in dictated]
+    repeated = list(dict.fromkeys(d for d, n in zip(dictated, names, strict=True) if names.count(n) > 1))
+    if repeated:
+        problems.append(
+            "Each box for the dictated text is a section judges choose by its name, so each needs"
+            " its own: " + ", ".join(f"“{d}”" for d in repeated) + "."
+        )
     return problems
 
 
@@ -472,7 +482,8 @@ class FillContext:
 
     jurisdiction_name: str
     year: int
-    dictated_text: str
+    # Dictated box tag -> its text (DIAAT-416: each section's own).
+    dictated_texts: dict[str, str]
     # Legal framework id -> title, in the jurisdiction's order.
     legal_issue_titles: dict[str, str] = field(default_factory=dict)
     # Legal framework id -> its text (Markdown), in the jurisdiction's order.
@@ -497,7 +508,7 @@ def box_text(fields: list[TemplateField], values: dict[str, Value], context: Fil
                 continue
             text = f.empty_text
         elif f.type == "dictated":
-            text = context.dictated_text
+            text = context.dictated_texts.get(f.tag)
         elif f.type == "benchnotes":
             text = context.jurisdiction_name if f.source == "jurisdiction" else str(context.year)
         elif _empty(value):
@@ -707,8 +718,42 @@ class _BlockText(HTMLParser):
         self._flush()
 
 
+def dictation_sections(fields: list[TemplateField]) -> list[TemplateField]:
+    """The template's dictation sections (DIAAT-416): its dictated boxes, in its order."""
+    return [f for f in fields if f.type == "dictated"]
+
+
+def sections_cover(fields: list[TemplateField], sections: dict[str, list[str]], transcript: list[str]) -> bool:
+    """Whether the sections hold exactly what was dictated, in the template's order:
+    nothing in the stored transcript is missing from the document, nor the reverse."""
+    return [text for f in dictation_sections(fields) for text in sections.get(f.tag, [])] == transcript
+
+
+def unknown_sections(fields: list[TemplateField], sections: dict[str, list[str]]) -> list[str]:
+    """The sections sent that are none of the template's (its fields may have changed
+    since the judge began): their dictation would have no box to go in."""
+    tags = {f.tag for f in dictation_sections(fields)}
+    return [tag for tag in sections if tag not in tags]
+
+
+def dictated_texts(
+    fields: list[TemplateField], sections: dict[str, list[str]] | None, transcript: list[str], notes_html: str | None
+) -> dict[str, str]:
+    """Each dictated box's text (DIAAT-416): its own section's dictation only, and the
+    judge's typed notes after the last section's. With no sections (one box, or a page
+    from before them), all of it, notes too, goes in the first box, as before sections."""
+    tags = [f.tag for f in dictation_sections(fields)]
+    if not tags:
+        return {}
+    if sections is None:
+        return {tag: dictated_text(transcript, notes_html) if tag == tags[0] else "" for tag in tags}
+    texts = {tag: dictated_text(sections.get(tag, []), None) for tag in tags}
+    texts[tags[-1]] = dictated_text(sections.get(tags[-1], []), notes_html)
+    return texts
+
+
 def dictated_text(transcript: list[str], notes_html: str | None) -> str:
-    """The judgment box's text: what was dictated, then the judge's own text."""
+    """A dictated box's text: what was dictated, then the judge's own text."""
     paragraphs = [t.strip() for t in transcript if t and t.strip()]
     if notes_html:
         parser = _BlockText()

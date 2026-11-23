@@ -40,6 +40,9 @@
   "GET /api/admin/jurisdictions/wording-keys": [
     "JurisdictionSuperAdministrator"
   ],
+  "GET /api/admin/jurisdictions/{code}/base-templates": [
+    "JurisdictionAdministrator"
+  ],
   "GET /api/admin/jurisdictions/{code}/history": [
     "JurisdictionSuperAdministrator"
   ],
@@ -95,6 +98,9 @@
     "JurisdictionSuperAdministrator"
   ],
   "GET /api/jurisdictions/templates": [
+    "Judge"
+  ],
+  "GET /api/jurisdictions/templates/{template_id}/revisions/{revision}": [
     "Judge"
   ],
   "GET /api/live-draft": [
@@ -197,6 +203,9 @@
     "JurisdictionSuperAdministrator"
   ],
   "POST /api/admin/jurisdictions/{code}/templates": [
+    "JurisdictionAdministrator"
+  ],
+  "POST /api/admin/jurisdictions/{code}/templates/from-base": [
     "JurisdictionAdministrator"
   ],
   "POST /api/admin/jurisdictions/{code}/templates/{template_id}/history/{number}/restore": [

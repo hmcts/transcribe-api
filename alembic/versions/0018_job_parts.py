@@ -13,8 +13,8 @@ out. The rows go with their job (ON DELETE CASCADE). The downgrade drops the tab
 being prepared in parts then loses its record of which parts were submitted (turn the flags off and
 let the worker drain first).
 
-Revision ID: 0017
-Revises: 0016
+Revision ID: 0018
+Revises: 0017
 Create Date: 2026-11-20
 """
 
@@ -23,8 +23,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "0017"
-down_revision = "0016"
+revision = "0018"
+down_revision = "0017"
 branch_labels = None
 depends_on = None
 

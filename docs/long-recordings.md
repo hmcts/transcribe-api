@@ -126,7 +126,7 @@ conversion), or by the worker for a job that was deferred.
   measured from its file. The planner keeps every part a second inside the limit (`SEGMENT_SLACK_SECONDS`, a margin that was sized
   for those packets and is kept) and cuts in the middle of a silence of at least half a second. A cancelled preparation stops the
   copy within a chunk and waits for it before the temporary directory is removed.
-- **Recording the parts**: one row per part in `transcription_job_part` (migration 0017): offset in the recording, length, cut kind,
+- **Recording the parts**: one row per part in `transcription_job_part` (migration 0018): offset in the recording, length, cut kind,
   blob (`uploads/{user_id}/{upload_id}-{name}.partNN.wav`, derived from the job's own WAV name, never client-supplied), Azure job,
   status, attempts. The job stays one row; it keeps the idempotency key; it is `PENDING` while its parts are submitted and
   `SUBMITTED` once all are.
@@ -228,7 +228,7 @@ browser makes answers in seconds whatever the recording's length, up to the size
 | `PART_MAX_ATTEMPTS` / `PART_RETRY_BACKOFF_SECONDS` | 3 / 5 | Attempts at one part before the job fails, and the wait between them. |
 | `JOB_STUCK_PART_FACTOR` | 1.5 | A job in parts is reported stuck after this many times its longest part has run (single-file jobs keep `JOB_STUCK_RUNNING_SECONDS`, 6 h). |
 
-**Rollout order.** (1) Deploy the API, the worker and the web with both flags off: migrations 0016 and 0017 are additive and run at
+**Rollout order.** (1) Deploy the API, the worker and the web with both flags off: migrations 0017 and 0018 are additive and run at
 startup, the previous release's pods keep working while it rolls out, and behaviour is as before except that an upload's length is read
 from its header first and `POST /jobs` looks in storage for a waiting original (finding none). (2) Ask the platform team
 for the two infrastructure items below. (3) On AAT turn on `async_upload_preparation`, run part A of the checklist below. (4) On AAT

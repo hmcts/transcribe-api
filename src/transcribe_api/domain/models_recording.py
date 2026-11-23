@@ -629,7 +629,7 @@ class SpeechBatchJob(BaseTable, table=True):
     audio_duration_seconds: float | None = Field(default=None)
     audio_blob_path: str | None = Field(default=None)
 
-    # DIAAT-408 (0016): with asynchronous upload preparation, the blob the original upload waits in
+    # DIAAT-408 (0017): with asynchronous upload preparation, the blob the original upload waits in
     # (incoming/{user_id}/{upload_id}{ext}) until the worker converts it and submits the job. Set
     # on a PENDING job with no Azure job yet; NULL for every other job. preparation_attempts counts
     # the worker's attempts at it (stt/preparation_service.py).
@@ -678,7 +678,7 @@ class SpeechBatchJob(BaseTable, table=True):
 
 
 class TranscriptionJobPart(BaseTable, table=True):
-    """DIAAT-408 (0017): one part of a recording longer than 240 minutes, transcribed as its own Azure
+    """DIAAT-408 (0018): one part of a recording longer than 240 minutes, transcribed as its own Azure
     job (stt/preparation_service.py). ``offset_seconds`` is where the part starts in the whole
     recording, measured from the cut files: what is added to the times of its transcript. Strings,
     not enums, for status and cut kind: the values are ``JobStatus`` and the splitter's CUT_* names."""

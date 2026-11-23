@@ -66,7 +66,7 @@ ADDED_AWARE_TIMESTAMP_COLUMNS = {
     "access_request": ["decided_at", "created_at"],  # 0009
     "system_feature_flag": ["updated_at"],  # 0009
     "setting_version": ["saved_at"],  # 0015
-    "transcription_job_part": ["created_datetime", "updated_datetime"],  # 0017
+    "transcription_job_part": ["created_datetime", "updated_datetime"],  # 0018
 }
 
 # Dictation migration a8f2c9d5e1b3 (fix for 15-20s p95 latency); 0001 lost them.
@@ -101,7 +101,7 @@ def _alter_type_sql(table: str, column: str, type_sql: str) -> re.Pattern[str]:
 def test_there_is_one_history_with_one_head():
     script = ScriptDirectory.from_config(migrations.alembic_config())
     assert script.get_bases() == ["0001"]
-    assert script.get_heads() == ["0017"]
+    assert script.get_heads() == ["0018"]
 
 
 def test_baseline_creates_every_table(monkeypatch):
@@ -317,6 +317,20 @@ def test_0012_makes_each_template_judges_could_choose_live_and_writes_no_jurisdi
         # The previous release's writes kept to the rules (test_sign_off_postgres.py).
         assert f"CREATE TRIGGER {table}_sign_off_guard BEFORE UPDATE ON {table}" in sql
     assert _forbidden_live_writes("0012", sql) == []
+
+
+def test_0016_adds_sharing_a_template_as_a_base_and_writes_nothing_live(monkeypatch):
+    """DIAAT-336. No template is shared and none was started from one."""
+    sql = _offline_sql(monkeypatch, "0015:0016")
+    assert "ALTER TABLE jurisdiction_template ADD COLUMN shared_as_base BOOLEAN DEFAULT false NOT NULL;" in sql
+    assert "ALTER TABLE jurisdiction_template ADD COLUMN started_from JSONB;" in sql
+    assert _forbidden_live_writes("0016", sql) == []
+
+
+def test_0016_downgrade_reverses_it(monkeypatch):
+    sql = _offline_sql(monkeypatch, "0016:0015", downgrade=True)
+    assert "ALTER TABLE jurisdiction_template DROP COLUMN started_from;" in sql
+    assert "ALTER TABLE jurisdiction_template DROP COLUMN shared_as_base;" in sql
 
 
 def test_0012_downgrade_reverses_it(monkeypatch):
@@ -922,7 +936,7 @@ def test_0004_and_0005_keep_every_existing_value_unchanged():
         # Whole rows, as JSON, without the columns 0004 adds.
         added = {
             "user": ["active_jurisdiction_id", "name", "is_active", "sysadmin"],  # 0004, then 0009, then 0014
-            "transcription_job": ["source_blob_path", "preparation_attempts"],  # 0016
+            "transcription_job": ["source_blob_path", "preparation_attempts"],  # 0017
         }
         tables = (
             "user",
