@@ -232,7 +232,7 @@ A send that fails is logged with the exception's type only. Seeding the key in K
 `GET /api/admin/feature-flags` and `PUT /api/admin/feature-flags/{name}` body `{"value": true|false}` (`feature_flags.manage`: acting as SystemAdministrator
 only). Both answer `{"flags": [{name, value, description, updated_at, updated_by}]}`; `updated_by` is the email of whoever set it
 last (null while it has its default, which comes from configuration: `DICTATION_ENABLED`). The flags are `dictation_enabled`, and, from DIAAT-408, `async_upload_preparation` and
-`long_recordings_enabled` (both off by default; defaults `ASYNC_UPLOAD_PREPARATION`, `LONG_RECORDINGS_ENABLED`; see the README, "Long recordings"). 404 `flag_not_found`;
+`long_recordings_enabled` (both off by default; defaults `ASYNC_UPLOAD_PREPARATION`, `LONG_RECORDINGS_ENABLED`; see [long-recordings.md](long-recordings.md)). 404 `flag_not_found`;
 a value that is not a JSON boolean is 422. Audited as `feature_flag.changed` with `flag`, `from`, `to` and `acted_as`.
 
 ```json
