@@ -24,7 +24,7 @@ from opentelemetry.trace import SpanKind
 from tests.unit.recording.unit.async_upload_helpers import tone
 from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.runtime.telemetry import JOURNEY_UPLOAD, configure_telemetry, upload_id_from_blob
-from transcribe_api.stt.preprocessing import AudioDecodeError
+from transcribe_api.stt.preprocessing import AudioDecodeError, ProbedDuration
 
 USER_ID = "00000000-0000-4000-8000-000000000001"
 HEARING_ID = "3F2504E0-4F89-41D3-9A0C-0305E82C3301"  # upper case: normalised on export
@@ -176,7 +176,8 @@ def test_recording_seconds_over_the_limit_is_not_described_as_within_it(tel, moc
     from transcribe_api.runtime.settings_recording import get_settings
 
     mocker.patch.object(get_settings(), "MAX_AUDIO_DURATION_SECONDS", 60)
-    response = _post(_client(mocker), "hearing.wav", body=_wav(60.5))
+    # Within the header tolerance: not refused from the header, the exact check on the WAV is.
+    response = _post(_client(mocker, normalised=_wav(60.5)), "hearing.wav", body=_wav(60.5))
     assert response.status_code == 422
     assert (
         response.json()["detail"] == "The recording is a little over 1 minute long. Recordings can be at most 1 minute."
@@ -284,7 +285,7 @@ def test_audio_formats_are_categorised(tel, mocker):
 
 def test_duration_is_omitted_when_the_audio_cannot_be_read(tel, mocker):
     # Neither the header (no duration) nor the converted file (not a WAV) gives a length.
-    mocker.patch("transcribe_api.api.routes_recording.probe_duration_seconds", new=mocker.AsyncMock(return_value=None))
+    mocker.patch("transcribe_api.api.routes_recording.probe_audio_duration", new=mocker.AsyncMock(return_value=None))
     response = _post(_client(mocker, normalised=b"not a wav"))
     assert response.status_code == 201
     (done,) = tel.events("upload.completed")
@@ -596,7 +597,8 @@ def test_five_hours_is_accepted_with_both_flags_on(tel, mocker, monkeypatch, tmp
     _both_flags(monkeypatch, True)
     _store_locally(monkeypatch, tmp_path)
     mocker.patch(
-        "transcribe_api.api.routes_recording.probe_duration_seconds", new=mocker.AsyncMock(return_value=5 * 3600.0)
+        "transcribe_api.api.routes_recording.probe_audio_duration",
+        new=mocker.AsyncMock(return_value=ProbedDuration(5 * 3600.0, exact=True)),
     )
     assert _post(_client(mocker)).status_code == 201
 
@@ -605,8 +607,8 @@ def test_over_eight_hours_is_refused_with_both_flags_on_naming_the_8_hour_limit(
     _both_flags(monkeypatch, True)
     _store_locally(monkeypatch, tmp_path)
     mocker.patch(
-        "transcribe_api.api.routes_recording.probe_duration_seconds",
-        new=mocker.AsyncMock(return_value=8 * 3600.0 + 120),
+        "transcribe_api.api.routes_recording.probe_audio_duration",
+        new=mocker.AsyncMock(return_value=ProbedDuration(8 * 3600.0 + 120, exact=True)),
     )
     response = _post(_client(mocker))
     assert response.status_code == 422
@@ -631,8 +633,8 @@ def test_with_the_flags_off_a_recording_over_four_hours_is_refused_from_its_head
 ):
     _both_flags(monkeypatch, False)
     probe = mocker.patch(
-        "transcribe_api.api.routes_recording.probe_duration_seconds",
-        new=mocker.AsyncMock(return_value=4 * 3600.0 + 60),
+        "transcribe_api.api.routes_recording.probe_audio_duration",
+        new=mocker.AsyncMock(return_value=ProbedDuration(4 * 3600.0 + 60, exact=True)),
     )
     client = _client(mocker)
     response = _post(client)
@@ -661,7 +663,7 @@ def test_with_the_flags_off_a_file_that_is_not_audio_is_refused_without_converti
 def test_with_the_flags_off_a_missing_ffprobe_is_a_503_and_nothing_is_converted(tel, mocker, monkeypatch):
     _both_flags(monkeypatch, False)
     mocker.patch(
-        "transcribe_api.api.routes_recording.probe_duration_seconds",
+        "transcribe_api.api.routes_recording.probe_audio_duration",
         new=mocker.AsyncMock(side_effect=FileNotFoundError(2, "No such file or directory", "ffprobe")),
     )
     client = _client(mocker)
@@ -689,7 +691,7 @@ def test_with_the_flags_off_a_file_whose_header_gives_no_length_is_converted_and
     tel, mocker, monkeypatch
 ):
     _both_flags(monkeypatch, False)
-    mocker.patch("transcribe_api.api.routes_recording.probe_duration_seconds", new=mocker.AsyncMock(return_value=None))
+    mocker.patch("transcribe_api.api.routes_recording.probe_audio_duration", new=mocker.AsyncMock(return_value=None))
     mocker.patch("transcribe_api.api.routes_recording._wav_duration_seconds", return_value=4 * 3600.0 + 60)
     client = _client(mocker)
     response = _post(client)

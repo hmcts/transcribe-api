@@ -63,3 +63,27 @@ def too_long_detail(duration: float, max_seconds: float) -> str:
     if length == limit:
         return f"The recording is a little over {limit} long. Recordings can be at most {limit}."
     return f"The recording is {length} long. Recordings can be at most {limit}."
+
+
+# What the length in a file's header can prove (DIAAT-408). The header is read in seconds, so a recording
+# that is certainly over the limit is refused before anything is converted; but the header is not the
+# length of the audio Azure will see, so the figure is only trusted as far as it can be:
+#
+# * An exact figure (a WAV, FLAC, MP4... or an MP3 with a Xing/LAME header) can differ from the converted
+#   WAV by encoder delay and padding, a few hundredths of a second (ffmpeg 8.0.1 and 9.0.2 differ by
+#   that much on the same file); HEADER_TOLERANCE_SECONDS allows for it, with room to spare against
+#   anything the header rounds, and is nothing against a limit of four hours.
+# * An estimate (an MP3 with no Xing header: file size over the bitrate; measured here at +0.8 % on CBR
+#   and -7 % on VBR) is refused only when it is over the limit by ESTIMATE_MARGIN, a quarter.
+#
+# Between the limit and that bound the file is not refused at the header: the exact check on the
+# converted WAV (in the request, or in the worker) decides.
+HEADER_TOLERANCE_SECONDS = 2.0
+ESTIMATE_MARGIN = 1.25
+
+
+def header_shows_too_long(seconds: float, *, exact: bool, limit: float) -> bool:
+    """Whether a length read from a file's header proves the recording is over ``limit``."""
+    if exact:
+        return seconds > limit + HEADER_TOLERANCE_SECONDS
+    return seconds > max(limit * ESTIMATE_MARGIN, limit + HEADER_TOLERANCE_SECONDS)

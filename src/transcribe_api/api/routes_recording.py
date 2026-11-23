@@ -86,7 +86,7 @@ from transcribe_api.runtime.security_events import (
     record_jurisdiction_blocked,
     record_ownership_violation,
 )
-from transcribe_api.runtime.settings_recording import get_settings
+from transcribe_api.runtime.settings_recording import AZURE_BATCH_FILE_LIMIT_SECONDS, get_settings
 from transcribe_api.runtime.telemetry import (
     EVENT_UPLOAD_VALIDATION_FAILED,
     JOURNEY_JOB,
@@ -106,10 +106,10 @@ from transcribe_api.stt.part_submission import delete_job_and_parts
 from transcribe_api.stt.preprocessing import (
     AudioDecodeError,
     normalize_to_wav,
-    probe_duration_seconds,
+    probe_audio_duration,
 )
 from transcribe_api.stt.preprocessing import wav_duration_seconds as _wav_duration_seconds
-from transcribe_api.stt.recording_limits import current_limit_seconds
+from transcribe_api.stt.recording_limits import current_limit_seconds, header_shows_too_long
 from transcribe_api.stt.recording_limits import format_duration as _format_duration  # noqa: F401  (tests import it from here)
 from transcribe_api.stt.recording_limits import too_long_detail as _too_long_detail
 from transcribe_api.stt.speech_auth import SpeechAuthError
@@ -854,7 +854,7 @@ async def _upload_audio(
         # DIAAT-408: the length in the file's header (ffprobe), whichever way the upload goes on: a file
         # that cannot be read or is over the limit is refused in seconds, before anything is converted or
         # stored. (No duration in the header: carried on, the exact check after the conversion decides.)
-        await _refuse_from_header(input_path, upload_stage)
+        await _refuse_from_header(input_path, upload_stage, converting_here=not defer_preparation)
 
         if defer_preparation:
             return await _accept_for_preparation(
@@ -898,7 +898,7 @@ async def _upload_audio(
             # wrote, so it is the length Azure will see. (None means the header could
             # not be read: the WAV is ffmpeg's own, so that is not expected, and it is
             # never a reason to fail the upload, as above.)
-            max_seconds = await asyncio.to_thread(current_limit_seconds)
+            max_seconds = await _upload_limit_seconds(converting_here=True)
             if duration > max_seconds:
                 _reject(upload_stage, "upload.too_long")
                 # After _reject: upload.validation_failed carries only the attributes
@@ -927,14 +927,28 @@ async def _upload_audio(
     return UploadResponse(audio_url=audio_url, blob_name=blob_name)
 
 
-async def _refuse_from_header(input_path: Path, upload_stage: StageHandle) -> None:
+async def _upload_limit_seconds(*, converting_here: bool) -> float:
+    """The longest recording this upload may be. An upload that converts inside the request (the flag was
+    off when it began) stores ONE WAV for Azure, so it is capped at Azure's 240 minutes per file whatever
+    the flags say by now: both flags may be turned on while it is in flight, and a 5 hour recording must
+    not be stored as a single file Azure fails. An upload that is deferred is cut into parts by the
+    worker, which applies the limit then."""
+    limit = await asyncio.to_thread(current_limit_seconds)
+    return min(limit, AZURE_BATCH_FILE_LIMIT_SECONDS) if converting_here else limit
+
+
+async def _refuse_from_header(input_path: Path, upload_stage: StageHandle, *, converting_here: bool) -> None:
     """DIAAT-408: read the recording's length from the file header (``ffprobe``, seconds whatever the
-    length) and refuse what cannot be read (422 undecodable; 503 if ffprobe is missing) or is over the
-    effective limit (422 too long, with the sentence), before the file is converted or stored. The
-    header of a VBR MP3 with no Xing header is an estimate and some files state none (None: nothing is
-    refused here); the exact check on the converted WAV is the backstop."""
+    length) and refuse what cannot be read (422 undecodable; 503 if ffprobe is missing) or is certainly
+    over the limit (422 too long, with the sentence), before the file is converted or stored.
+
+    "Certainly": the header is not the length of the audio Azure will see. An exact figure is refused
+    only beyond ``HEADER_TOLERANCE_SECONDS``, an estimate (an MP3 with no Xing header) only beyond
+    ``ESTIMATE_MARGIN``, and a file that states no length (or a video longer than its audio) is not
+    refused here at all (stt/recording_limits.py, stt/preprocessing.py). The exact check on the
+    converted WAV, in the request or in the worker, decides everything else."""
     try:
-        probed = await probe_duration_seconds(input_path)
+        probed = await probe_audio_duration(input_path)
     except AudioDecodeError as exc:
         _reject(upload_stage, "upload.undecodable")
         raise HTTPException(status_code=422, detail=_UNDECODABLE_DETAIL) from exc
@@ -944,12 +958,13 @@ async def _refuse_from_header(input_path: Path, upload_stage: StageHandle) -> No
         raise HTTPException(status_code=503, detail=_TRANSCODER_UNAVAILABLE_DETAIL) from exc
     if probed is None:
         return
-    max_seconds = await asyncio.to_thread(current_limit_seconds)
-    if probed > max_seconds:
+    max_seconds = await _upload_limit_seconds(converting_here=converting_here)
+    if header_shows_too_long(probed.seconds, exact=probed.exact, limit=max_seconds):
         _reject(upload_stage, "upload.too_long")
-        upload_stage.set_attribute("audio.duration_seconds", probed)
-        raise HTTPException(status_code=422, detail=_too_long_detail(probed, max_seconds))
-    upload_stage.set_attribute("audio.duration_seconds", probed)
+        upload_stage.set_attribute("audio.duration_seconds", probed.seconds)
+        raise HTTPException(status_code=422, detail=_too_long_detail(probed.seconds, max_seconds))
+    if probed.exact:
+        upload_stage.set_attribute("audio.duration_seconds", probed.seconds)
 
 
 async def _accept_for_preparation(

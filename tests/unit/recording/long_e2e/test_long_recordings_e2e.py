@@ -66,8 +66,12 @@ class Scale:
 
 
 REAL = Scale("real", 14_400, 12_600, 28_800, 3_600, 14_400, 18_000, 14_460, 28_800, 28_920)
-# The same shape at 1/450: 30 s is 240 minutes, 64 s is 8 hours (three parts of about 21 s).
-SMALL = Scale("small", 30, 22, 64, 8, 30, 40, 31, 64, 66)
+# The same shape at 1/450: 30 s is 240 minutes, 64 s is 8 hours (three parts of about 21 s). The refusals
+# are scaled by more than 1/450 (4 h 01 m would be 30.13 s): the header is refused on only beyond
+# HEADER_TOLERANCE_SECONDS (2 s, for the encoder delay and padding that differ between ffmpeg versions),
+# so a file meant to be refused from its header is more than that over, and one meant to be accepted
+# (exactly at a limit) is within it.
+SMALL = Scale("small", 30, 22, 64, 8, 30, 40, 34, 64, 68)
 
 SCALES = [
     pytest.param(SMALL, id="small"),

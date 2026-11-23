@@ -29,6 +29,8 @@ from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.runtime.telemetry import configure_telemetry
 from transcribe_api.stt import audio_storage, local_storage, submission
 from transcribe_api.stt.audio_storage import source_blob_name
+from transcribe_api.stt.preprocessing import ProbedDuration
+from transcribe_api.stt.recording_limits import HEADER_TOLERANCE_SECONDS
 
 # What a request may take: far under the gateway's 30 s (the brief: well under 10 s).
 FAST = 5.0
@@ -203,8 +205,8 @@ def test_a_recording_over_the_limit_is_refused_with_the_sentence_before_anything
 def test_the_message_for_a_long_recording_names_the_effective_limit(client, monkeypatch, normalize, mocker):
     _flag(monkeypatch, True)  # long recordings still off: the limit is 4 hours
     mocker.patch(
-        "transcribe_api.api.routes_recording.probe_duration_seconds",
-        new=mocker.AsyncMock(return_value=4 * 3600 + 120.0),
+        "transcribe_api.api.routes_recording.probe_audio_duration",
+        new=mocker.AsyncMock(return_value=ProbedDuration(4 * 3600 + 120.0, exact=True)),
     )
     response = _upload(client)
     assert response.status_code == 422
@@ -214,11 +216,11 @@ def test_the_message_for_a_long_recording_names_the_effective_limit(client, monk
 def test_with_both_flags_on_the_same_recording_is_accepted_up_to_8_hours(client, monkeypatch, normalize, mocker):
     _flag(monkeypatch, True, long_recordings=True)
     probe = mocker.patch(
-        "transcribe_api.api.routes_recording.probe_duration_seconds",
-        new=mocker.AsyncMock(return_value=4 * 3600 + 120.0),
+        "transcribe_api.api.routes_recording.probe_audio_duration",
+        new=mocker.AsyncMock(return_value=ProbedDuration(4 * 3600 + 120.0, exact=True)),
     )
     assert _upload(client).status_code == 201
-    probe.return_value = 8 * 3600 + 120.0
+    probe.return_value = ProbedDuration(8 * 3600 + 120.0, exact=True)
     response = _upload(client)
     assert response.status_code == 422
     assert response.json()["detail"] == "The recording is 8 hours 2 minutes long. Recordings can be at most 8 hours."
@@ -227,16 +229,136 @@ def test_with_both_flags_on_the_same_recording_is_accepted_up_to_8_hours(client,
 def test_a_recording_exactly_at_the_limit_is_accepted(client, monkeypatch, normalize, mocker):
     _flag(monkeypatch, True)
     mocker.patch(
-        "transcribe_api.api.routes_recording.probe_duration_seconds", new=mocker.AsyncMock(return_value=4 * 3600.0)
+        "transcribe_api.api.routes_recording.probe_audio_duration",
+        new=mocker.AsyncMock(return_value=ProbedDuration(4 * 3600.0, exact=True)),
     )
     assert _upload(client).status_code == 201
+
+
+# What the header can prove: the figure is refused on only if it is certainly over the limit ---------------
+
+
+def _probe(mocker, seconds, *, exact):
+    return mocker.patch(
+        "transcribe_api.api.routes_recording.probe_audio_duration",
+        new=mocker.AsyncMock(return_value=ProbedDuration(seconds, exact=exact)),
+    )
+
+
+@pytest.fixture
+def converting(mocker):
+    """The real conversion, watched (a flag-off upload converts in the request)."""
+    from transcribe_api.api import routes_recording
+
+    return mocker.spy(routes_recording, "normalize_to_wav")
+
+
+def test_a_header_a_few_hundredths_over_the_limit_is_not_refused_and_the_wav_decides(
+    client, monkeypatch, mocker, converting
+):
+    """ffmpeg 8.0.1 and 9.0.2 differ by encoder delay and padding on the same file, so the header of a file
+    exactly at the limit may read a little over it. Faked, so that no version of ffprobe matters."""
+    _flag(monkeypatch, False)
+    mocker.patch.object(get_settings(), "MAX_AUDIO_DURATION_SECONDS", 60)
+    probe = _probe(mocker, 60.05, exact=True)
+    assert _upload(client, extension_seconds=2.0).status_code == 201  # converted; the real WAV is 2 s
+    converting.assert_called_once()
+    probe.return_value = ProbedDuration(60 + HEADER_TOLERANCE_SECONDS, exact=True)
+    assert _upload(client, extension_seconds=2.0).status_code == 201  # the tolerance itself is not over
+    probe.return_value = ProbedDuration(60 + HEADER_TOLERANCE_SECONDS + 1, exact=True)
+    converting.reset_mock()
+    response = _upload(client, extension_seconds=2.0)
+    assert response.status_code == 422 and "Recordings can be at most 1 minute" in response.json()["detail"]
+    converting.assert_not_called()
+
+
+def test_an_estimate_over_the_limit_is_refused_only_when_clearly_over_it(client, monkeypatch, mocker, converting):
+    _flag(monkeypatch, False)
+    mocker.patch.object(get_settings(), "MAX_AUDIO_DURATION_SECONDS", 100)
+    probe = _probe(mocker, 110.0, exact=False)  # in between: not refused here, the WAV decides
+    assert _upload(client, extension_seconds=2.0).status_code == 201
+    converting.assert_called_once()
+    probe.return_value = ProbedDuration(125.0, exact=False)  # the margin itself is not over
+    assert _upload(client, extension_seconds=2.0).status_code == 201
+    probe.return_value = ProbedDuration(126.0, exact=False)
+    converting.reset_mock()
+    assert _upload(client, extension_seconds=2.0).status_code == 422
+    converting.assert_not_called()
+
+
+def test_an_estimated_length_in_the_grey_zone_is_converted_and_then_judged_exactly(
+    client, monkeypatch, mocker, converting
+):
+    """A real MP3 with no Xing header (the figure is an estimate): over the limit by less than the margin,
+    so it is converted; the exact length of the WAV (20 s) is then over the limit and refuses it."""
+    _flag(monkeypatch, False)
+    mocker.patch.object(get_settings(), "MAX_AUDIO_DURATION_SECONDS", 18)
+    body = tone(".mp3", 20.0, extra=("-write_xing", "0"))
+    response = _upload(client, body=body)
+    converting.assert_called_once()  # not refused at the header
+    assert response.status_code == 422
+    assert (
+        response.json()["detail"]
+        == "The recording is a little over 0 minutes long. Recordings can be at most 0 minutes."
+    )
+
+
+def test_audio_shorter_than_its_video_is_not_refused_for_the_length_of_the_video(
+    client, monkeypatch, mocker, converting, tmp_path
+):
+    """A 20 s video track with a 6 s audio track, limit 10 s: the container says 20 s but only the audio is
+    converted and transcribed. Flag off (converted in the request) and flag on (deferred) both accept it."""
+    import subprocess
+
+    path = tmp_path / "av.mp4"
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=64x64:r=5:d=20",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=6:sample_rate=8000", "-c:v", "mpeg4", "-c:a", "aac",
+         "-y", str(path)],
+        check=True,
+    )  # fmt: skip
+    mocker.patch.object(get_settings(), "MAX_AUDIO_DURATION_SECONDS", 10)
+    for on in (False, True):
+        _flag(monkeypatch, on)
+        response = client.post("/api/v1/uploads", files={"file": ("hearing.mp4", path.read_bytes(), "video/mp4")})
+        assert response.status_code == 201, response.text
+
+
+def test_a_synchronous_upload_is_capped_at_azures_limit_when_the_flags_come_on_while_it_is_in_flight(
+    client, monkeypatch, mocker, converting, tel
+):
+    """The upload chose the synchronous path (flag off); by the time it reads the limit both flags are on, so
+    the limit reads 8 hours: it must still refuse a 5 hour recording, which would be stored as ONE file."""
+    from transcribe_api.api import routes_recording
+
+    _flag(monkeypatch, False)
+    mocker.patch.object(routes_recording, "current_limit_seconds", return_value=8 * 3600)
+    _probe(mocker, 5 * 3600.0, exact=True)
+    response = _upload(client)
+    assert response.status_code == 422
+    assert response.json()["detail"] == "The recording is 5 hours long. Recordings can be at most 4 hours."
+    converting.assert_not_called()
+
+
+def test_the_exact_check_of_a_synchronous_upload_is_capped_too(client, monkeypatch, mocker, converting):
+    from transcribe_api.api import routes_recording
+
+    _flag(monkeypatch, False)
+    # The header read the limit as 4 hours (flags off), the check on the WAV reads it after they came on.
+    mocker.patch.object(routes_recording, "current_limit_seconds", side_effect=[4 * 3600, 8 * 3600])
+    mocker.patch.object(routes_recording, "_wav_duration_seconds", return_value=5 * 3600.0)
+    _probe(mocker, 3 * 3600.0, exact=True)  # within 4 hours: the header check passes and reads the limit once
+    response = _upload(client)
+    converting.assert_called_once()
+    assert response.status_code == 422
+    assert response.json()["detail"] == "The recording is 5 hours long. Recordings can be at most 4 hours."
 
 
 def test_a_file_that_states_no_length_is_accepted_and_the_exact_check_is_left_to_the_worker(
     client, monkeypatch, normalize, mocker, tel
 ):
     _flag(monkeypatch, True)
-    mocker.patch("transcribe_api.api.routes_recording.probe_duration_seconds", new=mocker.AsyncMock(return_value=None))
+    mocker.patch("transcribe_api.api.routes_recording.probe_audio_duration", new=mocker.AsyncMock(return_value=None))
     assert _upload(client).status_code == 201
     (done,) = tel.events("upload.completed")
     assert "audio.duration_seconds" not in done
@@ -253,7 +375,7 @@ def test_the_probed_length_is_on_the_upload_events(client, monkeypatch, normaliz
 def test_a_missing_ffprobe_is_a_503_not_a_bad_file(client, monkeypatch, normalize, mocker, tel):
     _flag(monkeypatch, True)
     mocker.patch(
-        "transcribe_api.api.routes_recording.probe_duration_seconds",
+        "transcribe_api.api.routes_recording.probe_audio_duration",
         new=mocker.AsyncMock(side_effect=FileNotFoundError(2, "No such file or directory", "ffprobe")),
     )
     response = _upload(client)

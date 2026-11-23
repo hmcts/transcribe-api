@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import math
 import wave
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -91,6 +93,8 @@ async def normalize_to_wav(input_path: Path, output_path: Path) -> None:
         "-nostdin",
         "-i",
         str(input_path),
+        "-map",
+        "0:a:0",  # the first audio stream, whatever else the file holds: the one probe_audio_duration measures
         "-ac",
         "1",
         "-ar",
@@ -129,23 +133,79 @@ def wav_duration_seconds(path: Path) -> float | None:
 
 PROBE_TIMEOUT_SECONDS = 10.0
 
+# Container formats (ffprobe's ``format_name``, a comma-separated list of aliases) whose header states the
+# length of the audio, so the figure is exact to a fraction of a second. MP3 is only exact when it carries
+# a Xing/Info/LAME header (see ``_is_exact``); a raw ADTS ``aac`` stream and anything else not listed has
+# its length estimated from the file size over the bitrate.
+_EXACT_LENGTH_FORMATS = frozenset({"wav", "w64", "flac", "ogg", "mov", "mp4", "m4a", "matroska", "webm"})
 
-def _parse_probed_duration(output: str) -> float | None:
-    """The duration ffprobe printed, or None when it printed none ("N/A") or nonsense."""
+
+@dataclass(frozen=True)
+class ProbedDuration:
+    """The length ffprobe read from a file's header, and whether it can be relied on to the second.
+    ``exact`` is False for an estimate (an MP3 with no Xing/LAME header: file size over bitrate, off by
+    several percent on a VBR file); the exact length is known only once the file is converted."""
+
+    seconds: float
+    exact: bool
+
+
+def _seconds(value: object) -> float | None:
+    """A duration ffprobe printed (a string), or None when it printed none ("N/A") or nonsense."""
     try:
-        seconds = float(output.strip().splitlines()[0])
-    except (ValueError, IndexError):
+        seconds = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
         return None
     return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
 
-async def probe_duration_seconds(path: Path, *, timeout: float = PROBE_TIMEOUT_SECONDS) -> float | None:
-    """The duration in the file's header, from ``ffprobe`` (a read of the header, not a decode).
+def _is_exact(format_name: str, audio_stream: dict) -> bool:
+    names = set(format_name.split(","))
+    if "mp3" in names:
+        # With a Xing/Info/LAME header ffprobe takes the length from the frame count and reports the encoder
+        # delay as the stream's start time (0.138 s for a 8 kHz file); without one the stream starts at 0
+        # and the length is an estimate. (A Xing header with no delay information counts as an estimate
+        # too: refusing less is the safe side, the exact check after conversion decides.)
+        start = _seconds(audio_stream.get("start_time"))
+        return start is not None and start > 0
+    return bool(names & _EXACT_LENGTH_FORMATS)
 
-    Returns None when the file is readable but states no length (some VBR MP3s, raw streams), or
-    when ffprobe takes longer than ``timeout``: the exact length is then known only once the file
-    is converted. For a VBR MP3 with no Xing/Info header the figure is an estimate (file size over
-    bitrate), usually within a minute: the exact check on the converted WAV is the backstop.
+
+def parse_probe(output: str) -> ProbedDuration | None:
+    """The length of the audio the conversion will use, from the JSON ffprobe printed.
+
+    ``normalize_to_wav`` maps the first audio stream (``-map 0:a:0``), so that stream's duration is the
+    one that counts: a video track longer than its audio (MP4, MKV) is not the recording's length. A
+    stream that states no duration (Matroska does not) falls back to the container's, but only when the
+    file has no video stream; with a video stream the length is unknown (None: the exact check after the
+    conversion decides). No audio stream at all is also None: the conversion refuses it."""
+    try:
+        data = json.loads(output)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    streams = [s for s in data.get("streams") or [] if isinstance(s, dict)]
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    if audio is None:
+        return None
+    fmt = data.get("format") if isinstance(data.get("format"), dict) else {}
+    seconds = _seconds(audio.get("duration"))
+    if seconds is None:
+        if any(s.get("codec_type") == "video" for s in streams):
+            return None
+        seconds = _seconds(fmt.get("duration"))
+        if seconds is None:
+            return None
+    return ProbedDuration(seconds, _is_exact(str(fmt.get("format_name") or ""), audio))
+
+
+async def probe_audio_duration(path: Path, *, timeout: float = PROBE_TIMEOUT_SECONDS) -> ProbedDuration | None:
+    """The length of the audio in the file's header, from ``ffprobe`` (a read of the header, not a decode).
+
+    Returns None when the file is readable but states no usable length (some VBR MP3s, raw streams, a
+    video with an audio track that states none), or when ffprobe takes longer than ``timeout``: the exact
+    length is then known only once the file is converted. See ``ProbedDuration`` for an estimate.
 
     Raises:
         AudioDecodeError: if ffprobe cannot read the file at all (not audio, or corrupt).
@@ -156,9 +216,9 @@ async def probe_duration_seconds(path: Path, *, timeout: float = PROBE_TIMEOUT_S
         "-v",
         "error",
         "-show_entries",
-        "format=duration",
+        "format=format_name,duration:stream=index,codec_type,duration,start_time",
         "-of",
-        "csv=p=0",
+        "json",
         str(path),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -175,7 +235,7 @@ async def probe_duration_seconds(path: Path, *, timeout: float = PROBE_TIMEOUT_S
         raise AudioDecodeError(
             f"ffprobe could not read the audio (exit {proc.returncode}): {stderr.decode(errors='replace')[-300:]}"
         )
-    return _parse_probed_duration(stdout.decode(errors="replace"))
+    return parse_probe(stdout.decode(errors="replace"))
 
 
 # Uploads are transcoded with ffmpeg (above); the worker probes and converts

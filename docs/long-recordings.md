@@ -35,14 +35,30 @@ The effective limit is what `GET /api/flags` returns as `max_recording_seconds`,
 **The header check, whatever the flag.** Every upload is saved and its length is read from the file header with `ffprobe`
 (`_refuse_from_header` in `api/routes_recording.py`) before anything is converted or stored: a file that is not audio is a 422
 ("could not be decoded"), a missing `ffprobe` is a 503, and a recording over the effective limit is a 422 with the usual
-sentence, all within seconds. A file whose header states no length passes this check (the exact check after conversion, below,
-decides); the length of some files (a VBR MP3 with no Xing header) is only an estimate in the header.
+sentence, all within seconds. The header is not the length of the audio Azure will see, so only what is *certainly* over the
+limit is refused here (`stt/recording_limits.py`, `stt/preprocessing.py`):
+
+- The length is that of the **first audio stream**, the one the conversion maps (`ffmpeg -map 0:a:0`), not the container's: an MP4 or
+  MKV whose video is longer than its audio is measured by its audio. If that stream states no duration (Matroska does not) and the
+  file has a video stream, the length is unknown; with no video stream the container's is used.
+- A figure from a format that states the length (WAV, FLAC, Ogg, MP4/M4A, Matroska, or an MP3 with a Xing/LAME header) is exact to
+  a fraction of a second, but encoder delay and padding differ between ffmpeg versions (8.0.1 here, 9.0.2 in the production image), so
+  it is refused only if it is more than `HEADER_TOLERANCE_SECONDS` (2 s) over the limit.
+- A figure that is an **estimate** (an MP3 with no Xing/LAME header, raw AAC, any format not listed: size over bitrate; measured
+  locally at +0.8 % on a constant-bitrate file and -7 % on a variable-bitrate one) is refused only if it is over the limit by a
+  quarter (`ESTIMATE_MARGIN` 1.25). An MP3 counts as exact only when `ffprobe` reports a non-zero start time, which is the encoder
+  delay from the Xing/LAME header (verified on files made with `ffmpeg -write_xing 0` and without); one with a Xing header but no
+  delay counts as an estimate, which only refuses less.
+- A file that states no length passes, and so does anything between the limit and these bounds: the exact check after the
+  conversion (in the request, or in the worker) decides.
 
 Converting a recording takes about 13-14 s per hour of audio, and the frontend Application Gateway gives a backend 30 s, so a
 long recording used to end in a 504 although the server finished. What happens next depends on the flag.
 
 **Flag off.** The request goes on as it did before DIAAT-408: it converts the file to a WAV (`ffmpeg`), checks the exact length of
-the WAV against the same limit, stores the WAV and answers. This is the path that can still reach the gateway's 30 s for a long
+the WAV against the same limit, stores the WAV and answers. An upload that began with the flag off stores ONE WAV for Azure, so both
+of its checks (the header and the WAV) are capped at Azure's 240 minutes whatever the flags say by then: if both are turned on while
+it is in flight, a 5 hour recording is still refused rather than stored as a file Azure fails. This is the path that can still reach the gateway's 30 s for a long
 recording that is within the limit.
 
 **Flag on.** No request converts anything:
@@ -236,12 +252,12 @@ point, which `cut_kind` records), the 1 s cutting slack, `PART_TARGET_SECONDS`, 
   nothing polls (the single-file path has the same window).
 - There is no retry or resubmit route for a failed job (single-file jobs never had one): the clerk uploads again.
 - A recording's transcript cannot be exported (there is no export of one; only the audio can be downloaded).
-- A file whose header states no length passes the header check, whatever the flag. With the asynchronous path on it is accepted
+- A file whose header states no length, or whose estimate or tolerance puts it near the limit, passes the header check, whatever the flag. With the asynchronous path on it is accepted
   by the upload and a bad one fails as a job; with the flag off it is converted inside the request first (slow for a long one)
   and then checked exactly. Observed with ffmpeg 8.0.1: text named `.mp3` makes `ffprobe` exit 0 and report no duration (its MP3
   detection is lenient), so the header cannot refuse it and the conversion does (flag off: a 422 in the request; flag on: the job
   fails with "The audio file could not be decoded..."). A file `ffprobe` refuses is a 422 in the request either way. The length
-  of a VBR MP3 with no Xing header is an estimate in the header; the exact check on the converted WAV is the backstop.
+  of a VBR MP3 with no Xing header is only an estimate (see above); the exact check on the converted WAV is the backstop.
 - Nothing here has been run against real Azure Speech or Blob Storage.
 
 **Measured locally (not on a pod, not with real hearings).** On a development machine (8 cores, ffmpeg 8.0.1), with synthetic
@@ -273,7 +289,7 @@ the risk accepted; `GET /api/flags` shows `max_recording_seconds: 14400`.
 | File | Expected |
 |---|---|
 | `bad.mp3` (not audio) | A 422 "could not be decoded" in under 2 s, or (if `ffprobe` is lenient with it, as it was locally) a 201 and then a failed job with the same sentence. |
-| `over.mp3` (4 h 01 m), `just-over.mp3` | A 422 with the 4-hour sentence in under 10 s, nothing stored. (A VBR MP3 without a Xing header may be judged by an estimate: check each way.) |
+| `over.mp3` (4 h 01 m), `just-over.mp3` | A 422 with the 4-hour sentence in under 10 s, nothing stored. (A VBR MP3 without a Xing header is judged by an estimate: one only a little over the limit is converted first and refused after, check each way. A file within 2 s of the limit is converted and judged exactly.) |
 | `timing-60min.mp3`, `timing-75min`, `timing-120min.mp3` | 201 from `/uploads` and `/jobs` each in under 10 s, job `pending` ("being prepared"), then `processing`, then `completed`; no part rows. |
 | `timing-180min.mp3`, `timing-B-180min-32kbps.mp3`, `under-3h59m.mp3` | The same; previously a 504 and a duplicate job. |
 | `exact-240.mp3` (14,400 s) | Accepted, one Azure job, no part rows. What Azure does at exactly 240 minutes is unknown: record it. |
