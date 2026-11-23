@@ -297,6 +297,50 @@ def test_a_cut_planned_in_the_shortest_silence_is_still_inside_it_a_packet_late(
     assert silence.start < cut + 0.13 < silence.end
 
 
+def test_the_part_files_are_ordered_by_their_number_past_part_999(tmp_path):
+    """``part-%03d.wav`` is part-1000.wav from the 1001st segment on: as text it sorts between part-100 and
+    part-101. (8 hours at the smallest PART_TARGET_SECONDS, 20, is 1,440 parts.)"""
+    for number in range(1005):
+        (tmp_path / f"part-{number:03d}.wav").write_bytes(b"")
+    files = splitter._segment_files(tmp_path)
+    assert [f.name for f in files] == [f"part-{n:03d}.wav" for n in range(1005)]
+    assert sorted(f.name for f in tmp_path.glob("part-*.wav"))[101] != "part-101.wav"  # the trap: sorting names
+
+
+@pytest.mark.parametrize("missing", ["part-001.wav", "part-000.wav"])
+def test_part_files_that_are_not_numbered_consecutively_from_zero_are_refused(tmp_path, missing):
+    for number in range(4):
+        (tmp_path / f"part-{number:03d}.wav").write_bytes(b"")
+    (tmp_path / missing).unlink()
+    with pytest.raises(SplitError, match="consecutively"):
+        splitter._segment_files(tmp_path)
+
+
+def test_a_stray_file_among_the_parts_is_refused(tmp_path):
+    (tmp_path / "part-000.wav").write_bytes(b"")
+    (tmp_path / "part-old.wav").write_bytes(b"")
+    with pytest.raises(SplitError, match="unexpected"):
+        splitter._segment_files(tmp_path)
+
+
+async def test_more_than_a_thousand_real_parts_keep_their_order_and_offsets(tmp_path):
+    """A real cut into 1,025 parts (a 205 s WAV cut every 0.2 s, more than the packet of either ffmpeg) with
+    names past part-999: each part follows the previous one and the offsets are the cut times."""
+    wav = tmp_path / "full.wav"
+    wav.write_bytes(tone_and_silence((("t", 205.0),)))
+    total = _frames(wav) / 16000
+    cut_times = [round(0.2 * k, 3) for k in range(1, 1025)]
+    out = tmp_path / "parts"
+    out.mkdir()
+    cut = await splitter.cut_segments(wav, cut_times, out, total_seconds=total, limit=60.0)
+    assert len(cut) == 1025
+    assert [p.path.name for p in cut] == [f"part-{n:03d}.wav" for n in range(1025)]
+    assert [p.index for p in cut] == list(range(1, 1026))
+    for number in (100, 101, 999, 1000, 1001, 1024):  # around the point where the names stop sorting
+        assert cut[number].offset_seconds == pytest.approx(0.2 * number, abs=CUT_TOLERANCE_SECONDS * 2)
+    assert all(a.offset_seconds < b.offset_seconds for a, b in itertools.pairwise(cut))
+
+
 async def test_audio_with_no_silence_is_cut_at_the_ideal_points(tmp_path):
     wav = tmp_path / "full.wav"
     wav.write_bytes(tone_and_silence((("t", 70.0),)))

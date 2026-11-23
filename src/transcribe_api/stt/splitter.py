@@ -243,6 +243,27 @@ def _wav_seconds(path: Path) -> float:
         raise SplitError(f"a part could not be read back ({type(exc).__name__})") from exc
 
 
+_SEGMENT_NAME = re.compile(r"part-(\d+)\.wav")
+
+
+def _segment_files(out_dir: Path) -> list[Path]:
+    """The files ``ffmpeg -f segment`` wrote for ``part-%03d.wav``, in cutting order. The number is at
+    least three digits and grows past 999 (``part-1000.wav``), so the order is the number's, not the name's:
+    sorted as text ``part-1000.wav`` would land between ``part-100`` and ``part-101`` and scramble the
+    offsets, while the lengths would still add up to the whole recording. Raises SplitError unless the
+    numbers are exactly 0, 1, ... n-1."""
+    numbered: list[tuple[int, Path]] = []
+    for path in out_dir.glob("part-*.wav"):
+        match = _SEGMENT_NAME.fullmatch(path.name)
+        if match is None:
+            raise SplitError(f"unexpected file {path.name} among the parts")
+        numbered.append((int(match.group(1)), path))
+    numbered.sort()
+    if [n for n, _ in numbered] != list(range(len(numbered))):
+        raise SplitError("the parts ffmpeg wrote are not numbered consecutively from 0")
+    return [path for _, path in numbered]
+
+
 async def cut_segments(
     wav_path: Path,
     cut_times: list[float],
@@ -282,7 +303,7 @@ async def cut_segments(
             f"ffmpeg segment failed (exit {result.returncode}): {result.stderr.decode(errors='replace')[-300:]}"
         )
 
-    files = sorted(out_dir.glob("part-*.wav"))
+    files = _segment_files(out_dir)
     if len(files) != len(cut_times) + 1:
         raise SplitError(f"expected {len(cut_times) + 1} parts, ffmpeg wrote {len(files)}")
     parts: list[CutPart] = []

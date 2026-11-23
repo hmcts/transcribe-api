@@ -117,7 +117,8 @@ conversion), or by the worker for a job that was deferred.
   moves to the longest silence within about 10 minutes of its ideal point (ffmpeg `silencedetect`), or is cut at the ideal point if
   there is none (`cut_kind` on the part row says which). The plan is checked: contiguous, covering the whole recording, no part over
   14,400 s. The WAV is cut with `ffmpeg -c copy -f segment` (no re-encode); each part's offset and length are measured from the cut
-  files, because the muxer cuts at packet boundaries (a fraction of a second: about 0.06 s with ffmpeg 8.0.1, up to 0.128 s with the
+  files (ordered by the number in `part-%03d.wav`, which grows past 999: 8 hours at the smallest `PART_TARGET_SECONDS`, 20, is 1,440
+  parts, and the names must be exactly 0 to n-1 or the cut fails), because the muxer cuts at packet boundaries (a fraction of a second: about 0.06 s with ffmpeg 8.0.1, up to 0.128 s with the
   9.0.2 of the production image, 4096-byte packets of 16 kHz mono 16-bit audio). The planner keeps every part a second inside the
   limit (`SEGMENT_SLACK_SECONDS`, about eight packets) and cuts in the middle of a silence of at least half a second, so a cut that
   lands a packet late is still inside the silence and no part passes the limit.
