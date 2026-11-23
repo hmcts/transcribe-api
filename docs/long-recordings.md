@@ -136,7 +136,8 @@ conversion), or by the worker for a job that was deferred.
   job is a **502 and the job is kept** (a blob that is already gone is success), with the part rows still recording what is left
   and the job marked `needs_cleanup`, so the delete can simply be repeated. (The job's own Azure job, the one of a single-file
   job, is still deleted on a best-effort basis and never blocks the delete.) The rows are removed only after every delete has
-  succeeded. The last step is one transaction that locks the job row (`SELECT ... FOR UPDATE`), deletes the part rows and reads
+  succeeded. A part's references are forgotten only if they still hold what was seen and deleted (compare and clear, field by
+  field): a blob or Azure job the worker records while a delete is being awaited stays recorded for the next pass. The last step is one transaction that locks the job row (`SELECT ... FOR UPDATE`), deletes the part rows and reads
   what they recorded: if the worker created or recorded a part after the resources were released, the transaction is rolled back,
   that part's blob and Azure job are deleted and the step is tried again (3 times at most, then a 502 to be repeated). A worker
   that inserts a part after the delete committed fails the foreign key (checked on Postgres: it waits on the job's lock, then gets

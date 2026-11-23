@@ -133,6 +133,24 @@ def test_a_part_that_azure_cannot_delete_keeps_the_job_and_its_rows_and_the_dele
     assert _rows(engine, job.id) == []
 
 
+def test_a_part_reference_is_forgotten_only_if_it_still_holds_what_was_deleted(engine):
+    job = add_job(engine, source_blob_path=None)
+    plan = jobs.PartPlan(1, 1, 0.0, 10.0, "start", "uploads/u/seen.part01.wav")
+    with Session(engine) as session:
+        (row,) = jobs.create_job_parts(session, job.id, [plan])
+        part_id = row.id
+        jobs.mark_part_submitted(session, part_id, "azure-new", "https://azure.test/jobs/new")
+        # What the cleanup saw and deleted: another blob and another Azure job than the ones recorded now.
+        seen = jobs.PartRefs(part_id, 1, "uploads/u/older.part01.wav", "https://azure.test/jobs/older")
+        jobs.release_part_refs(session, [seen])
+    (kept,) = _rows(engine, job.id)
+    assert (kept.blob_path, kept.batch_job_url) == ("uploads/u/seen.part01.wav", "https://azure.test/jobs/new")
+    with Session(engine) as session:
+        jobs.release_part_refs(session, [jobs.PartRefs(part_id, 1, kept.blob_path, kept.batch_job_url)])
+    (cleared,) = _rows(engine, job.id)
+    assert (cleared.blob_path, cleared.batch_job_url) == (None, None)
+
+
 def _storage_refusing(mocker, name_part: str, times: int = 1):
     """The local storage, refusing to delete a blob whose name contains ``name_part`` (``times`` times)."""
     from transcribe_api.stt.audio_storage import LocalAudioStorage, StorageError

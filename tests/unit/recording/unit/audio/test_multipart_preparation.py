@@ -651,6 +651,41 @@ async def test_a_worker_that_keeps_recording_parts_leaves_the_job_and_its_rows_f
     assert reload_job(engine, job.id) is None
 
 
+async def test_an_azure_job_recorded_while_the_cleanup_deletes_the_blob_is_not_forgotten_and_is_deleted(
+    engine, azure, mocker
+):
+    """The worker accepts a part and records its Azure job while the delete awaits the deletion of that part's
+    blob. Forgetting the part by its id alone would erase the new URL, and the last step would then delete the row
+    and leave the Azure job running. Each field is forgotten only if it still holds what was seen."""
+    job = _waiting(engine)
+    plan = jobs.PartPlan(1, 1, 0.0, 10.0, "start", part_blob_name(job.audio_blob_path, 1))
+    with Session(engine) as session:
+        (row,) = jobs.create_job_parts(session, job.id, [plan])
+    local_storage.save(b"part", row.blob_path)  # what the worker stored; its Azure job is not recorded yet
+    url = f"mock://batch-jobs/{uuid4()}"
+    real_delete = audio_storage.LocalAudioStorage.delete
+    recorded = []
+
+    async def delete_and_meanwhile_the_worker_records_the_job(self, blob_name):
+        await real_delete(self, blob_name)
+        if not recorded:
+            recorded.append(url)
+            with Session(engine) as session:
+                assert jobs.mark_part_submitted(session, row.id, "azure-1", url)
+
+    mocker.patch.object(audio_storage.LocalAudioStorage, "delete", delete_and_meanwhile_the_worker_records_the_job)
+
+    assert await cleanup_job_parts(job.id, engine=engine) is True
+    (kept,) = _parts(engine, job.id)
+    assert kept.batch_job_url == url and kept.blob_path is None  # the blob was seen and deleted; the URL was not seen
+    assert azure.deleted == []
+
+    assert await delete_job_and_parts(job.id, engine=engine) is True
+    assert azure.deleted == [url]  # the Azure job the worker made is deleted, not left running
+    assert reload_job(engine, job.id) is None and _parts(engine, job.id) == []
+    assert not _exists(part_blob_name(job.audio_blob_path, 1))
+
+
 async def test_cleanup_deletes_every_part_blob_and_azure_job_and_can_keep_or_remove_the_rows(engine, azure):
     job = _waiting(engine)
     await _prepare()

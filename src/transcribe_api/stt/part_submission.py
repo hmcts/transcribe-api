@@ -74,12 +74,13 @@ async def submit_part_to_speech(
 
 async def _release(
     refs: list[jobs.PartRefs], audio_blob_path: str | None, storage: AudioStorage, job_id: UUID
-) -> tuple[list[UUID], bool]:
+) -> tuple[list[jobs.PartRefs], bool]:
     """Delete the Azure job and the blob each part still records, each step on its own. Returns the
-    parts whose resources are all deleted and whether that is every one. A part with an Azure job
+    observed references of the parts whose resources are all deleted (to be forgotten only if they
+    still hold what was deleted, ``release_part_refs``) and whether that is every part. A part with an Azure job
     recorded always has its blob deleted by its derived name too: the worker that made the Azure job
     may have stored the blob after its row was released (blob names are derived, never supplied)."""
-    released: list[UUID] = []
+    released: list[jobs.PartRefs] = []
     clean = True
     for ref in refs:
         ok = True
@@ -99,7 +100,7 @@ async def _release(
                 ok = False
                 logger.warning("Could not delete a part's blob of job %s (%s)", job_id, type(exc).__name__)
         if ok:
-            released.append(ref.part_id)
+            released.append(ref)
         clean = clean and ok
     return released, clean
 

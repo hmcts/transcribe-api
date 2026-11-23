@@ -638,15 +638,21 @@ def get_part_refs(session: Session, job_id: UUID) -> list[PartRefs]:
     return [PartRefs(p.id, p.part_index, p.blob_path, p.batch_job_url) for p in get_job_parts(session, job_id)]
 
 
-def release_part_refs(session: Session, part_ids: list[UUID]) -> None:
-    """The blob and Azure job of these parts have been deleted: forget where they were."""
-    if not part_ids:
-        return
-    session.execute(
-        sa_update(TranscriptionJobPart)
-        .where(col(TranscriptionJobPart.id).in_(part_ids))
-        .values(blob_path=None, batch_job_url=None, updated_datetime=datetime.now(UTC))
-    )
+def release_part_refs(session: Session, observed: list[PartRefs]) -> None:
+    """The blob and Azure job these parts were seen to record have been deleted: forget them. Each field
+    is cleared only if it still holds what was observed (compare and clear, in the UPDATE's WHERE): the
+    worker may have recorded another blob or Azure job on the part while the deletes were awaited, and
+    that one is not deleted, so it must stay recorded for the next pass."""
+    for ref in observed:
+        for name, seen in (("blob_path", ref.blob_path), ("batch_job_url", ref.batch_job_url)):
+            if seen is None:
+                continue
+            column = getattr(TranscriptionJobPart, name)
+            session.execute(
+                sa_update(TranscriptionJobPart)
+                .where(col(TranscriptionJobPart.id) == ref.part_id, column == seen)
+                .values({name: None, "updated_datetime": datetime.now(UTC)})
+            )
     session.commit()
 
 

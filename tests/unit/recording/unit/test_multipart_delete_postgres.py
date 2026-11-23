@@ -136,3 +136,39 @@ def test_a_job_with_a_part_that_still_records_its_resources_is_not_deleted_and_n
     with Session(engine) as session:
         assert session.get(SpeechBatchJob, job.id) is not None  # rolled back: the job and the row are still there
         assert len(jobs.get_job_parts(session, job.id)) == 1
+
+
+async def test_an_azure_job_recorded_while_the_cleanup_deletes_the_blob_survives_the_release_on_postgres(
+    engine, mocker
+):
+    job = add_job(engine, source_blob_path=None)
+    deleted = []
+
+    async def delete_batch_job(url):
+        deleted.append(url)
+
+    mocker.patch.object(part_submission, "delete_batch_job", new=delete_batch_job)
+    with Session(engine) as session:
+        (row,) = jobs.create_job_parts(session, job.id, [_plan(job)])
+    local_storage.save(b"part", row.blob_path)
+    url = f"mock://batch-jobs/{uuid4()}"
+    from transcribe_api.stt import audio_storage
+
+    real_delete = audio_storage.LocalAudioStorage.delete
+    recorded = []
+
+    async def delete_and_meanwhile_the_worker_records_the_job(self, blob_name):
+        await real_delete(self, blob_name)
+        if not recorded:
+            recorded.append(url)
+            with Session(engine) as session:
+                assert jobs.mark_part_submitted(session, row.id, "azure-1", url)
+
+    mocker.patch.object(audio_storage.LocalAudioStorage, "delete", delete_and_meanwhile_the_worker_records_the_job)
+
+    assert await delete_job_and_parts(job.id, engine=engine) is True
+
+    assert deleted == [url]
+    with Session(engine) as session:
+        assert session.get(SpeechBatchJob, job.id) is None
+        assert jobs.get_job_parts(session, job.id) == []
