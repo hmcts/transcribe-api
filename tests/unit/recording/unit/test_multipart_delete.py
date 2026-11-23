@@ -95,20 +95,123 @@ def test_deleting_a_job_in_parts_removes_its_blobs_azure_jobs_and_rows(client, e
         assert jobs.get_job_parts(session, job.id) == []
 
 
-def test_a_part_that_azure_cannot_delete_does_not_stop_the_job_being_deleted(client, engine, mocker):
+def _rows(engine, job_id):
+    with Session(engine) as session:
+        return jobs.get_job_parts(session, job_id)
+
+
+def test_a_part_that_azure_cannot_delete_keeps_the_job_and_its_rows_and_the_delete_can_be_repeated(
+    client, engine, mocker
+):
+    """A failed delete must not lose the only record of what is left: 502, the job and the part rows (with
+    their Azure URLs) stay, the job is marked, and once Azure answers a second delete finishes the job."""
     job, blobs = _job_in_parts(engine)
 
     async def refuse(url):
         raise RuntimeError("azure down")
 
     mocker.patch.object(part_submission, "delete_batch_job", new=refuse)
+    response = client.delete(f"/api/v1/jobs/{job.id}")
+
+    assert response.status_code == 502
+    assert not any(_exists(name) for name in blobs)  # each step is tried on its own: the blobs went
+    with Session(engine) as session:
+        kept = session.get(SpeechBatchJob, job.id)
+        assert kept is not None and kept.needs_cleanup is True
+    assert [p.batch_job_url for p in _rows(engine, job.id)] == [f"https://azure.test/jobs/azure-{i}" for i in (1, 2, 3)]
+
+    deleted = []
+
+    async def delete_batch_job(url):
+        deleted.append(url)
+
+    mocker.patch.object(part_submission, "delete_batch_job", new=delete_batch_job)
     assert client.delete(f"/api/v1/jobs/{job.id}").status_code == 204
-    assert not any(_exists(name) for name in blobs)  # the blobs went whatever Azure said
+    assert sorted(deleted) == [f"https://azure.test/jobs/azure-{i}" for i in (1, 2, 3)]
+    with Session(engine) as session:
+        assert session.get(SpeechBatchJob, job.id) is None
+    assert _rows(engine, job.id) == []
+
+
+def _storage_refusing(mocker, name_part: str, times: int = 1):
+    """The local storage, refusing to delete a blob whose name contains ``name_part`` (``times`` times)."""
+    from transcribe_api.stt.audio_storage import LocalAudioStorage, StorageError
+
+    real = LocalAudioStorage.delete
+    refused = []
+
+    async def delete(self, blob_name):
+        if name_part in blob_name and len(refused) < times:
+            refused.append(blob_name)
+            raise StorageError("storage down")
+        await real(self, blob_name)
+
+    mocker.patch.object(LocalAudioStorage, "delete", delete)
+    return refused
+
+
+def test_a_part_blob_that_cannot_be_deleted_keeps_the_job_and_its_rows_and_a_second_delete_succeeds(
+    client, engine, mocker
+):
+    job, blobs = _job_in_parts(engine)
+    refused = _storage_refusing(mocker, ".part02.")
+    deleted = []
+
+    async def delete_batch_job(url):
+        deleted.append(url)
+
+    mocker.patch.object(part_submission, "delete_batch_job", new=delete_batch_job)
+
+    assert client.delete(f"/api/v1/jobs/{job.id}").status_code == 502
+
+    assert refused == [blobs[1]]
+    rows = _rows(engine, job.id)
+    assert len(rows) == 3
+    # What was deleted is forgotten; what is left is still recorded, so the retry knows.
+    assert [p.blob_path for p in rows] == [None, blobs[1], None]
+    assert _exists(blobs[1]) and not _exists(blobs[0]) and not _exists(blobs[2])
+    with Session(engine) as session:
+        kept = session.get(SpeechBatchJob, job.id)
+        assert kept is not None and kept.needs_cleanup is True
+
+    assert client.delete(f"/api/v1/jobs/{job.id}").status_code == 204
+    assert not any(_exists(name) for name in blobs)
+    assert _rows(engine, job.id) == []
+    with Session(engine) as session:
+        assert session.get(SpeechBatchJob, job.id) is None
+
+
+def test_an_original_that_cannot_be_deleted_keeps_the_job_and_a_retry_succeeds(client, engine, mocker):
+    job, _blobs = _job_in_parts(engine)
+    mocker.patch.object(part_submission, "delete_batch_job", new=mocker.AsyncMock())
+    refused = _storage_refusing(mocker, "incoming/")
+
+    assert client.delete(f"/api/v1/jobs/{job.id}").status_code == 502
+
+    assert refused == [job.source_blob_path]
+    assert _exists(job.source_blob_path)
+    with Session(engine) as session:
+        assert session.get(SpeechBatchJob, job.id) is not None
+    assert len(_rows(engine, job.id)) == 3  # nothing was touched past the original
+
+    assert client.delete(f"/api/v1/jobs/{job.id}").status_code == 204
+    assert not _exists(job.source_blob_path)
+    with Session(engine) as session:
+        assert session.get(SpeechBatchJob, job.id) is None
+
+
+def test_a_job_whose_original_is_already_gone_is_deleted(client, engine, mocker):
+    """A blob that is not there is success: the original of a job that was prepared and settled."""
+    job = add_job(engine, source_blob_path=f"incoming/{USER_ID}/{uuid4()}.mp3")
+    local_storage.save(b"wav", job.audio_blob_path)
+    assert client.delete(f"/api/v1/jobs/{job.id}").status_code == 204
+    with Session(engine) as session:
+        assert session.get(SpeechBatchJob, job.id) is None
 
 
 def test_a_job_of_240_minutes_or_less_is_deleted_as_before_without_looking_for_parts(client, engine, mocker):
     job = add_job(engine, source_blob_path=None)
     local_storage.save(b"wav", job.audio_blob_path)
-    cleanup = mocker.patch("transcribe_api.api.routes_recording.cleanup_job_parts")
+    cleanup = mocker.patch("transcribe_api.api.routes_recording.delete_job_and_parts")
     assert client.delete(f"/api/v1/jobs/{job.id}").status_code == 204
     cleanup.assert_not_called()

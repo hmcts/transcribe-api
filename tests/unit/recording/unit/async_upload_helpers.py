@@ -10,11 +10,12 @@ from functools import cache
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from sqlalchemy import event
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
 from sqlmodel import Session, SQLModel, create_engine
 
-from transcribe_api.domain.models_recording import JobStatus, SpeechBatchJob
+from transcribe_api.domain.models_recording import JobStatus, SpeechBatchJob, User
 
 USER_ID = UUID("00000000-0000-0000-0000-000000000002")
 
@@ -24,11 +25,23 @@ def _jsonb_on_sqlite(_type, _compiler, **_kw):  # the unit suite has no Postgres
     return "JSON"
 
 
-def new_engine(path: Path):
+def new_engine(path: Path, *, foreign_keys: bool = False):
     """A SQLite job table in a file: each connection (each worker thread's session) is its own, as
-    on Postgres, so claims and renewals really are separate transactions."""
+    on Postgres, so claims and renewals really are separate transactions. ``foreign_keys`` makes SQLite
+    enforce them as Postgres does (a part needs its job and goes with it; the job's owner must exist,
+    so USER_ID is created): off by default, as most tests add jobs without their owners."""
     engine = create_engine(f"sqlite:///{path}", connect_args={"check_same_thread": False, "timeout": 30})
+    if foreign_keys:
+
+        @event.listens_for(engine, "connect")
+        def _foreign_keys_on(dbapi_connection, _record):
+            dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
     SQLModel.metadata.create_all(engine)
+    if foreign_keys:
+        with Session(engine) as session:
+            session.add(User(id=USER_ID, azure_user_id="oid", email="judge@example.test", role="Judge"))
+            session.commit()
     return engine
 
 

@@ -619,18 +619,67 @@ def create_job_parts(session: Session, job_id: UUID, plans: list[PartPlan]) -> l
     return get_job_parts(session, job_id)
 
 
-def delete_job_parts(session: Session, job_id: UUID) -> list[tuple[str | None, str | None]]:
-    """Remove the job's part rows (the database also does it when the job row goes) and return, in the
-    same statement, the blob and Azure job each had recorded: what is left to delete. A part recorded
-    after this has nothing to be recorded on (its worker finds the row gone and deletes what it made),
-    so no resource can slip between "read what to delete" and "delete the rows"."""
-    rows = session.execute(
-        sa_delete(TranscriptionJobPart)
-        .where(col(TranscriptionJobPart.job_id) == job_id)
-        .returning(TranscriptionJobPart.blob_path, TranscriptionJobPart.batch_job_url)
-    ).all()
+@dataclass(frozen=True)
+class PartRefs:
+    """What a part row still records of its resources: its blob and its Azure job."""
+
+    part_id: UUID
+    part_index: int
+    blob_path: str | None
+    batch_job_url: str | None
+
+    @property
+    def released(self) -> bool:
+        return self.blob_path is None and self.batch_job_url is None
+
+
+def get_part_refs(session: Session, job_id: UUID) -> list[PartRefs]:
+    """The job's parts and what each still records (nothing is changed)."""
+    return [PartRefs(p.id, p.part_index, p.blob_path, p.batch_job_url) for p in get_job_parts(session, job_id)]
+
+
+def release_part_refs(session: Session, part_ids: list[UUID]) -> None:
+    """The blob and Azure job of these parts have been deleted: forget where they were."""
+    if not part_ids:
+        return
+    session.execute(
+        sa_update(TranscriptionJobPart)
+        .where(col(TranscriptionJobPart.id).in_(part_ids))
+        .values(blob_path=None, batch_job_url=None, updated_datetime=datetime.now(UTC))
+    )
     session.commit()
-    return [(row[0], row[1]) for row in rows]
+
+
+def delete_job_unless_parts_unreleased(session: Session, job_id: UUID) -> list[PartRefs]:
+    """The last step of deleting a job, in ONE transaction: lock the job row (``FOR UPDATE``: a part
+    inserted by the worker needs a key-share lock on it, so it waits), remove the part rows and look at
+    what they recorded. If every part had released its resources, delete the job and commit: returns
+    ``[]``. If a part still records a blob or an Azure job (one the worker made after the resources
+    were released), roll everything back, so nothing is lost, and return those parts: the caller deletes
+    what they name and tries again. A worker that records a part after the commit finds its row gone."""
+    try:
+        session.execute(select(SpeechBatchJob.id).where(SpeechBatchJob.id == job_id).with_for_update())
+        rows = session.execute(
+            sa_delete(TranscriptionJobPart)
+            .where(col(TranscriptionJobPart.job_id) == job_id)
+            .returning(
+                TranscriptionJobPart.id,
+                TranscriptionJobPart.part_index,
+                TranscriptionJobPart.blob_path,
+                TranscriptionJobPart.batch_job_url,
+            )
+        ).all()
+        refs = [PartRefs(r[0], r[1], r[2], r[3]) for r in rows]
+        unreleased = [r for r in refs if not r.released]
+        if unreleased:
+            session.rollback()
+            return unreleased
+        session.execute(sa_delete(SpeechBatchJob).where(col(SpeechBatchJob.id) == job_id))
+        session.commit()
+        return []
+    except BaseException:
+        session.rollback()
+        raise
 
 
 def start_part_attempt(session: Session, part_id: UUID) -> int | None:
@@ -673,17 +722,6 @@ def mark_part_failed(session: Session, part_id: UUID, message: str) -> None:
         .values(status=JobStatus.FAILED.value, error_message=message[:500], updated_datetime=datetime.now(UTC))
     )
     session.execute(stmt)
-    session.commit()
-
-
-def clear_part_resources(session: Session, job_id: UUID) -> None:
-    """The part blobs and Azure jobs of the job have been deleted: forget where they were (the rows
-    stay as the record of the parts)."""
-    session.execute(
-        sa_update(TranscriptionJobPart)
-        .where(col(TranscriptionJobPart.job_id) == job_id)
-        .values(blob_path=None, batch_job_url=None, updated_datetime=datetime.now(UTC))
-    )
     session.commit()
 
 

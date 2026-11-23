@@ -52,6 +52,7 @@ from pathlib import Path
 from uuid import UUID
 
 from hmcts_otel import journey, stage
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 
 from transcribe_api.domain import interface_recording as jobs
@@ -495,6 +496,10 @@ class PreparationService:
         with Session(get_engine()) as session:
             return jobs.create_job_parts(session, job.id, plans)
 
+    def _job_exists(self, job_id: UUID) -> bool:
+        with Session(get_engine()) as session:
+            return jobs.get_job_by_id(session, job_id) is not None
+
     def _is_settled(self, job_id: UUID) -> bool:
         """Whether nothing more will be prepared for the job: it is gone, submitted or failed."""
         with Session(get_engine()) as session:
@@ -520,7 +525,16 @@ class PreparationService:
         submitted as soon as its own blob is stored (part 1 does not wait for the others or for the
         full WAV), at most ``MAX_PARALLEL_PARTS`` parts at a time. The first failure stops the rest.
         Once every part is with Azure Speech the job is SUBMITTED."""
-        rows = await asyncio.to_thread(self._record_parts, job, prepared)
+        try:
+            rows = await asyncio.to_thread(self._record_parts, job, prepared)
+        except IntegrityError as exc:
+            # A part needs its job (a foreign key): if the job was deleted since the worker last looked,
+            # inserting the parts fails after the deleting transaction commits. That is "the job is
+            # gone", not a storage failure to retry.
+            if await asyncio.to_thread(self._job_exists, job.id):
+                raise
+            await self._forget_deleted_job(job, len(prepared.parts))
+            raise JobGone from exc
         files = {part.index: part.path for part in prepared.parts}
         slots = asyncio.Semaphore(self.settings.MAX_PARALLEL_PARTS)
 

@@ -36,7 +36,7 @@ from transcribe_api.runtime.telemetry import configure_telemetry, upload_id_from
 from transcribe_api.stt import audio_storage, local_storage, part_submission, recording_limits
 from transcribe_api.stt import preparation_service as prep
 from transcribe_api.stt.batch_client import BatchSubmissionError
-from transcribe_api.stt.part_submission import cleanup_job_parts, part_blob_name
+from transcribe_api.stt.part_submission import cleanup_job_parts, delete_job_and_parts, part_blob_name
 from transcribe_api.stt.preparation_service import PreparationService
 
 LIMIT = 30.0  # stands for Azure's 240 minutes
@@ -67,7 +67,7 @@ def environment(tmp_path, monkeypatch, mocker):
 
 @pytest.fixture
 def engine(mocker, tmp_path):
-    engine = new_engine(tmp_path / "jobs.db")
+    engine = new_engine(tmp_path / "jobs.db", foreign_keys=True)  # as Postgres: a part needs its job
     mocker.patch.object(prep, "get_engine", new=lambda: engine)
     mocker.patch.object(part_submission, "get_engine", new=lambda: engine)
     yield engine
@@ -542,10 +542,7 @@ async def test_a_job_deleted_while_a_part_is_being_submitted_leaves_no_azure_job
 
     async def delete_the_job_during_part_2(name):
         if name.endswith("part-2"):
-            await cleanup_job_parts(job.id, engine=engine, delete_rows=True)  # what DELETE /jobs/{id} does
-            with Session(engine) as session:
-                session.delete(session.get(SpeechBatchJob, job.id))
-                session.commit()
+            assert await delete_job_and_parts(job.id, engine=engine)  # what DELETE /jobs/{id} does
             local_storage.delete(job.audio_blob_path)
 
     azure.on_submit = delete_the_job_during_part_2
@@ -567,6 +564,93 @@ async def test_a_job_deleted_while_a_part_is_being_submitted_leaves_no_azure_job
     assert azure.submitted == [f"batch-{job.id}-part-1", f"batch-{job.id}-part-2"]  # part 3 was never started
 
 
+async def test_a_job_deleted_before_its_parts_are_recorded_is_gone_not_a_failure_to_retry(engine, azure, mocker, tel):
+    """The window the delete's cleanup used to miss: the worker has cut the recording and is about to record
+    the parts when the job is deleted. Inserting a part then breaks its foreign key; the worker must read that
+    as "the job is gone" (nothing submitted, nothing left, no retry), not as a storage failure."""
+    job = _waiting(engine)
+    real_record = PreparationService._record_parts
+
+    def delete_then_record(self, claimed, prepared):
+        assert asyncio.run(delete_job_and_parts(claimed.id, engine=engine))  # what DELETE /jobs/{id} does
+        return real_record(self, claimed, prepared)
+
+    mocker.patch.object(PreparationService, "_record_parts", delete_then_record)
+    retried = mocker.spy(PreparationService, "_retry_or_fail")
+
+    await _prepare()
+
+    retried.assert_not_called()
+    assert reload_job(engine, job.id) is None and _parts(engine, job.id) == []
+    assert azure.submitted == [] and azure.deleted == []
+    assert not any(
+        _exists(n)
+        for n in (
+            job.source_blob_path,
+            job.audio_blob_path,
+            *(part_blob_name(job.audio_blob_path, i) for i in (1, 2, 3)),
+        )
+    )
+
+
+async def test_parts_recorded_by_the_worker_after_the_deletes_cleanup_are_released_and_the_delete_finishes(
+    engine, azure, mocker
+):
+    """Cleanup ran before the worker created its part rows; the worker then creates, stores and submits a part.
+    The last step of the delete sees the part (it locks the job and reads the rows in one transaction), deletes
+    what it recorded and tries again, instead of cascading the row away with its blob and Azure job unseen."""
+    job = _waiting(engine)
+    real_cleanup = part_submission.cleanup_job_parts
+    made = []
+
+    async def cleanup_then_the_worker_records_a_part(*args, **kwargs):
+        clean = await real_cleanup(*args, **kwargs)
+        plan = jobs.PartPlan(1, 1, 0.0, 10.0, "start", part_blob_name(job.audio_blob_path, 1))
+        with Session(engine) as session:
+            (row,) = jobs.create_job_parts(session, job.id, [plan])
+            local_storage.save(b"part", row.blob_path)
+            url = f"mock://batch-jobs/{uuid4()}"
+            made.append(url)
+            jobs.mark_part_submitted(session, row.id, "azure-1", url)
+        return clean
+
+    mocker.patch.object(part_submission, "cleanup_job_parts", cleanup_then_the_worker_records_a_part)
+    # Only the first cleanup of the delete is followed by a recording; the second finds nothing new.
+    assert await delete_job_and_parts(job.id, engine=engine) is True
+
+    assert reload_job(engine, job.id) is None and _parts(engine, job.id) == []
+    assert azure.deleted == made and len(made) == 1
+    assert not _exists(part_blob_name(job.audio_blob_path, 1))
+
+
+async def test_a_worker_that_keeps_recording_parts_leaves_the_job_and_its_rows_for_a_retry(engine, azure, mocker):
+    job = _waiting(engine)
+    plan = jobs.PartPlan(1, 1, 0.0, 10.0, "start", part_blob_name(job.audio_blob_path, 1))
+    with Session(engine) as session:
+        (row,) = jobs.create_job_parts(session, job.id, [plan])
+    real_last_step = jobs.delete_job_unless_parts_unreleased
+    recorded = []
+
+    def the_worker_records_before_each_last_step(session, job_id):
+        url = f"mock://batch-jobs/{uuid4()}"
+        recorded.append(url)
+        with Session(engine) as other:
+            jobs.mark_part_submitted(other, row.id, "azure-1", url)
+        return real_last_step(session, job_id)
+
+    mocker.patch.object(jobs, "delete_job_unless_parts_unreleased", the_worker_records_before_each_last_step)
+
+    assert await delete_job_and_parts(job.id, engine=engine) is False
+
+    assert len(recorded) == part_submission.DELETE_ATTEMPTS
+    assert azure.deleted == recorded  # every Azure job the worker made was deleted, however often
+    assert reload_job(engine, job.id) is not None and len(_parts(engine, job.id)) == 1  # nothing was lost
+
+    mocker.patch.object(jobs, "delete_job_unless_parts_unreleased", real_last_step)
+    assert await delete_job_and_parts(job.id, engine=engine) is True
+    assert reload_job(engine, job.id) is None
+
+
 async def test_cleanup_deletes_every_part_blob_and_azure_job_and_can_keep_or_remove_the_rows(engine, azure):
     job = _waiting(engine)
     await _prepare()
@@ -578,8 +662,8 @@ async def test_cleanup_deletes_every_part_blob_and_azure_job_and_can_keep_or_rem
     kept = _parts(engine, job.id)
     assert len(kept) == 3 and all(p.blob_path is None and p.batch_job_url is None for p in kept)
 
-    assert await cleanup_job_parts(job.id, engine=engine, delete_rows=True) is True
-    assert _parts(engine, job.id) == []
+    assert await delete_job_and_parts(job.id, engine=engine) is True
+    assert _parts(engine, job.id) == [] and reload_job(engine, job.id) is None
 
 
 async def test_a_cleanup_that_cannot_delete_everything_says_so_and_marks_the_job(engine, azure, mocker):
@@ -648,10 +732,7 @@ async def test_parts_accepted_by_azure_when_the_job_is_deleted_are_not_left_as_a
             permits.release()
         if recorded_before_the_delete:
             await asyncio.wait_for(recorded_one.wait(), 20)
-        await cleanup_job_parts(job.id, engine=engine, delete_rows=True)  # what DELETE /jobs/{id} does
-        with Session(engine) as session:
-            session.delete(session.get(SpeechBatchJob, job.id))
-            session.commit()
+        assert await delete_job_and_parts(job.id, engine=engine)  # what DELETE /jobs/{id} does
         for _ in range(3 - recorded_before_the_delete):
             permits.release()
 

@@ -102,7 +102,7 @@ from transcribe_api.stt.audio_storage import (
     source_blob_name,
 )
 from transcribe_api.stt.batch_client import BatchSubmissionError, delete_batch_job
-from transcribe_api.stt.part_submission import cleanup_job_parts
+from transcribe_api.stt.part_submission import delete_job_and_parts
 from transcribe_api.stt.preprocessing import (
     AudioDecodeError,
     normalize_to_wav,
@@ -2103,6 +2103,16 @@ async def delete_job(
     return Response(status_code=204)
 
 
+async def _delete_own_batch_job(job: SpeechBatchJob) -> None:
+    """Best-effort: an in-flight batch job would otherwise keep running on Azure after its DB row is
+    gone. Never blocks the delete."""
+    if job.batch_job_url:
+        try:
+            await delete_batch_job(job.batch_job_url)
+        except Exception as exc:
+            logger.warning("Could not delete batch job %s: %s", job.batch_job_url, exc)
+
+
 async def _delete_job(session: Session, job: SpeechBatchJob) -> None:
     if job.audio_blob_path:
         try:
@@ -2118,24 +2128,27 @@ async def _delete_job(session: Session, job: SpeechBatchJob) -> None:
             ) from exc
 
     # DIAAT-408: a job deleted before the worker prepared it leaves its original in storage; one
-    # prepared in parts leaves the part blobs and their Azure jobs (the part rows go with the job).
+    # prepared in parts leaves the part blobs and their Azure jobs. As for the audio blob, a genuine
+    # failure to delete any of them is a 502 and the job is kept, with the part rows that record what
+    # is left, so the delete can be repeated: nothing is orphaned behind a deleted row.
     if job.source_blob_path:
         try:
             await get_audio_storage().delete(job.source_blob_path)
         except Exception as exc:
-            logger.warning("Could not delete the original of job %s (%s)", job.id, type(exc).__name__)
+            logger.error("Could not delete the original of job %s (%s)", job.id, type(exc).__name__)
+            raise HTTPException(status_code=502, detail="Failed to delete the audio file; job not deleted") from exc
+        # Best-effort, and only the job's own Azure job (single-file jobs): it never blocks the delete.
+        await _delete_own_batch_job(job)
         try:
-            await cleanup_job_parts(job.id, engine=session.get_bind(), delete_rows=True)
+            deleted = await delete_job_and_parts(job.id, engine=session.get_bind())
         except Exception as exc:
-            logger.warning("Could not delete the parts of job %s (%s)", job.id, type(exc).__name__)
+            logger.error("Could not delete the parts of job %s (%s)", job.id, type(exc).__name__)
+            deleted = False
+        if not deleted:
+            raise HTTPException(status_code=502, detail="Failed to delete the audio file; job not deleted")
+        session.expire_all()
+        return
 
-    # Best-effort: an in-flight batch job would otherwise keep running on
-    # Azure after its DB row is gone. Never blocks the delete.
-    if job.batch_job_url:
-        try:
-            await delete_batch_job(job.batch_job_url)
-        except Exception as exc:
-            logger.warning("Could not delete batch job %s: %s", job.batch_job_url, exc)
-
+    await _delete_own_batch_job(job)
     session.delete(job)
     session.commit()

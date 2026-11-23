@@ -109,8 +109,17 @@ conversion), or by the worker for a job that was deferred.
   restart mid-way (the job's lease runs out, or the worker hands it back on shutdown) continues with the parts not yet submitted, cutting
   the recording again at the recorded offsets and refusing a cut that no longer matches. The one window left is a crash after Azure
   accepted a part and before its row was updated: that part is submitted again and Azure keeps an Azure job nothing polls.
-- **Deleting a job** while its parts are in flight (`DELETE /jobs/{id}`) deletes the part blobs and Azure jobs and the rows; the worker
-  finds the rows gone at its next write, deletes the blob and Azure job it had just made, and stops.
+- **Deleting a job** (`DELETE /jobs/{id}`) deletes its WAV, its original, every part blob and Azure job, and then the job and its
+  rows. Nothing is orphaned behind a deleted row: a genuine failure to delete the WAV, the original, a part blob or a part's Azure
+  job is a **502 and the job is kept** (a blob that is already gone is success), with the part rows still recording what is left
+  and the job marked `needs_cleanup`, so the delete can simply be repeated. (The job's own Azure job, the one of a single-file
+  job, is still deleted on a best-effort basis and never blocks the delete.) The rows are removed only after every delete has
+  succeeded. The last step is one transaction that locks the job row (`SELECT ... FOR UPDATE`), deletes the part rows and reads
+  what they recorded: if the worker created or recorded a part after the resources were released, the transaction is rolled back,
+  that part's blob and Azure job are deleted and the step is tried again (3 times at most, then a 502 to be repeated). A worker
+  that inserts a part after the delete committed fails the foreign key (checked on Postgres: it waits on the job's lock, then gets
+  SQLSTATE 23503); it reads that as "the job is gone" and deletes what it made, as it does when it finds its row gone at a later
+  write, and stops.
 - **Polling and assembling** (`BatchPollingService`, beside its single-file polling): a job in parts has no Azure job of its own
   (`batch_job_*` stay empty until it finishes), so it is polled through its part rows: the submitted or running parts of jobs
   that are still in flight, the one polled longest ago first (`FOR UPDATE SKIP LOCKED`, so two pollers take different parts, and
