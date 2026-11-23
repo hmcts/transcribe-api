@@ -115,7 +115,10 @@ conversion), or by the worker for a job that was deferred.
   moves to the longest silence within about 10 minutes of its ideal point (ffmpeg `silencedetect`), or is cut at the ideal point if
   there is none (`cut_kind` on the part row says which). The plan is checked: contiguous, covering the whole recording, no part over
   14,400 s. The WAV is cut with `ffmpeg -c copy -f segment` (no re-encode); each part's offset and length are measured from the cut
-  files, because the muxer cuts at packet boundaries (about 0.06 s).
+  files, because the muxer cuts at packet boundaries (a fraction of a second: about 0.06 s with ffmpeg 8.0.1, up to 0.128 s with the
+  9.0.2 of the production image, 4096-byte packets of 16 kHz mono 16-bit audio). The planner keeps every part a second inside the
+  limit (`SEGMENT_SLACK_SECONDS`, about eight packets) and cuts in the middle of a silence of at least half a second, so a cut that
+  lands a packet late is still inside the silence and no part passes the limit.
 - **Recording the parts**: one row per part in `transcription_job_part` (migration 0017): offset in the recording, length, cut kind,
   blob (`uploads/{user_id}/{upload_id}-{name}.partNN.wav`, derived from the job's own WAV name, never client-supplied), Azure job,
   status, attempts. The job stays one row; it keeps the idempotency key; it is `PENDING` while its parts are submitted and
@@ -257,13 +260,13 @@ point, which `cut_kind` records), the 1 s cutting slack, `PART_TARGET_SECONDS`, 
 - A recording's transcript cannot be exported (there is no export of one; only the audio can be downloaded).
 - A file whose header states no length, or whose estimate or tolerance puts it near the limit, passes the header check, whatever the flag. With the asynchronous path on it is accepted
   by the upload and a bad one fails as a job; with the flag off it is converted inside the request first (slow for a long one)
-  and then checked exactly. Observed with ffmpeg 8.0.1: text named `.mp3` makes `ffprobe` exit 0 and report no duration (its MP3
+  and then checked exactly. Observed with ffmpeg 8.0.1 (the production image has 9.0.2, which was not run locally, so this is unconfirmed there): text named `.mp3` makes `ffprobe` exit 0 and report no duration (its MP3
   detection is lenient), so the header cannot refuse it and the conversion does (flag off: a 422 in the request; flag on: the job
   fails with "The audio file could not be decoded..."). A file `ffprobe` refuses is a 422 in the request either way. The length
   of a VBR MP3 with no Xing header is only an estimate (see above); the exact check on the converted WAV is the backstop.
 - Nothing here has been run against real Azure Speech or Blob Storage.
 
-**Measured locally (not on a pod, not with real hearings).** On a development machine (8 cores, ffmpeg 8.0.1), with synthetic
+**Measured locally (not on a pod, not with real hearings).** On a development machine (8 cores, ffmpeg 8.0.1; the production image has 9.0.2, so every figure here, and every ffmpeg behaviour described above as observed, was measured on 8.0.1 and not re-measured on 9.0.2), with synthetic
 8 kHz mono 8 kbps MP3 tone files (3.6 MB per hour; real recordings decode more slowly): an 8 h file (28.8 MB) converted to the 16 kHz
 mono WAV (922 MB) in about 10-16 s, silence detection over that WAV took about 11 s and cutting it into three parts about 4-5 s;
 ffmpeg's own peak memory was about 55 MB in each step. The browser-facing requests, with the real routes over local storage,

@@ -13,7 +13,8 @@ its own job. Three steps, kept apart so the middle one can be tested exhaustivel
    (``check_plan``): parts are contiguous, cover [0, duration], and none is longer than the limit.
    A recording no longer than the limit is a single part.
 3. ``cut_segments``: ``ffmpeg -c copy -f segment`` on the WAV: no re-encode, close to disk speed.
-   The segment muxer cuts at packet boundaries of the PCM data (about 0.06 s), so the **actual**
+   The segment muxer cuts at packet boundaries of the PCM data (a fraction of a second: about 0.06 s
+   with ffmpeg 8.0.1, up to 0.128 s with the 9.0.2 of the production image), so the **actual**
    length and offset of each part are measured from the files, not taken from the plan; the sum of
    the parts is still the whole recording to within a sample or two.
 
@@ -39,7 +40,8 @@ CUT_WINDOW_SECONDS = 600.0
 # What counts as silence: below this level for at least this long.
 SILENCE_NOISE_DB = -35.0
 SILENCE_MIN_SECONDS = 0.5
-# The segment muxer cuts at packet boundaries, up to about this far after the planned point.
+# The segment muxer cuts at packet boundaries, up to a packet after the planned point (0.128 s with
+# ffmpeg 9.0.2's 4096-byte packets of 16 kHz mono 16-bit audio): this is eight times that.
 SEGMENT_SLACK_SECONDS = 1.0
 # The shortest part a plan may contain (a part of a fraction of a second is not transcribable).
 MIN_PART_SECONDS = 1.0

@@ -30,6 +30,16 @@ from transcribe_api.stt.splitter import (
 
 LIMIT = 14_400.0
 
+# ffmpeg's segment muxer cuts the 16 kHz mono 16-bit PCM WAV at packet boundaries, at the first packet at or
+# after the planned time. With ffmpeg 8.0.1 a packet was about 2 KiB (0.06 s); the production image's 9.0.2 cuts
+# 4096-byte packets: 4096 / (16,000 samples x 2 bytes) = 0.128 s, which is what moved a cut planned at 21.0 s
+# to 21.12 s. A cut may therefore land up to PACKET_SECONDS late; the tolerance allows two packets (the second
+# for the rounding of the plan and of the silence times), and the planner's slack must cover one.
+PACKET_BYTES = 4096
+BYTES_PER_SECOND = 16_000 * 2
+PACKET_SECONDS = PACKET_BYTES / BYTES_PER_SECOND  # 0.128
+CUT_TOLERANCE_SECONDS = 2 * PACKET_SECONDS  # 0.256
+
 
 def _random_silences(rng: random.Random, duration: float) -> list[Silence]:
     """Sorted, non-overlapping silences of 0.5 s to 15 minutes, some touching the ends, some none at all."""
@@ -244,9 +254,47 @@ async def test_a_recording_is_cut_at_its_silences_and_the_parts_add_up_to_the_wh
         assert after.offset_seconds == pytest.approx(before.offset_seconds + before.duration_seconds, abs=1e-9)
     assert sum(_frames(p.path) for p in cut) == _frames(wav)
     assert max(p.duration_seconds for p in cut) <= 30.0
-    # The planned and the actual cut differ by no more than a packet (about 0.06 s).
+    # The planned and the actual cut differ by no more than a packet (0.06 s with ffmpeg 8.0.1, 0.128 s with 9.0.2).
     for planned, actual in zip(plan[1:], cut[1:], strict=False):
-        assert actual.offset_seconds == pytest.approx(planned.start, abs=0.1)
+        assert actual.offset_seconds == pytest.approx(planned.start, abs=CUT_TOLERANCE_SECONDS)
+        # ...and still inside the silence it was planned in (the planner cuts in the middle of a silence of
+        # 2 s, so a packet late is a second from its end).
+        assert (20.0 < actual.offset_seconds < 22.0) if planned.index == 2 else (42.0 < actual.offset_seconds < 44.0)
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_cuts_that_land_a_packet_late_still_leave_every_part_within_the_limit_and_inside_the_silence(seed):
+    """The quantisation of ffmpeg 9.0.2 (0.128 s, here taken as 0.13) cannot be run locally (8.0.1 is
+    installed), so it is checked by construction: shift every planned cut by up to a packet and the parts
+    are still within the limit (the planner works to limit - SEGMENT_SLACK_SECONDS, one second, about
+    eight packets). That a cut in a silence stays inside it follows from the next test."""
+    from transcribe_api.stt.splitter import SILENCE_MIN_SECONDS
+
+    quantum = 0.13
+    assert quantum >= PACKET_SECONDS and SEGMENT_SLACK_SECONDS >= 7 * quantum
+    assert SILENCE_MIN_SECONDS / 2 >= 1.9 * quantum  # half the shortest silence is two packets
+    rng = random.Random(seed)
+    for _ in range(300):
+        limit = rng.uniform(20, 400)
+        duration = rng.uniform(limit * 1.01, limit * 10)
+        silences = _random_silences(rng, duration)
+        parts = plan_parts(duration, silences, target=rng.uniform(5, limit), limit=limit, window=rng.uniform(1, 80))
+        late = [0.0, *(rng.uniform(0, quantum) for _ in parts[1:]), 0.0]  # the first start and the last end stay
+        actual = [p.start + late[i] for i, p in enumerate(parts)] + [duration]
+        for before, after in itertools.pairwise(actual):
+            assert after - before <= limit  # the part still fits Azure's limit
+
+
+def test_a_cut_planned_in_the_shortest_silence_is_still_inside_it_a_packet_late():
+    """The shortest silence silencedetect reports (SILENCE_MIN_SECONDS, 0.5 s), alone in the window: the plan cuts
+    in its middle, a quarter of a second from either end, and a cut 0.13 s late is still inside."""
+    from transcribe_api.stt.splitter import SILENCE_MIN_SECONDS
+
+    silence = Silence(9_599.75, 9_599.75 + SILENCE_MIN_SECONDS)
+    parts = plan_parts(28_800.0, [silence], target=12_600.0)
+    cut = parts[1].start
+    assert parts[1].cut_kind == CUT_SILENCE and cut == pytest.approx((silence.start + silence.end) / 2)
+    assert silence.start < cut + 0.13 < silence.end
 
 
 async def test_audio_with_no_silence_is_cut_at_the_ideal_points(tmp_path):
