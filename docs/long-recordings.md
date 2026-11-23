@@ -79,10 +79,11 @@ recording that is within the limit.
 **`POST /jobs`, whatever the flag.** It looks for the upload's original by the user's and the upload's ids (never by anything the
 client sends), whatever the flag says now, so an upload made while the flag was on is still deferred if the flag is turned off
 before its `POST /jobs`. Found: the job is created `PENDING` as above. Not found (the upload was converted in the request): the
-job is submitted at once, as before. If the lookup itself fails: with the flag on the request is a 502 ("The uploaded recording
-could not be checked. Please try again.") and no job is made, because submitting would send Azure a WAV that may not exist; with
-the flag off the error is logged and treated as "no original", as before DIAAT-408. With the flag off this is one extra lookup
-in storage per `POST /jobs`. The worker starts the preparation service with the other pollers and does not look at the flag to decide
+job is submitted at once, as before. Only a lookup that succeeds and finds nothing
+submits at once. If the lookup itself fails, the request is a 502 ("The uploaded recording could not be checked. Please try
+again.") and no job is made, **whatever the flag**: a failure does not say there is no original, and after a rollback the WAV
+does not exist, so submitting would send Azure a missing blob. With the flag off this is one extra lookup in storage per
+`POST /jobs`, and a storage outage now fails job creation (as it fails the upload) where before DIAAT-408 it did not. The worker starts the preparation service with the other pollers and does not look at the flag to decide
 what to prepare: it prepares whatever job is waiting (only its length check reads the flags, as the effective limit).
 
 | Setting | Default | Meaning |

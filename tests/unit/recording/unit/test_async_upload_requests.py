@@ -567,18 +567,23 @@ def test_with_the_flag_off_and_no_original_the_job_is_submitted_as_before(client
         assert session.exec(select(SpeechBatchJob).where(SpeechBatchJob.source_blob_path.is_not(None))).all() == []
 
 
-def test_with_the_flag_off_a_failed_lookup_is_logged_and_the_job_is_submitted_as_before(
-    client, engine, monkeypatch, mocker, caplog
+@pytest.mark.parametrize("flag_on", [False, True], ids=["flag_off", "flag_on"])
+def test_a_failed_lookup_is_a_502_and_nothing_is_submitted_whatever_the_flag(
+    client, engine, monkeypatch, mocker, caplog, flag_on
 ):
-    """With the flag off the lookup failing is not a reason to fail the request: as before, no original."""
-    _flag(monkeypatch, False)
+    """A lookup that fails does not say there is no original: after a rollback the WAV does not exist, so
+    submitting would send Azure a missing blob. Only a lookup that succeeds and finds nothing submits."""
+    _flag(monkeypatch, flag_on)
     submit = _broken_lookup(mocker, engine)
 
     with caplog.at_level("ERROR"):
         response = client.post("/api/v1/jobs", json=_job_body(uuid4()))
 
-    assert response.status_code == 201
-    submit.assert_called_once()
+    assert response.status_code == 502
+    assert response.json()["detail"] == "The uploaded recording could not be checked. Please try again."
+    submit.assert_not_called()
+    with Session(engine) as session:
+        assert session.exec(select(SpeechBatchJob)).all() == []
     assert "Could not look for the upload's original (StorageError)" in caplog.text
 
 
@@ -651,19 +656,6 @@ def test_a_replay_with_the_same_idempotency_key_returns_the_same_pending_job(cli
     assert first.json()["job_id"] == second.json()["job_id"]
     with Session(engine) as session:
         assert len(session.exec(select(SpeechBatchJob)).all()) == 1
-
-
-def test_a_storage_failure_while_looking_for_the_original_is_a_502_and_creates_no_job(
-    client, engine, monkeypatch, no_azure, mocker
-):
-    """Not "there is none": submitting would send Azure a WAV that does not exist."""
-    _flag(monkeypatch, True)
-    submit = _broken_lookup(mocker, engine)
-    response = client.post("/api/v1/jobs", json=_job_body(uuid4()))
-    assert response.status_code == 502
-    submit.assert_not_called()
-    with Session(engine) as session:
-        assert session.exec(select(SpeechBatchJob)).all() == []
 
 
 def test_another_users_blob_is_still_refused(client, monkeypatch, no_azure):

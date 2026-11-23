@@ -1165,8 +1165,9 @@ async def _waiting_source(body: SubmitJobRequest, current_user: AuthenticatedUse
     Looked up whatever the flag now says: an upload made with ``async_upload_preparation`` on has no
     WAV yet, so a job made after the flag was turned off must still wait for the worker to prepare it
     (the worker does so whatever the flag) instead of being sent to Azure with a WAV that is not there.
-    When the lookup itself fails: with the flag on, the upload may be one of those, so the request
-    fails (502) rather than guess; with it off, it is logged and treated as "no original", as before."""
+    Only a lookup that SUCCEEDS and finds nothing selects the immediate submission. A lookup that fails
+    is a 502 with the flag on or off: it does not say there is no original, and after a rollback the
+    WAV does not exist, so submitting would send Azure a missing blob."""
     if body.blob_name is None:
         return None
     upload_id = _upload_uuid(body.blob_name)
@@ -1176,12 +1177,9 @@ async def _waiting_source(body: SubmitJobRequest, current_user: AuthenticatedUse
         return await get_audio_storage().find_source(current_user.id, upload_id)
     except Exception as exc:
         logger.error("Could not look for the upload's original (%s)", type(exc).__name__)
-        if await asyncio.to_thread(feature_flags.is_async_upload_preparation_enabled):
-            # Not "there is none": submitting now would send Azure a WAV that does not exist.
-            raise HTTPException(
-                status_code=502, detail="The uploaded recording could not be checked. Please try again."
-            ) from exc
-        return None
+        raise HTTPException(
+            status_code=502, detail="The uploaded recording could not be checked. Please try again."
+        ) from exc
 
 
 @router.get("/jobs", response_model=ListJobsResponse)
