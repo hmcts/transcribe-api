@@ -21,7 +21,7 @@ from transcribe_api.documents.lib.docx_style_profile import (
     STYLE_QUOTATION,
     cm_to_pt,
 )
-from transcribe_api.documents.lib.models import ContentBlock, Heading, Paragraph
+from transcribe_api.documents.lib.models import ContentBlock, Heading, Paragraph, TextRun
 
 Alignment = Literal["left", "center", "right", "justify"]
 MarkdownDocumentToken = md_block.Document
@@ -69,6 +69,38 @@ def _collect_text(token: object) -> str:
 
 
 _UNDERLINE_TAG_RE = re.compile(r"</?u>", re.IGNORECASE)
+
+
+def _collect_runs(token: object, *, bold: bool = False, italic: bool = False) -> list[TextRun]:
+    """The token's text as _collect_text gives it, in runs of the same bold and italic."""
+    if isinstance(token, RawText):
+        return [TextRun(text=token.content, bold=bold, italic=italic)]
+    if isinstance(token, LineBreak):
+        return [TextRun(text=" " if token.soft else "\n", bold=bold, italic=italic)]
+    bold = bold or isinstance(token, Strong)
+    italic = italic or isinstance(token, Emphasis)
+    children = _iter_children(token)
+    if children:
+        return [run for child in children for run in _collect_runs(child, bold=bold, italic=italic)]
+    content = getattr(token, "content", None)
+    return [TextRun(text=content, bold=bold, italic=italic)] if isinstance(content, str) and content else []
+
+
+def _paragraph_runs(token: object, text: str) -> list[TextRun]:
+    """The paragraph's runs, trimmed and without <u> tags as its text is, neighbours of
+    the same formatting joined; empty when they do not spell out ``text``."""
+    runs: list[TextRun] = []
+    for run in _collect_runs(token):
+        piece = _UNDERLINE_TAG_RE.sub("", run.text)
+        if runs and (runs[-1].bold, runs[-1].italic) == (run.bold, run.italic):
+            runs[-1] = runs[-1].model_copy(update={"text": runs[-1].text + piece})
+        elif piece:
+            runs.append(run.model_copy(update={"text": piece}))
+    if runs:
+        runs[0] = runs[0].model_copy(update={"text": runs[0].text.lstrip()})
+        runs[-1] = runs[-1].model_copy(update={"text": runs[-1].text.rstrip()})
+        runs = [r for r in runs if r.text]
+    return runs if "".join(r.text for r in runs) == text else []
 
 
 def _strip_underline(text: str) -> tuple[str, bool]:
@@ -133,7 +165,10 @@ class _MarkdownBlockVisitor:
             return
         text, underline = _strip_underline(raw)
         bold, italic = _detect_inline_formatting(token)
+        emitted = len(self._blocks)
         self._emit_paragraph(text=text, context=context, bold=bold, italic=italic, underline=underline)
+        if len(self._blocks) > emitted and isinstance(self._blocks[-1], Paragraph):
+            self._blocks[-1].runs = _paragraph_runs(token, self._blocks[-1].text)
 
     @visit.register
     def _visit_heading(self, token: MarkdownHeadingToken, _context: _ParseContext) -> None:

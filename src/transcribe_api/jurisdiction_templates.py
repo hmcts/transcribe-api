@@ -29,6 +29,7 @@ from transcribe_api.documents.content_loader import get_document_content
 from transcribe_api.documents.uploaded_templates import (
     NOT_ASKED,
     Box,
+    BoxContent,
     FillContext,
     TemplateField,
     Value,
@@ -162,7 +163,7 @@ def add_template(
         content=data,
         sha256=hashlib.sha256(data).hexdigest(),
         boxes=[b.to_record() for b in boxes],
-        fields=[propose_field(b).model_dump() for b in boxes],
+        fields=[propose_field(b).stored() for b in boxes],
         stage=STAGE_DRAFT,
         enabled=False,
     )
@@ -195,7 +196,7 @@ def replace_file(
     row.content = data
     row.sha256 = hashlib.sha256(data).hexdigest()
     row.boxes = [b.to_record() for b in boxes]
-    row.fields = [f.model_dump() for f in fields]
+    row.fields = [f.stored() for f in fields]
     if field_problems(boxes, fields):
         _move(row, STAGE_DRAFT, None)
     row.updated_datetime = datetime.now(UTC)
@@ -243,7 +244,7 @@ def update_template(
         raise TemplateProblemsError(problems)
     row.name = _name(name)
     row.service = (service or "").strip()[:MAX_NAME_LENGTH] or None
-    row.fields = [f.model_dump() for f in normalise_fields(fields)]
+    row.fields = [f.stored() for f in normalise_fields(fields)]
     if stage not in STAGES:
         msg = f"The stage must be one of {', '.join(STAGES)}"
         raise AdminError(msg)
@@ -389,20 +390,28 @@ def judge_fields(row: JurisdictionTemplate) -> list[TemplateField]:
 # Filling a template: a judge's submission and the admin's preview (DIAAT-346) -----------
 
 
+def _ordered_frameworks(jurisdiction_id: UUID) -> list[dict[str, Any]]:
+    frameworks = get_document_content(jurisdiction_id).get("legal_frameworks") or []
+    return [f for f in sorted(frameworks, key=lambda f: f.get("rank", 0)) if f.get("id")]
+
+
 def legal_frameworks(jurisdiction_id: UUID) -> dict[str, str]:
     """The jurisdiction's legal frameworks, as its Legal Text Manager keeps them: id ->
     title, in their order. What a legal issues field offers."""
-    frameworks = get_document_content(jurisdiction_id).get("legal_frameworks") or []
-    return {
-        str(f["id"]): str(f.get("title") or f["id"])
-        for f in sorted(frameworks, key=lambda f: f.get("rank", 0))
-        if f.get("id")
-    }
+    return {str(f["id"]): str(f.get("title") or f["id"]) for f in _ordered_frameworks(jurisdiction_id)}
 
 
-def legal_issue_titles(jurisdiction_id: UUID, fields: list[TemplateField]) -> dict[str, str]:
-    """legal_frameworks, looked up only when a field asks for legal issues."""
-    return legal_frameworks(jurisdiction_id) if any(f.type == "legal_issues" for f in fields) else {}
+def legal_framework_content(
+    jurisdiction_id: UUID, fields: list[TemplateField]
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Each legal framework's title and its text (Markdown), by id in their order: looked
+    up only when a field asks for legal issues."""
+    if not any(f.type == "legal_issues" for f in fields):
+        return {}, {}
+    frameworks = _ordered_frameworks(jurisdiction_id)
+    titles = {str(f["id"]): str(f.get("title") or f["id"]) for f in frameworks}
+    texts = {str(f["id"]): str(f.get("content") or "") for f in frameworks}
+    return titles, texts
 
 
 def template_texts(
@@ -412,10 +421,10 @@ def template_texts(
     jurisdiction_id: UUID,
     jurisdiction_name: str,
     dictated: str,
-) -> tuple[dict[str, Value], dict[str, str]]:
-    """The values kept, and the text for each box. TemplateValuesError names each value
+) -> tuple[dict[str, Value], dict[str, BoxContent]]:
+    """The values kept, and what goes in each box. TemplateValuesError names each value
     that does not fit its field."""
-    titles = legal_issue_titles(jurisdiction_id, fields)
+    titles, framework_texts = legal_framework_content(jurisdiction_id, fields)
     kept, problems = check_values(fields, values, list(titles))
     if problems:
         raise TemplateValuesError(problems)
@@ -427,6 +436,7 @@ def template_texts(
             year=datetime.now(UTC).year,
             dictated_text=dictated,
             legal_issue_titles=titles,
+            legal_framework_texts=framework_texts,
         ),
     )
     return kept, texts

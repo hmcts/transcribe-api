@@ -49,7 +49,7 @@ from transcribe_api.documents.minutes.types import (
 )
 from transcribe_api.documents.models import DEFAULT_JURISDICTION
 from transcribe_api.documents.template_renderer import render_hearing_document
-from transcribe_api.documents.uploaded_templates import dictated_text, fill_template
+from transcribe_api.documents.uploaded_templates import BoxContent, dictated_text, fill_template
 from transcribe_api.documents.versioning import DECISION_TEMPLATE, track_render
 from transcribe_api.domain.audit import (
     SECTIONED_TRANSCRIPT,
@@ -1514,7 +1514,7 @@ def _decision_plan(
     )
 
 
-def _render_uploaded_template(*, content: bytes, texts: dict[str, str], output_dir: Path) -> Path:
+def _render_uploaded_template(*, content: bytes, texts: dict[str, BoxContent], output_dir: Path) -> Path:
     return fill_template(content, texts, output_dir / f"hearing-document-{uuid.uuid4()}.docx")
 
 

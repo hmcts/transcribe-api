@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,6 +23,34 @@ from transcribe_api.documents.models import ContentControl, ContentControlType, 
 if TYPE_CHECKING:
     from docx.document import Document as DocxDocument
     from lxml.etree import _Element
+
+
+@dataclass(frozen=True)
+class BoxRun:
+    """Part of a BoxParagraph's text with its own bold and italic."""
+
+    text: str
+    bold: bool = False
+    italic: bool = False
+
+
+@dataclass(frozen=True)
+class BoxParagraph:
+    """One paragraph written into a box (set_content_control_blocks)."""
+
+    text: str
+    # Shown before the text, such as "(a)" or "•": the template's numbering is not used.
+    label: str | None = None
+    bold: bool = False
+    italic: bool = False
+    underline: bool = False
+    left_indent_pt: float | None = None
+    # The text in parts formatted within the line; empty: all of it as the paragraph is.
+    runs: tuple[BoxRun, ...] = ()
+
+    @property
+    def shown_text(self) -> str:
+        return f"{self.label} {self.text}" if self.label else self.text
 
 
 class WordDocument:
@@ -153,6 +182,144 @@ class WordDocument:
     def set_content_control_text(self, sdt: _Element, value: str) -> None:
         """Fill one content control (``\\n\\n`` separates paragraphs); see _set_control_text."""
         self._set_control_text(sdt, value)
+
+    def set_content_control_blocks(self, sdt: _Element, blocks: list[BoxParagraph]) -> None:
+        """Fill one content control with formatted paragraphs, each in the style of the
+        box's first paragraph: bold, italic or underlined, indented, or led by a list
+        label such as ``(a)``. A box inside a line (no paragraph of its own) gets their
+        text, one line each."""
+        sdt_content = sdt.find(qn("w:sdtContent"))
+        if sdt_content is None:
+            return
+        paragraphs = sdt_content.xpath("./*[local-name()='p']")
+        if not paragraphs:
+            paragraph = self._promote_to_paragraph_box(sdt)
+            if paragraph is None:
+                self._set_inline_blocks(sdt, blocks)
+                return
+            paragraphs = [paragraph]
+        self._clean_sdt_properties(sdt)
+        anchor = paragraphs[0]
+        template_ppr = anchor.find(qn("w:pPr"))
+        template_rpr = anchor.xpath("./*[local-name()='r']/*[local-name()='rPr']")
+        template_rpr_elem = template_rpr[0] if template_rpr else None
+        written = []
+        previous = None
+        for block in blocks or [BoxParagraph(text="")]:
+            para = OxmlElement("w:p")
+            if template_ppr is not None:
+                ppr = deepcopy(template_ppr)
+                for unwanted in ("w:sectPr", *(("w:numPr", "w:ind") if block.left_indent_pt else ())):
+                    found = ppr.find(qn(unwanted))
+                    if found is not None:
+                        ppr.remove(found)
+                para.append(ppr)
+            if block.left_indent_pt:
+                ppr = para.find(qn("w:pPr"))
+                if ppr is None:
+                    ppr = OxmlElement("w:pPr")
+                    para.append(ppr)
+                ind = OxmlElement("w:ind")
+                ind.set(qn("w:left"), str(round(block.left_indent_pt * 20)))
+                ppr.append(ind)
+            for run in self._block_runs(template_rpr_elem, block):
+                para.append(run)
+            if previous is None:
+                anchor.addprevious(para)
+            else:
+                previous.addnext(para)
+            previous = para
+            written.append(para)
+        if template_ppr is not None:
+            sect_pr = template_ppr.find(qn("w:sectPr"))
+            if sect_pr is not None:
+                ppr = written[-1].find(qn("w:pPr"))
+                change = ppr.find(qn("w:pPrChange"))
+                if change is not None:
+                    change.addprevious(deepcopy(sect_pr))
+                else:
+                    ppr.append(deepcopy(sect_pr))
+        written_ids = {id(p) for p in written}
+        for old in list(sdt_content):
+            if old.tag == qn("w:p") and id(old) not in written_ids:
+                sdt_content.remove(old)
+        self._remove_control_highlighting(sdt)
+
+    def _block_runs(self, template_rpr: _Element | None, block: BoxParagraph) -> list[_Element]:
+        """The paragraph's runs: its label and text formatted as it is, or the label then
+        each of its runs, bold or italic as that run is."""
+        if not block.runs:
+            parts = [(block.shown_text, block.bold, block.italic)]
+        else:
+            parts = [(f"{block.label} ", block.bold, block.italic)] if block.label else []
+            parts += [(r.text, block.bold or r.bold, block.italic or r.italic) for r in block.runs]
+        runs = []
+        for text, bold, italic in parts:
+            run = OxmlElement("w:r")
+            rpr = self._formatted_rpr(template_rpr, bold=bold, italic=italic, underline=block.underline)
+            if len(rpr):
+                run.append(rpr)
+            self._populate_run_with_text(run, text)
+            runs.append(run)
+        return runs
+
+    @staticmethod
+    def _formatted_rpr(template_rpr: _Element | None, *, bold: bool, italic: bool, underline: bool) -> _Element:
+        """The box's run formatting, made bold, italic or underlined as asked."""
+        rpr = deepcopy(template_rpr) if template_rpr is not None else OxmlElement("w:rPr")
+        for wanted, on in (("w:b", bold), ("w:i", italic), ("w:u", underline)):
+            if on and rpr.find(qn(wanted)) is None:
+                element = OxmlElement(wanted)
+                if wanted == "w:u":
+                    element.set(qn("w:val"), "single")
+                rpr.append(element)
+        return rpr
+
+    @staticmethod
+    def _promote_to_paragraph_box(sdt: _Element) -> _Element | None:
+        """A box inside a line that is all its paragraph holds becomes a box around that
+        paragraph, which can then hold several: returns the paragraph, now in the box.
+        None when the paragraph has anything else (text, another box)."""
+        paragraph = sdt.getparent()
+        if paragraph is None or paragraph.tag != qn("w:p") or paragraph.getparent() is None:
+            return None
+        ignorable = {qn("w:pPr"), qn("w:bookmarkStart"), qn("w:bookmarkEnd"), qn("w:proofErr")}
+        if any(child is not sdt and child.tag not in ignorable for child in paragraph):
+            return None
+        sdt_content = sdt.find(qn("w:sdtContent"))
+        paragraph.addprevious(sdt)
+        new_paragraph = OxmlElement("w:p")
+        ppr = paragraph.find(qn("w:pPr"))
+        if ppr is not None:
+            new_paragraph.append(deepcopy(ppr))
+        for child in list(sdt_content):
+            new_paragraph.append(child)
+        sdt_content.append(new_paragraph)
+        paragraph.getparent().remove(paragraph)
+        return new_paragraph
+
+    def _set_inline_blocks(self, sdt: _Element, blocks: list[BoxParagraph]) -> None:
+        """Paragraphs in a box inside a line: one run each, bold or italic as they are,
+        a blank line between them."""
+        self._set_control_text(sdt, "")
+        sdt_content = sdt.find(qn("w:sdtContent"))
+        runs = sdt_content.xpath("./*[local-name()='r']") if sdt_content is not None else []
+        if not runs:
+            return
+        first = runs[0]
+        template_rpr = first.find(qn("w:rPr"))
+        previous = first
+        for index, block in enumerate(blocks):
+            runs = self._block_runs(template_rpr, block)
+            if index:
+                breaks = OxmlElement("w:r")
+                breaks.append(OxmlElement("w:br"))
+                breaks.append(OxmlElement("w:br"))
+                runs.insert(0, breaks)
+            for run in runs:
+                previous.addnext(run)
+                previous = run
+        first.getparent().remove(first)
 
     def get_content_controls(self) -> list[ContentControl]:
         """Get all content controls in the document.
