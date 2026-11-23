@@ -308,8 +308,7 @@ class PreparationService:
                         await self._retry_or_fail(job, f"unhandled.{type(exc).__name__}"[:64])
             finally:
                 heartbeat.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await heartbeat
+                await asyncio.gather(heartbeat, return_exceptions=True)  # the heartbeat's own cancellation ends here
 
     async def _heartbeat(self, job_id: UUID) -> None:
         interval = self.settings.PREPARE_HEARTBEAT_SECONDS
@@ -346,7 +345,8 @@ class PreparationService:
                 wav_path = tmp / "output.wav"
                 await self._fetch(storage, job, input_path)
                 await self._convert(input_path, wav_path)
-                input_path.unlink(missing_ok=True)  # the disk holds the WAV and its parts, not three copies
+                # The disk holds the WAV and its parts, not three copies.
+                await asyncio.to_thread(input_path.unlink, missing_ok=True)
                 duration = await asyncio.to_thread(wav_duration_seconds, wav_path)
                 if duration is not None:
                     preparation.set_attribute("audio.duration_seconds", duration)
@@ -372,7 +372,7 @@ class PreparationService:
         interrupted) the WAV is cut again at their recorded offsets, so the parts already submitted
         stay the parts of this recording."""
         parts_dir = tmp / "parts"
-        parts_dir.mkdir()
+        await asyncio.to_thread(parts_dir.mkdir)
         limit = AZURE_BATCH_FILE_LIMIT_SECONDS
         recorded = await asyncio.to_thread(self._recorded_parts, job.id)
         with stage(STAGE_SPLITTING, attributes={"audio.duration_seconds": duration}) as splitting:

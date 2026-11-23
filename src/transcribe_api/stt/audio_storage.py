@@ -82,7 +82,7 @@ class LocalAudioStorage:
 
     async def download(self, blob_name: str, destination: Path) -> None:
         source = await asyncio.to_thread(local_storage.path_of, blob_name)
-        if not source.exists():
+        if not await asyncio.to_thread(source.exists):
             raise FileNotFoundError(blob_name)
         await asyncio.to_thread(shutil.copyfile, source, destination)
 

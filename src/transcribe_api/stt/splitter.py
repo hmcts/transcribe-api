@@ -28,7 +28,6 @@ sample), and a part must still be within Azure's limit when it does.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import itertools
 import math
 import re
@@ -323,8 +322,9 @@ async def cut_segments(
         files = await asyncio.shield(work)
     except BaseException:
         stop.set()
-        with contextlib.suppress(BaseException):
-            await asyncio.shield(work)  # it stops at the next chunk (or has already ended)
+        # It stops at the next chunk (or has already ended). Its own outcome (_Stopped, an error) is not
+        # wanted; a further cancellation of this task is not swallowed, it propagates from here.
+        await asyncio.gather(asyncio.shield(work), return_exceptions=True)
         raise
     if len(files) != len(cut_times) + 1:
         raise SplitError(f"expected {len(cut_times) + 1} parts, wrote {len(files)}")
