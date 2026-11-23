@@ -82,7 +82,11 @@ recording that is within the limit.
    `PREPARE_HEARTBEAT_SECONDS`) has run out. A worker that is stopping (or any request or task that is cancelled) kills the `ffmpeg`
    or `ffprobe` it is running and waits for it to exit (`stt/subprocesses.py`) before it lets go of the job and removes its temporary
    directory, so no conversion goes on writing behind it (the kill is sent before the call can be left, and a killed process runs no more
-   code, so a further cancellation while it is reaped cannot leave it writing; the reaping carries on shielded). A job is `PENDING` throughout; no new status exists.
+   code, so a further cancellation while it is reaped cannot leave it writing; the reaping carries on shielded). The file writes the worker and the local (development) storage hand to a thread (the copy of
+   an original into the temporary directory, the store and delete of a local blob, the download of an Azure blob to a file, removing
+   the original from the temporary directory) are waited for in the same way (`stt/uninterrupted.py`, `run_to_completion`): a
+   cancelled task raises its cancellation only after the thread has finished, so a copy cannot outlive the lease or the directory,
+   or recreate a blob after cleanup. A job is `PENDING` throughout; no new status exists.
 
 **`POST /jobs`, whatever the flag.** It looks for the upload's original by the user's and the upload's ids (never by anything the
 client sends), whatever the flag says now, so an upload made while the flag was on is still deferred if the flag is turned off

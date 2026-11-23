@@ -76,6 +76,7 @@ from transcribe_api.stt.recording_limits import current_limit_seconds, too_long_
 from transcribe_api.stt.speech_auth import SpeechAuthError
 from transcribe_api.stt.splitter import CutPart, SplitError, cut_segments, split_wav
 from transcribe_api.stt.submission import record_parts_queued, submit_existing_job
+from transcribe_api.stt.uninterrupted import run_to_completion
 
 logger = logging.getLogger(__name__)
 
@@ -346,7 +347,7 @@ class PreparationService:
                 await self._fetch(storage, job, input_path)
                 await self._convert(input_path, wav_path)
                 # The disk holds the WAV and its parts, not three copies.
-                await asyncio.to_thread(input_path.unlink, missing_ok=True)
+                await run_to_completion(input_path.unlink, missing_ok=True)
                 duration = await asyncio.to_thread(wav_duration_seconds, wav_path)
                 if duration is not None:
                     preparation.set_attribute("audio.duration_seconds", duration)
@@ -372,7 +373,7 @@ class PreparationService:
         interrupted) the WAV is cut again at their recorded offsets, so the parts already submitted
         stay the parts of this recording."""
         parts_dir = tmp / "parts"
-        await asyncio.to_thread(parts_dir.mkdir)
+        await run_to_completion(parts_dir.mkdir)
         limit = AZURE_BATCH_FILE_LIMIT_SECONDS
         recorded = await asyncio.to_thread(self._recorded_parts, job.id)
         with stage(STAGE_SPLITTING, attributes={"audio.duration_seconds": duration}) as splitting:

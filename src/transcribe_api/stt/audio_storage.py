@@ -23,6 +23,7 @@ from uuid import UUID
 from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
 from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.stt import local_storage
+from transcribe_api.stt.uninterrupted import run_to_completion
 
 # Where an upload's original waits for the worker. Under its own prefix, so a lifecycle rule can
 # discard what no job ever claimed, and apart from ``uploads/{user_id}/``, the prefix the
@@ -92,17 +93,17 @@ class LocalAudioStorage:
         return None
 
     async def upload(self, path: Path, blob_name: str, *, concurrency: int | None = None) -> bool:
-        await asyncio.to_thread(local_storage.save_file, path, blob_name)
+        await run_to_completion(local_storage.save_file, path, blob_name)
         return True
 
     async def download(self, blob_name: str, destination: Path) -> None:
         source = await asyncio.to_thread(local_storage.path_of, blob_name)
         if not await asyncio.to_thread(source.exists):
             raise FileNotFoundError(blob_name)
-        await asyncio.to_thread(shutil.copyfile, source, destination)
+        await run_to_completion(shutil.copyfile, source, destination)
 
     async def delete(self, blob_name: str) -> None:
-        await asyncio.to_thread(local_storage.delete, blob_name)
+        await run_to_completion(local_storage.delete, blob_name)
 
     async def url(self, blob_name: str) -> str:
         return local_storage.build_url(blob_name)

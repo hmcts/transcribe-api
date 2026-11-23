@@ -6,7 +6,6 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from urllib.parse import quote
 
-import aiofiles
 import anyio
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from azure.identity.aio import DefaultAzureCredential
@@ -14,6 +13,7 @@ from azure.storage.blob import ContentSettings
 from azure.storage.blob.aio import BlobServiceClient as AsyncBlobServiceClient
 
 from transcribe_api.runtime.settings_recording import get_settings
+from transcribe_api.stt.uninterrupted import run_to_completion
 
 logger = logging.getLogger(__name__)
 
@@ -527,9 +527,14 @@ class AsyncAzureBlobManager:
                 # Download blob content a chunk at a time: a recording's original can be
                 # a gigabyte, and the worker's memory is 2 GiB.
                 download_stream = await blob_client.download_blob()
-                async with aiofiles.open(file_path, "wb") as out:  # not the event loop's thread
+                # Every open, write and close runs in a thread that is waited for through a cancellation: it must
+                # not go on writing (or recreate the file) after the task has let go of the directory.
+                out = await run_to_completion(open, file_path, "wb")
+                try:
                     async for chunk in download_stream.chunks():
-                        await out.write(chunk)
+                        await run_to_completion(out.write, chunk)
+                finally:
+                    await run_to_completion(out.close)
 
             logger.info(f"Successfully downloaded blob {container}/{blob_name} to {file_path}")
 

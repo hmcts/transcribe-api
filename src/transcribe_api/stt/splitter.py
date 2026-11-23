@@ -38,6 +38,7 @@ from pathlib import Path
 
 from transcribe_api.runtime.settings_recording import AZURE_BATCH_FILE_LIMIT_SECONDS
 from transcribe_api.stt.subprocesses import run_process
+from transcribe_api.stt.uninterrupted import wait_until_done
 
 # How far from a part's ideal end a cut may move to reach a silence. Never more than a quarter of
 # the parts' spacing (plan_parts), so the cuts stay in order whatever the target.
@@ -301,18 +302,6 @@ def _cut_wav(wav_path: Path, cut_times: list[float], out_dir: Path, stop: thread
         raise SplitError(f"the recording could not be cut ({type(exc).__name__})") from exc
 
 
-async def _wait_until_done(work: asyncio.Future) -> None:
-    """Return once ``work`` has finished. A cancellation of this task while it waits is not acted on until
-    ``work`` has finished: the wait carries on first (a further cancellation nests another wait), and the
-    cancellation is then raised, as it must be."""
-    while not work.done():
-        try:
-            await asyncio.wait({work})
-        except asyncio.CancelledError:
-            await _wait_until_done(work)
-            raise
-
-
 async def cut_segments(
     wav_path: Path,
     cut_times: list[float],
@@ -337,7 +326,7 @@ async def cut_segments(
         # The thread stops at the next chunk (or has already ended). Wait until it HAS, however often this
         # task is cancelled meanwhile: the caller removes the directory (and lets go of the job) as soon as
         # this raises.
-        await _wait_until_done(work)
+        await wait_until_done(work)
         if not work.cancelled():
             work.exception()  # its own outcome (_Stopped, an error) is not wanted: mark it retrieved
         raise
