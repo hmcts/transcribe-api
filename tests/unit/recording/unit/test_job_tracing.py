@@ -18,6 +18,7 @@ from hmcts_otel import capture_trace_context, get_tracer
 from hmcts_otel import conventions as c
 from hmcts_otel.testing import TelemetryCapture, capture_telemetry
 
+from tests.unit.recording.unit.async_upload_helpers import tone
 from transcribe_api.domain.models_recording import BatchJobStatus, SpeechBatchJob
 from transcribe_api.runtime.telemetry import (
     JOURNEY_UPLOAD,
@@ -54,6 +55,10 @@ def test_helpers():
     assert batch_job_id_from_url(SPEECH_URL) == SPEECH_JOB_ID
 
 
+# Every upload is checked from its header (ffprobe) first, whatever the flag: a real, tiny audio file.
+AUDIO = tone(".mp3", 1)
+
+
 # Upload -----------------------------------------------------------------------------------
 
 
@@ -77,9 +82,7 @@ def _client_with_user(mocker):
 
 
 def test_upload_is_a_journey_whose_id_is_in_the_blob_name(tel, mocker):
-    response = _client_with_user(mocker).post(
-        "/api/v1/uploads", files={"file": ("hearing.mp3", b"bytes", "audio/mpeg")}
-    )
+    response = _client_with_user(mocker).post("/api/v1/uploads", files={"file": ("hearing.mp3", AUDIO, "audio/mpeg")})
     assert response.status_code == 201
     upload_id = upload_id_from_blob(response.json()["blob_name"])
     assert upload_id is not None
@@ -267,7 +270,7 @@ def test_storage_failure_on_upload_is_an_error(tel, mocker):
 
     manager = routes_recording.AsyncAzureBlobManager.return_value
     manager.create_blob_from_file.return_value = False
-    response = client.post("/api/v1/uploads", files={"file": ("hearing.mp3", b"b", "audio/mpeg")})
+    response = client.post("/api/v1/uploads", files={"file": ("hearing.mp3", AUDIO, "audio/mpeg")})
     assert response.status_code == 502
     (failed,) = tel.events("upload.failed")
     assert failed[c.OUTCOME] == "error" and failed[c.ERROR_CODE] == "storage.write_failed"
@@ -302,7 +305,7 @@ def test_missing_ffmpeg_on_upload_is_an_error(tel, mocker):
     from transcribe_api.api import routes_recording
 
     routes_recording.normalize_to_wav.side_effect = FileNotFoundError("ffmpeg")
-    response = client.post("/api/v1/uploads", files={"file": ("hearing.mp3", b"b", "audio/mpeg")})
+    response = client.post("/api/v1/uploads", files={"file": ("hearing.mp3", AUDIO, "audio/mpeg")})
     assert response.status_code == 503
     (failed,) = tel.events("upload.failed")
     assert failed[c.OUTCOME] == "error" and failed[c.ERROR_CODE] == "upload.transcoder_unavailable"

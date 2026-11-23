@@ -334,7 +334,7 @@ async def test_a_recording_over_the_limit_is_split_into_parts_each_within_the_li
 # Refused recordings ----------------------------------------------------------------------------------
 
 
-def test_with_both_flags_off_a_recording_over_the_limit_is_refused_after_the_request_has_converted_it(h):
+def test_with_both_flags_off_a_recording_over_the_limit_is_refused_from_the_header_before_it_is_converted(h):
     h.set_flags(False, False)
     path = h.audio("over-limit", _pattern(h.scale.over_limit, 1))
 
@@ -345,10 +345,8 @@ def test_with_both_flags_off_a_recording_over_the_limit_is_refused_after_the_req
         response.json()["detail"].startswith("The recording is ")
         and "Recordings can be at most" in response.json()["detail"]
     )
-    assert (
-        "convert in the request" in h.timings
-    )  # today's behaviour: the whole file is converted inside the request first
-    assert h.stored_files() == []
+    # DIAAT-408: the header check runs whatever the flag, so nothing is converted or stored.
+    assert seconds < REQUEST_BUDGET_SECONDS and "convert in the request" not in h.timings and h.stored_files() == []
     h.record("4 h 01 m, flags off (refused)", file_bytes=path.stat().st_size, refused_after=round(seconds, 2))
 
 

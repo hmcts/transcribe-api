@@ -851,9 +851,14 @@ async def _upload_audio(
         if "file.size_bytes" not in upload_stage.attributes:
             upload_stage.set_attribute("file.size_bytes", size)
 
+        # DIAAT-408: the length in the file's header (ffprobe), whichever way the upload goes on: a file
+        # that cannot be read or is over the limit is refused in seconds, before anything is converted or
+        # stored. (No duration in the header: carried on, the exact check after the conversion decides.)
+        await _refuse_from_header(input_path, upload_stage)
+
         if defer_preparation:
             return await _accept_for_preparation(
-                input_path, extension, current_user, upload_id, blob_name, upload_stage
+                current_user, upload_id, input_path, extension, blob_name, upload_stage
             )
 
         # Transcode every accepted upload to 16 kHz mono PCM WAV — the format
@@ -922,20 +927,12 @@ async def _upload_audio(
     return UploadResponse(audio_url=audio_url, blob_name=blob_name)
 
 
-async def _accept_for_preparation(
-    input_path: Path,
-    extension: str,
-    current_user: AuthenticatedUser,
-    upload_id: UUID,
-    blob_name: str,
-    upload_stage: StageHandle,
-) -> UploadResponse:
-    """DIAAT-408: the upload with ``async_upload_preparation`` on. Answer within seconds, whatever
-    the recording's length: read its length from the file header (``ffprobe``), refuse what cannot be
-    read or is over the limit, store the original, and leave the conversion to the worker
-    (stt/preparation_service.py). The response is the one the converting upload gives: ``blob_name``
-    is the WAV's future name, so the ownership checks of POST /jobs are unchanged. The exact check on
-    the converted WAV stays in the worker."""
+async def _refuse_from_header(input_path: Path, upload_stage: StageHandle) -> None:
+    """DIAAT-408: read the recording's length from the file header (``ffprobe``, seconds whatever the
+    length) and refuse what cannot be read (422 undecodable; 503 if ffprobe is missing) or is over the
+    effective limit (422 too long, with the sentence), before the file is converted or stored. The
+    header of a VBR MP3 with no Xing header is an estimate and some files state none (None: nothing is
+    refused here); the exact check on the converted WAV is the backstop."""
     try:
         probed = await probe_duration_seconds(input_path)
     except AudioDecodeError as exc:
@@ -945,14 +942,29 @@ async def _accept_for_preparation(
         upload_stage.error("upload.transcoder_unavailable")  # server-side: counts as an error
         logger.error("Cannot read the upload, ffprobe is not available: %s", exc)
         raise HTTPException(status_code=503, detail=_TRANSCODER_UNAVAILABLE_DETAIL) from exc
-    if probed is not None:
-        max_seconds = await asyncio.to_thread(current_limit_seconds)
-        if probed > max_seconds:
-            _reject(upload_stage, "upload.too_long")
-            upload_stage.set_attribute("audio.duration_seconds", probed)
-            raise HTTPException(status_code=422, detail=_too_long_detail(probed, max_seconds))
+    if probed is None:
+        return
+    max_seconds = await asyncio.to_thread(current_limit_seconds)
+    if probed > max_seconds:
+        _reject(upload_stage, "upload.too_long")
         upload_stage.set_attribute("audio.duration_seconds", probed)
+        raise HTTPException(status_code=422, detail=_too_long_detail(probed, max_seconds))
+    upload_stage.set_attribute("audio.duration_seconds", probed)
 
+
+async def _accept_for_preparation(
+    current_user: AuthenticatedUser,
+    upload_id: UUID,
+    input_path: Path,
+    extension: str,
+    blob_name: str,
+    upload_stage: StageHandle,
+) -> UploadResponse:
+    """DIAAT-408: the upload with ``async_upload_preparation`` on, after the header check
+    (``_refuse_from_header``). Answer within seconds, whatever the recording's length: store the
+    original and leave the conversion to the worker (stt/preparation_service.py). The response is the
+    one the converting upload gives: ``blob_name`` is the WAV's future name, so the ownership checks of
+    POST /jobs are unchanged. The exact check on the converted WAV stays in the worker."""
     source_name = source_blob_name(current_user.id, upload_id, extension)
     storage = get_audio_storage()
     try:

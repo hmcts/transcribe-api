@@ -265,7 +265,7 @@ class Service:
     # API ---------------------------------------------------------------------------------
 
     def upload(self, name: str = ORIGINAL_FILE_NAME, **headers) -> httpx.Response:
-        return self.client.post("/api/v1/uploads", files={"file": (name, b"ID3 audio", "audio/mpeg")}, headers=headers)
+        return self.client.post("/api/v1/uploads", files={"file": (name, _wav(), "audio/mpeg")}, headers=headers)
 
     def submit(self, upload: dict) -> httpx.Response:
         body = {
