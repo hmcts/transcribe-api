@@ -19,7 +19,7 @@ import tempfile
 import urllib.parse
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -1085,3 +1085,18 @@ def test_sections_are_only_for_a_template():
     LiveTranscriptionSubmissionRequest.model_validate(body)  # the IAC decision, as before
     with pytest.raises(ValidationError, match="Send sections only with a template_id"):
         LiveTranscriptionSubmissionRequest.model_validate({**body, "sections": {"Background": _said("Heard.")}})
+
+
+def test_a_submission_takes_a_section_for_every_box_a_template_can_have():
+    from pydantic import ValidationError
+
+    from transcribe_api.api.routes_dictation import LiveTranscriptionSubmissionRequest
+
+    def body(count: int) -> dict:
+        sections = {f"Box{n}": _said("Said.") for n in range(count)}
+        return {"template_id": str(uuid4()), "values": {}, "messages": [], "sections": sections}
+
+    # As many as the template editor takes fields (500), not fewer.
+    LiveTranscriptionSubmissionRequest.model_validate(body(500))
+    with pytest.raises(ValidationError):
+        LiveTranscriptionSubmissionRequest.model_validate(body(501))

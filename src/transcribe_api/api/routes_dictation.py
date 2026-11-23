@@ -1270,7 +1270,8 @@ class LiveTranscriptionSubmissionRequest(BaseModel):
     template_id: uuid.UUID | None = None
     values: dict[str, str | bool | list[str] | None] | None = Field(default=None, max_length=500)
     messages: SectionedMessages | list[LiveTranscriptMessage]
-    sections: dict[str, list[LiveTranscriptMessage]] | None = Field(default=None, max_length=100)
+    # One per dictated box: as many as a template can have fields (TemplateWrite).
+    sections: dict[str, list[LiveTranscriptMessage]] | None = Field(default=None, max_length=500)
     notes: str | None = Field(default=None, max_length=200_000)
 
     @model_validator(mode="after")
