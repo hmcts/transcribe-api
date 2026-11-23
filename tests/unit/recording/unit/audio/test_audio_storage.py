@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -234,6 +235,21 @@ async def test_a_download_is_written_a_chunk_at_a_time(monkeypatch, tmp_path):
     target = tmp_path / "out.mp3"
     assert await manager.download_blob_to_file("incoming/u/a.mp3", target) is True
     assert target.read_bytes() == b"abcdefg"
+
+
+async def test_a_download_is_written_whole_without_blocking_file_calls_in_the_event_loop(monkeypatch, tmp_path):
+    """Many chunks of different sizes (and an empty one) arrive in order and are written whole, through an
+    asynchronous file API: pathlib's blocking ``Path.open`` is not used."""
+    chunks = [bytes([n % 251]) * size for n, size in enumerate([1, 4096, 0, 70_000, 3, 1_000_000, 17] * 6)]
+    manager = AsyncAzureBlobManager()
+    monkeypatch.setattr(manager, "_blob_service_client", lambda **kw: _DownloadService(_BlobClient(chunks)))
+    target = tmp_path / "out.mp3"
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "open", lambda *a, **k: (_ for _ in ()).throw(AssertionError("blocking Path.open")))
+        assert await manager.download_blob_to_file("incoming/u/a.mp3", target) is True
+
+    assert target.read_bytes() == b"".join(chunks)
 
 
 async def test_a_download_of_a_blob_that_is_not_there_raises_not_found_and_other_failures_return_false(

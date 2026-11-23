@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from urllib.parse import quote
 
+import aiofiles
 import anyio
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from azure.identity.aio import DefaultAzureCredential
@@ -526,9 +527,9 @@ class AsyncAzureBlobManager:
                 # Download blob content a chunk at a time: a recording's original can be
                 # a gigabyte, and the worker's memory is 2 GiB.
                 download_stream = await blob_client.download_blob()
-                with file_path.open("wb") as out:
+                async with aiofiles.open(file_path, "wb") as out:  # not the event loop's thread
                     async for chunk in download_stream.chunks():
-                        out.write(chunk)
+                        await out.write(chunk)
 
             logger.info(f"Successfully downloaded blob {container}/{blob_name} to {file_path}")
 
