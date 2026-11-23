@@ -7,6 +7,7 @@ generated tone-and-silence audio and a small part target: never hours, never lar
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import random
 import wave
@@ -30,7 +31,9 @@ from transcribe_api.stt.splitter import (
 
 LIMIT = 14_400.0
 
-# ffmpeg's segment muxer cuts the 16 kHz mono 16-bit PCM WAV at packet boundaries, at the first packet at or
+# (The cut is now made in Python, exact to the sample; these bounds are the margin the planner was sized for, and
+# the tolerance the tests keep, from when ffmpeg's segment muxer made it.)
+# ffmpeg's segment muxer cut the 16 kHz mono 16-bit PCM WAV at packet boundaries, at the first packet at or
 # after the planned time. With ffmpeg 8.0.1 a packet was about 2 KiB (0.06 s); the production image's 9.0.2 cuts
 # 4096-byte packets: 4096 / (16,000 samples x 2 bytes) = 0.128 s, which is what moved a cut planned at 21.0 s
 # to 21.12 s. A cut may therefore land up to PACKET_SECONDS late; the tolerance allows two packets (the second
@@ -297,35 +300,23 @@ def test_a_cut_planned_in_the_shortest_silence_is_still_inside_it_a_packet_late(
     assert silence.start < cut + 0.13 < silence.end
 
 
-def test_the_part_files_are_ordered_by_their_number_past_part_999(tmp_path):
-    """``part-%03d.wav`` is part-1000.wav from the 1001st segment on: as text it sorts between part-100 and
-    part-101. (8 hours at the smallest PART_TARGET_SECONDS, 20, is 1,440 parts.)"""
-    for number in range(1005):
-        (tmp_path / f"part-{number:03d}.wav").write_bytes(b"")
-    files = splitter._segment_files(tmp_path)
-    assert [f.name for f in files] == [f"part-{n:03d}.wav" for n in range(1005)]
-    assert sorted(f.name for f in tmp_path.glob("part-*.wav"))[101] != "part-101.wav"  # the trap: sorting names
-
-
-@pytest.mark.parametrize("missing", ["part-001.wav", "part-000.wav"])
-def test_part_files_that_are_not_numbered_consecutively_from_zero_are_refused(tmp_path, missing):
-    for number in range(4):
-        (tmp_path / f"part-{number:03d}.wav").write_bytes(b"")
-    (tmp_path / missing).unlink()
-    with pytest.raises(SplitError, match="consecutively"):
-        splitter._segment_files(tmp_path)
-
-
-def test_a_stray_file_among_the_parts_is_refused(tmp_path):
-    (tmp_path / "part-000.wav").write_bytes(b"")
-    (tmp_path / "part-old.wav").write_bytes(b"")
-    with pytest.raises(SplitError, match="unexpected"):
-        splitter._segment_files(tmp_path)
+def _write_wav(path, seconds: float, rate: int = 8_000) -> None:
+    """A mono 16-bit WAV whose samples count up (mod 2**15), so every part's content can be checked."""
+    frames = round(seconds * rate)
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        step = 100_000
+        for start in range(0, frames, step):
+            wav.writeframes(
+                b"".join((n % 32768).to_bytes(2, "little") for n in range(start, min(frames, start + step)))
+            )
 
 
 async def test_more_than_a_thousand_real_parts_keep_their_order_and_offsets(tmp_path):
-    """A real cut into 1,025 parts (a 205 s WAV cut every 0.2 s, more than the packet of either ffmpeg) with
-    names past part-999: each part follows the previous one and the offsets are the cut times."""
+    """1,025 parts (a 205 s WAV cut every 0.2 s), with names past part-999: each follows the previous one and the
+    offsets are the cut times, to the sample."""
     wav = tmp_path / "full.wav"
     wav.write_bytes(tone_and_silence((("t", 205.0),)))
     total = _frames(wav) / 16000
@@ -336,9 +327,78 @@ async def test_more_than_a_thousand_real_parts_keep_their_order_and_offsets(tmp_
     assert len(cut) == 1025
     assert [p.path.name for p in cut] == [f"part-{n:03d}.wav" for n in range(1025)]
     assert [p.index for p in cut] == list(range(1, 1026))
-    for number in (100, 101, 999, 1000, 1001, 1024):  # around the point where the names stop sorting
-        assert cut[number].offset_seconds == pytest.approx(0.2 * number, abs=CUT_TOLERANCE_SECONDS * 2)
-    assert all(a.offset_seconds < b.offset_seconds for a, b in itertools.pairwise(cut))
+    assert [p.offset_seconds for p in cut[:1025]] == pytest.approx([0.2 * n for n in range(1025)], abs=1 / 16000)
+    assert sum(_frames(p.path) for p in cut) == _frames(wav)
+
+
+async def test_cut_times_that_do_not_fit_on_one_command_line_are_cut_all_the_same(tmp_path):
+    """ffmpeg's -segment_times took every cut time in ONE argument, and Linux allows 128 KiB in one: a recording
+    of hours cut into parts of seconds (PART_TARGET_SECONDS is valid down to 1) could not even be started
+    (E2BIG, and every retry the same). 15,499 cuts of 0.2 s written as the old code wrote them are 139 KB."""
+    wav = tmp_path / "full.wav"
+    _write_wav(wav, 3_100.0)
+    cut_times = [round(0.2 * k, 3) for k in range(1, 15_500)]
+    assert len(",".join(f"{t:.6f}" for t in cut_times)) > 128 * 1024  # the old argument
+    out = tmp_path / "parts"
+    out.mkdir()
+
+    cut = await splitter.cut_segments(wav, cut_times, out, total_seconds=3_100.0, limit=60.0)
+
+    assert len(cut) == 15_500
+    assert [p.index for p in cut] == list(range(1, 15_501))
+    assert [p.offset_seconds for p in cut] == pytest.approx([0.2 * n for n in range(15_500)], abs=1 / 8000)
+    assert sum(_frames(p.path) for p in cut) == _frames(wav)
+
+
+async def test_every_part_holds_exactly_the_samples_between_its_cuts(tmp_path):
+    wav = tmp_path / "full.wav"
+    _write_wav(wav, 3.0, rate=1000)  # 3,000 samples counting up
+    out = tmp_path / "parts"
+    out.mkdir()
+    cut = await splitter.cut_segments(wav, [0.5, 1.2504], out, total_seconds=3.0, limit=10.0)
+    assert [(p.offset_seconds, p.duration_seconds) for p in cut] == [
+        (0.0, 0.5),
+        (0.5, 0.75),
+        (1.25, 1.75),
+    ]  # 1.2504 -> 1250
+    first_samples = []
+    for part in cut:
+        with wave.open(str(part.path), "rb") as w:
+            first_samples.append(int.from_bytes(w.readframes(1), "little"))
+    assert first_samples == [0, 500, 1250]
+
+
+@pytest.mark.parametrize("cuts", [[2.0, 1.0], [1.0, 1.0], [0.0], [3.0], [4.0]])
+async def test_cut_times_that_are_not_increasing_and_inside_the_recording_are_refused(tmp_path, cuts):
+    wav = tmp_path / "full.wav"
+    _write_wav(wav, 3.0, rate=1000)
+    with pytest.raises(SplitError, match="increasing"):
+        await splitter.cut_segments(wav, cuts, tmp_path, total_seconds=3.0)
+
+
+async def test_cancelling_the_cut_stops_the_copy_before_the_caller_can_remove_the_directory(tmp_path, monkeypatch):
+    """The copy runs in a thread. Cancelled, the task tells it to stop and waits for it: when the cancellation
+    reaches the caller, nothing is writing any more. Deterministic: the copy is held until it has been told."""
+    import threading
+
+    wav = tmp_path / "full.wav"
+    _write_wav(wav, 3.0, rate=1000)
+    entered, told, ended = threading.Event(), [], threading.Event()
+    real = splitter._copy_frames
+
+    def held_copy(source, target, count, stop):
+        entered.set()
+        told.append(stop.wait(20))  # returns once cut_segments has asked it to stop
+        ended.set()
+        return real(source, target, count, stop)  # raises _Stopped: the stop is set
+
+    monkeypatch.setattr(splitter, "_copy_frames", held_copy)
+    task = asyncio.create_task(splitter.cut_segments(wav, [1.0], tmp_path, total_seconds=3.0))
+    assert await asyncio.to_thread(entered.wait, 20)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert told == [True] and ended.is_set()  # told to stop, and finished before the cancellation was raised
 
 
 async def test_audio_with_no_silence_is_cut_at_the_ideal_points(tmp_path):

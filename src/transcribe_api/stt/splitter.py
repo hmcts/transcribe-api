@@ -12,21 +12,27 @@ its own job. Three steps, kept apart so the middle one can be tested exhaustivel
    holds none (``cut_kind`` says which). Whatever the input, the plan is checked
    (``check_plan``): parts are contiguous, cover [0, duration], and none is longer than the limit.
    A recording no longer than the limit is a single part.
-3. ``cut_segments``: ``ffmpeg -c copy -f segment`` on the WAV: no re-encode, close to disk speed.
-   The segment muxer cuts at packet boundaries of the PCM data (a fraction of a second: about 0.06 s
-   with ffmpeg 8.0.1, up to 0.128 s with the 9.0.2 of the production image), so the **actual**
-   length and offset of each part are measured from the files, not taken from the plan; the sum of
-   the parts is still the whole recording to within a sample or two.
+3. ``cut_segments``: the PCM frames of the WAV are copied into the parts in Python, at the frame
+   nearest each planned cut: no re-encode, close to disk speed, exact to the sample, and nothing
+   goes through a command line (ffmpeg's segment muxer took every cut time in ONE argument, and
+   Linux limits an argument to 128 KiB: a few thousand cuts, as a small ``PART_TARGET_SECONDS`` gives
+   for a long recording, could not even be started; the muxer also cut at packet boundaries, which
+   differ between ffmpeg versions). The length and offset of each part are still measured from the
+   files; the parts are the whole recording to the sample.
 
-Why the planner works to ``limit - SEGMENT_SLACK_SECONDS``: the cut can land up to a packet after
-the planned point, and a part must still be within Azure's limit when it has.
+Why the planner works to ``limit - SEGMENT_SLACK_SECONDS``: a cut may land a little after the planned
+point (it is a margin that was sized for packet boundaries, up to 0.128 s; now a cut is within half a
+sample), and a part must still be within Azure's limit when it does.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import itertools
 import math
 import re
+import threading
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,8 +46,9 @@ CUT_WINDOW_SECONDS = 600.0
 # What counts as silence: below this level for at least this long.
 SILENCE_NOISE_DB = -35.0
 SILENCE_MIN_SECONDS = 0.5
-# The segment muxer cuts at packet boundaries, up to a packet after the planned point (0.128 s with
-# ffmpeg 9.0.2's 4096-byte packets of 16 kHz mono 16-bit audio): this is eight times that.
+# A margin for a cut landing after the planned point: sized for the packet boundaries ffmpeg's segment
+# muxer cut at (0.128 s with 9.0.2's 4096-byte packets), which is eight times that. Kept: it costs
+# nothing against hours, and a plan that fits it fits an exact cut.
 SEGMENT_SLACK_SECONDS = 1.0
 # The shortest part a plan may contain (a part of a fraction of a second is not transcribable).
 MIN_PART_SECONDS = 1.0
@@ -243,25 +250,50 @@ def _wav_seconds(path: Path) -> float:
         raise SplitError(f"a part could not be read back ({type(exc).__name__})") from exc
 
 
-_SEGMENT_NAME = re.compile(r"part-(\d+)\.wav")
+# Frames copied at a time: 64 Ki frames of 16 kHz mono 16-bit audio is 128 KiB, so memory stays small however
+# long the recording, and a stop request is noticed within a few milliseconds of disk time.
+_COPY_CHUNK_FRAMES = 65_536
 
 
-def _segment_files(out_dir: Path) -> list[Path]:
-    """The files ``ffmpeg -f segment`` wrote for ``part-%03d.wav``, in cutting order. The number is at
-    least three digits and grows past 999 (``part-1000.wav``), so the order is the number's, not the name's:
-    sorted as text ``part-1000.wav`` would land between ``part-100`` and ``part-101`` and scramble the
-    offsets, while the lengths would still add up to the whole recording. Raises SplitError unless the
-    numbers are exactly 0, 1, ... n-1."""
-    numbered: list[tuple[int, Path]] = []
-    for path in out_dir.glob("part-*.wav"):
-        match = _SEGMENT_NAME.fullmatch(path.name)
-        if match is None:
-            raise SplitError(f"unexpected file {path.name} among the parts")
-        numbered.append((int(match.group(1)), path))
-    numbered.sort()
-    if [n for n, _ in numbered] != list(range(len(numbered))):
-        raise SplitError("the parts ffmpeg wrote are not numbered consecutively from 0")
-    return [path for _, path in numbered]
+class _Stopped(Exception):
+    """The cut was abandoned because the task awaiting it was cancelled."""
+
+
+def _copy_frames(source: wave.Wave_read, target: wave.Wave_write, count: int, stop: threading.Event) -> None:
+    """Copy ``count`` frames from ``source`` (at its current position) to ``target``."""
+    while count > 0:
+        if stop.is_set():
+            raise _Stopped
+        chunk = source.readframes(min(_COPY_CHUNK_FRAMES, count))
+        if not chunk:
+            raise SplitError("the recording ended before the last cut")
+        target.writeframes(chunk)
+        count -= len(chunk) // source.getsampwidth() // source.getnchannels()
+
+
+def _cut_wav(wav_path: Path, cut_times: list[float], out_dir: Path, stop: threading.Event) -> list[Path]:
+    """Write ``out_dir/part-000.wav`` ... from ``wav_path``, cut at the frame nearest each of ``cut_times``.
+    Pure Python on a PCM WAV (the recording is the 16 kHz mono WAV ``normalize_to_wav`` made): the cuts are
+    exact to the sample, and nothing depends on a command line, whose length is limited (Linux allows
+    128 KiB in one argument, which a few thousand cut times in one ``-segment_times`` exceed)."""
+    try:
+        with wave.open(str(wav_path), "rb") as source:
+            rate, total = source.getframerate(), source.getnframes()
+            bounds = [0, *(round(t * rate) for t in cut_times), total]
+            if any(not 0 < b < total for b in bounds[1:-1]) or any(b <= a for a, b in itertools.pairwise(bounds)):
+                raise SplitError("the cut times are not increasing and inside the recording")
+            paths: list[Path] = []
+            for number, (start, end) in enumerate(itertools.pairwise(bounds)):
+                path = out_dir / f"part-{number:03d}.wav"
+                with wave.open(str(path), "wb") as target:
+                    target.setparams((*source.getparams()[:3], 0, "NONE", "not compressed"))
+                    _copy_frames(source, target, end - start, stop)
+                paths.append(path)
+            return paths
+    except wave.Error as exc:
+        raise SplitError(f"the recording could not be cut ({exc})") from exc
+    except (EOFError, OSError) as exc:
+        raise SplitError(f"the recording could not be cut ({type(exc).__name__})") from exc
 
 
 async def cut_segments(
@@ -272,40 +304,24 @@ async def cut_segments(
     total_seconds: float,
     limit: float = AZURE_BATCH_FILE_LIMIT_SECONDS,
 ) -> list[CutPart]:
-    """Cut ``wav_path`` at ``cut_times`` into ``out_dir/part-001.wav`` ... with
-    ``ffmpeg -c copy -f segment`` (no re-encode). Returns the parts with their measured offsets and
-    lengths, after checking that there are ``len(cut_times) + 1`` of them, that none is longer than
-    ``limit``, and that together they are the whole recording (to within a hundredth of a second).
-    Raises SplitError otherwise."""
-    pattern = out_dir / "part-%03d.wav"
-    result = await run_process(
-        "ffmpeg",
-        "-nostdin",
-        "-v",
-        "error",
-        "-i",
-        str(wav_path),
-        "-f",
-        "segment",
-        "-segment_times",
-        ",".join(f"{t:.6f}" for t in cut_times),
-        "-c",
-        "copy",
-        "-segment_format",
-        "wav",
-        "-reset_timestamps",
-        "1",
-        "-y",
-        str(pattern),
-    )
-    if result.returncode != 0:
-        raise SplitError(
-            f"ffmpeg segment failed (exit {result.returncode}): {result.stderr.decode(errors='replace')[-300:]}"
-        )
+    """Cut ``wav_path`` at ``cut_times`` into ``out_dir/part-000.wav`` ... (no re-encode: the PCM frames
+    are copied; see ``_cut_wav``). Returns the parts with their offsets and lengths, measured from the files,
+    after checking that there are ``len(cut_times) + 1`` of them, that none is longer than ``limit``, and that
+    together they are the whole recording (to within a hundredth of a second). Raises SplitError otherwise.
 
-    files = _segment_files(out_dir)
+    The copy runs in a thread. If this task is cancelled the thread is told to stop and is waited for (it
+    notices within one chunk), so nothing is still writing into ``out_dir`` when the caller removes it."""
+    stop = threading.Event()
+    work = asyncio.ensure_future(asyncio.to_thread(_cut_wav, wav_path, cut_times, out_dir, stop))
+    try:
+        files = await asyncio.shield(work)
+    except BaseException:
+        stop.set()
+        with contextlib.suppress(BaseException):
+            await asyncio.shield(work)  # it stops at the next chunk (or has already ended)
+        raise
     if len(files) != len(cut_times) + 1:
-        raise SplitError(f"expected {len(cut_times) + 1} parts, ffmpeg wrote {len(files)}")
+        raise SplitError(f"expected {len(cut_times) + 1} parts, wrote {len(files)}")
     parts: list[CutPart] = []
     offset = 0.0
     for i, path in enumerate(files):

@@ -117,9 +117,3 @@ async def test_cancelling_silence_detection_stops_ffmpeg(spawns, slow_tools, tmp
     task = asyncio.create_task(splitter.detect_silences(tmp_path / "in.wav", 100.0))
     pid = await _cancel_once_running(spawns, task)
     assert _is_gone(pid)
-
-
-async def test_cancelling_the_cutting_stops_ffmpeg(spawns, slow_tools, tmp_path):
-    task = asyncio.create_task(splitter.cut_segments(tmp_path / "in.wav", [10.0], tmp_path, total_seconds=20.0))
-    pid = await _cancel_once_running(spawns, task)
-    assert _is_gone(pid)
