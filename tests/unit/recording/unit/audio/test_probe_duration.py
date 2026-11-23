@@ -155,6 +155,20 @@ def test_an_audio_only_file_with_no_stream_duration_takes_the_containers():
     assert parse_probe(_json(fmt="matroska,webm", container=None, streams=[_audio(None)])) is None
 
 
+def test_a_single_audio_stream_with_no_duration_still_takes_the_containers():
+    streams = [_audio(None)]
+    assert parse_probe(_json(fmt="matroska,webm", container=42.5, streams=streams)) == ProbedDuration(42.5, True)
+
+
+def test_a_first_audio_stream_with_no_duration_beside_a_longer_second_audio_stream_is_unknown():
+    """The conversion takes the first audio stream. The container's length is that of the longest stream, the
+    second one here: used for the first it would be too long, and could refuse a recording that is within the limit."""
+    streams = [_audio(None), {**_audio("500.0"), "index": 2}]
+    assert parse_probe(_json(fmt="matroska,webm", container=500.0, streams=streams)) is None
+    streams = [_audio(None), {"index": 2, "codec_type": "subtitle"}]  # any other stream counts too
+    assert parse_probe(_json(fmt="matroska,webm", container=500.0, streams=streams)) is None
+
+
 @pytest.mark.parametrize("output", ["", "not json", "[]", "{}"])
 def test_no_json_from_ffprobe_is_unknown(output):
     assert parse_probe(output) is None

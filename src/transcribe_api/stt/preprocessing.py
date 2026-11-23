@@ -164,9 +164,10 @@ def parse_probe(output: str) -> ProbedDuration | None:
 
     ``normalize_to_wav`` maps the first audio stream (``-map 0:a:0``), so that stream's duration is the
     one that counts: a video track longer than its audio (MP4, MKV) is not the recording's length. A
-    stream that states no duration (Matroska does not) falls back to the container's, but only when the
-    file has no video stream; with a video stream the length is unknown (None: the exact check after the
-    conversion decides). A file ffprobe could read that has no audio stream at all raises AudioDecodeError
+    stream that states no duration (Matroska does not) falls back to the container's only when that stream is
+    the file's ONLY stream: the container's length is the longest of all the streams, so with a video, or a
+    later (longer) audio stream, it is not the length of the audio converted, and the length is unknown
+    (None: the exact check after the conversion decides). A file ffprobe could read that has no audio stream at all raises AudioDecodeError
     (a video-only MP4 is not a recording); None is only for audio whose length is not stated."""
     try:
         data = json.loads(output)
@@ -185,7 +186,7 @@ def parse_probe(output: str) -> ProbedDuration | None:
     fmt = data.get("format") if isinstance(data.get("format"), dict) else {}
     seconds = _seconds(audio.get("duration"))
     if seconds is None:
-        if any(s.get("codec_type") == "video" for s in streams):
+        if len(streams) != 1:  # the container's length would be that of the longest stream, not of this one
             return None
         seconds = _seconds(fmt.get("duration"))
         if seconds is None:
@@ -197,7 +198,7 @@ async def probe_audio_duration(path: Path, *, timeout: float = PROBE_TIMEOUT_SEC
     """The length of the audio in the file's header, from ``ffprobe`` (a read of the header, not a decode).
 
     Returns None when the file has an audio stream but states no usable length (some VBR MP3s, raw
-    streams, a video with an audio track that states none), or when ffprobe takes longer than ``timeout``: the exact
+    streams, a video or a second audio stream beside an audio track that states none), or when ffprobe takes longer than ``timeout``: the exact
     length is then known only once the file is converted. See ``ProbedDuration`` for an estimate.
 
     Raises:

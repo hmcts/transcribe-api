@@ -40,7 +40,8 @@ limit is refused here (`stt/recording_limits.py`, `stt/preprocessing.py`):
 
 - The length is that of the **first audio stream**, the one the conversion maps (`ffmpeg -map 0:a:0`), not the container's: an MP4 or
   MKV whose video is longer than its audio is measured by its audio. If that stream states no duration (Matroska does not) and the
-  file has a video stream, the length is unknown; with no video stream the container's is used.
+  file has any other stream (a video, or a later and possibly longer audio stream), the length is unknown, because the container's
+  is that of the longest stream; the container's is used only when the audio stream is the file's only stream.
 - A figure from a format that states the length (WAV, FLAC, Ogg, MP4/M4A, Matroska, or an MP3 with a Xing/LAME header) is exact to
   a fraction of a second, but encoder delay and padding differ between ffmpeg versions (8.0.1 here, 9.0.2 in the production image), so
   it is refused only if it is more than `HEADER_TOLERANCE_SECONDS` (2 s) over the limit.
