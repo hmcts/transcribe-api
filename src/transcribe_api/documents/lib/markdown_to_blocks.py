@@ -186,11 +186,11 @@ class _MarkdownBlockVisitor:
 
     @visit.register
     def _visit_heading(self, token: MarkdownHeadingToken, _context: _ParseContext) -> None:
-        self._emit_heading(token.level, _collect_text(token).strip())
+        self._emit_heading(token.level, _collect_text(token).strip(), token)
 
     @visit.register
     def _visit_setext_heading(self, token: MarkdownSetextHeadingToken, _context: _ParseContext) -> None:
-        self._emit_heading(token.level, _collect_text(token).strip())
+        self._emit_heading(token.level, _collect_text(token).strip(), token)
 
     @visit.register
     def _visit_quote(self, token: MarkdownQuoteToken, context: _ParseContext) -> None:
@@ -212,7 +212,11 @@ class _MarkdownBlockVisitor:
 
     @visit.register
     def _visit_list_item(self, token: MarkdownListItemToken, context: _ParseContext) -> None:
+        start = len(self._blocks)
         self._visit_children(token, context)
+        items = [b for b in self._blocks[start:] if isinstance(b, Paragraph) and b.list_depth == context.list_depth]
+        for continued in items[1:]:
+            continued.list_continued = True
 
     @visit.register
     def _visit_thematic_break(self, _token: ThematicBreak, _context: _ParseContext) -> None:
@@ -226,7 +230,7 @@ class _MarkdownBlockVisitor:
     def _visit_block_code(self, token: BlockCode, _context: _ParseContext) -> None:
         self._emit_code_block(token.content)
 
-    def _emit_heading(self, level: int, text: str) -> None:
+    def _emit_heading(self, level: int, text: str, token: object = None) -> None:
         if not text:
             return
         self._blocks.append(
@@ -235,6 +239,7 @@ class _MarkdownBlockVisitor:
                 level=level,
                 bold=True,
                 underline=level <= 2,
+                runs=_paragraph_runs(token, text) if token is not None else [],
             )
         )
 

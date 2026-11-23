@@ -82,6 +82,8 @@ class Paragraph(BaseModel):
     # nested), as ``list_level`` alone does not say. Never dumped either.
     list_ordered: bool | None = Field(default=None, exclude=True)
     list_depth: int | None = Field(default=None, exclude=True)
+    # A list item's second or later paragraph: in the list, but not a new item.
+    list_continued: bool = Field(default=False, exclude=True)
 
 
 class Heading(BaseModel):
@@ -94,6 +96,8 @@ class Heading(BaseModel):
     bold: bool = True
     underline: bool = True
     font_size: int = 12
+    # As for Paragraph.runs: the heading formatted within the line, never dumped.
+    runs: list[TextRun] = Field(default_factory=list, exclude=True)
 
 
 class PageBreak(BaseModel):

@@ -577,7 +577,8 @@ def box_paragraphs(blocks: list[ContentBlock]) -> list[BoxParagraph]:
     for block in blocks:
         if isinstance(block, Heading):
             counters.clear()
-            paragraphs.append(BoxParagraph(text=block.text, bold=True, underline=block.underline))
+            runs = tuple(BoxRun(r.text, r.bold, r.italic) for r in block.runs)
+            paragraphs.append(BoxParagraph(text=block.text, bold=True, underline=block.underline, runs=runs))
             continue
         if not isinstance(block, Paragraph):
             continue
@@ -585,6 +586,9 @@ def box_paragraphs(blocks: list[ContentBlock]) -> list[BoxParagraph]:
         if level is None or level < 0:
             counters.clear()
             label, indent = None, block.left_indent_pt
+        elif block.list_continued:
+            # More of the same item: under its text, without a label of its own.
+            label, indent = None, block.left_indent_pt or _LIST_INDENT_PT * ((block.list_depth or 0) + 1)
         else:
             ordered = block.list_ordered if block.list_ordered is not None else level > 0
             depth = block.list_depth if block.list_depth is not None else level

@@ -215,13 +215,10 @@ class WordDocument:
                         ppr.remove(found)
                 para.append(ppr)
             if block.left_indent_pt:
-                ppr = para.find(qn("w:pPr"))
-                if ppr is None:
-                    ppr = OxmlElement("w:pPr")
-                    para.append(ppr)
-                ind = OxmlElement("w:ind")
-                ind.set(qn("w:left"), str(round(block.left_indent_pt * 20)))
-                ppr.append(ind)
+                ppr = para.get_or_add_pPr()
+                # Not numbered, even by the box's list style: a list label is in the text.
+                ppr.get_or_add_numPr().get_or_add_numId().val = 0
+                ppr.get_or_add_ind().set(qn("w:left"), str(round(block.left_indent_pt * 20)))
             for run in self._block_runs(template_rpr_elem, block):
                 para.append(run)
             if previous is None:
@@ -240,10 +237,25 @@ class WordDocument:
                 else:
                     ppr.append(deepcopy(sect_pr))
         written_ids = {id(p) for p in written}
-        for old in list(sdt_content):
-            if old.tag == qn("w:p") and id(old) not in written_ids:
-                sdt_content.remove(old)
+        old_paragraphs = [old for old in sdt_content if old.tag == qn("w:p") and id(old) not in written_ids]
+        self._keep_bookmarks(old_paragraphs, written[0], written[-1])
+        for old in old_paragraphs:
+            sdt_content.remove(old)
         self._remove_control_highlighting(sdt)
+
+    @staticmethod
+    def _keep_bookmarks(old_paragraphs: list[_Element], first: _Element, last: _Element) -> None:
+        """Bookmarks in the paragraphs a box's text replaces move to its new paragraphs:
+        starts to the beginning of the first, ends to the end of the last, so links and
+        fields pointing at them, and bookmarks running on past the box, still work."""
+        markers = [m for old in old_paragraphs for m in old.iter(qn("w:bookmarkStart"), qn("w:bookmarkEnd"))]
+        position = 1 if first.find(qn("w:pPr")) is not None else 0
+        for marker in markers:
+            if marker.tag == qn("w:bookmarkStart"):
+                first.insert(position, marker)
+                position += 1
+            else:
+                last.append(marker)
 
     def _block_runs(self, template_rpr: _Element | None, block: BoxParagraph) -> list[_Element]:
         """The paragraph's runs: its label and text formatted as it is, or the label then

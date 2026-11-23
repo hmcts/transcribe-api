@@ -725,3 +725,63 @@ def test_underline_and_italic_are_written_even_where_the_template_turns_them_off
     assert rpr.find(qn("w:i")).get(qn("w:val")) is None
     assert rpr.find(qn("w:u")).get(qn("w:val")) == "single"
     assert rpr.find(qn("w:b")) is None
+
+
+def test_a_list_items_second_paragraph_is_not_a_new_item():
+    assert _box_lines("1. first\n\n   more of it\n2. second") == [("(a)", 36.0), (None, 36.0), ("(b)", 36.0)]
+
+
+def test_italic_within_a_heading_stays_on_its_words():
+    from transcribe_api.documents.lib.markdown_to_blocks import markdown_to_blocks
+
+    (heading,) = t.box_paragraphs(markdown_to_blocks("## Scope of *Smith v Jones*"))
+    assert (heading.bold, heading.underline) == (True, True)
+    assert [(r.text, r.bold, r.italic) for r in heading.runs] == [
+        ("Scope of ", False, False),
+        ("Smith v Jones", False, True),
+    ]
+
+
+def test_list_lines_are_not_numbered_again_by_the_boxs_list_style(tmp_path):
+    from lxml import etree
+
+    data, fields = _framework_template()
+    document = _framework_filled(tmp_path, fields, {"Issues": ["demo_rule"]}, data)
+    root = etree.fromstring(zipfile.ZipFile(io.BytesIO(document)).read("word/document.xml"))
+    w = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    (item,) = [
+        p
+        for p in root.xpath("//w:p", namespaces=w)
+        if "".join(p.xpath(".//w:t/text()", namespaces=w)) == "• first point"
+    ]
+    assert item.xpath("w:pPr/w:numPr/w:numId/@w:val", namespaces=w) == ["0"]
+
+
+def test_a_bookmark_inside_a_box_around_a_paragraph_is_kept(tmp_path):
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    def box_around_paragraph(paragraph, w):
+        # <w:p><w:sdt>…<w:r/>…</w:sdt></w:p> → <w:sdt>…<w:p>bookmark <w:r/> bookmark</w:p>…</w:sdt>
+        (sdt,) = paragraph.xpath("w:sdt", namespaces=w)
+        (content,) = sdt.xpath("w:sdtContent", namespaces=w)
+        inner = parse_xml(f"<w:p {nsdecls('w')}/>")
+        inner.append(parse_xml(f'<w:bookmarkStart {nsdecls("w")} w:id="7" w:name="Framework"/>'))
+        for run in list(content):
+            inner.append(run)
+        inner.append(parse_xml(f'<w:bookmarkEnd {nsdecls("w")} w:id="7"/>'))
+        content.append(inner)
+        paragraph.addprevious(sdt)
+        paragraph.getparent().remove(paragraph)
+
+    data, fields = _framework_template()
+    template = _framework_box_xml(data, box_around_paragraph)
+    document = _framework_filled(tmp_path, fields, {"Issues": ["demo_rule"]}, template)
+    xml = zipfile.ZipFile(io.BytesIO(document)).read("word/document.xml").decode()
+    start, first, last, end = (
+        xml.index('w:name="Framework"'),
+        xml.index("The Demo Rule applies."),
+        xml.index("second point"),
+        xml.index("w:bookmarkEnd"),
+    )
+    assert start < first < last < end
