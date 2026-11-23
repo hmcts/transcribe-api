@@ -51,6 +51,14 @@ class Frontmatter(BaseModel):
         return base
 
 
+class TextRun(BaseModel):
+    """A stretch of a paragraph's text with its own bold and italic (DIAAT-415)."""
+
+    text: str
+    bold: bool = False
+    italic: bool = False
+
+
 class Paragraph(BaseModel):
     """A paragraph block for structured hearing document rendering."""
 
@@ -66,6 +74,16 @@ class Paragraph(BaseModel):
     first_line_indent_pt: float | None = None
     list_level: int | None = None
     right_tab: bool = False
+    # The text as it is formatted within the line, for a writer that can keep that
+    # (uploaded templates): ``bold`` and ``italic`` say only whether any of it is.
+    # Never dumped, so nothing that stores or hashes blocks changes.
+    runs: list[TextRun] = Field(default_factory=list, exclude=True)
+    # For a list item: whether its list is ordered and how deep it is nested (0: not
+    # nested), as ``list_level`` alone does not say. Never dumped either.
+    list_ordered: bool | None = Field(default=None, exclude=True)
+    list_depth: int | None = Field(default=None, exclude=True)
+    # A list item's second or later paragraph: in the list, but not a new item.
+    list_continued: bool = Field(default=False, exclude=True)
 
 
 class Heading(BaseModel):
@@ -78,6 +96,8 @@ class Heading(BaseModel):
     bold: bool = True
     underline: bool = True
     font_size: int = 12
+    # As for Paragraph.runs: the heading formatted within the line, never dumped.
+    runs: list[TextRun] = Field(default_factory=list, exclude=True)
 
 
 class PageBreak(BaseModel):

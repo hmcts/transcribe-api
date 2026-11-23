@@ -826,3 +826,131 @@ def test_going_back_from_a_stale_page_or_to_no_such_version_is_refused(as_admin)
     stale = _restore(as_admin, template, 1)
     assert (stale.status_code, stale.json()["detail"]["code"]) == (409, "edit_conflict")
     assert _restore(as_admin, saved, 99).status_code == 404
+
+
+# DIAAT-415: the legal framework text, mapped into any jurisdiction's template -------------
+
+FRAMEWORK_TEMPLATE = make_template(
+    [
+        ["Case Number: ", Sdt("Reference")],
+        ["Issues: ", Sdt("Issues")],
+        [Sdt("LegalFramework", "Legal framework")],
+        [Sdt("JudgmentText", "Judgment text")],
+    ]
+)
+
+
+def _framework_setup(jurisdiction_db, admin_app, judge_app, code: str, frameworks: list[dict], **framework):
+    """In jurisdiction ``code``: its Legal Text Manager's frameworks, a live template whose
+    Issues box asks for legal issues and whose LegalFramework box prints their text, and a
+    judge. The admin changes only the Issues box: the LegalFramework box is proposed."""
+    jurisdiction = add_jurisdiction(jurisdiction_db, code)
+    save_document_content(jurisdiction.id, {"legal_frameworks": frameworks})
+    admin = add_user(jurisdiction_db, f"admin@{code.lower()}.test")
+    add_member(jurisdiction_db, admin, jurisdiction, role="admin")
+    as_admin = client_as(admin_app, jurisdiction_db, admin, ctx=(code, "JurisdictionAdministrator"))
+    template = as_admin.post(
+        f"/api/admin/jurisdictions/{code}/templates",
+        content=FRAMEWORK_TEMPLATE,
+        headers={"Content-Type": "application/octet-stream", "X-Upload-Filename": f"{code}.docx"},
+    ).json()
+    proposed = {f["tag"]: f for f in template["fields"]}
+    assert (proposed["LegalFramework"]["type"], proposed["LegalFramework"]["source"]) == (
+        "benchnotes",
+        "legal_framework",
+    )
+    fields = [
+        {**f, "type": "legal_issues", "required": False}
+        if f["tag"] == "Issues"
+        else {**f, **framework}
+        if f["tag"] == "LegalFramework"
+        else f
+        for f in template["fields"]
+    ]
+    saved = as_admin.put(
+        f"/api/admin/jurisdictions/{code}/templates/{template['id']}", json=complete(template, fields=fields)
+    )
+    assert saved.status_code == 200, saved.text
+    judge = add_user(jurisdiction_db, f"judge@{code.lower()}.test")
+    add_member(jurisdiction_db, judge, jurisdiction)
+
+    def as_judge():
+        # Signed in afresh each time: a client_as signs in every client of the app.
+        client = client_as(judge_app, jurisdiction_db, judge, ctx=(code, "Judge"))
+        client.headers["X-Jurisdiction"] = code
+        return client
+
+    return saved.json(), as_judge
+
+
+def _decision(as_judge, stored, template: dict, issues: list[str] | None) -> list[str]:
+    values = {"Reference": "1/2026", **({"Issues": issues} if issues is not None else {})}
+    response = as_judge().post("/api/live-transcription/submission", json=_submission(template["id"], values))
+    assert response.status_code == 200, response.text
+    return document_text(stored[response.json()["document_blob_path"]])
+
+
+def test_the_chosen_legal_frameworks_text_is_in_each_jurisdictions_document(
+    jurisdiction_db, admin_app, judge_app, stored
+):
+    et, et_judge = _framework_setup(
+        jurisdiction_db,
+        admin_app,
+        judge_app,
+        "ET",
+        [
+            {"id": "wages", "title": "Unlawful deductions", "rank": 2, "content": "Section 13 **ERA 1996**."},
+            {
+                "id": "unfair",
+                "title": "Unfair dismissal",
+                "rank": 1,
+                "content": "**Section 98**\n\n1. reason\n2. fairness",
+            },
+        ],
+    )
+    sscs, sscs_judge = _framework_setup(
+        jurisdiction_db,
+        admin_app,
+        judge_app,
+        "SSCS",
+        [{"id": "demo_rule", "title": "Demo Rule", "rank": 1, "content": "The Demo Rule applies.\n\n- a point"}],
+        empty_text="No legal framework applies.",
+    )
+
+    # Several frameworks: each once, in the Legal Text Manager's order, lists written out.
+    assert _decision(et_judge, stored, et, ["wages", "unfair"]) == [
+        "Case Number: 1/2026",
+        "Issues: Unfair dismissal, Unlawful deductions",
+        "Section 98",
+        "(a) reason",
+        "(b) fairness",
+        "Section 13 ERA 1996.",
+        "The claim succeeds.\n\nCosts are reserved.",
+    ]
+    # Another jurisdiction, its own frameworks, the same code.
+    assert _decision(sscs_judge, stored, sscs, ["demo_rule"])[1:4] == [
+        "Issues: Demo Rule",
+        "The Demo Rule applies.",
+        "• a point",
+    ]
+    # None chosen: the ET's box and its line go; the SSCS prints its "when left empty" text.
+    assert _decision(et_judge, stored, et, None) == [
+        "Case Number: 1/2026",
+        "The claim succeeds.\n\nCosts are reserved.",
+    ]
+    assert _decision(sscs_judge, stored, sscs, [])[1] == "No legal framework applies."
+    # A framework of the other jurisdiction is not one of this template's choices.
+    refused = et_judge().post(
+        "/api/live-transcription/submission", json=_submission(et["id"], {"Reference": "1", "Issues": ["demo_rule"]})
+    )
+    assert refused.status_code == 400
+
+
+def test_a_legal_framework_box_cannot_be_saved_without_a_legal_issues_question(as_admin):
+    template = upload(as_admin, data=FRAMEWORK_TEMPLATE).json()
+    response = as_admin.put(f"/api/admin/jurisdictions/ET/templates/{template['id']}", json=complete(template))
+    assert response.status_code == 400
+    assert (
+        "“Legal framework” prints the text of the legal frameworks the judge chooses: link a box"
+        " to a Legal issues question for them to choose from." in response.json()["detail"]["problems"]
+    )

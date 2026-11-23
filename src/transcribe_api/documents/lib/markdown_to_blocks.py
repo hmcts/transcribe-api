@@ -21,7 +21,7 @@ from transcribe_api.documents.lib.docx_style_profile import (
     STYLE_QUOTATION,
     cm_to_pt,
 )
-from transcribe_api.documents.lib.models import ContentBlock, Heading, Paragraph
+from transcribe_api.documents.lib.models import ContentBlock, Heading, Paragraph, TextRun
 
 Alignment = Literal["left", "center", "right", "justify"]
 MarkdownDocumentToken = md_block.Document
@@ -71,6 +71,38 @@ def _collect_text(token: object) -> str:
 _UNDERLINE_TAG_RE = re.compile(r"</?u>", re.IGNORECASE)
 
 
+def _collect_runs(token: object, *, bold: bool = False, italic: bool = False) -> list[TextRun]:
+    """The token's text as _collect_text gives it, in runs of the same bold and italic."""
+    if isinstance(token, RawText):
+        return [TextRun(text=token.content, bold=bold, italic=italic)]
+    if isinstance(token, LineBreak):
+        return [TextRun(text=" " if token.soft else "\n", bold=bold, italic=italic)]
+    bold = bold or isinstance(token, Strong)
+    italic = italic or isinstance(token, Emphasis)
+    children = _iter_children(token)
+    if children:
+        return [run for child in children for run in _collect_runs(child, bold=bold, italic=italic)]
+    content = getattr(token, "content", None)
+    return [TextRun(text=content, bold=bold, italic=italic)] if isinstance(content, str) and content else []
+
+
+def _paragraph_runs(token: object, text: str, *, italic: bool = False) -> list[TextRun]:
+    """The paragraph's runs, trimmed and without <u> tags as its text is, neighbours of
+    the same formatting joined; empty when they do not spell out ``text``."""
+    runs: list[TextRun] = []
+    for run in _collect_runs(token, italic=italic):
+        piece = _UNDERLINE_TAG_RE.sub("", run.text)
+        if runs and (runs[-1].bold, runs[-1].italic) == (run.bold, run.italic):
+            runs[-1] = runs[-1].model_copy(update={"text": runs[-1].text + piece})
+        elif piece:
+            runs.append(run.model_copy(update={"text": piece}))
+    if runs:
+        runs[0] = runs[0].model_copy(update={"text": runs[0].text.lstrip()})
+        runs[-1] = runs[-1].model_copy(update={"text": runs[-1].text.rstrip()})
+        runs = [r for r in runs if r.text]
+    return runs if "".join(r.text for r in runs) == text else []
+
+
 def _strip_underline(text: str) -> tuple[str, bool]:
     """Remove <u> and </u> tags and report whether any were present."""
     has_underline = bool(_UNDERLINE_TAG_RE.search(text))
@@ -96,6 +128,8 @@ class _ParseContext:
     quote_depth: int = 0
     list_level: int = -1
     list_item_label: str | None = None  # pre-computed "(a)" etc. for ordered items in blockquotes
+    list_depth: int = -1
+    list_ordered: bool = False
 
     def enter_quote(self) -> _ParseContext:
         return replace(self, quote_depth=self.quote_depth + 1)
@@ -104,7 +138,9 @@ class _ParseContext:
         # NumNormal level 0 is decimal. Ordered lists start at level 1 (a),
         # then level 2 (i). Unordered lists keep the existing base level.
         next_level = (1 if ordered else 0) if self.list_level < 0 else self.list_level + 1
-        return replace(self, list_level=next_level, list_item_label=None)
+        return replace(
+            self, list_level=next_level, list_item_label=None, list_depth=self.list_depth + 1, list_ordered=ordered
+        )
 
 
 class _MarkdownBlockVisitor:
@@ -133,15 +169,28 @@ class _MarkdownBlockVisitor:
             return
         text, underline = _strip_underline(raw)
         bold, italic = _detect_inline_formatting(token)
+        emitted = len(self._blocks)
         self._emit_paragraph(text=text, context=context, bold=bold, italic=italic, underline=underline)
+        if len(self._blocks) > emitted and isinstance(self._blocks[-1], Paragraph):
+            block = self._blocks[-1]
+            # A quote is italic throughout, its runs too. A label written into the text,
+            # such as "(a)\t" in a quote, is a run of its own.
+            quoted = context.quote_depth > 0
+            runs = _paragraph_runs(token, text, italic=quoted)
+            label = block.text.removesuffix(text)
+            if runs and label and block.text.endswith(text):
+                runs.insert(0, TextRun(text=label, italic=quoted))
+            block.runs = runs if "".join(r.text for r in runs) == block.text else []
+            if block.list_level is not None:
+                block.list_ordered, block.list_depth = context.list_ordered, context.list_depth
 
     @visit.register
     def _visit_heading(self, token: MarkdownHeadingToken, _context: _ParseContext) -> None:
-        self._emit_heading(token.level, _collect_text(token).strip())
+        self._emit_heading(token.level, _collect_text(token).strip(), token)
 
     @visit.register
     def _visit_setext_heading(self, token: MarkdownSetextHeadingToken, _context: _ParseContext) -> None:
-        self._emit_heading(token.level, _collect_text(token).strip())
+        self._emit_heading(token.level, _collect_text(token).strip(), token)
 
     @visit.register
     def _visit_quote(self, token: MarkdownQuoteToken, context: _ParseContext) -> None:
@@ -163,7 +212,11 @@ class _MarkdownBlockVisitor:
 
     @visit.register
     def _visit_list_item(self, token: MarkdownListItemToken, context: _ParseContext) -> None:
+        start = len(self._blocks)
         self._visit_children(token, context)
+        items = [b for b in self._blocks[start:] if isinstance(b, Paragraph) and b.list_depth == context.list_depth]
+        for continued in items[1:]:
+            continued.list_continued = True
 
     @visit.register
     def _visit_thematic_break(self, _token: ThematicBreak, _context: _ParseContext) -> None:
@@ -177,7 +230,7 @@ class _MarkdownBlockVisitor:
     def _visit_block_code(self, token: BlockCode, _context: _ParseContext) -> None:
         self._emit_code_block(token.content)
 
-    def _emit_heading(self, level: int, text: str) -> None:
+    def _emit_heading(self, level: int, text: str, token: object = None) -> None:
         if not text:
             return
         self._blocks.append(
@@ -186,6 +239,7 @@ class _MarkdownBlockVisitor:
                 level=level,
                 bold=True,
                 underline=level <= 2,
+                runs=_paragraph_runs(token, text) if token is not None else [],
             )
         )
 

@@ -11,8 +11,14 @@ fields on the Hearing Details form. No code change or release is needed.
 - Fields can only be the template's boxes: none can be added, and every box needs one.
 - Exactly one box takes the dictated text (the judgment). "Filled by BenchNotes" boxes
   take the jurisdiction's name or the year, and the judge is not asked for them.
-- A box left empty (an optional field) is removed with its paragraph when every box in
-  that paragraph is empty, so an unused party or panel member leaves no line behind.
+- A "Filled by BenchNotes" box can take the legal framework text (DIAAT-415): the text the
+  jurisdiction's Legal Text Manager keeps for each legal framework the judge chose in the
+  template's Legal issues question, in the Legal Text Manager's order, each once, with its
+  paragraphs, lists and bold kept. Nothing about any one jurisdiction is in the code.
+- A box left empty (an optional field, or legal framework text with no framework chosen)
+  is removed with its paragraph when every box in that paragraph is empty, so an unused
+  party or panel member leaves no line behind. A legal framework box can have "when left
+  empty" text instead.
 
 An upload is checked before anything reads it: a size cap, a zip within limits, and no
 macros, ActiveX, embedded objects, imported chunks or external links other than
@@ -36,7 +42,9 @@ from docx import Document
 from docx.oxml.ns import qn
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from transcribe_api.documents.word_document import WordDocument
+from transcribe_api.documents.lib.markdown_to_blocks import markdown_to_blocks
+from transcribe_api.documents.lib.models import ContentBlock, Heading, Paragraph
+from transcribe_api.documents.word_document import BoxParagraph, BoxRun, WordDocument
 
 # The upload ------------------------------------------------------------------------
 
@@ -274,7 +282,7 @@ FieldType = Literal[
 LIST_TYPES = ("dropdown", "multi_select")
 # Not asked of the judge: BenchNotes fills them.
 NOT_ASKED = ("benchnotes", "dictated")
-BenchNotesSource = Literal["jurisdiction", "year"]
+BenchNotesSource = Literal["jurisdiction", "year", "legal_framework"]
 
 
 class TemplateField(BaseModel):
@@ -288,6 +296,13 @@ class TemplateField(BaseModel):
     required: bool = True
     options: list[str] = Field(default_factory=list, max_length=200)
     source: BenchNotesSource | None = None
+    # Printed when a legal framework box has nothing to print (DIAAT-415).
+    empty_text: str | None = Field(default=None, max_length=2000)
+
+    def stored(self) -> dict[str, Any]:
+        """As kept with the template: empty_text only when set, so pods from before it
+        (extra="forbid") still read every template that does not use it."""
+        return self.model_dump(exclude={"empty_text"} if self.empty_text is None else set())
 
     @field_validator("options")
     @classmethod
@@ -311,6 +326,8 @@ def _proposed_type(box: Box) -> tuple[FieldType, BenchNotesSource | None]:
         return "benchnotes", "jurisdiction"
     if key in ("year", "yearofpublication", "publicationyear"):
         return "benchnotes", "year"
+    if key in ("legalframework", "legalframeworks", "legalframeworkcontent", "legalframeworktext"):
+        return "benchnotes", "legal_framework"
     return "text", None
 
 
@@ -356,6 +373,11 @@ def field_problems(boxes: list[Box], fields: list[TemplateField]) -> list[str]:
             problems.append(f"“{f.label}” has the same option twice.")
         if f.type == "benchnotes" and f.source is None:
             problems.append(f"Choose what BenchNotes fills “{f.label}” with.")
+        if _is_legal_framework(f) and not any(o.type == "legal_issues" for o in fields):
+            problems.append(
+                f"“{f.label}” prints the text of the legal frameworks the judge chooses: link a box"
+                " to a Legal issues question for them to choose from."
+            )
     dictated = [f.label for f in fields if f.type == "dictated"]
     if not dictated:
         problems.append("Link one box to the dictated text (the judgment).")
@@ -372,10 +394,15 @@ def normalise_fields(fields: list[TemplateField]) -> list[TemplateField]:
                 "options": f.options if f.type in LIST_TYPES else [],
                 "source": f.source if f.type == "benchnotes" else None,
                 "required": f.required if f.type not in NOT_ASKED else False,
+                "empty_text": ((f.empty_text or "").strip() or None) if _is_legal_framework(f) else None,
             }
         )
         for f in fields
     ]
+
+
+def _is_legal_framework(f: TemplateField) -> bool:
+    return f.type == "benchnotes" and f.source == "legal_framework"
 
 
 # The judge's values ----------------------------------------------------------------
@@ -448,15 +475,28 @@ class FillContext:
     dictated_text: str
     # Legal framework id -> title, in the jurisdiction's order.
     legal_issue_titles: dict[str, str] = field(default_factory=dict)
+    # Legal framework id -> its text (Markdown), in the jurisdiction's order.
+    legal_framework_texts: dict[str, str] = field(default_factory=dict)
 
 
-def box_text(fields: list[TemplateField], values: dict[str, Value], context: FillContext) -> dict[str, str]:
-    """The text for each box; a box with none (an optional field left empty) is absent."""
-    texts: dict[str, str] = {}
+# What goes in a box: plain text, or formatted paragraphs.
+BoxContent = str | list[BoxParagraph]
+
+
+def box_text(fields: list[TemplateField], values: dict[str, Value], context: FillContext) -> dict[str, BoxContent]:
+    """What goes in each box; a box with nothing (an optional field left empty, or no
+    legal framework chosen and no "when left empty" text) is absent."""
+    texts: dict[str, BoxContent] = {}
     for f in fields:
         value = values.get(f.tag)
         text: str | None = None
-        if f.type == "dictated":
+        if _is_legal_framework(f):
+            paragraphs = _legal_framework_paragraphs(fields, values, context)
+            if paragraphs:
+                texts[f.tag] = paragraphs
+                continue
+            text = f.empty_text
+        elif f.type == "dictated":
             text = context.dictated_text
         elif f.type == "benchnotes":
             text = context.jurisdiction_name if f.source == "jurisdiction" else str(context.year)
@@ -479,7 +519,106 @@ def box_text(fields: list[TemplateField], values: dict[str, Value], context: Fil
     return texts
 
 
-def fill_template(data: bytes, texts: dict[str, str], output_path: Path) -> Path:
+def _legal_framework_paragraphs(
+    fields: list[TemplateField], values: dict[str, Value], context: FillContext
+) -> list[BoxParagraph]:
+    """The text of every legal framework chosen in the template's Legal issues questions,
+    in the jurisdiction's order and each once, however the judge chose them."""
+    chosen: set[str] = set()
+    for f in fields:
+        value = values.get(f.tag)
+        if f.type == "legal_issues" and isinstance(value, list):
+            chosen.update(str(v) for v in value)
+    paragraphs: list[BoxParagraph] = []
+    for framework_id, text in context.legal_framework_texts.items():
+        if framework_id in chosen and text.strip():
+            paragraphs.extend(box_paragraphs(markdown_to_blocks(text)))
+    return paragraphs
+
+
+_ROMAN = (
+    (1000, "m"), (900, "cm"), (500, "d"), (400, "cd"), (100, "c"), (90, "xc"),
+    (50, "l"), (40, "xl"), (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i"),
+)  # fmt: skip
+_LIST_INDENT_PT = 36.0
+
+
+def _alphabetic(number: int) -> str:
+    """1 → a, 26 → z, 27 → aa: never back to a."""
+    letters = ""
+    while number > 0:
+        number, rest = divmod(number - 1, 26)
+        letters = chr(ord("a") + rest) + letters
+    return letters
+
+
+def _roman(number: int) -> str:
+    numeral = ""
+    for value, letters in _ROMAN:
+        count, number = divmod(number, value)
+        numeral += letters * count
+    return numeral
+
+
+def _list_label(level: int, number: int) -> str:
+    if level == 1:
+        return f"({_alphabetic(number)})"
+    if level == 2:
+        return f"({_roman(number)})"
+    return "•"
+
+
+def box_paragraphs(blocks: list[ContentBlock]) -> list[BoxParagraph]:
+    """Document blocks (from the Legal Text Manager's Markdown) as a box's paragraphs.
+    Lists are written out, (a) then (i), or a bullet, as the template's own numbering
+    would not match them; each list nested in another is indented further."""
+    paragraphs: list[BoxParagraph] = []
+    counters: dict[int, int] = {}
+    for block in blocks:
+        if isinstance(block, Heading):
+            counters.clear()
+            runs = tuple(BoxRun(r.text, r.bold, r.italic) for r in block.runs)
+            paragraphs.append(BoxParagraph(text=block.text, bold=True, underline=block.underline, runs=runs))
+            continue
+        if not isinstance(block, Paragraph):
+            continue
+        level = block.list_level
+        if level is None or level < 0:
+            counters.clear()
+            label, indent = None, block.left_indent_pt
+        elif block.list_continued:
+            # More of the same item: under its text, without a label of its own.
+            label, indent = None, block.left_indent_pt or _LIST_INDENT_PT * ((block.list_depth or 0) + 1)
+        else:
+            ordered = block.list_ordered if block.list_ordered is not None else level > 0
+            depth = block.list_depth if block.list_depth is not None else level
+            for deeper in [k for k in counters if k > depth]:
+                del counters[deeper]
+            if ordered:
+                counters[depth] = counters.get(depth, 0) + 1
+                label = _list_label(level, counters[depth])
+            else:
+                counters.pop(depth, None)
+                label = "•"
+            indent = block.left_indent_pt or _LIST_INDENT_PT * (depth + 1)
+        # Formatted within the line: the runs carry all of its bold and italic (a
+        # quote's too), rather than one bold word making the whole paragraph bold.
+        runs = tuple(BoxRun(r.text, r.bold, r.italic) for r in block.runs)
+        paragraphs.append(
+            BoxParagraph(
+                text=block.text,
+                label=label,
+                bold=block.bold and not runs,
+                italic=block.italic and not runs,
+                underline=block.underline,
+                left_indent_pt=indent,
+                runs=runs,
+            )
+        )
+    return paragraphs
+
+
+def fill_template(data: bytes, texts: dict[str, BoxContent], output_path: Path) -> Path:
     """Fill the template's boxes and save it. An empty box is removed, and its paragraph
     too when every box in that paragraph is empty."""
     doc = WordDocument(document=Document(io.BytesIO(data)))
@@ -487,7 +626,9 @@ def fill_template(data: bytes, texts: dict[str, str], output_path: Path) -> Path
     for sdt in _leaf_controls(doc):
         key = _control_key(sdt)
         text = texts.get(key or "")
-        if text:
+        if isinstance(text, list) and text:
+            doc.set_content_control_blocks(sdt, text)
+        elif isinstance(text, str) and text:
             doc.set_content_control_text(sdt, text)
         else:
             empty.append(sdt)

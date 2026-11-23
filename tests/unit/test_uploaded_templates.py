@@ -3,7 +3,9 @@ them, and the document a judge's values make from it (documents/uploaded_templat
 
 from __future__ import annotations
 
+import io
 import re
+import zipfile
 
 import pytest
 
@@ -454,3 +456,332 @@ def test_a_table_cell_whose_only_box_is_empty_keeps_an_empty_paragraph(tmp_path)
     (cell_paragraph,) = filled.tables[0].cell(0, 0).paragraphs
     assert cell_paragraph.text == ""  # neither the label nor the box is left
     assert document_text(output.read_bytes()) == ["Judgment: Granted."]
+
+
+# The legal framework text (DIAAT-415) ------------------------------------------------
+
+FRAMEWORK_TEXTS = {
+    "protection": "**Protection claims**\n\nThe appellant must show:\n\n1. a real risk\n2. no protection at home",
+    "demo_rule": "The Demo Rule applies.\n\n- first point\n- second point",
+    "unused": "Never chosen.",
+}
+FRAMEWORK_TITLES = {"protection": "Protection", "demo_rule": "Demo Rule", "unused": "Unused"}
+
+
+def _framework_template(**framework):
+    data = make_template(
+        [["Issues: ", Sdt("Issues")], [Sdt("LegalFramework", "Legal framework")], [Sdt("JudgmentText")]]
+    )
+    fields = [
+        t.TemplateField(tag="Issues", label="Issues", type="legal_issues", required=False),
+        t.TemplateField(
+            tag="LegalFramework", label="Legal framework", type="benchnotes", source="legal_framework"
+        ).model_copy(update=framework),
+        t.TemplateField(tag="JudgmentText", label="Judgment", type="dictated"),
+    ]
+    return data, fields
+
+
+def _framework_filled(tmp_path, fields, values, data):
+    texts = _filled(fields, values, legal_issue_titles=FRAMEWORK_TITLES, legal_framework_texts=FRAMEWORK_TEXTS)
+    return t.fill_template(data, texts, tmp_path / "out.docx").read_bytes()
+
+
+def _paragraphs(document: bytes) -> list[tuple[str, bool]]:
+    """Each non-empty paragraph's text, and whether its runs are bold."""
+    from lxml import etree
+
+    w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    root = etree.fromstring(zipfile.ZipFile(io.BytesIO(document)).read("word/document.xml"))
+    found = []
+    for p in root.iter(f"{{{w}}}p"):
+        text = "".join(p.xpath(".//w:t/text()", namespaces={"w": w}))
+        if text.strip():
+            found.append((text, bool(p.xpath(".//w:r/w:rPr/w:b", namespaces={"w": w}))))
+    return found
+
+
+def test_a_box_named_for_the_legal_framework_is_proposed_as_its_text():
+    boxes = t.find_boxes(make_template([[Sdt("LegalFramework")], [Sdt("Legal_Framework_Text")]]))
+    proposed = [t.propose_field(b) for b in boxes]
+    assert [(f.type, f.source, f.required) for f in proposed] == [("benchnotes", "legal_framework", False)] * 2
+
+
+def test_the_legal_framework_text_needs_a_legal_issues_question_to_follow():
+    data, fields = _framework_template()
+    boxes = t.find_boxes(data)
+    assert t.field_problems(boxes, fields) == []
+    without = [f.model_copy(update={"type": "text"}) if f.tag == "Issues" else f for f in fields]
+    assert t.field_problems(boxes, without) == [
+        (
+            "“Legal framework” prints the text of the legal frameworks the judge chooses: link a box"
+            " to a Legal issues question for them to choose from."
+        )
+    ]
+
+
+def test_the_chosen_frameworks_text_goes_in_its_box_in_order_with_its_formatting(tmp_path):
+    data, fields = _framework_template()
+    # Chosen in the other order: the text follows the Legal Text Manager's order.
+    document = _framework_filled(tmp_path, fields, {"Issues": ["demo_rule", "protection"]}, data)
+    assert _paragraphs(document)[:8] == [
+        ("Issues: Protection, Demo Rule", False),
+        ("Protection claims", True),
+        ("The appellant must show:", False),
+        ("(a) a real risk", False),
+        ("(b) no protection at home", False),
+        ("The Demo Rule applies.", False),
+        ("• first point", False),
+        ("• second point", False),
+    ]
+
+
+def test_one_framework_chosen_gives_only_its_text(tmp_path):
+    data, fields = _framework_template()
+    document = _framework_filled(tmp_path, fields, {"Issues": ["demo_rule"]}, data)
+    assert document_text(document)[:4] == [
+        "Issues: Demo Rule",
+        "The Demo Rule applies.",
+        "• first point",
+        "• second point",
+    ]
+
+
+def test_a_framework_chosen_in_two_questions_is_printed_once(tmp_path):
+    data = make_template([[Sdt("Issues")], [Sdt("MoreIssues")], [Sdt("LegalFramework")], [Sdt("JudgmentText")]])
+    fields = [
+        t.TemplateField(tag="Issues", label="Issues", type="legal_issues"),
+        t.TemplateField(tag="MoreIssues", label="More issues", type="legal_issues"),
+        t.TemplateField(tag="LegalFramework", label="Legal framework", type="benchnotes", source="legal_framework"),
+        t.TemplateField(tag="JudgmentText", label="Judgment", type="dictated"),
+    ]
+    values = {"Issues": ["demo_rule"], "MoreIssues": ["demo_rule"]}
+    document = _framework_filled(tmp_path, fields, values, data)
+    assert document_text(document).count("The Demo Rule applies.") == 1
+
+
+def test_with_no_framework_chosen_the_box_and_its_line_are_removed(tmp_path):
+    data, fields = _framework_template()
+    document = _framework_filled(tmp_path, fields, {}, data)
+    assert document_text(document) == ["The claim succeeds.\n\nCosts are reserved."]
+
+
+def test_with_no_framework_chosen_the_when_left_empty_text_is_printed(tmp_path):
+    data, fields = _framework_template(empty_text="No legal framework applies.")
+    document = _framework_filled(tmp_path, fields, {}, data)
+    assert document_text(document)[0] == "No legal framework applies."
+
+
+def test_when_left_empty_text_is_kept_only_for_a_legal_framework_box_and_stored_only_when_set():
+    _, fields = _framework_template(empty_text="  ")
+    fields = [*fields, t.TemplateField(tag="Reference", label="Reference", empty_text="n/a")]
+    normalised = {f.tag: f for f in t.normalise_fields(fields)}
+    assert normalised["LegalFramework"].empty_text is None
+    assert normalised["Reference"].empty_text is None
+    assert "empty_text" not in normalised["LegalFramework"].stored()
+    set_text = t.normalise_fields(_framework_template(empty_text="None.")[1])[1]
+    assert set_text.stored()["empty_text"] == "None."
+
+
+def _runs(document: bytes, text: str) -> list[tuple[str, bool, bool]]:
+    """The runs of the paragraph reading ``text``: their text, bold and italic."""
+    from lxml import etree
+
+    w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    root = etree.fromstring(zipfile.ZipFile(io.BytesIO(document)).read("word/document.xml"))
+    for p in root.iter(f"{{{w}}}p"):
+        if "".join(p.xpath(".//w:t/text()", namespaces={"w": w})) == text:
+            return [
+                (
+                    "".join(r.xpath("./w:t/text()", namespaces={"w": w})),
+                    bool(r.xpath("./w:rPr/w:b", namespaces={"w": w})),
+                    bool(r.xpath("./w:rPr/w:i", namespaces={"w": w})),
+                )
+                for r in p.xpath(".//w:r[w:t]", namespaces={"w": w})
+            ]
+    raise AssertionError(f"no paragraph reads {text!r}")
+
+
+def test_bold_and_italic_within_a_line_stay_on_their_words(tmp_path):
+    data, fields = _framework_template()
+    texts = _filled(
+        fields,
+        {"Issues": ["protection"]},
+        legal_issue_titles=FRAMEWORK_TITLES,
+        legal_framework_texts={
+            "protection": "Section 82 of the **2002 Act**, as in *Smith v Jones*.\n\n1. a **real** risk"
+        },
+    )
+    document = t.fill_template(data, texts, tmp_path / "out.docx").read_bytes()
+    assert _runs(document, "Section 82 of the 2002 Act, as in Smith v Jones.") == [
+        ("Section 82 of the ", False, False),
+        ("2002 Act", True, False),
+        (", as in ", False, False),
+        ("Smith v Jones", False, True),
+        (".", False, False),
+    ]
+    assert _runs(document, "(a) a real risk") == [
+        ("(a) ", False, False),
+        ("a ", False, False),
+        ("real", True, False),
+        (" risk", False, False),
+    ]
+
+
+def _box_lines(markdown: str) -> list[tuple[str | None, float | None]]:
+    from transcribe_api.documents.lib.markdown_to_blocks import markdown_to_blocks
+
+    return [(p.label, p.left_indent_pt) for p in t.box_paragraphs(markdown_to_blocks(markdown))]
+
+
+def test_list_labels_go_on_past_z_and_x_rather_than_starting_again():
+    labels = [label for label, _ in _box_lines("\n".join(f"{i}. item" for i in range(1, 29)))]
+    assert labels[25:] == ["(z)", "(aa)", "(ab)"]
+    nested = _box_lines("1. top\n" + "\n".join(f"   {i}. item" for i in range(1, 12)))
+    assert [label for label, _ in nested[-2:]] == ["(x)", "(xi)"]
+
+
+def test_a_nested_bulleted_list_stays_bulleted_and_indented_further():
+    assert _box_lines("- First\n  - Nested\n- Second") == [("•", 36.0), ("•", 72.0), ("•", 36.0)]
+    assert _box_lines("1. one\n   - point\n2. two") == [("(a)", 36.0), ("•", 72.0), ("(b)", 36.0)]
+
+
+def test_in_a_quote_bold_stays_on_its_words_and_the_quote_is_italic_throughout():
+    from transcribe_api.documents.lib.markdown_to_blocks import markdown_to_blocks
+
+    item, heading = t.box_paragraphs(markdown_to_blocks("> 1. a **real** risk\n\n> **Scope**"))
+    assert [(r.text, r.bold, r.italic) for r in item.runs] == [
+        ("(a)\t", False, True),
+        ("a ", False, True),
+        ("real", True, True),
+        (" risk", False, True),
+    ]
+    assert [(r.text, r.bold, r.italic) for r in heading.runs] == [("Scope", True, True)]
+
+
+def _framework_box_xml(data: bytes, change) -> bytes:
+    """``data`` with the paragraph holding the LegalFramework box changed by ``change(p)``."""
+    from lxml import etree
+
+    def transform(content: bytes) -> bytes:
+        root = etree.fromstring(content)
+        w = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        (paragraph,) = root.xpath("//w:p[w:sdt/w:sdtPr/w:tag[@w:val='LegalFramework']]", namespaces=w)
+        change(paragraph, w)
+        return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+    return replace_part(data, "word/document.xml", transform)
+
+
+def test_bold_is_written_even_where_the_template_turns_it_off(tmp_path):
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+    from lxml import etree
+
+    def plain(paragraph, w):
+        (run,) = paragraph.xpath("w:sdt/w:sdtContent/w:r", namespaces=w)
+        run.insert(0, parse_xml(f'<w:rPr {nsdecls("w")}><w:b w:val="0"/><w:u w:val="none"/></w:rPr>'))
+
+    data, fields = _framework_template()
+    document = _framework_filled(tmp_path, fields, {"Issues": ["protection"]}, _framework_box_xml(data, plain))
+    root = etree.fromstring(zipfile.ZipFile(io.BytesIO(document)).read("word/document.xml"))
+    w = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+
+    def formatting(text):
+        (run,) = root.xpath(f"//w:r[w:t='{text}']", namespaces=w)
+        return [
+            (e.tag.split("}")[1], e.get(f"{{{w['w']}}}val")) for e in run.xpath("w:rPr/w:b | w:rPr/w:u", namespaces=w)
+        ]
+
+    assert formatting("Protection claims") == [("b", None), ("u", "none")]
+    assert formatting("The appellant must show:") == [("b", "0"), ("u", "none")]
+
+
+def test_a_bookmark_around_the_framework_box_is_kept(tmp_path):
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    def bookmarked(paragraph, w):
+        (sdt,) = paragraph.xpath("w:sdt", namespaces=w)
+        sdt.addprevious(parse_xml(f'<w:bookmarkStart {nsdecls("w")} w:id="7" w:name="Framework"/>'))
+        sdt.addnext(parse_xml(f'<w:bookmarkEnd {nsdecls("w")} w:id="7"/>'))
+
+    data, fields = _framework_template()
+    document = _framework_filled(tmp_path, fields, {"Issues": ["demo_rule"]}, _framework_box_xml(data, bookmarked))
+    xml = zipfile.ZipFile(io.BytesIO(document)).read("word/document.xml").decode()
+    start, box, end = xml.index('w:name="Framework"'), xml.index("The Demo Rule applies."), xml.index("w:bookmarkEnd")
+    assert start < box < end
+    assert document_text(document)[1:4] == ["The Demo Rule applies.", "• first point", "• second point"]
+
+
+def test_underline_and_italic_are_written_even_where_the_template_turns_them_off():
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls, qn
+
+    from transcribe_api.documents.word_document import WordDocument
+
+    template = parse_xml(f'<w:rPr {nsdecls("w")}><w:i w:val="false"/><w:u w:val="none"/></w:rPr>')
+    rpr = WordDocument._formatted_rpr(template, bold=False, italic=True, underline=True)
+    assert rpr.find(qn("w:i")).get(qn("w:val")) is None
+    assert rpr.find(qn("w:u")).get(qn("w:val")) == "single"
+    assert rpr.find(qn("w:b")) is None
+
+
+def test_a_list_items_second_paragraph_is_not_a_new_item():
+    assert _box_lines("1. first\n\n   more of it\n2. second") == [("(a)", 36.0), (None, 36.0), ("(b)", 36.0)]
+
+
+def test_italic_within_a_heading_stays_on_its_words():
+    from transcribe_api.documents.lib.markdown_to_blocks import markdown_to_blocks
+
+    (heading,) = t.box_paragraphs(markdown_to_blocks("## Scope of *Smith v Jones*"))
+    assert (heading.bold, heading.underline) == (True, True)
+    assert [(r.text, r.bold, r.italic) for r in heading.runs] == [
+        ("Scope of ", False, False),
+        ("Smith v Jones", False, True),
+    ]
+
+
+def test_list_lines_are_not_numbered_again_by_the_boxs_list_style(tmp_path):
+    from lxml import etree
+
+    data, fields = _framework_template()
+    document = _framework_filled(tmp_path, fields, {"Issues": ["demo_rule"]}, data)
+    root = etree.fromstring(zipfile.ZipFile(io.BytesIO(document)).read("word/document.xml"))
+    w = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    (item,) = [
+        p
+        for p in root.xpath("//w:p", namespaces=w)
+        if "".join(p.xpath(".//w:t/text()", namespaces=w)) == "• first point"
+    ]
+    assert item.xpath("w:pPr/w:numPr/w:numId/@w:val", namespaces=w) == ["0"]
+
+
+def test_a_bookmark_inside_a_box_around_a_paragraph_is_kept(tmp_path):
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    def box_around_paragraph(paragraph, w):
+        # <w:p><w:sdt>…<w:r/>…</w:sdt></w:p> → <w:sdt>…<w:p>bookmark <w:r/> bookmark</w:p>…</w:sdt>
+        (sdt,) = paragraph.xpath("w:sdt", namespaces=w)
+        (content,) = sdt.xpath("w:sdtContent", namespaces=w)
+        inner = parse_xml(f"<w:p {nsdecls('w')}/>")
+        inner.append(parse_xml(f'<w:bookmarkStart {nsdecls("w")} w:id="7" w:name="Framework"/>'))
+        for run in list(content):
+            inner.append(run)
+        inner.append(parse_xml(f'<w:bookmarkEnd {nsdecls("w")} w:id="7"/>'))
+        content.append(inner)
+        paragraph.addprevious(sdt)
+        paragraph.getparent().remove(paragraph)
+
+    data, fields = _framework_template()
+    template = _framework_box_xml(data, box_around_paragraph)
+    document = _framework_filled(tmp_path, fields, {"Issues": ["demo_rule"]}, template)
+    xml = zipfile.ZipFile(io.BytesIO(document)).read("word/document.xml").decode()
+    start, first, last, end = (
+        xml.index('w:name="Framework"'),
+        xml.index("The Demo Rule applies."),
+        xml.index("second point"),
+        xml.index("w:bookmarkEnd"),
+    )
+    assert start < first < last < end
