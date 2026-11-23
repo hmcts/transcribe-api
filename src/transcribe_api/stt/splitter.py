@@ -322,9 +322,19 @@ async def cut_segments(
         files = await asyncio.shield(work)
     except BaseException:
         stop.set()
-        # It stops at the next chunk (or has already ended). Its own outcome (_Stopped, an error) is not
-        # wanted; a further cancellation of this task is not swallowed, it propagates from here.
-        await asyncio.gather(asyncio.shield(work), return_exceptions=True)
+        # The thread stops at the next chunk (or has already ended). Wait until it HAS, however often this
+        # task is cancelled meanwhile: the caller removes the directory (and lets go of the job) as soon as
+        # this raises. A further cancellation is remembered and raised, after the wait, in place of the first.
+        later: asyncio.CancelledError | None = None
+        while not work.done():
+            try:
+                await asyncio.wait({work})
+            except asyncio.CancelledError as again:
+                later = again
+        if not work.cancelled():
+            work.exception()  # its own outcome (_Stopped, an error) is not wanted: mark it retrieved
+        if later is not None:
+            raise later
         raise
     if len(files) != len(cut_times) + 1:
         raise SplitError(f"expected {len(cut_times) + 1} parts, wrote {len(files)}")

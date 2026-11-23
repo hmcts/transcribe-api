@@ -79,7 +79,8 @@ recording that is within the limit.
    leaves the original and the job `PENDING`, and the job is claimed again once its lease (`PREPARE_LEASE_SECONDS`, renewed every
    `PREPARE_HEARTBEAT_SECONDS`) has run out. A worker that is stopping (or any request or task that is cancelled) kills the `ffmpeg`
    or `ffprobe` it is running and waits for it to exit (`stt/subprocesses.py`) before it lets go of the job and removes its temporary
-   directory, so no conversion goes on writing behind it. A job is `PENDING` throughout; no new status exists.
+   directory, so no conversion goes on writing behind it (the kill is sent before the call can be left, and a killed process runs no more
+   code, so a further cancellation while it is reaped cannot leave it writing; the reaping carries on shielded). A job is `PENDING` throughout; no new status exists.
 
 **`POST /jobs`, whatever the flag.** It looks for the upload's original by the user's and the upload's ids (never by anything the
 client sends), whatever the flag says now, so an upload made while the flag was on is still deferred if the flag is turned off
@@ -126,7 +127,8 @@ conversion), or by the worker for a job that was deferred.
   the production image). The parts are numbered `part-000.wav` upward, in cutting order, and each part's offset and length are still
   measured from its file. The planner keeps every part a second inside the limit (`SEGMENT_SLACK_SECONDS`, a margin that was sized
   for those packets and is kept) and cuts in the middle of a silence of at least half a second. A cancelled preparation stops the
-  copy within a chunk and waits for it before the temporary directory is removed.
+  copy within a chunk and waits for the thread to end before the cut raises, however often the task is cancelled meanwhile (a
+  further cancellation is remembered and raised after the wait), so the temporary directory is never removed under a writing thread.
 - **Recording the parts**: one row per part in `transcription_job_part` (migration 0018): offset in the recording, length, cut kind,
   blob (`uploads/{user_id}/{upload_id}-{name}.partNN.wav`, derived from the job's own WAV name, never client-supplied), Azure job,
   status, attempts. The job stays one row; it keeps the idempotency key; it is `PENDING` while its parts are submitted and

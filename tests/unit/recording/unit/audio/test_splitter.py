@@ -422,6 +422,42 @@ async def test_cancelling_the_cut_stops_the_copy_before_the_caller_can_remove_th
     assert told == [True] and ended.is_set()  # told to stop, and finished before the cancellation was raised
 
 
+async def test_the_cut_keeps_waiting_for_its_thread_through_repeated_cancellations(tmp_path, monkeypatch):
+    """The caller removes the directory the copy writes into as soon as the cut raises, so the cut must not raise
+    until the thread has ended, however often the task is cancelled. Deterministic: the thread is held on an event
+    until the test has cancelled the task twice and seen that it is still waiting."""
+    import threading
+
+    wav = tmp_path / "full.wav"
+    _write_wav(wav, 3.0, rate=1000)
+    told, release, finished = threading.Event(), threading.Event(), threading.Event()
+    real = splitter._copy_frames
+
+    def held_copy(source, target, count, stop):
+        try:
+            assert stop.wait(20)  # the first cancellation has told the thread to stop
+            told.set()
+            assert release.wait(20)  # ...and it is still running until the test lets it go
+            return real(source, target, count, stop)  # raises _Stopped
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(splitter, "_copy_frames", held_copy)
+    task = asyncio.create_task(splitter.cut_segments(wav, [1.0], tmp_path, total_seconds=3.0))
+    await asyncio.sleep(0)  # let the task start the thread
+    task.cancel()  # the first cancellation
+    assert await asyncio.to_thread(told.wait, 20)
+    task.cancel()  # a second one, while the thread is still running
+    for _ in range(5):
+        await asyncio.sleep(0)  # let the task react to it
+    assert not task.done() and not finished.is_set()  # still waiting for the thread
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 20)
+    assert finished.is_set()  # the thread had ended when the cancellation was raised
+
+
 async def test_audio_with_no_silence_is_cut_at_the_ideal_points(tmp_path):
     wav = tmp_path / "full.wav"
     wav.write_bytes(tone_and_silence((("t", 70.0),)))
