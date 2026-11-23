@@ -14,7 +14,6 @@ import subprocess
 import pytest
 
 from tests.unit.recording.unit.async_upload_helpers import tone
-from transcribe_api.stt import preprocessing
 from transcribe_api.stt.preprocessing import (
     AudioDecodeError,
     ProbedDuration,
@@ -178,7 +177,7 @@ async def test_a_missing_ffprobe_is_a_server_problem_not_a_bad_file(tmp_path, mo
     async def missing(*args, **kwargs):
         raise FileNotFoundError(2, "No such file or directory", "ffprobe")
 
-    monkeypatch.setattr(preprocessing.asyncio, "create_subprocess_exec", missing)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", missing)
     with pytest.raises(FileNotFoundError):
         await probe_audio_duration(tmp_path / "x.mp3")
 
@@ -189,7 +188,7 @@ async def test_an_ffprobe_that_does_not_answer_in_time_means_the_length_is_unkno
     async def slow(*args, **kwargs):
         return await real("sleep", "30", **kwargs)
 
-    monkeypatch.setattr(preprocessing.asyncio, "create_subprocess_exec", slow)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", slow)
     started = asyncio.get_running_loop().time()
     assert await probe_audio_duration(tmp_path / "x.mp3", timeout=0.2) is None
     assert asyncio.get_running_loop().time() - started < 5  # killed, not waited for

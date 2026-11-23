@@ -6,14 +6,14 @@ dynamic range compression, and loudness normalisation.
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import json
 import logging
 import math
 import wave
 from dataclasses import dataclass
 from pathlib import Path
+
+from transcribe_api.stt.subprocesses import run_process
 
 logger = logging.getLogger(__name__)
 
@@ -53,17 +53,10 @@ async def preprocess_audio(input_path: Path, output_path: Path) -> None:
         str(output_path),
     ]
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
+    result = await run_process(*cmd)
 
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"FFmpeg preprocessing failed (exit {proc.returncode}): {stderr.decode()[:500]}"
-        )
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg preprocessing failed (exit {result.returncode}): {result.stderr.decode()[:500]}")
 
     logger.info("Preprocessed audio: %s → %s", input_path.name, output_path.name)
 
@@ -107,17 +100,12 @@ async def normalize_to_wav(input_path: Path, output_path: Path) -> None:
         str(output_path),
     ]
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
+    result = await run_process(*cmd)
 
-    if proc.returncode != 0:
+    if result.returncode != 0:
         raise AudioDecodeError(
-            f"FFmpeg could not decode the audio (exit {proc.returncode}): "
-            f"{stderr.decode(errors='replace')[-500:]}"
+            f"FFmpeg could not decode the audio (exit {result.returncode}): "
+            f"{result.stderr.decode(errors='replace')[-500:]}"
         )
 
 
@@ -211,31 +199,27 @@ async def probe_audio_duration(path: Path, *, timeout: float = PROBE_TIMEOUT_SEC
         AudioDecodeError: if ffprobe cannot read the file at all (not audio, or corrupt).
         FileNotFoundError: if ffprobe is not installed (a server misconfiguration, as for ffmpeg).
     """
-    proc = await asyncio.create_subprocess_exec(
-        "ffprobe",
-        "-v",
-        "error",
-        "-show_entries",
-        "format=format_name,duration:stream=index,codec_type,duration,start_time",
-        "-of",
-        "json",
-        str(path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
-    except TimeoutError:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-        await proc.wait()
+        result = await run_process(
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=format_name,duration:stream=index,codec_type,duration,start_time",
+            "-of",
+            "json",
+            str(path),
+            timeout=timeout,
+        )
+    except TimeoutError:  # run_process has killed ffprobe
         logger.warning("ffprobe did not answer within %.0f s: the length is checked after conversion", timeout)
         return None
-    if proc.returncode != 0:
+    if result.returncode != 0:
         raise AudioDecodeError(
-            f"ffprobe could not read the audio (exit {proc.returncode}): {stderr.decode(errors='replace')[-300:]}"
+            f"ffprobe could not read the audio (exit {result.returncode}): "
+            f"{result.stderr.decode(errors='replace')[-300:]}"
         )
-    return parse_probe(stdout.decode(errors="replace"))
+    return parse_probe(result.stdout.decode(errors="replace"))
 
 
 # Uploads are transcoded with ffmpeg (above); the worker probes and converts
@@ -248,17 +232,11 @@ async def missing_ffmpeg_tools() -> list[str]:
     missing = []
     for tool in FFMPEG_TOOLS:
         try:
-            proc = await asyncio.create_subprocess_exec(
-                tool,
-                "-version",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.communicate()
+            result = await run_process(tool, "-version")
         except OSError:
             missing.append(tool)
         else:
-            if proc.returncode != 0:
+            if result.returncode != 0:
                 missing.append(tool)
     return missing
 

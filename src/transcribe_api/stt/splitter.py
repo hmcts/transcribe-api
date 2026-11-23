@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from transcribe_api.runtime.settings_recording import AZURE_BATCH_FILE_LIMIT_SECONDS
+from transcribe_api.stt.subprocesses import run_process
 
 # How far from a part's ideal end a cut may move to reach a silence. Never more than a quarter of
 # the parts' spacing (plan_parts), so the cuts stay in order whatever the target.
@@ -114,7 +115,7 @@ async def detect_silences(
     min_seconds: float = SILENCE_MIN_SECONDS,
 ) -> list[Silence]:
     """Run ``silencedetect`` over a WAV (a read pass, no output). Raises SplitError if ffmpeg fails."""
-    proc = await asyncio.create_subprocess_exec(
+    result = await run_process(
         "ffmpeg",
         "-nostdin",
         "-hide_banner",
@@ -125,13 +126,10 @@ async def detect_silences(
         "-f",
         "null",
         "-",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
     )
-    _, stderr = await proc.communicate()
-    text = stderr.decode(errors="replace")
-    if proc.returncode != 0:
-        raise SplitError(f"ffmpeg silencedetect failed (exit {proc.returncode}): {text[-300:]}")
+    text = result.stderr.decode(errors="replace")
+    if result.returncode != 0:
+        raise SplitError(f"ffmpeg silencedetect failed (exit {result.returncode}): {text[-300:]}")
     return parse_silencedetect(text, duration)
 
 
@@ -257,7 +255,7 @@ async def cut_segments(
     ``limit``, and that together they are the whole recording (to within a hundredth of a second).
     Raises SplitError otherwise."""
     pattern = out_dir / "part-%03d.wav"
-    proc = await asyncio.create_subprocess_exec(
+    result = await run_process(
         "ffmpeg",
         "-nostdin",
         "-v",
@@ -276,12 +274,11 @@ async def cut_segments(
         "1",
         "-y",
         str(pattern),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
     )
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise SplitError(f"ffmpeg segment failed (exit {proc.returncode}): {stderr.decode(errors='replace')[-300:]}")
+    if result.returncode != 0:
+        raise SplitError(
+            f"ffmpeg segment failed (exit {result.returncode}): {result.stderr.decode(errors='replace')[-300:]}"
+        )
 
     files = sorted(out_dir.glob("part-*.wav"))
     if len(files) != len(cut_times) + 1:

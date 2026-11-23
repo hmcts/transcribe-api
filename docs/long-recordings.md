@@ -74,7 +74,9 @@ recording that is within the limit.
    long by the exact check becomes `FAILED` with the sentence the upload gives for the same file (the web already shows
    `error_message`); a storage failure is retried `PREPARE_MAX_ATTEMPTS` times and then fails the job; a crash or a restart
    leaves the original and the job `PENDING`, and the job is claimed again once its lease (`PREPARE_LEASE_SECONDS`, renewed every
-   `PREPARE_HEARTBEAT_SECONDS`) has run out. A job is `PENDING` throughout; no new status exists.
+   `PREPARE_HEARTBEAT_SECONDS`) has run out. A worker that is stopping (or any request or task that is cancelled) kills the `ffmpeg`
+   or `ffprobe` it is running and waits for it to exit (`stt/subprocesses.py`) before it lets go of the job and removes its temporary
+   directory, so no conversion goes on writing behind it. A job is `PENDING` throughout; no new status exists.
 
 **`POST /jobs`, whatever the flag.** It looks for the upload's original by the user's and the upload's ids (never by anything the
 client sends), whatever the flag says now, so an upload made while the flag was on is still deferred if the flag is turned off

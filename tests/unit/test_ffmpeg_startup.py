@@ -42,13 +42,13 @@ def _fake_exec(outcomes: dict[str, object]):
 class TestMissingFfmpegTools:
     @pytest.mark.asyncio
     async def test_none_missing_when_both_run(self, monkeypatch):
-        monkeypatch.setattr(preprocessing.asyncio, "create_subprocess_exec", _fake_exec({"ffmpeg": 0, "ffprobe": 0}))
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec({"ffmpeg": 0, "ffprobe": 0}))
         assert await preprocessing.missing_ffmpeg_tools() == []
 
     @pytest.mark.asyncio
     async def test_reports_a_binary_that_is_not_installed(self, monkeypatch):
         monkeypatch.setattr(
-            preprocessing.asyncio,
+            asyncio,
             "create_subprocess_exec",
             _fake_exec({"ffmpeg": 0, "ffprobe": FileNotFoundError("ffprobe")}),
         )
@@ -57,7 +57,7 @@ class TestMissingFfmpegTools:
     @pytest.mark.asyncio
     async def test_reports_a_binary_that_cannot_run(self, monkeypatch):
         monkeypatch.setattr(
-            preprocessing.asyncio,
+            asyncio,
             "create_subprocess_exec",
             _fake_exec({"ffmpeg": PermissionError("ffmpeg"), "ffprobe": 1}),
         )
@@ -66,7 +66,7 @@ class TestMissingFfmpegTools:
     @pytest.mark.asyncio
     async def test_is_ffmpeg_available_needs_both(self, monkeypatch):
         monkeypatch.setattr(
-            preprocessing.asyncio,
+            asyncio,
             "create_subprocess_exec",
             _fake_exec({"ffmpeg": 0, "ffprobe": FileNotFoundError("ffprobe")}),
         )

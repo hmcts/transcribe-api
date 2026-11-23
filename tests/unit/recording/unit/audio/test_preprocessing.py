@@ -4,9 +4,10 @@ These tests never invoke real ffmpeg: the subprocess boundary is patched so the
 behaviour is deterministic.
 """
 
+import asyncio
+
 import pytest
 
-from transcribe_api.stt import preprocessing
 from transcribe_api.stt.preprocessing import AudioDecodeError, normalize_to_wav
 
 
@@ -28,7 +29,7 @@ class TestNormalizeToWav:
             seen.append(args)
             return FakeProc()
 
-        monkeypatch.setattr(preprocessing.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
 
         await normalize_to_wav(tmp_path / "in.mp3", tmp_path / "out.wav")
 
@@ -48,7 +49,7 @@ class TestNormalizeToWav:
         async def fake_exec(*args, **kwargs):
             return FakeProc()
 
-        monkeypatch.setattr(preprocessing.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
 
         with pytest.raises(AudioDecodeError, match="boom"):
             await normalize_to_wav(tmp_path / "in.mp3", tmp_path / "out.wav")
@@ -58,7 +59,7 @@ class TestNormalizeToWav:
         async def fake_exec(*args, **kwargs):
             raise FileNotFoundError("ffmpeg")
 
-        monkeypatch.setattr(preprocessing.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
 
         with pytest.raises(FileNotFoundError):
             await normalize_to_wav(tmp_path / "in.mp3", tmp_path / "out.wav")
