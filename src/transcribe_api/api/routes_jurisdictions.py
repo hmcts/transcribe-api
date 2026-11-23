@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Response
 from pydantic import BaseModel
 from sqlmodel import Session
 
@@ -30,7 +30,6 @@ from transcribe_api.domain.jurisdictions import (
     ActiveJurisdiction,
     JurisdictionFeatures,
 )
-from transcribe_api.domain.models_dictation import JurisdictionTemplate
 from transcribe_api.runtime.db_connection import get_engine
 
 router = APIRouter(tags=["jurisdictions"])
@@ -114,17 +113,21 @@ class AvailableTemplate(BaseModel):
     # The sections the judge dictates into, in the template's order: with several,
     # the judge chooses which they are dictating.
     sections: list[TemplateSection]
+    # DIAAT-339: this version of it, which a draft keeps and its submission names.
+    revision: str
 
 
-def template_forms(rows: list[JurisdictionTemplate], jurisdiction_id: UUID) -> list[AvailableTemplate]:
+def template_forms(
+    templates: list[jurisdiction_templates.TemplateVersion], jurisdiction_id: UUID
+) -> list[AvailableTemplate]:
     """Each template's Hearing Details form: the fields a judge fills (not those
     BenchNotes fills), in the admin's order. A legal issues field offers the
     jurisdiction's legal frameworks, as its Legal Text Manager keeps them."""
     legal_issues: list[TemplateOption] | None = None
     result = []
-    for row in rows:
+    for template in templates:
         form_fields = []
-        for f in jurisdiction_templates.judge_fields(row):
+        for f in jurisdiction_templates.judge_fields(template.fields):
             if f.type == "legal_issues":
                 if legal_issues is None:
                     frameworks = jurisdiction_templates.legal_frameworks(jurisdiction_id)
@@ -137,10 +140,17 @@ def template_forms(rows: list[JurisdictionTemplate], jurisdiction_id: UUID) -> l
             )
         sections = [
             TemplateSection(tag=f.tag, label=f.label)
-            for f in jurisdiction_templates.dictation_sections(jurisdiction_templates.fields_of(row))
+            for f in jurisdiction_templates.dictation_sections(template.fields)
         ]
         result.append(
-            AvailableTemplate(id=str(row.id), name=row.name, service=row.service, fields=form_fields, sections=sections)
+            AvailableTemplate(
+                id=str(template.id),
+                name=template.name,
+                service=template.service,
+                fields=form_fields,
+                sections=sections,
+                revision=template.revision,
+            )
         )
     return result
 
@@ -154,6 +164,27 @@ def available_templates(
     fields each asks for: live ones, and those in test for its test group and
     administrators (DIAAT-347)."""
     with Session(get_engine()) as session:
-        rows = jurisdiction_templates.available_templates(session, active.id, user.id)
+        templates = [
+            jurisdiction_templates.TemplateVersion.of(row)
+            for row in jurisdiction_templates.available_templates(session, active.id, user.id)
+        ]
     # Outside the session: the legal frameworks are read in their own.
-    return template_forms(rows, active.id)
+    return template_forms(templates, active.id)
+
+
+@router.get("/jurisdictions/templates/{template_id}/revisions/{revision}", response_model=AvailableTemplate)
+def template_revision(
+    template_id: UUID,
+    revision: str = Path(max_length=64),
+    user=Depends(require_permission("recording.own", "dictation.use")),
+    active: ActiveJurisdiction = Depends(get_active_jurisdiction),
+) -> AvailableTemplate:
+    """DIAAT-339: the template's form as a draft started with it (``revision``), to finish
+    that draft once the template has changed or been switched off. 404 when the user
+    could never choose that version."""
+    with Session(get_engine()) as session:
+        template = jurisdiction_templates.template_version(session, active.id, template_id, user.id, revision)
+    if template is None:
+        raise HTTPException(status_code=404, detail="That version of the template is not available.")
+    (form,) = template_forms([template], active.id)
+    return form

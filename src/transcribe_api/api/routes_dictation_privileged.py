@@ -653,6 +653,14 @@ UPLOAD_CONTENT_TYPE = "application/octet-stream"
 _TEMPLATE_ADMIN = require_permission("templates.manage")
 
 
+class StartedFrom(BaseModel):
+    template_id: str
+    name: str
+    jurisdiction: str
+    jurisdiction_name: str
+    copied_at: datetime
+
+
 class TemplateAdminRecord(BaseModel):
     id: str
     name: str
@@ -669,6 +677,26 @@ class TemplateAdminRecord(BaseModel):
     # What stops it being saved or enabled; empty when it is complete.
     problems: list[str]
     version: str
+    # DIAAT-336: shared as a base for other jurisdictions, and the shared template it
+    # was copied from, if it was.
+    shared_as_base: bool = False
+    started_from: StartedFrom | None = None
+
+
+class SharedTemplateRecord(BaseModel):
+    """A template shared as a base (DIAAT-336), for an admin to start one from."""
+
+    id: str
+    name: str
+    service: str | None
+    jurisdiction: str
+    jurisdiction_name: str
+    # How many fields it has.
+    field_count: int
+
+
+class FromBaseRequest(BaseModel):
+    template_id: UUID
 
 
 class TemplatePreviewRequest(BaseModel):
@@ -690,6 +718,8 @@ class TemplateWrite(BaseModel):
     # The previous web release's switch, read only without ``stage``: off is a draft,
     # on is live (and so is refused without a sign-off).
     enabled: bool = False
+    # DIAAT-336: share it as a base, or stop; left out (the previous web release), kept.
+    shared_as_base: bool | None = None
     version: str
 
     @property
@@ -812,6 +842,7 @@ def admin_update_template(
                 stage=body.chosen_stage,
                 expected_version=body.version,
                 sign_off=_sign_off(body.sign_off, admin_user),
+                shared_as_base=body.shared_as_base,
                 saved_by=admin_user.id,
             )
         )
@@ -821,7 +852,54 @@ def admin_update_template(
         admin_user,
         code,
         record["id"],
-        {"change": "fields", "stage": record["stage"], "sign_off": record["sign_off"]},
+        {
+            "change": "fields",
+            "stage": record["stage"],
+            "sign_off": record["sign_off"],
+            "shared_as_base": record["shared_as_base"],
+        },
+    )
+    return TemplateAdminRecord(**record)
+
+
+@router.get("/jurisdictions/{code}/base-templates", response_model=list[SharedTemplateRecord])
+def admin_list_base_templates(
+    code: str,
+    admin_user: User = Depends(_TEMPLATE_ADMIN),
+) -> list[SharedTemplateRecord]:
+    """DIAAT-336: the templates any jurisdiction shares as a base, complete ones only,
+    for the admin of ``code`` to start a template from."""
+    assert_jurisdiction_in_scope(admin_user, code)
+    rows = _admin_session_run(
+        lambda s: [
+            jurisdiction_templates.shared_template_record(*shared)
+            for shared in jurisdiction_templates.shared_templates(s)
+        ]
+    )
+    return [SharedTemplateRecord(**row) for row in rows]
+
+
+@router.post("/jurisdictions/{code}/templates/from-base", response_model=TemplateAdminRecord, status_code=201)
+def admin_add_template_from_base(
+    code: str,
+    body: FromBaseRequest,
+    admin_user: User = Depends(_TEMPLATE_ADMIN),
+) -> TemplateAdminRecord:
+    """DIAAT-336: a new draft template of ``code`` from a copy of a shared one, for the
+    admin to change there. 404 when it is no longer shared; later changes to it do not
+    change the copy."""
+    assert_jurisdiction_in_scope(admin_user, code)
+    record = _admin_session_run(
+        lambda s: jurisdiction_templates.template_record(
+            jurisdiction_templates.add_from_base(s, code, body.template_id, saved_by=admin_user.id)
+        )
+    )
+    _audit_template_change(
+        "template.add",
+        admin_user,
+        code,
+        record["id"],
+        {"change": "from_base", "base": record["started_from"], "boxes": len(record["boxes"])},
     )
     return TemplateAdminRecord(**record)
 
@@ -836,7 +914,7 @@ def admin_template_form(
     the admin to fill with sample details, whether or not judges can choose it yet."""
     assert_jurisdiction_in_scope(admin_user, code)
     row = _admin_session_run(lambda s: jurisdiction_templates.template_of(s, code, template_id))
-    (result,) = template_forms([row], row.jurisdiction_id)
+    (result,) = template_forms([jurisdiction_templates.TemplateVersion.of(row)], row.jurisdiction_id)
     return result
 
 
