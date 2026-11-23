@@ -89,6 +89,47 @@ async def test_a_timeout_kills_and_reaps_the_child_and_is_raised(spawns):
     assert _is_gone(proc.pid)
 
 
+@pytest.mark.parametrize("first", ["cancel", "timeout"])
+async def test_a_cancellation_while_the_child_is_being_reaped_is_raised_and_the_reaping_finishes(monkeypatch, first):
+    """The child has been killed and the wait for it is held; the task is cancelled (again, after a first
+    cancellation, or for the first time after a timeout). The cancellation is raised, not swallowed, the
+    first exception is its context after a timeout, and the child is still reaped once the hold is released."""
+    real_exec = asyncio.create_subprocess_exec
+    reaping, reaped, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    spawned: list[asyncio.subprocess.Process] = []
+
+    async def hold_the_reaping(*args, **kwargs):
+        proc = await real_exec(*args, **kwargs)
+        real_wait = proc.wait
+
+        async def wait():
+            reaping.set()
+            await release.wait()
+            code = await real_wait()
+            reaped.set()
+            return code
+
+        proc.wait = wait
+        spawned.append(proc)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", hold_the_reaping)
+    task = asyncio.create_task(run_process("sleep", "30", timeout=0.2 if first == "timeout" else None))
+    if first == "cancel":
+        while not spawned:  # the spawn is awaited by the task: yield until it has happened
+            await asyncio.sleep(0)
+        task.cancel()
+    await asyncio.wait_for(reaping.wait(), WAIT)  # killed, and now waiting for it to exit
+    task.cancel()  # while reaping
+    release.set()
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await asyncio.wait_for(task, WAIT)
+    if first == "timeout":
+        assert isinstance(raised.value.__cause__, TimeoutError)
+    await asyncio.wait_for(reaped.wait(), WAIT)  # the shielded reaping was not abandoned
+    assert _is_gone(spawned[0].pid)
+
+
 async def test_a_child_that_finishes_gives_its_output_and_exit_code():
     result = await run_process(
         sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr); sys.exit(3)"

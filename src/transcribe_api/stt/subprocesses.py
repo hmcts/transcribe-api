@@ -39,17 +39,22 @@ async def run_process(*command: str, timeout: float | None = None) -> ProcessRes
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
     except BaseException as exc:
-        cancelled_again = await _kill_and_reap(proc)
-        if cancelled_again and not isinstance(exc, asyncio.CancelledError):
-            raise asyncio.CancelledError from exc  # a cancellation that arrived while stopping the child
+        try:
+            await _kill_and_reap(proc)
+        except asyncio.CancelledError as again:
+            # A cancellation that arrived while the child was being stopped: it is not swallowed. Whatever
+            # took the caller out first stays as its context (the reaping itself goes on, shielded).
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise again from exc
         raise
     return ProcessResult(proc.returncode if proc.returncode is not None else -1, stdout, stderr)
 
 
-async def _kill_and_reap(proc: asyncio.subprocess.Process) -> bool:
+async def _kill_and_reap(proc: asyncio.subprocess.Process) -> None:
     """Kill the child and wait (at most ``REAP_TIMEOUT_SECONDS``) until it has exited. The wait is
-    shielded: a second cancellation does not abandon the reaping, it is reported to the caller.
-    Returns whether this task was cancelled meanwhile."""
+    shielded: a cancellation of this task while it waits propagates (``asyncio.CancelledError`` is never
+    swallowed here), and the reaping carries on without it."""
     if proc.returncode is None:
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
@@ -57,8 +62,5 @@ async def _kill_and_reap(proc: asyncio.subprocess.Process) -> bool:
     reaping.add_done_callback(lambda task: task.cancelled() or task.exception())  # never "not retrieved"
     try:
         await asyncio.shield(reaping)
-    except asyncio.CancelledError:
-        return True
     except Exception:  # the child would not exit in time: nothing more can be done for it here
-        return False
-    return False
+        return
