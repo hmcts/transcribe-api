@@ -725,6 +725,15 @@ def test_rules_are_kept_only_for_their_box_and_stored_only_when_set():
         ("Counsel (*{{Name}}*) attended", {"Name": ""}, "Counsel attended"),
         ("Counsel ({{Name}}, of chambers)", {"Name": ""}, "Counsel (of chambers)"),
         ("**{{Name}}**, Counsel", {"Name": "J"}, "**J**, Counsel"),
+        ("Counsel [{{Name}}] attended", {"Name": ""}, "Counsel attended"),
+        ("Counsel **({{Name}})** attended", {"Name": ""}, "Counsel attended"),
+        ("Counsel <u>{{Name}}</u>, attended", {"Name": ""}, "Counsel attended"),
+        ("Counsel (**{{Name}}**, of chambers)", {"Name": ""}, "Counsel (of chambers)"),
+        # Only what wraps nothing but the empty answer goes.
+        ("**Counsel {{Name}}**", {"Name": ""}, "**Counsel**"),
+        # In code, which prints verbatim, the answer goes in as typed, unescaped.
+        ("Ref `{{Ref}}` and {{Ref}}", {"Ref": "A-1"}, "Ref `A-1` and A\\-1"),
+        ("```\n{{Ref}}\n```\n{{Ref}}", {"Ref": "A-1"}, "```\nA-1\n```\nA\\-1"),
         # A list item left with nothing goes; the admin's own lines stay.
         ("Present:\n- {{A}}\n- {{B}}\n-", {"A": "", "B": "X"}, "Present:\n- X\n-"),
         # As typed: no formatting, link, paragraph or underlining from the judge's answer.

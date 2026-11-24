@@ -621,50 +621,78 @@ _MARKDOWN_PUNCTUATION = re.compile(r"([!-/:-@\[-`{-~])")
 # The tags markdown_to_blocks reads as underlining, whether escaped or not.
 _UNDERLINE_TAG = re.compile(r"<(/?)(u>)", re.IGNORECASE)
 _WORD_JOINER = "\u2060"
-# A placeholder with the formatting around it (**{{A}}**, ({{A}})), which goes with it.
-_WRAPPED = (
-    r"(?:\((?P<pmarks>[*_]{0,3})\{\{(?P<ptag>[^{}\n]+)\}\}(?P=pmarks)\)"
-    r"|(?P<marks>[*_]{0,3})\{\{(?P<tag>[^{}\n]+)\}\}(?P=marks))"
+# Where an empty answer was, while what surrounds it is tidied away.
+_GONE = "\x00"
+# Formatting or brackets around nothing but an empty answer, which go with it.
+_EMPTY_WRAPPERS = (
+    re.compile(rf"\({_GONE}\)"),
+    re.compile(rf"\[{_GONE}\]"),
+    re.compile(rf"(\*{{1,3}}|_{{1,3}}){_GONE}\1"),
+    re.compile(rf"<u>{_GONE}</u>", re.IGNORECASE),
 )
 _LIST_MARKER_ONLY = re.compile(r"\s*(?:[-*+]|\d+[.)])?\s*")
+_FENCE = re.compile(r"\s{0,3}(```|~~~)")
 
 
 def _as_plain_text(answer: str) -> str:
     """An answer as Markdown that reads as typed: no formatting, links, underlining or
     new paragraphs."""
-    one_line = " ".join(answer.split())
+    return _MARKDOWN_PUNCTUATION.sub(r"\\\1", _without_underlining(" ".join(answer.split())))
+
+
+def _without_underlining(text: str) -> str:
     # Invisible, it keeps a typed <u> from being read as underlining.
-    one_line = _UNDERLINE_TAG.sub(lambda m: f"<{_WORD_JOINER}{m[1]}{m[2]}", one_line)
-    return _MARKDOWN_PUNCTUATION.sub(r"\\\1", one_line)
+    return _UNDERLINE_TAG.sub(lambda m: f"<{_WORD_JOINER}{m[1]}{m[2]}", text)
+
+
+def _in_code_span(line: str, at: int) -> bool:
+    """Whether a position of a line is inside `code`, which Markdown prints verbatim."""
+    return line[:at].count("`") % 2 == 1
+
+
+def _without_empty_answers(line: str, answers: dict[str, str]) -> str:
+    """The line with each empty answer gone, and with it any formatting or brackets around
+    it, a comma next to it (after it if there is one, else before it) and one space."""
+    line = PLACEHOLDER.sub(lambda m: _GONE if m[1] in answers and not answers[m[1]] else m[0], line)
+    if _GONE not in line:
+        return line
+    while True:
+        unwrapped = line
+        for wrapper in _EMPTY_WRAPPERS:
+            unwrapped = wrapper.sub(_GONE, unwrapped)
+        if unwrapped == line:
+            break
+        line = unwrapped
+    line = re.sub(rf"{_GONE}[ \t]*,[ \t]*", "", line)
+    line = re.sub(rf"[ \t]*,[ \t]*{_GONE}", "", line)
+    return re.sub(rf"([ \t]?){_GONE}([ \t]?)", lambda m: " " if m[1] and m[2] else "", line)
 
 
 def fill_in_answers(text: str, answers: dict[str, str]) -> str:
     """A rule's text with each ``{{Tag}}`` of ``answers`` replaced by the answer as plain
-    text. An empty answer prints nothing, with its formatting, a comma next to it (after
-    it if there is one, else before it) and one space, so no gap or stray comma is left;
-    a list item left with nothing goes. Placeholders naming no question stay."""
-
-    def blank(match: re.Match[str]) -> bool:
-        tag = match["ptag"] or match["tag"]
-        return tag in answers and not answers[tag]
-
-    def no_space_twice(match: re.Match[str]) -> str:
-        return " " if match["before"] and match["after"] else ""
-
+    text, as typed in code. An empty answer prints nothing, with no gap, stray comma or
+    formatting left; a list item left with nothing goes. Placeholders naming no question
+    stay."""
     lines = []
+    in_fence = False
     for line in text.split("\n"):
-        filled = re.sub(_WRAPPED + r"[ \t]*,[ \t]*", lambda m: "" if blank(m) else m[0], line)
-        filled = re.sub(r"[ \t]*,[ \t]*" + _WRAPPED, lambda m: "" if blank(m) else m[0], filled)
-        filled = re.sub(
-            r"(?P<before>[ \t]?)" + _WRAPPED + r"(?P<after>[ \t]?)",
-            lambda m: no_space_twice(m) if blank(m) else m[0],
-            filled,
-        )
+        if _FENCE.match(line):
+            in_fence = not in_fence
+            lines.append(line)
+            continue
+        filled = _without_empty_answers(line, answers)
         if filled != line and _LIST_MARKER_ONLY.fullmatch(filled):
             continue
-        lines.append(
-            PLACEHOLDER.sub(lambda m: _as_plain_text(answers[m[1]]) if m[1] in answers else m[0], filled)
-        )
+
+        def answer(m: re.Match[str], line: str = filled, fenced: bool = in_fence) -> str:
+            if m[1] not in answers:
+                return m[0]
+            # Code is printed verbatim: escapes there would print as backslashes.
+            if fenced or _in_code_span(line, m.start()):
+                return _without_underlining(" ".join(answers[m[1]].split()))
+            return _as_plain_text(answers[m[1]])
+
+        lines.append(PLACEHOLDER.sub(answer, filled))
     return "\n".join(lines)
 
 
