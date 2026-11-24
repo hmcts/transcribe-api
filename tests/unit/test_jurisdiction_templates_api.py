@@ -1001,6 +1001,74 @@ def test_a_legal_framework_box_cannot_be_saved_without_a_legal_issues_question(a
     )
 
 
+# Text depending on an answer (DIAAT-411) --------------------------------------------
+
+ANSWER_TEMPLATE = make_template(
+    [
+        ["Case Number: ", Sdt("Reference")],
+        ["Appellant: ", Sdt("Attendance", kind="dropdown", options=["Attended", "Did not attend"])],
+        [Sdt("Represented", "Respondent represented")],
+        [Sdt("Rule28", "Rule 28")],
+        [Sdt("JudgmentText", "Judgment text")],
+    ]
+)
+ABSENT_TEXT = "The appellant failed to attend the hearing. I considered **rule 28** because [REASONS]."
+
+
+def _answer_text_template(as_admin, rules: list[dict]):
+    template = upload(as_admin, data=ANSWER_TEMPLATE, name="Rule 28.docx").json()
+    body = complete(template)
+    changes = {
+        "Represented": {"type": "yes_no"},
+        "Rule28": {"type": "benchnotes", "source": "answer_text", "required": False, "rules": rules},
+    }
+    body["fields"] = [{**f, **changes.get(f["tag"], {})} for f in body["fields"]]
+    return as_admin.put(f"/api/admin/jurisdictions/ET/templates/{template['id']}", json=body)
+
+
+def test_a_box_prints_text_depending_on_the_judges_answers(as_admin, as_et_judge, stored):
+    rules = [
+        {"field": "Attendance", "answer": "Did not attend", "text": ABSENT_TEXT},
+        {"field": "Represented", "answer": "no", "text": "The respondent was not represented."},
+    ]
+    saved = _answer_text_template(as_admin, rules)
+    assert saved.status_code == 200, saved.text
+    assert {f["tag"]: f for f in saved.json()["fields"]}["Rule28"]["rules"] == rules
+    # The judge is not asked for it: their answers decide it.
+    (offered,) = as_et_judge.get("/api/jurisdictions/templates").json()
+    assert "Rule28" not in [f["tag"] for f in offered["fields"]]
+
+    def document(values: dict) -> list[str]:
+        response = as_et_judge.post(
+            "/api/live-transcription/submission", json=_submission(saved.json()["id"], {"Reference": "1", **values})
+        )
+        assert response.status_code == 200, response.text
+        return document_text(stored[response.json()["document_blob_path"]])
+
+    assert document({"Attendance": "Did not attend", "Represented": False}) == [
+        "Case Number: 1",
+        "Appellant: Did not attend",
+        "No",
+        "The appellant failed to attend the hearing. I considered rule 28 because [REASONS].",
+        "The respondent was not represented.",
+        "The claim succeeds.\n\nCosts are reserved.",
+    ]
+    assert document({"Attendance": "Attended", "Represented": True}) == [
+        "Case Number: 1",
+        "Appellant: Attended",
+        "Yes",
+        "The claim succeeds.\n\nCosts are reserved.",
+    ]
+
+
+def test_rules_on_an_answer_the_question_does_not_have_are_refused(as_admin):
+    response = _answer_text_template(as_admin, [{"field": "Attendance", "answer": "Absent", "text": "Text."}])
+    assert response.status_code == 400
+    assert response.json()["detail"]["problems"] == [
+        "Rule 1 of “Rule 28” depends on an answer “Attendance” no longer has: choose another."
+    ]
+
+
 # Dictation sections (DIAAT-416) ---------------------------------------------------
 
 SECTIONS_TEMPLATE = make_template(

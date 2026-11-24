@@ -605,6 +605,108 @@ def test_a_prefill_is_kept_only_for_a_text_field_and_stored_only_when_set():
     assert "prefill" not in day.stored()
 
 
+# Text depending on an answer (DIAAT-411) --------------------------------------------
+
+APPELLANT_ABSENT = (
+    "The appellant failed to attend the hearing. I considered **rule 28**.\n\n"
+    "It was in the interests of justice to proceed because [REASONS]."
+)
+RESPONDENT_ABSENT = "The respondent was not represented at the hearing."
+
+
+def _answer_template(*rules: dict, **extra):
+    data = make_template(
+        [
+            ["Case Number: ", Sdt("Reference")],
+            [Sdt("Rule28", "Rule 28")],
+            [Sdt("JudgmentText")],
+        ]
+    )
+    fields = [
+        t.TemplateField(tag="Reference", label="Case number", required=False),
+        t.TemplateField(tag="Attendance", label="Appellant", type="dropdown", options=["Attended", "Did not attend"]),
+        t.TemplateField(tag="Represented", label="Respondent represented", type="yes_no"),
+        t.TemplateField(tag="Panel", label="Panel", type="multi_select", options=["Lay member", "Doctor"], required=False),
+        t.TemplateField(
+            tag="Rule28", label="Rule 28", type="benchnotes", source="answer_text", rules=list(rules)
+        ).model_copy(update=extra),
+        t.TemplateField(tag="JudgmentText", label="Judgment", type="dictated"),
+    ]
+    return data, fields
+
+
+RULE_28 = (
+    {"field": "Attendance", "answer": "Did not attend", "text": APPELLANT_ABSENT},
+    {"field": "Represented", "answer": "no", "text": RESPONDENT_ABSENT},
+)
+
+
+def _answer_filled(tmp_path, fields, values, data) -> bytes:
+    return t.fill_template(data, _filled(fields, values), tmp_path / "out.docx").read_bytes()
+
+
+def test_each_rule_whose_answer_was_given_prints_its_text_in_order(tmp_path):
+    data, fields = _answer_template(*RULE_28)
+    document = _answer_filled(tmp_path, fields, {"Attendance": "Did not attend", "Represented": False}, data)
+    assert document_text(document) == [
+        "The appellant failed to attend the hearing. I considered rule 28.",
+        "It was in the interests of justice to proceed because [REASONS].",
+        "The respondent was not represented at the hearing.",
+        "The claim succeeds.\n\nCosts are reserved.",
+    ]
+    # Formatted as the admin wrote it.
+    assert ("rule 28", True, False) in _runs(document, "The appellant failed to attend the hearing. I considered rule 28.")
+
+
+def test_with_no_rule_applying_the_box_and_its_line_are_removed(tmp_path):
+    data, fields = _answer_template(*RULE_28)
+    document = _answer_filled(tmp_path, fields, {"Attendance": "Attended", "Represented": True}, data)
+    assert document_text(document) == ["The claim succeeds.\n\nCosts are reserved."]
+
+
+def test_a_rule_can_depend_on_one_choice_of_a_list(tmp_path):
+    data, fields = _answer_template({"field": "Panel", "answer": "Doctor", "text": "A doctor sat with me."})
+    values = {"Attendance": "Attended", "Represented": True}
+    with_doctor = _answer_filled(tmp_path, fields, {**values, "Panel": ["Lay member", "Doctor"]}, data)
+    assert document_text(with_doctor)[0] == "A doctor sat with me."
+    without = _answer_filled(tmp_path, fields, {**values, "Panel": ["Lay member"]}, data)
+    assert document_text(without) == ["The claim succeeds.\n\nCosts are reserved."]
+
+
+def test_rules_that_cannot_work_are_named():
+    _, fields = _answer_template()
+    assert t.field_problems(t.find_boxes(_answer_template()[0]), fields)[-1:] == [
+        "Add a rule for when BenchNotes fills “Rule 28”."
+    ]
+    _, fields = _answer_template(
+        {"field": "Reference", "answer": "1", "text": "Text."},
+        {"field": "Attendance", "answer": "Absent", "text": "Text."},
+        {"field": "Represented", "answer": "maybe", "text": "Text."},
+        {"field": "Represented", "answer": "yes", "text": "  "},
+        {"field": "", "answer": "", "text": "Text."},
+        {"field": "Attendance", "answer": "", "text": "Text."},
+    )
+    problems = t.field_problems([], fields)
+    assert [p for p in problems if "of “Rule 28”" in p] == [
+        "Rule 1 of “Rule 28” depends on a question that is not a dropdown, list or yes/no question.",
+        "Rule 2 of “Rule 28” depends on an answer “Appellant” no longer has: choose another.",
+        "Rule 3 of “Rule 28” depends on an answer “Respondent represented” no longer has: choose another.",
+        "Rule 4 of “Rule 28” has no text to print.",
+        "Choose the question rule 5 of “Rule 28” depends on.",
+        "Choose the answer of “Appellant” rule 6 of “Rule 28” depends on.",
+    ]
+
+
+def test_rules_are_kept_only_for_their_box_and_stored_only_when_set():
+    _, fields = _answer_template(*RULE_28)
+    fields = [*fields, t.TemplateField(tag="Other", label="Other", rules=[t.AnswerRule(**RULE_28[0])])]
+    normalised = {f.tag: f for f in t.normalise_fields(fields)}
+    assert [r["answer"] for r in normalised["Rule28"].stored()["rules"]] == ["Did not attend", "no"]
+    assert normalised["Other"].rules is None
+    assert "rules" not in normalised["Other"].stored()
+    assert "rules" not in normalised["Reference"].stored()
+
+
 def _runs(document: bytes, text: str) -> list[tuple[str, bool, bool]]:
     """The runs of the paragraph reading ``text``: their text, bold and italic."""
     from lxml import etree

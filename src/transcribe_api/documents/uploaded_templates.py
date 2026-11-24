@@ -16,6 +16,10 @@ fields on the Hearing Details form. No code change or release is needed.
   one box, or a page that sends no sections, everything goes in the first, as before.
   "Filled by BenchNotes" boxes take the jurisdiction's name or the year, and the judge
   is not asked for them.
+- A "Filled by BenchNotes" box can take text depending on an answer (DIAAT-411), as the
+  IAC's decision adds its rule 28 paragraphs: each of its rules prints its text when a
+  question of the template has a given answer, in the admin's order, with its
+  paragraphs, lists and bold kept. With none applying, the box and its line go.
 - A text field can start with the signed-in judge's name (DIAAT-340), as the IAC's form
   does for its first judge; the judge can change it.
 - A "Filled by BenchNotes" box can take the legal framework text (DIAAT-415): the text the
@@ -289,9 +293,24 @@ FieldType = Literal[
 LIST_TYPES = ("dropdown", "multi_select")
 # Not asked of the judge: BenchNotes fills them.
 NOT_ASKED = ("benchnotes", "dictated")
-BenchNotesSource = Literal["jurisdiction", "year", "legal_framework"]
+BenchNotesSource = Literal["jurisdiction", "year", "legal_framework", "answer_text"]
+# The questions text can depend on (DIAAT-411): those with set answers.
+ANSWER_TYPES = ("dropdown", "multi_select", "yes_no")
+YES_NO_ANSWERS = ("yes", "no")
 # What a text field's answer starts as on the judge's form (DIAAT-340).
 Prefill = Literal["judge_name"]
+
+
+class AnswerRule(BaseModel):
+    """DIAAT-411: print ``text`` (Markdown) when the question ``field`` (a tag of the same
+    template) has the answer ``answer``: one of its options, or "yes" or "no"."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    # Empty until the admin chooses them: saving then says what is missing.
+    field: str = Field(default="", max_length=200)
+    answer: str = Field(default="", max_length=200)
+    text: str = Field(default="", max_length=10000)
 
 
 class TemplateField(BaseModel):
@@ -309,12 +328,14 @@ class TemplateField(BaseModel):
     empty_text: str | None = Field(default=None, max_length=2000)
     # Filled in on the judge's form before they answer: they can change it (DIAAT-340).
     prefill: Prefill | None = None
+    # A "text depending on an answer" box's rules, in the order printed (DIAAT-411).
+    rules: list[AnswerRule] | None = Field(default=None, max_length=50)
 
     def stored(self) -> dict[str, Any]:
-        """As kept with the template: empty_text and prefill only when set, so pods from
-        before them (extra="forbid") still read every template that does not use them,
-        and its revision (DIAAT-339) stays the same."""
-        unset = {name for name in ("empty_text", "prefill") if getattr(self, name) is None}
+        """As kept with the template: empty_text, prefill and rules only when set, so pods
+        from before them (extra="forbid") still read every template that does not use
+        them, and its revision (DIAAT-339) stays the same."""
+        unset = {name for name in ("empty_text", "prefill", "rules") if getattr(self, name) is None}
         return self.model_dump(exclude=unset)
 
     @field_validator("options")
@@ -391,6 +412,8 @@ def field_problems(boxes: list[Box], fields: list[TemplateField]) -> list[str]:
                 f"“{f.label}” prints the text of the legal frameworks the judge chooses: link a box"
                 " to a Legal issues question for them to choose from."
             )
+        if _is_answer_text(f):
+            problems.extend(_rule_problems(f, fields))
     dictated = [f.label for f in fields if f.type == "dictated"]
     if not dictated:
         problems.append("Link at least one box to the dictated text.")
@@ -414,6 +437,7 @@ def normalise_fields(fields: list[TemplateField]) -> list[TemplateField]:
                 "required": f.required if f.type not in NOT_ASKED else False,
                 "empty_text": ((f.empty_text or "").strip() or None) if _is_legal_framework(f) else None,
                 "prefill": f.prefill if f.type == "text" else None,
+                "rules": f.rules if _is_answer_text(f) else None,
             }
         )
         for f in fields
@@ -422,6 +446,41 @@ def normalise_fields(fields: list[TemplateField]) -> list[TemplateField]:
 
 def _is_legal_framework(f: TemplateField) -> bool:
     return f.type == "benchnotes" and f.source == "legal_framework"
+
+
+def _is_answer_text(f: TemplateField) -> bool:
+    return f.type == "benchnotes" and f.source == "answer_text"
+
+
+def _rule_problems(f: TemplateField, fields: list[TemplateField]) -> list[str]:
+    """What stops a "text depending on an answer" box's rules being saved."""
+    if not f.rules:
+        return [f"Add a rule for when BenchNotes fills “{f.label}”."]
+    by_tag = {o.tag: o for o in fields}
+    problems: list[str] = []
+    for number, rule in enumerate(f.rules, start=1):
+        which = f"rule {number} of “{f.label}”"
+        rule_name = f"Rule {number} of “{f.label}”"
+        question = by_tag.get(rule.field)
+        if not rule.field:
+            problems.append(f"Choose the question {which} depends on.")
+        elif question is None or question.type not in ANSWER_TYPES:
+            problems.append(f"{rule_name} depends on a question that is not a dropdown, list or yes/no question.")
+        elif not rule.answer:
+            problems.append(f"Choose the answer of “{question.label}” {which} depends on.")
+        elif rule.answer not in (YES_NO_ANSWERS if question.type == "yes_no" else question.options):
+            problems.append(f"{rule_name} depends on an answer “{question.label}” no longer has: choose another.")
+        if not rule.text:
+            problems.append(f"{rule_name} has no text to print.")
+    return problems
+
+
+def _has_answer(question: TemplateField, value: Value, answer: str) -> bool:
+    if question.type == "yes_no":
+        return isinstance(value, bool) and value == (answer == "yes")
+    if question.type == "multi_select":
+        return isinstance(value, list) and answer in value
+    return value == answer
 
 
 # The judge's values ----------------------------------------------------------------
@@ -510,6 +569,11 @@ def box_text(fields: list[TemplateField], values: dict[str, Value], context: Fil
     for f in fields:
         value = values.get(f.tag)
         text: str | None = None
+        if _is_answer_text(f):
+            paragraphs = _answer_text_paragraphs(f, fields, values)
+            if paragraphs:
+                texts[f.tag] = paragraphs
+            continue
         if _is_legal_framework(f):
             paragraphs = _legal_framework_paragraphs(fields, values, context)
             if paragraphs:
@@ -537,6 +601,19 @@ def box_text(fields: list[TemplateField], values: dict[str, Value], context: Fil
         if text and text.strip():
             texts[f.tag] = text
     return texts
+
+
+def _answer_text_paragraphs(
+    f: TemplateField, fields: list[TemplateField], values: dict[str, Value]
+) -> list[BoxParagraph]:
+    """The text of each of the box's rules whose answer the judge gave, in its order."""
+    by_tag = {o.tag: o for o in fields}
+    paragraphs: list[BoxParagraph] = []
+    for rule in f.rules or []:
+        question = by_tag.get(rule.field)
+        if question is not None and _has_answer(question, values.get(rule.field), rule.answer) and rule.text.strip():
+            paragraphs.extend(box_paragraphs(markdown_to_blocks(rule.text)))
+    return paragraphs
 
 
 def _legal_framework_paragraphs(
