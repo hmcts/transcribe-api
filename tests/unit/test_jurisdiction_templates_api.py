@@ -1015,12 +1015,13 @@ ANSWER_TEMPLATE = make_template(
 ABSENT_TEXT = "The appellant failed to attend the hearing. I considered **rule 28** because [REASONS]."
 
 
-def _answer_text_template(as_admin, rules: list[dict]):
+def _answer_text_template(as_admin, rules: list[dict], **more: dict):
     template = upload(as_admin, data=ANSWER_TEMPLATE, name="Rule 28.docx").json()
     body = complete(template)
     changes = {
         "Represented": {"type": "yes_no"},
         "Rule28": {"type": "benchnotes", "source": "answer_text", "required": False, "rules": rules},
+        **more,
     }
     body["fields"] = [{**f, **changes.get(f["tag"], {})} for f in body["fields"]]
     return as_admin.put(f"/api/admin/jurisdictions/ET/templates/{template['id']}", json=body)
@@ -1058,6 +1059,34 @@ def test_a_box_prints_text_depending_on_the_judges_answers(as_admin, as_et_judge
         "Appellant: Attended",
         "Yes",
         "The claim succeeds.\n\nCosts are reserved.",
+    ]
+
+
+def test_a_rule_prints_the_judges_answers_in_its_sentence(as_admin, as_et_judge, stored):
+    """DIAAT-412: as the IAC's "J Bloggs, Home Office Presenting Officer"."""
+    saved = _answer_text_template(
+        as_admin,
+        [{"field": "Represented", "answer": "yes", "text": "{{Reference}}, Home Office Presenting Officer"}],
+        Reference={"required": False},
+    )
+    assert saved.status_code == 200, saved.text
+
+    def document(values: dict) -> list[str]:
+        response = as_et_judge.post("/api/live-transcription/submission", json=_submission(saved.json()["id"], values))
+        assert response.status_code == 200, response.text
+        return document_text(stored[response.json()["document_blob_path"]])
+
+    named = {"Reference": "J Bloggs", "Attendance": "Attended", "Represented": True}
+    assert document(named)[3] == "J Bloggs, Home Office Presenting Officer"
+    # No name: the sentence without it, and no gap.
+    assert document({**named, "Reference": ""})[2] == "Home Office Presenting Officer"
+
+
+def test_a_rule_printing_no_question_is_refused(as_admin):
+    response = _answer_text_template(as_admin, [{"field": "Represented", "answer": "no", "text": "{{Counsel}}"}])
+    assert response.status_code == 400
+    assert response.json()["detail"]["problems"] == [
+        "Rule 1 of “Rule 28” prints the answer to “Counsel”, which is not a question the judge answers."
     ]
 
 

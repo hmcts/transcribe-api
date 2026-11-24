@@ -20,6 +20,9 @@ fields on the Hearing Details form. No code change or release is needed.
   IAC's decision adds its rule 28 paragraphs: each of its rules prints its text when a
   question of the template has a given answer, in the admin's order, with its
   paragraphs, lists and bold kept. With none applying, the box and its line go.
+  A rule's text can hold the judge's answers (DIAAT-412): ``{{Tag}}`` prints the answer to
+  that question as its own box would, as plain text. An empty answer prints nothing, and
+  takes a comma next to it, so "{{RepName}}, Counsel" with no name is "Counsel".
 - A text field can start with the signed-in judge's name (DIAAT-340), as the IAC's form
   does for its first judge; the judge can change it.
 - A "Filled by BenchNotes" box can take the legal framework text (DIAAT-415): the text the
@@ -41,10 +44,12 @@ from __future__ import annotations
 import io
 import re
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from html.parser import HTMLParser
+from itertools import groupby
 from pathlib import Path
 from typing import Any, Literal
 from xml.etree import ElementTree
@@ -54,7 +59,7 @@ from docx.oxml.ns import qn
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from transcribe_api.documents.lib.markdown_to_blocks import markdown_to_blocks
-from transcribe_api.documents.lib.models import ContentBlock, Heading, Paragraph
+from transcribe_api.documents.lib.models import ContentBlock, Heading, Paragraph, TextRun
 from transcribe_api.documents.word_document import BoxParagraph, BoxRun, WordDocument
 
 # The upload ------------------------------------------------------------------------
@@ -457,6 +462,7 @@ def _rule_problems(f: TemplateField, fields: list[TemplateField]) -> list[str]:
     if not f.rules:
         return [f"Add a rule for when BenchNotes fills “{f.label}”."]
     by_tag = {o.tag: o for o in fields}
+    asked = {o.tag for o in fields if o.type not in NOT_ASKED}
     problems: list[str] = []
     for number, rule in enumerate(f.rules, start=1):
         which = f"rule {number} of “{f.label}”"
@@ -472,6 +478,8 @@ def _rule_problems(f: TemplateField, fields: list[TemplateField]) -> list[str]:
             problems.append(f"{rule_name} depends on an answer “{question.label}” no longer has: choose another.")
         if not rule.text:
             problems.append(f"{rule_name} has no text to print.")
+        for unknown in dict.fromkeys(n for n in PLACEHOLDER.findall(rule.text) if n not in asked):
+            problems.append(f"{rule_name} prints the answer to “{unknown}”, which is not a question the judge answers.")
     return problems
 
 
@@ -570,7 +578,7 @@ def box_text(fields: list[TemplateField], values: dict[str, Value], context: Fil
         value = values.get(f.tag)
         text: str | None = None
         if _is_answer_text(f):
-            paragraphs = _answer_text_paragraphs(f, fields, values)
+            paragraphs = _answer_text_paragraphs(f, fields, values, context)
             if paragraphs:
                 texts[f.tag] = paragraphs
             continue
@@ -584,35 +592,180 @@ def box_text(fields: list[TemplateField], values: dict[str, Value], context: Fil
             text = context.dictated_texts.get(f.tag)
         elif f.type == "benchnotes":
             text = context.jurisdiction_name if f.source == "jurisdiction" else str(context.year)
-        elif _empty(value):
-            text = None
-        elif f.type == "date":
-            day = date.fromisoformat(str(value))
-            text = f"{day.day} {day:%B %Y}"
-        elif f.type == "yes_no":
-            text = "Yes" if value else "No"
-        elif f.type == "multi_select":
-            text = ", ".join(value)  # type: ignore[arg-type]
-        elif f.type == "legal_issues":
-            chosen = set(value)  # type: ignore[arg-type]
-            text = ", ".join(t for i, t in context.legal_issue_titles.items() if i in chosen)
         else:
-            text = str(value)
+            text = _printed_answer(f, value, context)
         if text and text.strip():
             texts[f.tag] = text
     return texts
 
 
+def _printed_answer(f: TemplateField, value: Value, context: FillContext) -> str | None:
+    """A question's answer as the document prints it; None when it was not answered."""
+    if _empty(value):
+        return None
+    if f.type == "date":
+        day = date.fromisoformat(str(value))
+        return f"{day.day} {day:%B %Y}"
+    if f.type == "yes_no":
+        return "Yes" if value else "No"
+    if f.type == "multi_select":
+        return ", ".join(value)  # type: ignore[arg-type]
+    if f.type == "legal_issues":
+        chosen = set(value)  # type: ignore[arg-type]
+        return ", ".join(t for i, t in context.legal_issue_titles.items() if i in chosen)
+    return str(value)
+
+
+# DIAAT-412: an answer in a rule's text, by its question's tag. Double braces, which
+# legal text does not use, so text saved before them is never read as one.
+PLACEHOLDER = re.compile(r"\{\{([^{}\n]+)\}\}")
+# Where an empty answer was, while what surrounds it is tidied away: _GONE as it was,
+# _GONE_WITH_COMMA once a comma next to it has gone too (one comma per answer).
+_GONE = "\x00"
+_GONE_WITH_COMMA = "\x01"
+_ANY_GONE = f"[{_GONE}{_GONE_WITH_COMMA}]"
+# Underlining around nothing but empty answers: markdown_to_blocks would underline the
+# whole paragraph for it, so it goes before the text is read.
+_EMPTY_UNDERLINE = re.compile(r"<u>(?:[\s*_`,]*\{\{([^{}\n]+)\}\})+[\s*_`,]*</u>", re.IGNORECASE)
+# An answer given, held as one character while the text around empty ones is tidied.
+_GIVEN = "\x02"
+# What goes around an empty answer, tidied until none is left: answers side by side as
+# one, which can still take a comma if either could; one comma next to it (after it,
+# else before it); brackets around nothing else.
+_TIDY_EMPTY = (
+    (re.compile(rf"(?P<keep>{_ANY_GONE})\s*{_ANY_GONE}"), lambda m: _GONE if _GONE in m[0] else _GONE_WITH_COMMA),
+    (re.compile(rf"(?P<keep>{_GONE})\s*,[ \t]*"), _GONE_WITH_COMMA),
+    (re.compile(rf"[ \t]*,\s*(?P<keep>{_GONE})"), _GONE_WITH_COMMA),
+    (re.compile(rf"\(\s*(?P<keep>{_ANY_GONE})\s*\)"), None),
+    (re.compile(rf"\[\s*(?P<keep>{_ANY_GONE})\s*\]"), None),
+)
+_SPACED_GONE = re.compile(rf"([ \t]*){_ANY_GONE}([ \t]*)")
+
+# A paragraph's text as characters, each with the run (bold, italic) it is in.
+_Styled = list[tuple[str, bool, bool]]
+
+
+def _without_empty_underlining(text: str, answers: dict[str, str]) -> str:
+    def empty(match: re.Match[str]) -> bool:
+        return all(answers.get(tag) == "" for tag in PLACEHOLDER.findall(match[0]))
+
+    return _EMPTY_UNDERLINE.sub(lambda m: re.sub(r"</?u>", "", m[0], flags=re.IGNORECASE) if empty(m) else m[0], text)
+
+
+def _replaced(chars: _Styled, match: re.Match[str], keep: str | Callable[[re.Match[str]], str] | None) -> _Styled:
+    """``chars`` with the match's text replaced by its ``keep`` group (or by ``keep``, or
+    what it gives for the match), in the style of the first character it replaces."""
+    kept = keep(match) if callable(keep) else keep or match["keep"]
+    _, bold, italic = chars[match.start()]
+    return [*chars[: match.start()], *((c, bold, italic) for c in kept), *chars[match.end() :]]
+
+
+def _tidied(chars: _Styled) -> _Styled:
+    """The paragraph with each empty answer gone, and with it what would show it was there:
+    brackets around nothing else, a comma, and spaces. One space is left between words;
+    none at either end, before punctuation or a closing bracket, or after an opening one."""
+    while True:
+        text = "".join(c for c, _, _ in chars)
+        for pattern, keep in _TIDY_EMPTY:
+            match = pattern.search(text)
+            if match:
+                chars = _replaced(chars, match, keep)
+                break
+        else:
+            break
+    while True:
+        text = "".join(c for c, _, _ in chars)
+        match = _SPACED_GONE.search(text)
+        if not match:
+            return chars
+        before, after = text[: match.start()], text[match.end() :]
+        between_words = bool(before.strip() and after.strip() and after[0] not in ".,;:!?)]" and before[-1] not in "([")
+        space: _Styled = []
+        if between_words and (match[1] or match[2]):
+            # One space, in the style of the first that was there.
+            _, bold, italic = chars[match.start()] if match[1] else chars[match.end() - 1]
+            space = [(" ", bold, italic)]
+        chars = [*chars[: match.start()], *space, *chars[match.end() :]]
+
+
+def _answered(block: ContentBlock, answers: dict[str, str]) -> ContentBlock | None:
+    """The block with each placeholder of ``answers`` replaced by the answer as typed, on
+    one line: filled in after the admin's Markdown is read, so nothing in an answer can
+    format the document. An empty answer goes with what would show it was there (see
+    _tidied); None when nothing is left of the block."""
+    if not isinstance(block, Paragraph | Heading) or not any(PLACEHOLDER.search(r.text) for r in [block, *block.runs]):
+        return block
+    runs = block.runs or [TextRun(text=block.text, bold=block.bold, italic=getattr(block, "italic", False))]
+    given: list[str] = []
+
+    def mark(m: re.Match[str]) -> str:
+        if m[1] not in answers:
+            return m[0]
+        answer = " ".join(answers[m[1]].split())
+        if not answer:
+            return _GONE
+        given.append(answer)
+        return _GIVEN
+
+    # The admin's text alone is tidied, each answer given held as one character, so the
+    # work does not grow with the answers.
+    chars: _Styled = [(c, r.bold, r.italic) for r in runs for c in PLACEHOLDER.sub(mark, r.text)]
+    if any(c in (_GONE, _GONE_WITH_COMMA) for c, _, _ in chars):
+        chars = _tidied(chars)
+        if not "".join(c for c, _, _ in chars).strip():
+            return None
+    answers_given = iter(given)
+    filled = [
+        TextRun(
+            text="".join(next(answers_given) if c == _GIVEN else c for c, _, _ in group),
+            bold=bold,
+            italic=italic,
+        )
+        for (bold, italic), group in groupby(chars, key=lambda styled: (styled[1], styled[2]))
+    ]
+    text = "".join(r.text for r in filled)
+    return block.model_copy(update={"text": text, "runs": filled if block.runs else []})
+
+
+def answer_paragraphs(text: str, answers: dict[str, str]) -> list[BoxParagraph]:
+    """A rule's text (Markdown) as paragraphs, with ``{{Tag}}`` replaced by the answers to
+    those questions. An empty answer leaves no gap; placeholders naming no question stay.
+    A list item left with nothing goes, its next paragraph, if any, taking its place."""
+    blocks: list[ContentBlock] = []
+    promote = False
+    for block in markdown_to_blocks(_without_empty_underlining(text, answers)):
+        answered = _answered(block, answers)
+        if answered is None:
+            # An empty item's bullet waits for its first paragraph with something left.
+            if isinstance(block, Paragraph) and block.list_level is not None and not block.list_continued:
+                promote = True
+            elif not (isinstance(block, Paragraph) and block.list_continued):
+                promote = False
+            continue
+        if promote and isinstance(answered, Paragraph) and answered.list_continued:
+            answered = answered.model_copy(update={"list_continued": False})
+        promote = False
+        blocks.append(answered)
+    return box_paragraphs(blocks)
+
+
 def _answer_text_paragraphs(
-    f: TemplateField, fields: list[TemplateField], values: dict[str, Value]
+    f: TemplateField, fields: list[TemplateField], values: dict[str, Value], context: FillContext
 ) -> list[BoxParagraph]:
-    """The text of each of the box's rules whose answer the judge gave, in its order."""
+    """The text of each of the box's rules whose answer the judge gave, in its order, with
+    the answers it prints filled in."""
     by_tag = {o.tag: o for o in fields}
     paragraphs: list[BoxParagraph] = []
     for rule in f.rules or []:
         question = by_tag.get(rule.field)
-        if question is not None and _has_answer(question, values.get(rule.field), rule.answer) and rule.text.strip():
-            paragraphs.extend(box_paragraphs(markdown_to_blocks(rule.text)))
+        if question is None or not _has_answer(question, values.get(rule.field), rule.answer) or not rule.text.strip():
+            continue
+        answers = {
+            tag: _printed_answer(by_tag[tag], values.get(tag), context) or ""
+            for tag in PLACEHOLDER.findall(rule.text)
+            if tag in by_tag and by_tag[tag].type not in NOT_ASKED
+        }
+        paragraphs.extend(answer_paragraphs(rule.text, answers))
     return paragraphs
 
 

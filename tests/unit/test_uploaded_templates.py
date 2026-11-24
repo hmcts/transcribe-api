@@ -707,6 +707,116 @@ def test_rules_are_kept_only_for_their_box_and_stored_only_when_set():
     assert "rules" not in normalised["Reference"].stored()
 
 
+# Answers in a rule's text (DIAAT-412) ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "answers", "printed"),
+    [
+        # The IAC's representative sentences.
+        ("{{Name}}, Home Office Presenting Officer", {"Name": "J Bloggs"}, ["J Bloggs, Home Office Presenting Officer"]),
+        ("{{Name}}, Counsel", {"Name": ""}, ["Counsel"]),
+        ("Counsel, {{Name}}", {"Name": ""}, ["Counsel"]),
+        ("X, {{Name}}, Y", {"Name": ""}, ["X, Y"]),
+        ("{{First}}, {{Second}}, Counsel", {"First": "", "Second": "B"}, ["B, Counsel"]),
+        # Empty: no gap, stray space, comma, formatting or brackets left behind.
+        ("Heard by {{Name}} today.", {"Name": ""}, ["Heard by today."]),
+        ("Heard by {{Name}}.", {"Name": ""}, ["Heard by."]),
+        ("{{Name}} attended.", {"Name": ""}, ["attended."]),
+        ("**{{Name}}**, Counsel", {"Name": ""}, ["Counsel"]),
+        ("Counsel (*{{Name}}*) attended", {"Name": ""}, ["Counsel attended"]),
+        ("Counsel ({{Name}}, of chambers)", {"Name": ""}, ["Counsel (of chambers)"]),
+        ("Counsel [{{Name}}] attended", {"Name": ""}, ["Counsel attended"]),
+        ("Counsel **({{Name}})** attended", {"Name": ""}, ["Counsel attended"]),
+        ("Counsel <u>{{Name}}</u>, attended", {"Name": ""}, ["Counsel attended"]),
+        ("Counsel ({{First}} {{Last}}) attended", {"First": "", "Last": ""}, ["Counsel attended"]),
+        ("**{{Name}},** Counsel", {"Name": ""}, ["Counsel"]),
+        ("Ref `{{Ref}}`, Counsel", {"Ref": ""}, ["Ref Counsel"]),
+        ("Counsel ( {{Name}} ) attended", {"Name": ""}, ["Counsel attended"]),
+        ("Counsel [ {{Name}} ] attended", {"Name": ""}, ["Counsel attended"]),
+        ("Counsel <u> {{Name}} </u>, attended", {"Name": ""}, ["Counsel attended"]),
+        # A space beside formatting is kept between words.
+        ("**Counsel** {{Name}} attended", {"Name": ""}, ["Counsel attended"]),
+        ("Counsel {{Name}} **attended**", {"Name": ""}, ["Counsel attended"]),
+        ("<u>Counsel</u> {{Name}} attended", {"Name": ""}, ["Counsel attended"]),
+        # A list item keeps what else it holds.
+        ("- {{Name}}\n  represented the respondent", {"Name": ""}, ["• represented the respondent"]),
+        ("- {{Name}}\n\n  More text\n- Other", {"Name": ""}, ["• More text", "• Other"]),
+        ("X, {{First}}, {{Last}}, Y", {"First": "", "Last": ""}, ["X, Y"]),
+        ("X, {{First}} {{Last}}, Y", {"First": "", "Last": ""}, ["X, Y"]),
+        ("- {{A}}\n\n  {{B}}\n\n  More text", {"A": "", "B": ""}, ["• More text"]),
+        # Only what wraps nothing but empty answers goes.
+        ("**Counsel {{Name}}**", {"Name": ""}, ["Counsel"]),
+        ("Counsel ({{First}} {{Last}})", {"First": "", "Last": "Bloggs"}, ["Counsel (Bloggs)"]),
+        # A list item left with nothing goes; the admin's own lines stay.
+        ("Present:\n\n- {{A}}\n- {{B}}", {"A": "", "B": "X"}, ["Present:", "• X"]),
+        # As typed, whatever it holds: nothing in an answer formats the document.
+        ("**For:** {{Name}}", {"Name": "*J* [x](y) # 1. a_b\n\nc"}, ["For: *J* [x](y) # 1. a_b c"]),
+        ("{{Name}}", {"Name": "<u>x</u> \\*y\\*"}, ["<u>x</u> \\*y\\*"]),
+        ("Ref `{{Ref}}` and ``{{Ref}}`` and \\`{{Ref}}", {"Ref": "x` **b** `y"}, ["Ref x` **b** `y and x` **b** `y and `x` **b** `y"]),
+        ("```\n{{Ref}}\n```", {"Ref": "A-1"}, ["A-1"]),
+        # Single braces, which text saved before placeholders may hold, are never read as one;
+        # nor is a placeholder naming no question.
+        ("Keep {Name} and {{Other}}", {"Name": "x"}, ["Keep {Name} and {{Other}}"]),
+    ],
+)
+def test_answers_are_filled_in_as_typed_with_no_gap_where_one_is_empty(text, answers, printed):
+    assert [p.shown_text for p in t.answer_paragraphs(text, answers)] == printed
+
+
+def test_an_empty_answer_leaves_the_formatting_around_it_as_it_was():
+    (bold_before,) = t.answer_paragraphs("**Counsel** {{Name}} attended", {"Name": ""})
+    assert [(r.text, r.bold) for r in bold_before.runs] == [("Counsel", True), (" attended", False)]
+    (empty_underlined,) = t.answer_paragraphs("Counsel <u> {{Name}} </u>, attended", {"Name": ""})
+    assert not empty_underlined.underline
+    (underlined,) = t.answer_paragraphs("<u>Counsel</u> {{Name}} attended", {"Name": ""})
+    assert underlined.underline
+    (nested,) = t.answer_paragraphs("Counsel <u>**{{Name}}**</u>, attended", {"Name": ""})
+    assert (nested.text, nested.underline) == ("Counsel attended", False)
+    (kept,) = t.answer_paragraphs("Counsel <u>**{{Name}}** QC</u>, attended", {"Name": ""})
+    assert (kept.text, kept.underline) == ("Counsel QC, attended", True)
+
+
+def test_long_answers_are_filled_in_whole():
+    text = " ".join(["{{Name}}"] * 1000)
+    (paragraph,) = t.answer_paragraphs(text, {"Name": "x" * 5000})
+    assert paragraph.text == " ".join(["x" * 5000] * 1000)
+    assert len(paragraph.runs) == 1
+
+
+def test_an_answer_takes_the_formatting_of_where_it_is():
+    (paragraph,) = t.answer_paragraphs("For **{{Name}}**, Counsel", {"Name": "*J*"})
+    assert [(r.text, r.bold) for r in paragraph.runs] == [("For ", False), ("*J*", True), (", Counsel", False)]
+    assert not paragraph.underline
+
+
+def test_a_rule_prints_the_answers_as_their_boxes_would(tmp_path):
+    data, fields = _answer_template(
+        {"field": "Represented", "answer": "yes", "text": "{{Reference}}, for the respondent, on {{Heard}}: {{Panel}}."},
+        {"field": "Represented", "answer": "no", "text": "{{Reference}}, Counsel"},
+    )
+    fields.insert(1, t.TemplateField(tag="Heard", label="Heard", type="date", required=False))
+    values = {"Attendance": "Attended", "Reference": "J *Bloggs*", "Heard": "2026-02-12", "Panel": ["Doctor"]}
+    present = _answer_filled(tmp_path, fields, {**values, "Represented": True}, data)
+    assert document_text(present)[1] == "J *Bloggs*, for the respondent, on 12 February 2026: Doctor."
+    # Underlining typed by the judge is printed, not applied.
+    underlined = _answer_filled(tmp_path, fields, {**values, "Reference": "<u>J</u>", "Represented": True}, data)
+    assert document_text(underlined)[1].startswith("<u>J</u>, for the respondent")
+    assert _runs(present, "J *Bloggs*, for the respondent, on 12 February 2026: Doctor.")[0][1:] == (False, False)
+    unnamed = _answer_filled(tmp_path, fields, {"Attendance": "Attended", "Represented": False}, data)
+    assert document_text(unnamed)[0] == "Counsel"
+
+
+def test_a_rule_printing_an_answer_that_is_not_a_question_is_named():
+    _, fields = _answer_template(
+        {"field": "Represented", "answer": "no", "text": "{{Rule28}} {{JudgmentText}} {{Nobody}} {{Nobody}} {{Reference}} {sic}"},
+    )
+    assert [p for p in t.field_problems([], fields) if "prints the answer" in p] == [
+        f"Rule 1 of “Rule 28” prints the answer to “{tag}”, which is not a question the judge answers."
+        for tag in ("Rule28", "JudgmentText", "Nobody")
+    ]
+
+
 def _runs(document: bytes, text: str) -> list[tuple[str, bool, bool]]:
     """The runs of the paragraph reading ``text``: their text, bold and italic."""
     from lxml import etree
