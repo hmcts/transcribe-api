@@ -44,7 +44,7 @@ from __future__ import annotations
 import io
 import re
 import zipfile
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from html.parser import HTMLParser
@@ -57,7 +57,7 @@ from docx.oxml.ns import qn
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from transcribe_api.documents.lib.markdown_to_blocks import markdown_to_blocks
-from transcribe_api.documents.lib.models import ContentBlock, Heading, Paragraph
+from transcribe_api.documents.lib.models import ContentBlock, Heading, Paragraph, TextRun
 from transcribe_api.documents.word_document import BoxParagraph, BoxRun, WordDocument
 
 # The upload ------------------------------------------------------------------------
@@ -622,72 +622,112 @@ PLACEHOLDER = re.compile(r"\{\{([^{}\n]+)\}\}")
 _GONE = "\x00"
 _GONE_WITH_COMMA = "\x01"
 _ANY_GONE = f"[{_GONE}{_GONE_WITH_COMMA}]"
-# Formatting or brackets around nothing but empty answers, which go with them.
-_EMPTY_WRAPPERS = (
-    re.compile(rf"\(({_ANY_GONE})\)"),
-    re.compile(rf"\[({_ANY_GONE})\]"),
-    re.compile(rf"(?:\*{{1,3}}|_{{1,3}})({_ANY_GONE})(?:\*{{1,3}}|_{{1,3}})"),
-    re.compile(rf"<u>({_ANY_GONE})</u>", re.IGNORECASE),
+# Underlining around nothing but empty answers: markdown_to_blocks would underline the
+# whole paragraph for it, so it goes before the text is read.
+_EMPTY_UNDERLINE = re.compile(r"<u>(?:\s*\{\{([^{}\n]+)\}\})+\s*</u>", re.IGNORECASE)
+# What goes around an empty answer, tidied until none is left: answers side by side as
+# one; brackets around nothing else; one comma next to it (after it, else before it).
+_TIDY_EMPTY = (
+    (re.compile(rf"(?P<keep>{_ANY_GONE})\s*{_ANY_GONE}"), None),
+    (re.compile(rf"\(\s*(?P<keep>{_ANY_GONE})\s*\)"), None),
+    (re.compile(rf"\[\s*(?P<keep>{_ANY_GONE})\s*\]"), None),
+    (re.compile(rf"(?P<keep>{_GONE})\s*,[ \t]*"), _GONE_WITH_COMMA),
+    (re.compile(rf"[ \t]*,\s*(?P<keep>{_GONE})"), _GONE_WITH_COMMA),
 )
-_LIST_MARKER_ONLY = re.compile(r"\s*(?:[-*+]|\d+[.)])?\s*")
+_SPACED_GONE = re.compile(rf"([ \t]*){_ANY_GONE}([ \t]*)")
+
+# A paragraph's text as characters, each with the run (bold, italic) it is in.
+_Styled = list[tuple[str, bool, bool]]
 
 
-def _without_empty_answers(text: str, answers: dict[str, str]) -> str:
-    """The admin's text with each empty answer's placeholder gone, and with it, so as to
-    leave no gap: formatting or brackets around nothing else, a comma next to it (after
-    it if there is one, else before it) and a space. A list item left with nothing goes."""
-    lines = []
-    for line in text.split("\n"):
-        tidied = PLACEHOLDER.sub(lambda m: _GONE if m[1] in answers and not answers[m[1]] else m[0], line)
-        if tidied == line:
-            lines.append(line)
-            continue
-        while True:
-            before = tidied
-            # Empty answers side by side are as one: "({{First}} {{Last}})".
-            tidied = re.sub(rf"({_ANY_GONE})[ \t]*{_ANY_GONE}", r"\1", tidied)
-            tidied = re.sub(rf"{_GONE}[ \t]*,[ \t]*", _GONE_WITH_COMMA, tidied)
-            tidied = re.sub(rf"[ \t]*,[ \t]*{_GONE}", _GONE_WITH_COMMA, tidied)
-            for wrapper in _EMPTY_WRAPPERS:
-                tidied = wrapper.sub(r"\1", tidied)
-            if tidied == before:
+def _without_empty_underlining(text: str, answers: dict[str, str]) -> str:
+    def empty(match: re.Match[str]) -> bool:
+        return all(answers.get(tag) == "" for tag in PLACEHOLDER.findall(match[0]))
+
+    return _EMPTY_UNDERLINE.sub(lambda m: re.sub(r"</?u>", "", m[0], flags=re.IGNORECASE) if empty(m) else m[0], text)
+
+
+def _replaced(chars: _Styled, match: re.Match[str], keep: str | None) -> _Styled:
+    """``chars`` with the match's text replaced by its ``keep`` group (as ``keep``, if
+    given), in the style of the first character it replaces."""
+    kept = keep or match["keep"]
+    _, bold, italic = chars[match.start()]
+    return [*chars[: match.start()], *((c, bold, italic) for c in kept), *chars[match.end() :]]
+
+
+def _tidied(chars: _Styled) -> _Styled:
+    """The paragraph with each empty answer gone, and with it what would show it was there:
+    brackets around nothing else, a comma, and spaces. One space is left between words;
+    none at either end, before punctuation or a closing bracket, or after an opening one."""
+    while True:
+        text = "".join(c for c, _, _ in chars)
+        for pattern, keep in _TIDY_EMPTY:
+            match = pattern.search(text)
+            if match:
+                chars = _replaced(chars, match, keep)
                 break
-        tidied = re.sub(rf"([ \t]*){_ANY_GONE}([ \t]*)", _one_space_at_most, tidied)
-        if not _LIST_MARKER_ONLY.fullmatch(tidied):
-            lines.append(tidied)
-    return "\n".join(lines)
+        else:
+            break
+    while True:
+        text = "".join(c for c, _, _ in chars)
+        match = _SPACED_GONE.search(text)
+        if not match:
+            return chars
+        before, after = text[: match.start()], text[match.end() :]
+        between_words = bool(before.strip() and after.strip() and after[0] not in ".,;:!?)]" and before[-1] not in "([")
+        space: _Styled = []
+        if between_words and (match[1] or match[2]):
+            # One space, in the style of the first that was there.
+            _, bold, italic = chars[match.start()] if match[1] else chars[match.end() - 1]
+            space = [(" ", bold, italic)]
+        chars = [*chars[: match.start()], *space, *chars[match.end() :]]
 
 
-def _one_space_at_most(gone: re.Match[str]) -> str:
-    """The spaces around an empty answer: one between words, none at either end of the
-    line, before punctuation or a closing bracket or mark, or after an opening one."""
-    before = gone.string[: gone.start()]
-    after = gone.string[gone.end() :]
-    if not before.strip() or not after.strip() or after[0] in ".,;:!?)]*_<" or before[-1] in "([*_>":
-        return ""
-    return " " if gone[1] or gone[2] else ""
+def _answered(block: ContentBlock, answers: dict[str, str]) -> ContentBlock | None:
+    """The block with each placeholder of ``answers`` replaced by the answer as typed, on
+    one line: filled in after the admin's Markdown is read, so nothing in an answer can
+    format the document. An empty answer goes with what would show it was there (see
+    _tidied); None when nothing is left of the block."""
+    if not isinstance(block, Paragraph | Heading) or not any(PLACEHOLDER.search(r.text) for r in [block, *block.runs]):
+        return block
+    runs = block.runs or [TextRun(text=block.text, bold=block.bold, italic=getattr(block, "italic", False))]
 
+    def fill(m: re.Match[str]) -> str:
+        if m[1] not in answers:
+            return m[0]
+        return " ".join(answers[m[1]].split()) or _GONE
 
-def _answered(paragraph: BoxParagraph, answers: dict[str, str]) -> BoxParagraph:
-    """The paragraph with each placeholder of ``answers`` replaced by the answer as typed,
-    on one line. Filled in after the admin's Markdown is read, so nothing in an answer can
-    format the document, whatever it holds."""
-
-    def fill(text: str) -> str:
-        return PLACEHOLDER.sub(lambda m: " ".join(answers[m[1]].split()) if m[1] in answers else m[0], text)
-
-    return replace(
-        paragraph,
-        text=fill(paragraph.text),
-        runs=tuple(replace(run, text=fill(run.text)) for run in paragraph.runs),
-    )
+    chars: _Styled = [(c, r.bold, r.italic) for r in runs for c in PLACEHOLDER.sub(fill, r.text)]
+    if any(c in (_GONE, _GONE_WITH_COMMA) for c, _, _ in chars):
+        chars = _tidied(chars)
+        if not "".join(c for c, _, _ in chars).strip():
+            return None
+    filled: list[TextRun] = []
+    for c, bold, italic in chars:
+        if filled and (filled[-1].bold, filled[-1].italic) == (bold, italic):
+            filled[-1] = TextRun(text=filled[-1].text + c, bold=bold, italic=italic)
+        else:
+            filled.append(TextRun(text=c, bold=bold, italic=italic))
+    text = "".join(r.text for r in filled)
+    return block.model_copy(update={"text": text, "runs": filled if block.runs else []})
 
 
 def answer_paragraphs(text: str, answers: dict[str, str]) -> list[BoxParagraph]:
     """A rule's text (Markdown) as paragraphs, with ``{{Tag}}`` replaced by the answers to
-    those questions. An empty answer leaves no gap; placeholders naming no question stay."""
-    kept = _without_empty_answers(text, answers)
-    return [_answered(p, answers) for p in box_paragraphs(markdown_to_blocks(kept))]
+    those questions. An empty answer leaves no gap; placeholders naming no question stay.
+    A list item left with nothing goes, its next paragraph, if any, taking its place."""
+    blocks: list[ContentBlock] = []
+    promote = False
+    for block in markdown_to_blocks(_without_empty_underlining(text, answers)):
+        answered = _answered(block, answers)
+        if answered is None:
+            promote = isinstance(block, Paragraph) and block.list_level is not None and not block.list_continued
+            continue
+        if promote and isinstance(answered, Paragraph) and answered.list_continued:
+            answered = answered.model_copy(update={"list_continued": False})
+        promote = False
+        blocks.append(answered)
+    return box_paragraphs(blocks)
 
 
 def _answer_text_paragraphs(

@@ -731,6 +731,17 @@ def test_rules_are_kept_only_for_their_box_and_stored_only_when_set():
         ("Counsel <u>{{Name}}</u>, attended", {"Name": ""}, ["Counsel attended"]),
         ("Counsel ({{First}} {{Last}}) attended", {"First": "", "Last": ""}, ["Counsel attended"]),
         ("**{{Name}},** Counsel", {"Name": ""}, ["Counsel"]),
+        ("Ref `{{Ref}}`, Counsel", {"Ref": ""}, ["Ref Counsel"]),
+        ("Counsel ( {{Name}} ) attended", {"Name": ""}, ["Counsel attended"]),
+        ("Counsel [ {{Name}} ] attended", {"Name": ""}, ["Counsel attended"]),
+        ("Counsel <u> {{Name}} </u>, attended", {"Name": ""}, ["Counsel attended"]),
+        # A space beside formatting is kept between words.
+        ("**Counsel** {{Name}} attended", {"Name": ""}, ["Counsel attended"]),
+        ("Counsel {{Name}} **attended**", {"Name": ""}, ["Counsel attended"]),
+        ("<u>Counsel</u> {{Name}} attended", {"Name": ""}, ["Counsel attended"]),
+        # A list item keeps what else it holds.
+        ("- {{Name}}\n  represented the respondent", {"Name": ""}, ["• represented the respondent"]),
+        ("- {{Name}}\n\n  More text\n- Other", {"Name": ""}, ["• More text", "• Other"]),
         # Only what wraps nothing but empty answers goes.
         ("**Counsel {{Name}}**", {"Name": ""}, ["Counsel"]),
         ("Counsel ({{First}} {{Last}})", {"First": "", "Last": "Bloggs"}, ["Counsel (Bloggs)"]),
@@ -748,6 +759,15 @@ def test_rules_are_kept_only_for_their_box_and_stored_only_when_set():
 )
 def test_answers_are_filled_in_as_typed_with_no_gap_where_one_is_empty(text, answers, printed):
     assert [p.shown_text for p in t.answer_paragraphs(text, answers)] == printed
+
+
+def test_an_empty_answer_leaves_the_formatting_around_it_as_it_was():
+    (bold_before,) = t.answer_paragraphs("**Counsel** {{Name}} attended", {"Name": ""})
+    assert [(r.text, r.bold) for r in bold_before.runs] == [("Counsel", True), (" attended", False)]
+    (empty_underlined,) = t.answer_paragraphs("Counsel <u> {{Name}} </u>, attended", {"Name": ""})
+    assert not empty_underlined.underline
+    (underlined,) = t.answer_paragraphs("<u>Counsel</u> {{Name}} attended", {"Name": ""})
+    assert underlined.underline
 
 
 def test_an_answer_takes_the_formatting_of_where_it_is():
