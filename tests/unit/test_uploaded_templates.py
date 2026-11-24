@@ -707,6 +707,69 @@ def test_rules_are_kept_only_for_their_box_and_stored_only_when_set():
     assert "rules" not in normalised["Reference"].stored()
 
 
+# Answers in a rule's text (DIAAT-412) ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "answers", "printed"),
+    [
+        # The IAC's representative sentences.
+        ("{{Name}}, Home Office Presenting Officer", {"Name": "J Bloggs"}, "J Bloggs, Home Office Presenting Officer"),
+        ("{{Name}}, Counsel", {"Name": ""}, "Counsel"),
+        ("Counsel, {{Name}}", {"Name": ""}, "Counsel"),
+        ("{{First}}, {{Second}}, Counsel", {"First": "", "Second": "B"}, "B, Counsel"),
+        # Empty: no gap, no stray space, no formatting or brackets left behind.
+        ("Heard by {{Name}} today.", {"Name": ""}, "Heard by today."),
+        ("{{Name}} attended.", {"Name": ""}, "attended."),
+        ("**{{Name}}**, Counsel", {"Name": ""}, "Counsel"),
+        ("Counsel (*{{Name}}*) attended", {"Name": ""}, "Counsel attended"),
+        ("Counsel ({{Name}}, of chambers)", {"Name": ""}, "Counsel (of chambers)"),
+        ("**{{Name}}**, Counsel", {"Name": "J"}, "**J**, Counsel"),
+        # A list item left with nothing goes; the admin's own lines stay.
+        ("Present:\n- {{A}}\n- {{B}}\n-", {"A": "", "B": "X"}, "Present:\n- X\n-"),
+        # As typed: no formatting, link, paragraph or underlining from the judge's answer.
+        (
+            "**For:** {{Name}}",
+            {"Name": "*J* [x](y) # 1. a_b\n\nc"},
+            "**For:** \\*J\\* \\[x\\]\\(y\\) \\# 1\\. a\\_b c",
+        ),
+        ("{{Name}}", {"Name": "<u>x</U>"}, "\\<\u2060u\\>x\\<\u2060\\/U\\>"),
+        # Single braces, which text saved before placeholders may hold, are never read as one;
+        # nor is a placeholder naming no question.
+        ("Keep {Name} and {{Other}} and **that**  ", {"Name": "x"}, "Keep {Name} and {{Other}} and **that**  "),
+    ],
+)
+def test_answers_are_filled_in_with_no_gap_where_one_is_empty(text, answers, printed):
+    assert t.fill_in_answers(text, answers) == printed
+
+
+def test_a_rule_prints_the_answers_as_their_boxes_would(tmp_path):
+    data, fields = _answer_template(
+        {"field": "Represented", "answer": "yes", "text": "{{Reference}}, for the respondent, on {{Heard}}: {{Panel}}."},
+        {"field": "Represented", "answer": "no", "text": "{{Reference}}, Counsel"},
+    )
+    fields.insert(1, t.TemplateField(tag="Heard", label="Heard", type="date", required=False))
+    values = {"Attendance": "Attended", "Reference": "J *Bloggs*", "Heard": "2026-02-12", "Panel": ["Doctor"]}
+    present = _answer_filled(tmp_path, fields, {**values, "Represented": True}, data)
+    assert document_text(present)[1] == "J *Bloggs*, for the respondent, on 12 February 2026: Doctor."
+    # Underlining typed by the judge is printed, not applied.
+    underlined = _answer_filled(tmp_path, fields, {**values, "Reference": "<u>J</u>", "Represented": True}, data)
+    assert "<\u2060u>J<\u2060/u>" in document_text(underlined)[1]
+    assert _runs(present, "J *Bloggs*, for the respondent, on 12 February 2026: Doctor.")[0][1:] == (False, False)
+    unnamed = _answer_filled(tmp_path, fields, {"Attendance": "Attended", "Represented": False}, data)
+    assert document_text(unnamed)[0] == "Counsel"
+
+
+def test_a_rule_printing_an_answer_that_is_not_a_question_is_named():
+    _, fields = _answer_template(
+        {"field": "Represented", "answer": "no", "text": "{{Rule28}} {{JudgmentText}} {{Nobody}} {{Nobody}} {{Reference}} {sic}"},
+    )
+    assert [p for p in t.field_problems([], fields) if "prints the answer" in p] == [
+        f"Rule 1 of “Rule 28” prints the answer to “{tag}”, which is not a question the judge answers."
+        for tag in ("Rule28", "JudgmentText", "Nobody")
+    ]
+
+
 def _runs(document: bytes, text: str) -> list[tuple[str, bool, bool]]:
     """The runs of the paragraph reading ``text``: their text, bold and italic."""
     from lxml import etree
