@@ -714,42 +714,46 @@ def test_rules_are_kept_only_for_their_box_and_stored_only_when_set():
     ("text", "answers", "printed"),
     [
         # The IAC's representative sentences.
-        ("{{Name}}, Home Office Presenting Officer", {"Name": "J Bloggs"}, "J Bloggs, Home Office Presenting Officer"),
-        ("{{Name}}, Counsel", {"Name": ""}, "Counsel"),
-        ("Counsel, {{Name}}", {"Name": ""}, "Counsel"),
-        ("{{First}}, {{Second}}, Counsel", {"First": "", "Second": "B"}, "B, Counsel"),
-        # Empty: no gap, no stray space, no formatting or brackets left behind.
-        ("Heard by {{Name}} today.", {"Name": ""}, "Heard by today."),
-        ("{{Name}} attended.", {"Name": ""}, "attended."),
-        ("**{{Name}}**, Counsel", {"Name": ""}, "Counsel"),
-        ("Counsel (*{{Name}}*) attended", {"Name": ""}, "Counsel attended"),
-        ("Counsel ({{Name}}, of chambers)", {"Name": ""}, "Counsel (of chambers)"),
-        ("**{{Name}}**, Counsel", {"Name": "J"}, "**J**, Counsel"),
-        ("Counsel [{{Name}}] attended", {"Name": ""}, "Counsel attended"),
-        ("Counsel **({{Name}})** attended", {"Name": ""}, "Counsel attended"),
-        ("Counsel <u>{{Name}}</u>, attended", {"Name": ""}, "Counsel attended"),
-        ("Counsel (**{{Name}}**, of chambers)", {"Name": ""}, "Counsel (of chambers)"),
-        # Only what wraps nothing but the empty answer goes.
-        ("**Counsel {{Name}}**", {"Name": ""}, "**Counsel**"),
-        # In code, which prints verbatim, the answer goes in as typed, unescaped.
-        ("Ref `{{Ref}}` and {{Ref}}", {"Ref": "A-1"}, "Ref `A-1` and A\\-1"),
-        ("```\n{{Ref}}\n```\n{{Ref}}", {"Ref": "A-1"}, "```\nA-1\n```\nA\\-1"),
+        ("{{Name}}, Home Office Presenting Officer", {"Name": "J Bloggs"}, ["J Bloggs, Home Office Presenting Officer"]),
+        ("{{Name}}, Counsel", {"Name": ""}, ["Counsel"]),
+        ("Counsel, {{Name}}", {"Name": ""}, ["Counsel"]),
+        ("X, {{Name}}, Y", {"Name": ""}, ["X, Y"]),
+        ("{{First}}, {{Second}}, Counsel", {"First": "", "Second": "B"}, ["B, Counsel"]),
+        # Empty: no gap, stray space, comma, formatting or brackets left behind.
+        ("Heard by {{Name}} today.", {"Name": ""}, ["Heard by today."]),
+        ("Heard by {{Name}}.", {"Name": ""}, ["Heard by."]),
+        ("{{Name}} attended.", {"Name": ""}, ["attended."]),
+        ("**{{Name}}**, Counsel", {"Name": ""}, ["Counsel"]),
+        ("Counsel (*{{Name}}*) attended", {"Name": ""}, ["Counsel attended"]),
+        ("Counsel ({{Name}}, of chambers)", {"Name": ""}, ["Counsel (of chambers)"]),
+        ("Counsel [{{Name}}] attended", {"Name": ""}, ["Counsel attended"]),
+        ("Counsel **({{Name}})** attended", {"Name": ""}, ["Counsel attended"]),
+        ("Counsel <u>{{Name}}</u>, attended", {"Name": ""}, ["Counsel attended"]),
+        ("Counsel ({{First}} {{Last}}) attended", {"First": "", "Last": ""}, ["Counsel attended"]),
+        ("**{{Name}},** Counsel", {"Name": ""}, ["Counsel"]),
+        # Only what wraps nothing but empty answers goes.
+        ("**Counsel {{Name}}**", {"Name": ""}, ["Counsel"]),
+        ("Counsel ({{First}} {{Last}})", {"First": "", "Last": "Bloggs"}, ["Counsel (Bloggs)"]),
         # A list item left with nothing goes; the admin's own lines stay.
-        ("Present:\n- {{A}}\n- {{B}}\n-", {"A": "", "B": "X"}, "Present:\n- X\n-"),
-        # As typed: no formatting, link, paragraph or underlining from the judge's answer.
-        (
-            "**For:** {{Name}}",
-            {"Name": "*J* [x](y) # 1. a_b\n\nc"},
-            "**For:** \\*J\\* \\[x\\]\\(y\\) \\# 1\\. a\\_b c",
-        ),
-        ("{{Name}}", {"Name": "<u>x</U>"}, "\\<\u2060u\\>x\\<\u2060\\/U\\>"),
+        ("Present:\n\n- {{A}}\n- {{B}}", {"A": "", "B": "X"}, ["Present:", "• X"]),
+        # As typed, whatever it holds: nothing in an answer formats the document.
+        ("**For:** {{Name}}", {"Name": "*J* [x](y) # 1. a_b\n\nc"}, ["For: *J* [x](y) # 1. a_b c"]),
+        ("{{Name}}", {"Name": "<u>x</u> \\*y\\*"}, ["<u>x</u> \\*y\\*"]),
+        ("Ref `{{Ref}}` and ``{{Ref}}`` and \\`{{Ref}}", {"Ref": "x` **b** `y"}, ["Ref x` **b** `y and x` **b** `y and `x` **b** `y"]),
+        ("```\n{{Ref}}\n```", {"Ref": "A-1"}, ["A-1"]),
         # Single braces, which text saved before placeholders may hold, are never read as one;
         # nor is a placeholder naming no question.
-        ("Keep {Name} and {{Other}} and **that**  ", {"Name": "x"}, "Keep {Name} and {{Other}} and **that**  "),
+        ("Keep {Name} and {{Other}}", {"Name": "x"}, ["Keep {Name} and {{Other}}"]),
     ],
 )
-def test_answers_are_filled_in_with_no_gap_where_one_is_empty(text, answers, printed):
-    assert t.fill_in_answers(text, answers) == printed
+def test_answers_are_filled_in_as_typed_with_no_gap_where_one_is_empty(text, answers, printed):
+    assert [p.shown_text for p in t.answer_paragraphs(text, answers)] == printed
+
+
+def test_an_answer_takes_the_formatting_of_where_it_is():
+    (paragraph,) = t.answer_paragraphs("For **{{Name}}**, Counsel", {"Name": "*J*"})
+    assert [(r.text, r.bold) for r in paragraph.runs] == [("For ", False), ("*J*", True), (", Counsel", False)]
+    assert not paragraph.underline
 
 
 def test_a_rule_prints_the_answers_as_their_boxes_would(tmp_path):
@@ -763,7 +767,7 @@ def test_a_rule_prints_the_answers_as_their_boxes_would(tmp_path):
     assert document_text(present)[1] == "J *Bloggs*, for the respondent, on 12 February 2026: Doctor."
     # Underlining typed by the judge is printed, not applied.
     underlined = _answer_filled(tmp_path, fields, {**values, "Reference": "<u>J</u>", "Represented": True}, data)
-    assert "<\u2060u>J<\u2060/u>" in document_text(underlined)[1]
+    assert document_text(underlined)[1].startswith("<u>J</u>, for the respondent")
     assert _runs(present, "J *Bloggs*, for the respondent, on 12 February 2026: Doctor.")[0][1:] == (False, False)
     unnamed = _answer_filled(tmp_path, fields, {"Attendance": "Attended", "Represented": False}, data)
     assert document_text(unnamed)[0] == "Counsel"
