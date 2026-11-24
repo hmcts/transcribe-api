@@ -16,6 +16,8 @@ fields on the Hearing Details form. No code change or release is needed.
   one box, or a page that sends no sections, everything goes in the first, as before.
   "Filled by BenchNotes" boxes take the jurisdiction's name or the year, and the judge
   is not asked for them.
+- A text field can start with the signed-in judge's name (DIAAT-340), as the IAC's form
+  does for its first judge; the judge can change it.
 - A "Filled by BenchNotes" box can take the legal framework text (DIAAT-415): the text the
   jurisdiction's Legal Text Manager keeps for each legal framework the judge chose in the
   template's Legal issues question, in the Legal Text Manager's order, each once, with its
@@ -288,6 +290,8 @@ LIST_TYPES = ("dropdown", "multi_select")
 # Not asked of the judge: BenchNotes fills them.
 NOT_ASKED = ("benchnotes", "dictated")
 BenchNotesSource = Literal["jurisdiction", "year", "legal_framework"]
+# What a text field's answer starts as on the judge's form (DIAAT-340).
+Prefill = Literal["judge_name"]
 
 
 class TemplateField(BaseModel):
@@ -303,11 +307,15 @@ class TemplateField(BaseModel):
     source: BenchNotesSource | None = None
     # Printed when a legal framework box has nothing to print (DIAAT-415).
     empty_text: str | None = Field(default=None, max_length=2000)
+    # Filled in on the judge's form before they answer: they can change it (DIAAT-340).
+    prefill: Prefill | None = None
 
     def stored(self) -> dict[str, Any]:
-        """As kept with the template: empty_text only when set, so pods from before it
-        (extra="forbid") still read every template that does not use it."""
-        return self.model_dump(exclude={"empty_text"} if self.empty_text is None else set())
+        """As kept with the template: empty_text and prefill only when set, so pods from
+        before them (extra="forbid") still read every template that does not use them,
+        and its revision (DIAAT-339) stays the same."""
+        unset = {name for name in ("empty_text", "prefill") if getattr(self, name) is None}
+        return self.model_dump(exclude=unset)
 
     @field_validator("options")
     @classmethod
@@ -405,6 +413,7 @@ def normalise_fields(fields: list[TemplateField]) -> list[TemplateField]:
                 "source": f.source if f.type == "benchnotes" else None,
                 "required": f.required if f.type not in NOT_ASKED else False,
                 "empty_text": ((f.empty_text or "").strip() or None) if _is_legal_framework(f) else None,
+                "prefill": f.prefill if f.type == "text" else None,
             }
         )
         for f in fields

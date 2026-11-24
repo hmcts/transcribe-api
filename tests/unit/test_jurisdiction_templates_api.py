@@ -377,6 +377,34 @@ def test_judges_see_an_enabled_template_with_the_fields_they_fill(jurisdiction_d
     assert draft["id"] != available["id"]
 
 
+def test_a_text_field_can_start_with_the_signed_in_judges_name(as_admin, as_et_judge):
+    """DIAAT-340: the form fills in the judge's name, as the IAC's does; they can change it."""
+    template = upload(as_admin).json()
+    body = complete(template)
+    body["fields"] = [
+        {**f, "prefill": "judge_name"} if f["tag"] in ("Party1", "HearingDate") else f for f in body["fields"]
+    ]
+    saved = as_admin.put(f"/api/admin/jurisdictions/ET/templates/{template['id']}", json=body).json()
+
+    stored = {f["tag"]: f for f in saved["fields"]}
+    assert stored["Party1"]["prefill"] == "judge_name"
+    # Only a text field starts with a name. A field without one stores nothing new, so
+    # the previous release reads it and its revision (DIAAT-339) is unchanged.
+    assert "prefill" not in stored["HearingDate"]
+    assert "prefill" not in stored["Reference"]
+    (available,) = as_et_judge.get("/api/jurisdictions/templates").json()
+    offered = {f["tag"]: f["prefill"] for f in available["fields"]}
+    assert offered["Party1"] == "judge_name"
+    assert offered["HearingDate"] is None
+
+
+def test_a_field_starts_only_with_what_benchnotes_knows(as_admin):
+    template = upload(as_admin).json()
+    body = complete(template)
+    body["fields"] = [{**f, "prefill": "court"} if f["tag"] == "Party1" else f for f in body["fields"]]
+    assert as_admin.put(f"/api/admin/jurisdictions/ET/templates/{template['id']}", json=body).status_code == 422
+
+
 def test_judges_of_another_jurisdiction_never_see_it(jurisdiction_db, as_admin, judge_app):
     _enabled_template(as_admin)
     iac = add_jurisdiction(jurisdiction_db, "IAC")

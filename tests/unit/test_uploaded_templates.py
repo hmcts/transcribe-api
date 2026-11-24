@@ -594,6 +594,17 @@ def test_when_left_empty_text_is_kept_only_for_a_legal_framework_box_and_stored_
     assert set_text.stored()["empty_text"] == "None."
 
 
+def test_a_prefill_is_kept_only_for_a_text_field_and_stored_only_when_set():
+    fields = [
+        t.TemplateField(tag="Judge", label="Judge", prefill="judge_name"),
+        t.TemplateField(tag="HearingDate", label="Hearing date", type="date", prefill="judge_name"),
+    ]
+    judge, day = t.normalise_fields(fields)
+    assert judge.stored()["prefill"] == "judge_name"
+    assert day.prefill is None
+    assert "prefill" not in day.stored()
+
+
 def _runs(document: bytes, text: str) -> list[tuple[str, bool, bool]]:
     """The runs of the paragraph reading ``text``: their text, bold and italic."""
     from lxml import etree

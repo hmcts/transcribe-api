@@ -96,6 +96,8 @@ class TemplateFormField(BaseModel):
     type: str
     required: bool
     options: list[TemplateOption]
+    # DIAAT-340: "judge_name": the form starts with the signed-in judge's name.
+    prefill: str | None = None
 
 
 class TemplateSection(BaseModel):
@@ -136,7 +138,14 @@ def template_forms(
             else:
                 options = [TemplateOption(value=o, label=o) for o in f.options]
             form_fields.append(
-                TemplateFormField(tag=f.tag, label=f.label, type=f.type, required=f.required, options=options)
+                TemplateFormField(
+                    tag=f.tag,
+                    label=f.label,
+                    type=f.type,
+                    required=f.required,
+                    options=options,
+                    prefill=f.prefill,
+                )
             )
         sections = [
             TemplateSection(tag=f.tag, label=f.label)
