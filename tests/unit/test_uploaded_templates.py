@@ -742,6 +742,9 @@ def test_rules_are_kept_only_for_their_box_and_stored_only_when_set():
         # A list item keeps what else it holds.
         ("- {{Name}}\n  represented the respondent", {"Name": ""}, ["• represented the respondent"]),
         ("- {{Name}}\n\n  More text\n- Other", {"Name": ""}, ["• More text", "• Other"]),
+        ("X, {{First}}, {{Last}}, Y", {"First": "", "Last": ""}, ["X, Y"]),
+        ("X, {{First}} {{Last}}, Y", {"First": "", "Last": ""}, ["X, Y"]),
+        ("- {{A}}\n\n  {{B}}\n\n  More text", {"A": "", "B": ""}, ["• More text"]),
         # Only what wraps nothing but empty answers goes.
         ("**Counsel {{Name}}**", {"Name": ""}, ["Counsel"]),
         ("Counsel ({{First}} {{Last}})", {"First": "", "Last": "Bloggs"}, ["Counsel (Bloggs)"]),
@@ -768,6 +771,17 @@ def test_an_empty_answer_leaves_the_formatting_around_it_as_it_was():
     assert not empty_underlined.underline
     (underlined,) = t.answer_paragraphs("<u>Counsel</u> {{Name}} attended", {"Name": ""})
     assert underlined.underline
+    (nested,) = t.answer_paragraphs("Counsel <u>**{{Name}}**</u>, attended", {"Name": ""})
+    assert (nested.text, nested.underline) == ("Counsel attended", False)
+    (kept,) = t.answer_paragraphs("Counsel <u>**{{Name}}** QC</u>, attended", {"Name": ""})
+    assert (kept.text, kept.underline) == ("Counsel QC, attended", True)
+
+
+def test_long_answers_are_filled_in_whole():
+    text = " ".join(["{{Name}}"] * 1000)
+    (paragraph,) = t.answer_paragraphs(text, {"Name": "x" * 5000})
+    assert paragraph.text == " ".join(["x" * 5000] * 1000)
+    assert len(paragraph.runs) == 1
 
 
 def test_an_answer_takes_the_formatting_of_where_it_is():

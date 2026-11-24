@@ -44,10 +44,12 @@ from __future__ import annotations
 import io
 import re
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from html.parser import HTMLParser
+from itertools import groupby
 from pathlib import Path
 from typing import Any, Literal
 from xml.etree import ElementTree
@@ -624,15 +626,18 @@ _GONE_WITH_COMMA = "\x01"
 _ANY_GONE = f"[{_GONE}{_GONE_WITH_COMMA}]"
 # Underlining around nothing but empty answers: markdown_to_blocks would underline the
 # whole paragraph for it, so it goes before the text is read.
-_EMPTY_UNDERLINE = re.compile(r"<u>(?:\s*\{\{([^{}\n]+)\}\})+\s*</u>", re.IGNORECASE)
+_EMPTY_UNDERLINE = re.compile(r"<u>(?:[\s*_`,]*\{\{([^{}\n]+)\}\})+[\s*_`,]*</u>", re.IGNORECASE)
+# An answer given, held as one character while the text around empty ones is tidied.
+_GIVEN = "\x02"
 # What goes around an empty answer, tidied until none is left: answers side by side as
-# one; brackets around nothing else; one comma next to it (after it, else before it).
+# one, which can still take a comma if either could; one comma next to it (after it,
+# else before it); brackets around nothing else.
 _TIDY_EMPTY = (
-    (re.compile(rf"(?P<keep>{_ANY_GONE})\s*{_ANY_GONE}"), None),
-    (re.compile(rf"\(\s*(?P<keep>{_ANY_GONE})\s*\)"), None),
-    (re.compile(rf"\[\s*(?P<keep>{_ANY_GONE})\s*\]"), None),
+    (re.compile(rf"(?P<keep>{_ANY_GONE})\s*{_ANY_GONE}"), lambda m: _GONE if _GONE in m[0] else _GONE_WITH_COMMA),
     (re.compile(rf"(?P<keep>{_GONE})\s*,[ \t]*"), _GONE_WITH_COMMA),
     (re.compile(rf"[ \t]*,\s*(?P<keep>{_GONE})"), _GONE_WITH_COMMA),
+    (re.compile(rf"\(\s*(?P<keep>{_ANY_GONE})\s*\)"), None),
+    (re.compile(rf"\[\s*(?P<keep>{_ANY_GONE})\s*\]"), None),
 )
 _SPACED_GONE = re.compile(rf"([ \t]*){_ANY_GONE}([ \t]*)")
 
@@ -647,10 +652,10 @@ def _without_empty_underlining(text: str, answers: dict[str, str]) -> str:
     return _EMPTY_UNDERLINE.sub(lambda m: re.sub(r"</?u>", "", m[0], flags=re.IGNORECASE) if empty(m) else m[0], text)
 
 
-def _replaced(chars: _Styled, match: re.Match[str], keep: str | None) -> _Styled:
-    """``chars`` with the match's text replaced by its ``keep`` group (as ``keep``, if
-    given), in the style of the first character it replaces."""
-    kept = keep or match["keep"]
+def _replaced(chars: _Styled, match: re.Match[str], keep: str | Callable[[re.Match[str]], str] | None) -> _Styled:
+    """``chars`` with the match's text replaced by its ``keep`` group (or by ``keep``, or
+    what it gives for the match), in the style of the first character it replaces."""
+    kept = keep(match) if callable(keep) else keep or match["keep"]
     _, bold, italic = chars[match.start()]
     return [*chars[: match.start()], *((c, bold, italic) for c in kept), *chars[match.end() :]]
 
@@ -691,23 +696,33 @@ def _answered(block: ContentBlock, answers: dict[str, str]) -> ContentBlock | No
     if not isinstance(block, Paragraph | Heading) or not any(PLACEHOLDER.search(r.text) for r in [block, *block.runs]):
         return block
     runs = block.runs or [TextRun(text=block.text, bold=block.bold, italic=getattr(block, "italic", False))]
+    given: list[str] = []
 
-    def fill(m: re.Match[str]) -> str:
+    def mark(m: re.Match[str]) -> str:
         if m[1] not in answers:
             return m[0]
-        return " ".join(answers[m[1]].split()) or _GONE
+        answer = " ".join(answers[m[1]].split())
+        if not answer:
+            return _GONE
+        given.append(answer)
+        return _GIVEN
 
-    chars: _Styled = [(c, r.bold, r.italic) for r in runs for c in PLACEHOLDER.sub(fill, r.text)]
+    # The admin's text alone is tidied, each answer given held as one character, so the
+    # work does not grow with the answers.
+    chars: _Styled = [(c, r.bold, r.italic) for r in runs for c in PLACEHOLDER.sub(mark, r.text)]
     if any(c in (_GONE, _GONE_WITH_COMMA) for c, _, _ in chars):
         chars = _tidied(chars)
         if not "".join(c for c, _, _ in chars).strip():
             return None
-    filled: list[TextRun] = []
-    for c, bold, italic in chars:
-        if filled and (filled[-1].bold, filled[-1].italic) == (bold, italic):
-            filled[-1] = TextRun(text=filled[-1].text + c, bold=bold, italic=italic)
-        else:
-            filled.append(TextRun(text=c, bold=bold, italic=italic))
+    answers_given = iter(given)
+    filled = [
+        TextRun(
+            text="".join(next(answers_given) if c == _GIVEN else c for c, _, _ in group),
+            bold=bold,
+            italic=italic,
+        )
+        for (bold, italic), group in groupby(chars, key=lambda styled: (styled[1], styled[2]))
+    ]
     text = "".join(r.text for r in filled)
     return block.model_copy(update={"text": text, "runs": filled if block.runs else []})
 
@@ -721,7 +736,11 @@ def answer_paragraphs(text: str, answers: dict[str, str]) -> list[BoxParagraph]:
     for block in markdown_to_blocks(_without_empty_underlining(text, answers)):
         answered = _answered(block, answers)
         if answered is None:
-            promote = isinstance(block, Paragraph) and block.list_level is not None and not block.list_continued
+            # An empty item's bullet waits for its first paragraph with something left.
+            if isinstance(block, Paragraph) and block.list_level is not None and not block.list_continued:
+                promote = True
+            elif not (isinstance(block, Paragraph) and block.list_continued):
+                promote = False
             continue
         if promote and isinstance(answered, Paragraph) and answered.list_continued:
             answered = answered.model_copy(update={"list_continued": False})
