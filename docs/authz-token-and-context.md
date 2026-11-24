@@ -147,8 +147,9 @@ token, and goes through the same mint as a real sign-in. Anywhere else the heade
 ```bash
 docker compose up -d postgres azurite
 cp .env.example .env            # add APP_JWT_SIGNING_KEY (see above)
+export DATABASE_CONNECTION_STRING=postgresql://transcribe:transcribe@localhost:5432/transcribe
 .venv/bin/alembic upgrade head
-.venv/bin/python scripts-seed-personas.py    # idempotent; refuses a database that is not your own
+.venv/bin/python tests/data/seed_local.py    # idempotent; refuses a database that is not your own
 ./run-local.sh
 
 curl -s -X POST localhost:8000/api/auth/session -H 'X-Dev-Persona: judge-et'

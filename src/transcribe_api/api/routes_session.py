@@ -87,13 +87,13 @@ async def get_sign_in_identity(
         persona = PERSONAS.get(x_dev_persona.strip())
         if persona is None:
             raise error(400, "unknown_persona", f"Unknown persona. Known: {', '.join(sorted(PERSONAS))}.")
-        # The user must be there (scripts-seed-personas.py) for one with assignments: they
+        # The user must be there (tests/data/seed_local.py) for one with assignments: they
         # are the point of the persona, and read from the database like anyone's.
         if persona.assignments and not await run_in_threadpool(_persona_is_seeded, persona.azure_user_id):
             raise error(
                 409,
                 "persona_not_seeded",
-                "Run scripts-seed-personas.py to create the dev personas and their assignments.",
+                "Run tests/data/seed_local.py to create the dev personas and their assignments.",
             )
         return SignInIdentity(
             azure_user_id=persona.azure_user_id, email=persona.email, name=persona.display_name, sysadmin=persona.sysadmin

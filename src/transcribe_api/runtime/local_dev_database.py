@@ -1,7 +1,7 @@
-"""Database URL resolution for the local-only seed scripts (scripts-seed-*.py).
+"""Database URL resolution for local-only code: tests/data/seed_local.py and the dev-persona sign-in.
 
-Those scripts delete and insert rows unconditionally, so they must only ever
-reach a developer's own Postgres, whatever a misconfigured .env resolves to.
+The seed deletes and inserts rows, and a persona signs in without proving anything, so both must
+only ever reach a developer's own Postgres, whatever a misconfigured .env resolves to.
 """
 
 from __future__ import annotations
