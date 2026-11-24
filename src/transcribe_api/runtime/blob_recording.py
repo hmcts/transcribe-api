@@ -13,6 +13,7 @@ from azure.storage.blob import ContentSettings
 from azure.storage.blob.aio import BlobServiceClient as AsyncBlobServiceClient
 
 from transcribe_api.runtime.settings_recording import get_settings
+from transcribe_api.stt.uninterrupted import run_to_completion
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +149,11 @@ class AsyncAzureBlobManager:
             return True
 
     async def create_blob_from_file(
-        self, file_path: Path, blob_name: str, container_name: str | None = None
+        self,
+        file_path: Path,
+        blob_name: str,
+        container_name: str | None = None,
+        max_concurrency: int | None = None,
     ) -> bool:
         """Create a blob from a local file (async).
 
@@ -160,6 +165,9 @@ class AsyncAzureBlobManager:
             Name of the blob in Azure Storage.
         container_name : str, optional
             Container name. If None, uses the default container from settings.
+        max_concurrency : int, optional
+            How many blocks are sent in parallel (the SDK's ``max_concurrency``). None keeps the
+            SDK's default of one at a time; n holds up to n blocks (4 MiB each) in memory.
 
         Returns
         -------
@@ -170,6 +178,7 @@ class AsyncAzureBlobManager:
         container_safe = _sanitize_for_log(container)
         blob_safe = _sanitize_for_log(blob_name)
         file_path_safe = _sanitize_for_log(file_path)
+        upload_options = {} if max_concurrency is None else {"max_concurrency": max_concurrency}
 
         try:
             # Upload in 4 MiB blocks. The SDK's default reads any file up to
@@ -195,6 +204,7 @@ class AsyncAzureBlobManager:
                         data,
                         overwrite=True,
                         content_settings=content_settings,
+                        **upload_options,
                     )
 
             logger.info(f"Successfully created blob: {container_safe}/{blob_safe}")
@@ -340,6 +350,18 @@ class AsyncAzureBlobManager:
             return []
         else:
             return blobs
+
+    async def find_blob_names(self, prefix: str, container_name: str | None = None) -> list[str]:
+        """The names of the blobs that start with ``prefix``. Unlike list_blobs_in_prefix, a storage
+        failure is raised, not turned into an empty list: a caller that must tell "there is none"
+        from "could not look" (POST /jobs) needs the difference."""
+        container = container_name or self.container_name
+        names: list[str] = []
+        async with self._blob_service_client() as blob_service:
+            container_client = blob_service.get_container_client(container)
+            async for blob in container_client.list_blobs(name_starts_with=prefix):
+                names.append(blob.name)
+        return names
 
     async def get_blob_metadata(self, blob_name: str, container_name: str | None = None) -> dict:
         """Get metadata for a specific blob (async).
@@ -502,12 +524,17 @@ class AsyncAzureBlobManager:
                     error_msg = "Blob not found"
                     raise FileNotFoundError(error_msg)
 
-                # Download blob content
+                # Download blob content a chunk at a time: a recording's original can be
+                # a gigabyte, and the worker's memory is 2 GiB.
                 download_stream = await blob_client.download_blob()
-                content = await download_stream.readall()
-
-                # Write to file
-                file_path.write_bytes(content)
+                # Every open, write and close runs in a thread that is waited for through a cancellation: it must
+                # not go on writing (or recreate the file) after the task has let go of the directory.
+                out = await run_to_completion(open, file_path, "wb")
+                try:
+                    async for chunk in download_stream.chunks():
+                        await run_to_completion(out.write, chunk)
+                finally:
+                    await run_to_completion(out.close)
 
             logger.info(f"Successfully downloaded blob {container}/{blob_name} to {file_path}")
 

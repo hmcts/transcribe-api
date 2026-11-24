@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.unit.jurisdiction_fixtures import IAC_JURISDICTION_ID
+from tests.unit.recording.unit.async_upload_helpers import tone
 from transcribe_api.api.app import create_app
 from transcribe_api.domain.auth.app_token import Context
 from transcribe_api.domain.models_recording import JobStatus, SpeechBatchJob, User
@@ -18,6 +19,10 @@ from transcribe_api.runtime.settings_recording import get_settings
 
 _TEST_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000002")
 _MISSING_SEGMENT = f"seg_{'0' * 32}"
+
+# Real (tiny) audio: every upload is checked from its header before anything else, whatever the flag.
+_MP3 = tone(".mp3", 1)
+_M4A = tone(".m4a", 1)
 
 
 def _sid(job: SpeechBatchJob, index: int = 0) -> str:
@@ -193,7 +198,7 @@ class TestUploadAudio:
 
         response = client.post(
             "/api/v1/uploads",
-            files={"file": ("hearing.mp3", b"fake-audio-bytes", "audio/mpeg")},
+            files={"file": ("hearing.mp3", _MP3, "audio/mpeg")},
         )
         assert response.status_code == 201
         body = response.json()
@@ -207,7 +212,7 @@ class TestUploadAudio:
 
         response = client.post(
             "/api/v1/uploads",
-            files={"file": ("hearing.mp3", b"fake-audio-bytes", "audio/mpeg")},
+            files={"file": ("hearing.mp3", _MP3, "audio/mpeg")},
         )
         assert response.status_code == 201
         # Streamed from disk, never buffered as bytes.
@@ -221,15 +226,15 @@ class TestUploadAudio:
 
         response = client.post(
             "/api/v1/uploads",
-            files={"file": ("hearing.M4A", b"fake-audio-bytes", "audio/mp4")},
+            files={"file": ("hearing.M4A", _M4A, "audio/mp4")},
         )
         assert response.status_code == 201
-        assert normalize.inputs == [(".m4a", b"fake-audio-bytes")]
+        assert normalize.inputs == [(".m4a", _M4A)]
 
     def test_returns_413_when_upload_exceeds_the_cap(self, client, as_current_user, mocker):
         manager = self._mock_blob_manager(mocker)
         normalize = self._mock_normalize(mocker)
-        mocker.patch("transcribe_api.api.routes_recording._MAX_UPLOAD_BYTES", 10)
+        mocker.patch.object(get_settings(), "MAX_UPLOAD_BYTES", 10)
         mocker.patch("transcribe_api.api.routes_recording._UPLOAD_CHUNK_BYTES", 4)
 
         response = client.post(
@@ -252,11 +257,11 @@ class TestUploadAudio:
 
         response = client.post(
             "/api/v1/uploads",
-            files={"file": ("hearing.mp3", b"fake-audio-bytes", "audio/mpeg")},
+            files={"file": ("hearing.mp3", _MP3, "audio/mpeg")},
         )
         assert response.status_code == 201
         assert opened.call_args.args[1] == "wb"
-        assert normalize.inputs == [(".mp3", b"fake-audio-bytes")]
+        assert normalize.inputs == [(".mp3", _MP3)]
 
     def test_returns_503_when_ffmpeg_is_not_installed(self, client, as_current_user, mocker):
         manager = self._mock_blob_manager(mocker)
@@ -267,7 +272,7 @@ class TestUploadAudio:
 
         response = client.post(
             "/api/v1/uploads",
-            files={"file": ("hearing.mp3", b"fake-audio-bytes", "audio/mpeg")},
+            files={"file": ("hearing.mp3", _MP3, "audio/mpeg")},
         )
         assert response.status_code == 503
         assert "audio conversion is unavailable" in response.json()["detail"].lower()
@@ -285,7 +290,7 @@ class TestUploadAudio:
 
         response = client.post(
             "/api/v1/uploads",
-            files={"file": ("hearing.mp3", b"not-real-audio", "audio/mpeg")},
+            files={"file": ("hearing.mp3", _MP3, "audio/mpeg")},
         )
         assert response.status_code == 422
         # No blob is stored for an undecodable upload — no doomed job is created.
@@ -305,14 +310,14 @@ class TestUploadAudio:
 
         response = client.post(
             "/api/v1/uploads",
-            files={"file": ("hearing.mp3", b"fake-audio-bytes", "audio/mpeg")},
+            files={"file": ("hearing.mp3", _MP3, "audio/mpeg")},
         )
         assert response.status_code == 502
 
     def test_requires_auth(self, client):
         response = client.post(
             "/api/v1/uploads",
-            files={"file": ("hearing.mp3", b"fake-audio-bytes", "audio/mpeg")},
+            files={"file": ("hearing.mp3", _MP3, "audio/mpeg")},
         )
         assert response.status_code in (401, 422)
 
@@ -333,7 +338,7 @@ class TestUploadAudioLocalBackend:
         _patch_normalize(mocker, b"WAVDATA")
         response = client.post(
             "/api/v1/uploads",
-            files={"file": ("hearing.mp3", b"fake-audio-bytes", "audio/mpeg")},
+            files={"file": ("hearing.mp3", _MP3, "audio/mpeg")},
         )
         assert response.status_code == 201
         body = response.json()
@@ -352,7 +357,7 @@ class TestUploadAudioLocalBackend:
 
         client.post(
             "/api/v1/uploads",
-            files={"file": ("hearing.mp3", b"fake-audio-bytes", "audio/mpeg")},
+            files={"file": ("hearing.mp3", _MP3, "audio/mpeg")},
         )
 
         blob_manager_cls.assert_not_called()
@@ -942,6 +947,8 @@ class TestSubmitJob:
         mocker.patch(
             "transcribe_api.api.routes_recording.get_job_by_idempotency_key_for_user", return_value=None
         )
+        mocker.patch("transcribe_api.api.routes_recording.has_live_job_for_upload", return_value=False)
+        mocker.patch("transcribe_api.api.routes_recording.lock_upload_for_submission")
 
         # as_current_user's id is 00000000-0000-0000-0000-000000000002 (see _make_user).
         # As upload_audio names it: the upload's ID, then the file name.

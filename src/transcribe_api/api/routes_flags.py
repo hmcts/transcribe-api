@@ -1,9 +1,9 @@
 """What is switched on (DIAAT-388, DIAAT-392), under ``/api``.
 
 ``GET /api/flags`` tells the web app which system feature flags are on, so it can hide what is
-off (the record and speech pages when dictation is off). Any signed-in user, with or without a
-context or a role: it says nothing about anyone. The flags themselves are
-domain/feature_flags.py; the admin endpoints that set them are DIAAT-392.
+off (the record and speech pages when dictation is off), and how long a recording may be (DIAAT-408).
+Any signed-in user, with or without a context or a role: it says nothing about anyone. The flags
+themselves are domain/feature_flags.py; the admin endpoints that set them are DIAAT-392.
 """
 
 from __future__ import annotations
@@ -13,12 +13,16 @@ from pydantic import BaseModel
 
 from transcribe_api.domain import feature_flags
 from transcribe_api.domain.auth.dependencies_dictation import signed_in_endpoint
+from transcribe_api.stt.recording_limits import current_limit_seconds
 
 router = APIRouter(tags=["flags"])
 
 
 class FlagsResponse(BaseModel):
     dictation_enabled: bool
+    # DIAAT-408: the longest recording the upload accepts now (stt/recording_limits.py: 4 hours
+    # unless both async_upload_preparation and long_recordings_enabled are on), for the upload page's hint.
+    max_recording_seconds: int
 
 
 # A plain def: the flag lookup is a database read, so FastAPI runs it in the threadpool.
@@ -26,4 +30,7 @@ class FlagsResponse(BaseModel):
 def get_flags(response: Response, _user=Depends(signed_in_endpoint)) -> FlagsResponse:
     """The system feature flags that affect what the web app shows."""
     response.headers["Cache-Control"] = "no-store"
-    return FlagsResponse(dictation_enabled=feature_flags.is_dictation_enabled())
+    return FlagsResponse(
+        dictation_enabled=feature_flags.is_dictation_enabled(),
+        max_recording_seconds=current_limit_seconds(),
+    )

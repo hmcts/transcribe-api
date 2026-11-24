@@ -19,6 +19,9 @@ from transcribe_api.runtime import settings_dictation
 
 pytestmark = [pytest.mark.real_jurisdictions, pytest.mark.real_feature_flags]
 
+# DIAAT-408 added the last two: off by default.
+ALL_FLAGS = ["dictation_enabled", "async_upload_preparation", "long_recordings_enabled"]
+
 
 @pytest.fixture
 def world(jurisdiction_db, monkeypatch):
@@ -57,8 +60,8 @@ def test_the_list_has_the_contracts_shape_and_the_default_when_nothing_is_stored
 
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"flags"} and [f["name"] for f in body["flags"]] == ["dictation_enabled"]
-    (dictation,) = body["flags"]
+    assert set(body) == {"flags"} and [f["name"] for f in body["flags"]] == ALL_FLAGS
+    dictation = flag(body)
     assert set(dictation) == {"name", "value", "description", "updated_at", "updated_by"}
     assert dictation["value"] is True and dictation["description"]
     assert dictation["updated_at"] is None and dictation["updated_by"] is None
@@ -68,7 +71,36 @@ def test_the_default_comes_from_configuration(world, cast, monkeypatch):
     monkeypatch.setenv("DICTATION_ENABLED", "false")
     settings_dictation.get_settings.cache_clear()
     assert flag(cast.sysadmin.get("/api/admin/feature-flags").json())["value"] is False
-    assert world.client.get("/api/flags", headers=cast.judge.headers(JUDGE, "IAC")).json() == {"dictation_enabled": False}
+    assert world.client.get("/api/flags", headers=cast.judge.headers(JUDGE, "IAC")).json()["dictation_enabled"] is False
+
+
+def test_the_recording_flags_are_off_by_default_and_described(world, cast):
+    listing = cast.sysadmin.get("/api/admin/feature-flags").json()
+    for name in ("async_upload_preparation", "long_recordings_enabled"):
+        assert flag(listing, name)["value"] is False and flag(listing, name)["description"]
+
+
+def test_the_two_recording_flags_together_raise_the_recording_limit_at_once(world, cast, monkeypatch):
+    """DIAAT-408: GET /api/flags says how long a recording may be: 4 hours, 8 hours only with both flags on."""
+    monkeypatch.setattr(feature_flags, "CACHE_TTL_SECONDS", 60.0)  # a long one: only an invalidation can explain it
+    headers = cast.judge.headers(JUDGE, "IAC")
+
+    def limit() -> int:
+        return world.client.get("/api/flags", headers=headers).json()["max_recording_seconds"]
+
+    assert limit() == 4 * 3600
+    cast.sysadmin.put("/api/admin/feature-flags/long_recordings_enabled", json={"value": True})
+    assert limit() == 4 * 3600  # not on its own
+    cast.sysadmin.put("/api/admin/feature-flags/async_upload_preparation", json={"value": True})
+    assert limit() == 8 * 3600
+    cast.sysadmin.put("/api/admin/feature-flags/long_recordings_enabled", json={"value": False})
+    assert limit() == 4 * 3600
+    (first, second, third) = world.audit("feature_flag.changed")[:3]
+    assert [r.detail["flag"] for r in (first, second, third)] == [
+        "long_recordings_enabled",
+        "async_upload_preparation",
+        "long_recordings_enabled",
+    ]
 
 
 # --- setting ---------------------------------------------------------------------------------------------
@@ -92,15 +124,15 @@ def test_setting_a_flag_returns_the_list_as_the_get_gives_it(world, cast):
 def test_a_change_takes_effect_at_once_in_api_flags_despite_the_cache(world, cast, monkeypatch):
     monkeypatch.setattr(feature_flags, "CACHE_TTL_SECONDS", 60.0)  # a long one: only an invalidation can explain it
     headers = cast.judge.headers(JUDGE, "IAC")
-    assert world.client.get("/api/flags", headers=headers).json() == {"dictation_enabled": True}
-    assert world.client.get("/api/flags", headers=headers).json() == {"dictation_enabled": True}  # cached
+    assert world.client.get("/api/flags", headers=headers).json()["dictation_enabled"] is True
+    assert world.client.get("/api/flags", headers=headers).json()["dictation_enabled"] is True  # cached
 
     assert cast.sysadmin.put("/api/admin/feature-flags/dictation_enabled", json={"value": False}).status_code == 200
-    assert world.client.get("/api/flags", headers=headers).json() == {"dictation_enabled": False}
+    assert world.client.get("/api/flags", headers=headers).json()["dictation_enabled"] is False
     assert feature_flags.is_dictation_enabled() is False
 
     cast.sysadmin.put("/api/admin/feature-flags/dictation_enabled", json={"value": True})
-    assert world.client.get("/api/flags", headers=headers).json() == {"dictation_enabled": True}
+    assert world.client.get("/api/flags", headers=headers).json()["dictation_enabled"] is True
 
 
 def test_a_changed_flag_switches_the_dictation_routes_off_and_on(world, cast, monkeypatch):
@@ -122,7 +154,7 @@ def test_a_changed_flag_switches_the_dictation_routes_off_and_on(world, cast, mo
 def test_an_unknown_flag_is_a_404_and_nothing_is_stored(world, cast):
     response = cast.sysadmin.put("/api/admin/feature-flags/no_such_flag", json={"value": True})
     assert response.status_code == 404 and response.json()["detail"]["code"] == "flag_not_found"
-    assert [f["name"] for f in cast.sysadmin.get("/api/admin/feature-flags").json()["flags"]] == ["dictation_enabled"]
+    assert [f["name"] for f in cast.sysadmin.get("/api/admin/feature-flags").json()["flags"]] == ALL_FLAGS
     assert world.audit("feature_flag.changed") == []
 
 

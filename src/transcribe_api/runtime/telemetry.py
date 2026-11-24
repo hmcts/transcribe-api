@@ -91,6 +91,10 @@ EVENT_TRANSCRIPT_AVAILABLE = "transcript.available"
 EVENT_JOB_FINISHED = "job.finished"
 EVENT_JOB_RETRIED = "job.retried"
 EVENT_JOB_POLL_FAILED = "job.poll_failed"
+# DIAAT-408: a part of a recording in parts finished in Azure Speech (success or failure), with its
+# own processing time; the job's single job.finished comes once the transcript is assembled or a
+# part has failed.
+EVENT_JOB_PART_FINISHED = "job.part_finished"
 EVENT_JOB_STUCK = "job.stuck"
 EVENT_WEBHOOK_DELIVERY_FAILED = "webhook.delivery_failed"
 ATTR_JOB_STATE = "job.state"
@@ -132,6 +136,19 @@ SPEECH_CONFIG_ATTRIBUTES = (
 #   results_retrieval -> transcript_postprocessing -> transcript_persistence
 #   -> transcript.available -> job.finished (-> webhook.delivered / delivery_failed)
 STAGE_RESULTS_RETRIEVAL = "results_retrieval"
+# DIAAT-408: the worker converts an upload the API accepted without converting it: a stage of
+# the job journey (preparation.started / .completed / .failed), before speech_submission. Its
+# codes: upload.undecodable and upload.too_long (the upload request's), preparation.source_missing,
+# preparation.storage_failed, preparation.transcoder_unavailable, preparation.exhausted.
+STAGE_PREPARATION = "preparation"
+# DIAAT-408: cutting a recording over 240 minutes into parts (stt/splitter.py), inside preparation:
+# splitting.started / .completed / .failed. Each part is then a speech_submission stage carrying
+# job.part_index and job.part_count. Codes: split.failed, preparation.split_mismatch.
+STAGE_SPLITTING = "splitting"
+# job.retried's operation for a part that will be stored and submitted again.
+PART_SUBMIT_OPERATION = "part.submit"
+# job.retried's operation for a preparation attempt that will be repeated.
+JOB_PREPARE_OPERATION = "job.prepare"
 STAGE_POSTPROCESSING = "transcript_postprocessing"
 STAGE_PERSISTENCE = "transcript_persistence"
 POST_SPEECH_STAGES = (STAGE_RESULTS_RETRIEVAL, STAGE_POSTPROCESSING, STAGE_PERSISTENCE)
@@ -171,6 +188,8 @@ ATTR_SETTINGS_FEATURES_CHANGED_COUNT = "settings.features_changed_count"
 WEBHOOK_NOTIFICATIONS = ("succeeded", "failed")
 JOB_STATES = ("waiting", "running")
 RETRY_OPERATIONS = (
+    JOB_PREPARE_OPERATION,
+    PART_SUBMIT_OPERATION,
     "speech.submit",
     "speech.status",
     "speech.results",

@@ -117,6 +117,8 @@ def test_each_poller_is_built_and_runs_in_its_own_area(monkeypatch):
 
     monkeypatch.setattr("transcribe_api.stt.polling_service.BatchPollingService", fake_poller("batch"))
     monkeypatch.setattr("transcribe_api.stt.work_poller.TranscriptionPollingService", fake_poller("transcription"))
+    # DIAAT-408: the third task, which prepares uploads the API accepted without converting them.
+    monkeypatch.setattr("transcribe_api.stt.preparation_service.PreparationService", fake_poller("preparation"))
     monkeypatch.setattr("transcribe_api.stt.job_telemetry.register_job_gauges", lambda: None)
 
     async def run() -> None:
@@ -126,6 +128,7 @@ def test_each_poller_is_built_and_runs_in_its_own_area(monkeypatch):
     assert seen == {
         "batch": (AREA_RECORDING, AREA_RECORDING),
         "transcription": (AREA_DICTATION, AREA_DICTATION),
+        "preparation": (AREA_RECORDING, AREA_RECORDING),
     }
 
 

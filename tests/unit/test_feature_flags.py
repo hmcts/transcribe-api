@@ -354,7 +354,7 @@ def test_flags_are_visible_to_any_signed_in_user_with_no_context_needed(app, rou
     finally:
         app.dependency_overrides.clear()
     assert response.status_code == 200
-    assert response.json() == {"dictation_enabled": enabled}
+    assert response.json() == {"dictation_enabled": enabled, "max_recording_seconds": 4 * 60 * 60}
     assert response.headers["cache-control"] == "no-store"
 
 

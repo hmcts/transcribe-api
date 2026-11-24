@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from hmcts_otel import (
     Outcome,
@@ -29,12 +29,59 @@ from transcribe_api.runtime.telemetry import (
     upload_id_from_blob,
 )
 from transcribe_api.stt import job_telemetry
+from transcribe_api.stt.audio_storage import job_wav_name
 from transcribe_api.stt.batch_client import BatchSubmissionError, submit_batch_job
 from transcribe_api.stt.job_telemetry import record_job_finished, seconds_between
 from transcribe_api.stt.speech_auth import SpeechAuthError
 from transcribe_api.stt.speech_telemetry import speech_config_attributes
 
 logger = logging.getLogger(__name__)
+
+
+def create_job(
+    session: Session,
+    audio_url: str,
+    caller_id: UUID | None = None,
+    locale: str = "en-GB",
+    enable_diarization: bool = True,
+    callback_url: str | None = None,
+    idempotency_key: str | None = None,
+    metadata: dict | None = None,
+    audio_duration_seconds: float | None = None,
+    audio_blob_path: str | None = None,
+    user_id: UUID | None = None,
+    jurisdiction_id: UUID | None = None,
+    source_blob_path: str | None = None,
+    job_id: UUID | None = None,
+) -> SpeechBatchJob:
+    """Create and store the job record, PENDING, and nothing else.
+
+    ``source_blob_path`` is set for a job whose audio the worker still has to prepare
+    (stt/preparation_service.py); the submission to Azure Speech is a separate step.
+    """
+    job = SpeechBatchJob(
+        **({"id": job_id} if job_id else {}),
+        caller_id=caller_id,
+        user_id=user_id,
+        jurisdiction_id=jurisdiction_id,
+        audio_url=audio_url,
+        locale=locale,
+        enable_diarization=enable_diarization,
+        callback_url=callback_url,
+        idempotency_key=idempotency_key,
+        metadata_=metadata or {},
+        audio_duration_seconds=audio_duration_seconds,
+        audio_blob_path=audio_blob_path,
+        source_blob_path=source_blob_path,
+        status=JobStatus.PENDING,
+        # DIAAT-276: the poller links the job's later processing to this request.
+        trace_parent=capture_trace_context(),
+    )
+    return save_job(session, job)
+
+
+def _job_journey(job: SpeechBatchJob):
+    return journey(JOURNEY_JOB, str(job.id), parent_id=upload_id_from_blob(job.audio_blob_path))
 
 
 async def submit_and_queue_batch_job(
@@ -62,34 +109,72 @@ async def submit_and_queue_batch_job(
     upload blob stays on the failed job (audio_blob_path), as it does for a
     batch job that fails later, because a retry may resubmit the same blob.
     """
-    job = SpeechBatchJob(
+    job = create_job(
+        session,
+        audio_url,
         caller_id=caller_id,
-        user_id=user_id,
-        jurisdiction_id=jurisdiction_id,
-        audio_url=audio_url,
         locale=locale,
         enable_diarization=enable_diarization,
         callback_url=callback_url,
         idempotency_key=idempotency_key,
-        metadata_=metadata or {},
+        metadata=metadata,
         audio_duration_seconds=audio_duration_seconds,
         audio_blob_path=audio_blob_path,
-        status=JobStatus.PENDING,
-        # DIAAT-276: the poller links the job's later processing to this request.
-        trace_parent=capture_trace_context(),
+        user_id=user_id,
+        jurisdiction_id=jurisdiction_id,
     )
-    job = save_job(session, job)
+    return await submit_existing_job(session, job, created=True)
 
-    with journey(JOURNEY_JOB, str(job.id), parent_id=upload_id_from_blob(audio_blob_path)):
+
+def defer_batch_job(session: Session, audio_url: str, source_blob_path: str, **fields) -> SpeechBatchJob:
+    """DIAAT-408: create the job for an upload whose audio is not prepared yet, and do not submit it.
+
+    The job is PENDING with ``source_blob_path`` set and no Azure job; the worker converts the
+    original and submits it (stt/preparation_service.py, through ``submit_existing_job``).
+    ``job.created`` is recorded here, once, as for a job submitted at once.
+    """
+    # The WAV the worker stores (and the parts cut from it) is named from this job as well as the upload, so
+    # that two jobs made from one upload never share a blob (stt/audio_storage.py, job_wav_name).
+    job_id = uuid4()
+    if fields.get("audio_blob_path"):
+        fields["audio_blob_path"] = job_wav_name(fields["audio_blob_path"], job_id)
+    job = create_job(session, audio_url, source_blob_path=source_blob_path, job_id=job_id, **fields)
+    with _job_journey(job):
         record_event(EVENT_JOB_CREATED)
-        job = await _submit(session, job, audio_url, locale, enable_diarization)
+    return job
+
+
+def record_parts_queued(job: SpeechBatchJob, part_count: int) -> None:
+    """DIAAT-408: every part of a recording split into parts is with Azure Speech: the job is queued.
+    ``job.queued`` once, with the number of parts; each part's own submission is a
+    ``speech_submission`` stage."""
+    accepted = seconds_between(job.created_datetime, datetime.now(UTC))
+    with _job_journey(job):
+        record_event(
+            EVENT_JOB_QUEUED,
+            {**speech_config_attributes(job.locale, job.enable_diarization), "job.part_count": part_count},
+            duration_ms=accepted * 1000.0 if accepted is not None else None,
+        )
+
+
+async def submit_existing_job(session: Session, job: SpeechBatchJob, *, created: bool = False) -> SpeechBatchJob:
+    """Submit a stored PENDING job to Azure Speech and record it as SUBMITTED.
+
+    ``created=True`` records ``job.created`` first (a job submitted in the request that created it);
+    a job created earlier by ``defer_batch_job`` has already recorded it. The events, the
+    ``speech_submission`` stage and the failure handling are the same for both.
+    """
+    with _job_journey(job):
+        if created:
+            record_event(EVENT_JOB_CREATED)
+        job = await _submit(session, job, job.audio_url, job.locale, job.enable_diarization)
         # DIAAT-281: Azure accepted the job; it now waits for Azure to start it.
         accepted = seconds_between(job.created_datetime, datetime.now(UTC))
         # DIAAT-282: with the configuration reference the job was sent with.
         record_event(
             EVENT_JOB_QUEUED,
             {
-                **speech_config_attributes(locale, enable_diarization),
+                **speech_config_attributes(job.locale, job.enable_diarization),
                 c.DEPENDENCY_REF: job.batch_job_id,
             },
             duration_ms=accepted * 1000.0 if accepted is not None else None,

@@ -1,4 +1,4 @@
-"""Worker entrypoint — background pollers only, no request serving.
+"""Worker entrypoint — background pollers and upload preparation only, no request serving.
 
 Deployed as a separate workload from the API (architecture 4.3) so that batch
 transcription backlogs cannot degrade real-time Speech token minting.

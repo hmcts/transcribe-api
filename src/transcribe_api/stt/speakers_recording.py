@@ -227,10 +227,10 @@ def normalize_speaker_labels(entries: list[DialogueEntry]) -> list[DialogueEntry
     return result
 
 
-def add_speaker_labels(entries: list[DialogueEntry]) -> list[DialogueEntry]:
+def add_speaker_labels(entries: list[DialogueEntry], prefix: str = "") -> list[DialogueEntry]:
     return [
         DialogueEntry(
-            speaker=f"Speaker {entry.speaker}",
+            speaker=f"{prefix}Speaker {entry.speaker}",
             text=entry.text,
             start_time=entry.start_time,
             end_time=entry.end_time,
@@ -242,8 +242,11 @@ def add_speaker_labels(entries: list[DialogueEntry]) -> list[DialogueEntry]:
     ]
 
 
-def process_speakers(entries: list[DialogueEntry]) -> list[DialogueEntry]:
+def process_speakers(entries: list[DialogueEntry], label_prefix: str | None = None) -> list[DialogueEntry]:
     """Group, normalise, and label speaker entries.
+
+    DIAAT-408: ``label_prefix`` ("Part 2 · ") goes before every label, for a part of a recording
+    transcribed in parts (stt/part_merge.py); without it the labels are as they have always been.
 
     Each step degrades gracefully: on failure the previous step's output
     is returned rather than raising. DIAAT-283: transcript.postprocess_degraded
@@ -264,7 +267,7 @@ def process_speakers(entries: list[DialogueEntry]) -> list[DialogueEntry]:
         return grouped
 
     try:
-        return add_speaker_labels(normalised)
+        return add_speaker_labels(normalised, label_prefix) if label_prefix else add_speaker_labels(normalised)
     except Exception:
         logger.exception("Speaker labelling failed; returning normalised entries")
         _degraded("speaker_labelling")

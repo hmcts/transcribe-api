@@ -106,6 +106,27 @@ file names), every request gets an `X-Request-Id`, and health probes are not tra
 - There is no Sentry: errors go to Application Insights. `SENTRY_DSN` is ignored.
 - The base image's `/opt/otel` distro is kept off `PYTHONPATH` (Dockerfile), so Azure Monitor is configured once.
 
+## Recording length and size limits (DIAAT-408)
+
+Recordings of up to 8 hours are accepted when both system feature flags below are on; otherwise the limit is 240 minutes
+(Azure batch transcription with diarization fails a file over that, so a longer recording is cut into parts, each its own Azure
+job, and merged). Every upload has its length read from the file header first, so an over-long or unreadable file is refused
+within seconds, whatever the flag. With `async_upload_preparation` on, `POST /uploads` only stores the original and the worker
+converts and submits it, so no request waits on the frontend gateway's 30 s limit.
+
+How it works, the over-240-minute flow, rollout, rollback and operation, infrastructure notes, pilot-tuning constants and the AAT
+operator checklist (not yet executed) are in [`docs/long-recordings.md`](docs/long-recordings.md).
+
+| Setting or flag (admin > Feature flags) | Default | Effect |
+|---|---|---|
+| `MAX_AUDIO_DURATION_SECONDS` | 28800 (8 h) | Longest recording, as decoded. In full only with both flags on; otherwise `min(this, 14400)`. |
+| `MAX_UPLOAD_BYTES` | 1 GiB | Backstop on one upload (413 above it). **transcribe-web reads the same figure from its own `MAX_UPLOAD_BYTES` environment variable: set both to the same value.** |
+| `async_upload_preparation` | `ASYNC_UPLOAD_PREPARATION=false` | `POST /uploads` stores the original and answers at once; the worker converts it and submits the job. |
+| `long_recordings_enabled` | `LONG_RECORDINGS_ENABLED=false` | Recordings over 240 minutes, up to `MAX_AUDIO_DURATION_SECONDS`. Takes effect only with `async_upload_preparation` on. |
+
+The effective limit is what `GET /api/flags` returns as `max_recording_seconds`. Turning either flag off needs no deploy and
+fails no job except one over 240 minutes that is still waiting to be prepared (the limit is 240 minutes unless both flags are on).
+
 ## Database migrations
 
 One Alembic history in `alembic/`. Its first revision, `0001_baseline`, replaced

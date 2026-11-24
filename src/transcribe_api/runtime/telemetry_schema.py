@@ -350,11 +350,23 @@ def _recording_attributes(schema: TelemetrySchema) -> None:
     schema.attribute(
         "job.queue_wait_ms", float, description="Queue wait: job created to Azure Speech processing started, in ms."
     )
+    schema.attribute(
+        "job.part_count", int, description="How many parts the recording was split into (recordings over 240 minutes)."
+    )
+    schema.attribute("job.part_index", int, description="Which part of a split recording (1 is the first).")
     schema.attribute("job.retry.attempt", int, description="Number of the attempt that failed (1 on the first retry).")
     schema.attribute(
         "job.retry.operation",
-        allowed_values=("speech.delete", "speech.results", "speech.status", "speech.submit", "webhook.deliver"),
-        description="The call being retried.",
+        allowed_values=(
+            "job.prepare",
+            "part.submit",
+            "speech.delete",
+            "speech.results",
+            "speech.status",
+            "speech.submit",
+            "webhook.deliver",
+        ),
+        description="The call being retried: job.prepare is the worker's conversion of an uploaded recording, part.submit the storing and submission of one part of a long recording.",
     )
     schema.attribute(
         "job.state",
@@ -403,6 +415,10 @@ def _recording_attributes(schema: TelemetrySchema) -> None:
         allowed_values=("speaker_grouping", "speaker_labelling", "speaker_normalisation"),
         description="The speaker-processing step that failed.",
     )
+    schema.attribute(
+        "split.forced_cut_count", int, description="Cuts made at the ideal point because no silence was in the window."
+    )
+    schema.attribute("split.part_count", int, description="Parts a recording over 240 minutes was cut into.")
     schema.attribute("transcript.segment_count", int, description="Number of dialogue entries in the transcript.")
     schema.attribute("transcript.speaker_count", int, description="Number of distinct speakers in the transcript.")
     schema.attribute(
@@ -443,6 +459,7 @@ def _shared_events(schema: TelemetrySchema) -> None:
             "speech.diarization",
             "speech.audio_duration_s",
             "speech.audio_duration_source",
+            "job.part_count",
         ),
         description="A job finished, once per job: hmcts.outcome success, error (counts towards the failed-jobs alert), failure (the user's input was rejected) or cancelled; hmcts.error.code says why. Dictation: an uploaded-audio transcription. Recording: a batch Speech job, with queue and processing times and the Speech details.",
     )
@@ -458,7 +475,12 @@ def _shared_events(schema: TelemetrySchema) -> None:
     )
     schema.event(
         "transcript.available",
-        attributes=("transcript.segment_count", "transcript.speaker_count", "dictation.transcription_id"),
+        attributes=(
+            "transcript.segment_count",
+            "transcript.speaker_count",
+            "dictation.transcription_id",
+            "job.part_count",
+        ),
         description="A transcript was saved and can be opened. Dictation: dictation.transcription_id is the transcription created (live submission). Recording: segment and speaker counts.",
     )
 
@@ -501,20 +523,45 @@ def _recording_events(schema: TelemetrySchema) -> None:
     """Recording service (heritage batch-audio-transcription)."""
     schema.event("job.created", description="Job row created: the upload is complete and the job exists.")
     schema.event(
+        "job.part_finished",
+        attributes=(
+            "job.part_index",
+            "job.part_count",
+            "hmcts.failure.source",
+            "speech.error_code",
+        ),
+        description="One part of a recording in parts finished in Azure Speech: hmcts.outcome success or error (hmcts.error.code speech.job_failed); duration_ms: its processing time. The job's own job.finished comes once, when its transcript is assembled or a part has failed.",
+    )
+    schema.event(
         "job.poll_failed",
-        attributes=("hmcts.failure.source", "speech.error_code", "http.response.status_code", "speech.retry_after_s"),
-        description="Polling the job failed; it stays unfinished and is polled again.",
+        attributes=(
+            "hmcts.failure.source",
+            "speech.error_code",
+            "http.response.status_code",
+            "speech.retry_after_s",
+            "job.part_index",
+            "job.part_count",
+        ),
+        description="Polling the job failed; it stays unfinished and is polled again. For a recording in parts, job.part_index says which part.",
     )
     schema.event(
         "job.queued",
-        attributes=("speech.region", "speech.locale", "speech.api_version", "speech.model_ref", "speech.diarization"),
-        description="Azure Speech accepted the job; duration_ms: created to accepted.",
+        attributes=(
+            "speech.region",
+            "speech.locale",
+            "speech.api_version",
+            "speech.model_ref",
+            "speech.diarization",
+            "job.part_count",
+        ),
+        description="Azure Speech accepted the job (for a recording split into parts: every part); duration_ms: created to accepted.",
     )
     schema.event(
         "job.retried",
         attributes=(
             "job.retry.operation",
             "job.retry.attempt",
+            "job.part_index",
             "hmcts.failure.source",
             "speech.error_code",
             "http.response.status_code",
@@ -532,22 +579,55 @@ def _recording_events(schema: TelemetrySchema) -> None:
         attributes=("job.state", "hmcts.failure.source"),
         description="The job has waited or run longer than its threshold. Emitted once per job; duration_ms: time in that state so far.",
     )
+    schema.event("preparation.cancelled", description="Preparing an uploaded recording (worker) was cancelled.")
+    schema.event(
+        "preparation.completed",
+        attributes=("audio.duration_seconds",),
+        description="The worker read, converted and stored an uploaded recording; duration_ms: its duration; audio.duration_seconds: the converted audio's length.",
+    )
+    schema.event(
+        "preparation.failed",
+        attributes=("audio.duration_seconds",),
+        description="The worker could not prepare an uploaded recording; hmcts.error.code says why (upload.undecodable, upload.too_long, preparation.source_missing: the file's; preparation.storage_failed, preparation.transcoder_unavailable: ours, retried), duration_ms: its duration.",
+    )
+    schema.event(
+        "preparation.started",
+        description="The worker started preparing an uploaded recording (reading, converting and storing it), before it is submitted to Azure Speech.",
+    )
+    schema.event("splitting.cancelled", description="Cutting a long recording into parts was cancelled.")
+    schema.event(
+        "splitting.completed",
+        attributes=("audio.duration_seconds", "split.part_count", "split.forced_cut_count"),
+        description="A recording over 240 minutes was cut into parts at silences where there were any; duration_ms: its duration.",
+    )
+    schema.event(
+        "splitting.failed",
+        attributes=("audio.duration_seconds",),
+        description="Cutting a long recording into parts failed (hmcts.error.code: split.failed, preparation.split_mismatch); it is retried.",
+    )
+    schema.event("splitting.started", description="The worker started cutting a recording over 240 minutes into parts.")
     schema.event(
         "results_retrieval.cancelled", description="Downloading the transcript from Azure Speech was cancelled."
     )
     schema.event(
         "results_retrieval.completed",
+        attributes=("job.part_index",),
         description="Downloading the transcript from Azure Speech completed; duration_ms: its duration.",
     )
     schema.event(
         "results_retrieval.failed",
+        attributes=("job.part_index",),
         description="Downloading the transcript from Azure Speech failed; hmcts.error.code says why, duration_ms: its duration.",
     )
-    schema.event("results_retrieval.started", description="Downloading the transcript from Azure Speech started.")
+    schema.event(
+        "results_retrieval.started",
+        attributes=("job.part_index",),
+        description="Downloading the transcript from Azure Speech started (job.part_index: of that part of a recording in parts).",
+    )
     schema.event(
         "speech.job_failed",
-        attributes=("hmcts.failure.source", "speech.error_code"),
-        description="Azure Speech reported the job as failed; speech.error_code is Azure's code.",
+        attributes=("hmcts.failure.source", "speech.error_code", "job.part_index", "job.part_count"),
+        description="Azure Speech reported the job (or, with job.part_index, one part of a recording in parts) as failed; speech.error_code is Azure's code.",
     )
     schema.event("speech.job_running", description="Azure Speech started processing; duration_ms: the queue wait.")
     schema.event(

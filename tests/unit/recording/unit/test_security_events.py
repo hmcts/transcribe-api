@@ -164,6 +164,8 @@ def test_foreign_blob_name_is_blocked_with_the_same_422_and_a_security_event(tel
 
 def test_own_blob_name_is_not_a_violation(tel, mocker):
     mocker.patch(f"{ROUTES}.get_job_by_idempotency_key_for_user", return_value=None)
+    mocker.patch(f"{ROUTES}.has_live_job_for_upload", return_value=False)
+    mocker.patch(f"{ROUTES}.lock_upload_for_submission")
     mocker.patch(f"{ROUTES}.submit_and_queue_batch_job", return_value=_job(CALLER_ID))
 
     response = _client().post(

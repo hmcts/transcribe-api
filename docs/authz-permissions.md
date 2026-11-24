@@ -304,6 +304,6 @@ Pre-migration jobs with no `user_id` were visible, and changeable, only to a Sys
 
 `DICTATION_ENABLED` (setting, default true) is the default of the flag `dictation_enabled`; a row of `system_feature_flag` with that name overrides it
 (`domain/feature_flags.py`, read on every dictation request; if the database cannot be read the default applies). `GET /api/flags` returns
-`{"dictation_enabled": bool}` for any signed-in user. The admin endpoints that write the row are `GET/PUT /api/admin/feature-flags` (DIAAT-392, `feature_flags.manage`): each change is audited (`feature_flag.changed`, with
+`{"dictation_enabled": bool, "max_recording_seconds": int}` for any signed-in user (DIAAT-408 added the second key). The admin endpoints that write the row are `GET/PUT /api/admin/feature-flags` (DIAAT-392, `feature_flags.manage`): each change is audited (`feature_flag.changed`, with
 from, to and the roles acted as) and clears the flag's in-process cache. The flag is cached for 5 seconds per process (`feature_flags.CACHE_TTL_SECONDS`), so the
 per-request read is one database read per process per 5 seconds; a change made on another replica is seen within that time. Hearing-recording routes do not look at it.

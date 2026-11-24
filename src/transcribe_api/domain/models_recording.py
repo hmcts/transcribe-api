@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, DateTime, Index, Text, UniqueConstraint, text
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Text, UniqueConstraint, Uuid, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -629,6 +629,13 @@ class SpeechBatchJob(BaseTable, table=True):
     audio_duration_seconds: float | None = Field(default=None)
     audio_blob_path: str | None = Field(default=None)
 
+    # DIAAT-408 (0017): with asynchronous upload preparation, the blob the original upload waits in
+    # (incoming/{user_id}/{upload_id}{ext}) until the worker converts it and submits the job. Set
+    # on a PENDING job with no Azure job yet; NULL for every other job. preparation_attempts counts
+    # the worker's attempts at it (stt/preparation_service.py).
+    source_blob_path: str | None = Field(default=None)
+    preparation_attempts: int = Field(default=0, sa_column_kwargs={"server_default": "0"})
+
     # Run metadata (DIAAT-227) — populated once the job reaches a terminal
     # state so the dashboard can surface "how long did this take and which
     # model produced it" without opening the transcript.
@@ -668,3 +675,31 @@ class SpeechBatchJob(BaseTable, table=True):
     # Webhook delivery guard — set atomically by the replica that wins the dispatch race.
     # NULL means no webhook has been dispatched yet for this job.
     webhook_dispatched_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
+
+
+class TranscriptionJobPart(BaseTable, table=True):
+    """DIAAT-408 (0018): one part of a recording longer than 240 minutes, transcribed as its own Azure
+    job (stt/preparation_service.py). ``offset_seconds`` is where the part starts in the whole
+    recording, measured from the cut files: what is added to the times of its transcript. Strings,
+    not enums, for status and cut kind: the values are ``JobStatus`` and the splitter's CUT_* names."""
+
+    __tablename__ = "transcription_job_part"
+    __table_args__ = (UniqueConstraint("job_id", "part_index", name="uq_transcription_job_part_index"),)
+
+    job_id: UUID = Field(
+        sa_column=Column(Uuid, ForeignKey("transcription_job.id", ondelete="CASCADE"), nullable=False, index=True)
+    )
+    part_index: int  # 1-based
+    part_count: int
+    offset_seconds: float
+    duration_seconds: float
+    cut_kind: str  # start (the first part), silence or forced
+    # Where the part's audio is stored (uploads/{user_id}/...): None once it has been deleted.
+    blob_path: str | None = Field(default=None)
+    status: str = Field(default=JobStatus.PENDING.value)
+    # Submissions to Azure Speech started for this part (a retry is another attempt).
+    attempts: int = Field(default=0)
+    batch_job_id: str | None = Field(default=None)
+    batch_job_url: str | None = Field(default=None)
+    batch_job_status: str | None = Field(default=None)
+    error_message: str | None = Field(default=None)

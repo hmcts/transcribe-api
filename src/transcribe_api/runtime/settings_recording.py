@@ -3,8 +3,12 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import ValidationInfo, field_validator
+from pydantic import ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# DIAAT-408: Azure Speech batch transcription with diarization fails a file longer than
+# 240 minutes. Not a setting: it is Azure's limit, and PART_TARGET_SECONDS may not exceed it.
+AZURE_BATCH_FILE_LIMIT_SECONDS = 14_400
 
 
 class Settings(BaseSettings):
@@ -48,11 +52,47 @@ class Settings(BaseSettings):
     # resource and no network access at all.
     SPEECH_BACKEND: Literal["azure", "mock"] = "azure"
 
-    # DIAAT-408: the longest recording accepted, as decoded. 240 minutes is Azure Speech's
-    # limit per file for batch transcription with diarization, which every job uses, so
-    # raising this past it needs the audio split before it is submitted: Azure would
-    # accept the job and then fail it.
-    MAX_AUDIO_DURATION_SECONDS: int = 4 * 60 * 60
+    # DIAAT-408: the longest recording the service can accept, as decoded: 8 hours. What a
+    # request is held to is the *effective* limit (stt/recording_limits.py): this value only
+    # when both system feature flags `async_upload_preparation` and `long_recordings_enabled`
+    # are on, otherwise at most AZURE_BATCH_FILE_LIMIT_SECONDS (240 minutes, Azure Speech's
+    # limit per file for batch transcription with diarization, which every job uses). Past
+    # that limit a recording has to be split before it is submitted: Azure would accept the
+    # job and then fail it.
+    MAX_AUDIO_DURATION_SECONDS: int = 8 * 60 * 60
+    # DIAAT-408: the longest part a recording over 240 minutes is split into (3 h 30 m, a
+    # margin under Azure's per-file limit). Must be between 1 second and that limit.
+    PART_TARGET_SECONDS: int = 12_600
+    # DIAAT-408: how many parts of one recording are prepared and submitted at once.
+    MAX_PARALLEL_PARTS: int = 4
+    # DIAAT-408: a backstop on the size of an uploaded file, not the limit on how long a
+    # recording may be. 1 GiB takes 4 hours of any usual MP3/M4A and of 16 kHz mono WAV
+    # (about 460 MB); CD-quality WAV is about 635 MB an hour. transcribe-web reads the same
+    # figure from its own MAX_UPLOAD_BYTES environment variable: the two must match.
+    MAX_UPLOAD_BYTES: int = 1024 * 1024 * 1024
+
+    # DIAAT-408: asynchronous upload preparation (stt/preparation_service.py). With the system
+    # flag `async_upload_preparation` on, POST /uploads stores the original file and answers at
+    # once; the worker transcodes it and submits the job. How often the worker looks for jobs
+    # to prepare, how many it prepares at once, how many times it tries one before failing it,
+    # and how long a job being prepared may go without a sign of life before another attempt
+    # takes it over (the worker renews it every PREPARE_HEARTBEAT_SECONDS).
+    PREPARE_POLL_INTERVAL_SECONDS: int = 5
+    PREPARE_MAX_CONCURRENT: int = 2
+    PREPARE_MAX_ATTEMPTS: int = 3
+    PREPARE_LEASE_SECONDS: int = 300
+    PREPARE_HEARTBEAT_SECONDS: int = 30
+    # How long before a storage failure is retried (multiplied by the attempt number).
+    PREPARE_RETRY_BACKOFF_SECONDS: int = 30
+    # Parallel block uploads of a large file to Blob Storage (the SDK default is 1, about 30 MB/s
+    # measured on AAT, which would put a 1 GiB upload past the gateway's 30 s). Each in-flight
+    # block is held in memory: 8 x 4 MiB. Used by the asynchronous upload path only.
+    BLOB_UPLOAD_CONCURRENCY: int = 8
+    # DIAAT-408: a part of a recording over 240 minutes is stored and submitted up to this many times
+    # (a failed part is retried alone) before the job fails, and waits this long (times the attempt
+    # number) between tries.
+    PART_MAX_ATTEMPTS: int = 3
+    PART_RETRY_BACKOFF_SECONDS: int = 5
 
     # Polling
     BATCH_POLL_INTERVAL_SECONDS: int = 30
@@ -67,6 +107,10 @@ class Settings(BaseSettings):
     # 4-hour recording has not been measured: revisit this once it has been.
     JOB_STUCK_WAITING_SECONDS: int = 30 * 60
     JOB_STUCK_RUNNING_SECONDS: int = 6 * 60 * 60
+    # DIAAT-408: a recording in parts (over 240 minutes) runs its parts at the same time, so it is
+    # reported as stuck once it has run longer than this many times its longest part, not after the
+    # fixed JOB_STUCK_RUNNING_SECONDS above (which is 1.5 x Azure's 4 hours per file).
+    JOB_STUCK_PART_FACTOR: float = 1.5
 
     # DIAAT-277: how often the background checker probes the database, Blob Storage
     # and Azure Speech (Speech at most once per 300 s whatever this is), and how long
@@ -172,6 +216,72 @@ class Settings(BaseSettings):
         if v <= 0:
             raise ValueError("Dependency health interval and timeout must be greater than 0")
         return v
+
+    @field_validator(
+        "MAX_AUDIO_DURATION_SECONDS",
+        "PART_TARGET_SECONDS",
+        "MAX_PARALLEL_PARTS",
+        "MAX_UPLOAD_BYTES",
+        "PREPARE_POLL_INTERVAL_SECONDS",
+        "PREPARE_MAX_CONCURRENT",
+        "PREPARE_MAX_ATTEMPTS",
+        "PREPARE_LEASE_SECONDS",
+        "PREPARE_HEARTBEAT_SECONDS",
+        "PREPARE_RETRY_BACKOFF_SECONDS",
+        "BLOB_UPLOAD_CONCURRENCY",
+        "PART_MAX_ATTEMPTS",
+        "PART_RETRY_BACKOFF_SECONDS",
+        mode="before",
+    )
+    @classmethod
+    def blank_recording_limit_is_default(cls, v: object, info: ValidationInfo) -> object:
+        # An env var set but empty (e.g. by a deployment template) means "use the default".
+        if isinstance(v, str) and not v.strip():
+            return cls.model_fields[info.field_name].default
+        return v
+
+    @field_validator(
+        "MAX_AUDIO_DURATION_SECONDS",
+        "MAX_PARALLEL_PARTS",
+        "MAX_UPLOAD_BYTES",
+        "PREPARE_POLL_INTERVAL_SECONDS",
+        "PREPARE_MAX_CONCURRENT",
+        "PREPARE_MAX_ATTEMPTS",
+        "PREPARE_LEASE_SECONDS",
+        "PREPARE_HEARTBEAT_SECONDS",
+        "PREPARE_RETRY_BACKOFF_SECONDS",
+        "BLOB_UPLOAD_CONCURRENCY",
+        "PART_MAX_ATTEMPTS",
+        "PART_RETRY_BACKOFF_SECONDS",
+    )
+    @classmethod
+    def validate_recording_limit(cls, v: int, info: ValidationInfo) -> int:
+        if v <= 0:
+            raise ValueError(f"{info.field_name} must be greater than 0")
+        return v
+
+    @field_validator("JOB_STUCK_PART_FACTOR")
+    @classmethod
+    def validate_stuck_part_factor(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("JOB_STUCK_PART_FACTOR must be greater than 0")
+        return v
+
+    @field_validator("PART_TARGET_SECONDS")
+    @classmethod
+    def validate_part_target(cls, v: int) -> int:
+        # Azure's limit is per file: a part over it would be accepted and then failed.
+        if not 1 <= v <= AZURE_BATCH_FILE_LIMIT_SECONDS:
+            raise ValueError(f"PART_TARGET_SECONDS must be between 1 and {AZURE_BATCH_FILE_LIMIT_SECONDS} seconds")
+        return v
+
+    @model_validator(mode="after")
+    def lease_outlasts_heartbeat(self) -> Settings:
+        # A job being prepared is renewed every heartbeat; a lease that could expire between two
+        # renewals would let a second worker prepare (and submit) the same job.
+        if self.PREPARE_LEASE_SECONDS < 2 * self.PREPARE_HEARTBEAT_SECONDS:
+            raise ValueError("PREPARE_LEASE_SECONDS must be at least twice PREPARE_HEARTBEAT_SECONDS")
+        return self
 
     @field_validator("SPEECH_CONCURRENT_JOBS_LIMIT", mode="before")
     @classmethod

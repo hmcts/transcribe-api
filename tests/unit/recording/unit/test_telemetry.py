@@ -10,6 +10,8 @@ import logging
 from fastapi.testclient import TestClient
 from hmcts_otel.testing import capture_telemetry
 
+from tests.unit.recording.unit.async_upload_helpers import tone
+
 APPEAL_FILE = "PA_50123_2024"
 
 
@@ -42,7 +44,7 @@ def test_upload_exports_no_case_reference_or_email(mocker, monkeypatch):
         app.dependency_overrides[get_current_user] = lambda: user
         response = TestClient(app).post(
             "/api/v1/uploads",
-            files={"file": (f"{APPEAL_FILE}.mp3", b"fake-audio-bytes", "audio/mpeg")},
+            files={"file": (f"{APPEAL_FILE}.mp3", tone(".mp3", 1), "audio/mpeg")},
         )
         logging.getLogger("transcribe_api").info("processed upload for %s", user.email)
 
