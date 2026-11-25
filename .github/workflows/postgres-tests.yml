@@ -58,3 +58,10 @@ jobs:
             echo "::error::Postgres-backed tests were skipped although TEST_POSTGRES_URL is set"
             exit 1
           fi
+
+      - name: Fail if any Azurite test was skipped
+        run: |
+          if grep -E '^SKIPPED .*needs Azurite' pytest.log; then
+            echo "::error::Azurite-backed tests were skipped although Docker is there for Testcontainers"
+            exit 1
+          fi

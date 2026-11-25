@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
+from tests.unit.recording.blob_stores import install_memory_blob_storage, installed_memory_blob_storage
 from tests.unit.recording.unit.async_upload_helpers import USER_ID, add_job, new_engine
 from transcribe_api.api.app import create_app
 from transcribe_api.domain import interface_recording as jobs
@@ -19,9 +20,7 @@ from transcribe_api.domain.auth.app_token import Context
 from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
 from transcribe_api.domain.auth.dependencies_recording import get_current_user
 from transcribe_api.domain.models_recording import JobStatus, User
-from transcribe_api.runtime import settings_recording
 from transcribe_api.runtime.db_recording import get_session
-from transcribe_api.stt import local_storage
 
 
 @pytest.fixture
@@ -32,11 +31,8 @@ def engine(tmp_path):
 
 
 @pytest.fixture
-def client(engine, tmp_path, monkeypatch):
-    monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
-    monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path / "audio"))
-    monkeypatch.setenv("LOCAL_AUDIO_BASE_URL", "http://api.test")
-    settings_recording.get_settings.cache_clear()
+def client(engine, monkeypatch):
+    install_memory_blob_storage(monkeypatch)
     app = create_app()
     user = AuthenticatedUser(
         db_user=User(id=USER_ID, azure_user_id="oid", email="judge@example.test", role="Judge"),
@@ -70,7 +66,7 @@ def test_a_missing_wav_of_any_other_job_is_still_just_not_found(client, engine):
 def test_a_pending_job_whose_wav_is_already_stored_plays(client, engine):
     """Between the WAV being stored and the job being submitted the audio is there: it is served."""
     job = add_job(engine, status=JobStatus.PENDING)
-    local_storage.save(b"RIFF" + b"x" * 100, job.audio_blob_path)
+    installed_memory_blob_storage().put(job.audio_blob_path, b"RIFF" + b"x" * 100)
     response = client.get(f"/api/v1/jobs/{job.id}/audio")
     assert response.status_code == 200 and len(response.content) == 104
 
@@ -79,7 +75,7 @@ def test_a_pending_job_whose_wav_is_already_stored_plays(client, engine):
 def test_a_recording_in_parts_plays_from_its_full_wav_with_ranges_in_every_state(client, engine, status):
     job = add_job(engine, status=status, source_blob_path=f"incoming/{uuid4()}.wav")
     wav = bytes(range(256)) * 4
-    local_storage.save(wav, job.audio_blob_path)
+    installed_memory_blob_storage().put(job.audio_blob_path, wav)
     with Session(engine) as session:
         jobs.create_job_parts(session, job.id, [jobs.PartPlan(1, 1, 0.0, 10.0, "start", "uploads/p1")])
 

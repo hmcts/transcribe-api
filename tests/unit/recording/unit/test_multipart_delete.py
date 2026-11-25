@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
+from tests.unit.recording.blob_stores import install_memory_blob_storage, installed_memory_blob_storage
 from tests.unit.recording.unit.async_upload_helpers import USER_ID, add_job, new_engine
 from transcribe_api.api.app import create_app
 from transcribe_api.domain import interface_recording as jobs
@@ -17,9 +18,8 @@ from transcribe_api.domain.auth.app_token import Context
 from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
 from transcribe_api.domain.auth.dependencies_recording import get_current_user
 from transcribe_api.domain.models_recording import SpeechBatchJob, User
-from transcribe_api.runtime import settings_recording
 from transcribe_api.runtime.db_recording import get_session
-from transcribe_api.stt import local_storage, part_submission
+from transcribe_api.stt import part_submission
 from transcribe_api.stt.part_submission import part_blob_name
 
 
@@ -31,11 +31,8 @@ def engine(tmp_path):
 
 
 @pytest.fixture
-def client(engine, tmp_path, monkeypatch):
-    monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
-    monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path / "audio"))
-    monkeypatch.setenv("LOCAL_AUDIO_BASE_URL", "http://api.test")
-    settings_recording.get_settings.cache_clear()
+def client(engine, monkeypatch):
+    install_memory_blob_storage(monkeypatch)
     app = create_app()
     user = AuthenticatedUser(
         db_user=User(id=USER_ID, azure_user_id="oid", email="judge@example.test", role="Judge"),
@@ -54,15 +51,15 @@ def client(engine, tmp_path, monkeypatch):
 def _job_in_parts(engine) -> tuple[SpeechBatchJob, list[str]]:
     upload_id = uuid4()
     job = add_job(engine, upload_id=upload_id, source_blob_path=f"incoming/{USER_ID}/{upload_id}.mp3")
-    local_storage.save(b"original", job.source_blob_path)
-    local_storage.save(b"full wav", job.audio_blob_path)
+    installed_memory_blob_storage().put(job.source_blob_path, b"original")
+    installed_memory_blob_storage().put(job.audio_blob_path, b"full wav")
     blobs = [part_blob_name(job.audio_blob_path, i) for i in (1, 2, 3)]
     plans = [
         jobs.PartPlan(i, 3, (i - 1) * 100.0, 100.0, "start" if i == 1 else "silence", blobs[i - 1]) for i in (1, 2, 3)
     ]
     with Session(engine) as session:
         for part in jobs.create_job_parts(session, job.id, plans):
-            local_storage.save(b"part", part.blob_path)
+            installed_memory_blob_storage().put(part.blob_path, b"part")
             jobs.mark_part_submitted(
                 session, part.id, f"azure-{part.part_index}", f"https://azure.test/jobs/azure-{part.part_index}"
             )
@@ -70,11 +67,7 @@ def _job_in_parts(engine) -> tuple[SpeechBatchJob, list[str]]:
 
 
 def _exists(name: str) -> bool:
-    try:
-        local_storage.size(name)
-    except FileNotFoundError:
-        return False
-    return True
+    return name in installed_memory_blob_storage()
 
 
 def test_deleting_a_job_in_parts_removes_its_blobs_azure_jobs_and_rows(client, engine, mocker):
@@ -152,10 +145,10 @@ def test_a_part_reference_is_forgotten_only_if_it_still_holds_what_was_deleted(e
 
 
 def _storage_refusing(mocker, name_part: str, times: int = 1):
-    """The local storage, refusing to delete a blob whose name contains ``name_part`` (``times`` times)."""
-    from transcribe_api.stt.audio_storage import LocalAudioStorage, StorageError
+    """The storage, refusing to delete a blob whose name contains ``name_part`` (``times`` times)."""
+    from transcribe_api.stt.audio_storage import AzureAudioStorage, StorageError
 
-    real = LocalAudioStorage.delete
+    real = AzureAudioStorage.delete
     refused = []
 
     async def delete(self, blob_name):
@@ -164,7 +157,7 @@ def _storage_refusing(mocker, name_part: str, times: int = 1):
             raise StorageError("storage down")
         await real(self, blob_name)
 
-    mocker.patch.object(LocalAudioStorage, "delete", delete)
+    mocker.patch.object(AzureAudioStorage, "delete", delete)
     return refused
 
 
@@ -221,7 +214,7 @@ def test_an_original_that_cannot_be_deleted_keeps_the_job_and_a_retry_succeeds(c
 def test_a_job_whose_original_is_already_gone_is_deleted(client, engine, mocker):
     """A blob that is not there is success: the original of a job that was prepared and settled."""
     job = add_job(engine, source_blob_path=f"incoming/{USER_ID}/{uuid4()}.mp3")
-    local_storage.save(b"wav", job.audio_blob_path)
+    installed_memory_blob_storage().put(job.audio_blob_path, b"wav")
     assert client.delete(f"/api/v1/jobs/{job.id}").status_code == 204
     with Session(engine) as session:
         assert session.get(SpeechBatchJob, job.id) is None
@@ -229,7 +222,7 @@ def test_a_job_whose_original_is_already_gone_is_deleted(client, engine, mocker)
 
 def test_a_job_of_240_minutes_or_less_is_deleted_as_before_without_looking_for_parts(client, engine, mocker):
     job = add_job(engine, source_blob_path=None)
-    local_storage.save(b"wav", job.audio_blob_path)
+    installed_memory_blob_storage().put(job.audio_blob_path, b"wav")
     cleanup = mocker.patch("transcribe_api.api.routes_recording.delete_job_and_parts")
     assert client.delete(f"/api/v1/jobs/{job.id}").status_code == 204
     cleanup.assert_not_called()

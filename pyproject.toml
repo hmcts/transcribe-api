@@ -101,6 +101,7 @@ dev = [
     "beautifulsoup4==4.15.0",
     "defusedxml>=0.7.1",
     "ruff==0.17.3",
+    "testcontainers>=4.15.0",
 ]
 
 [tool.hatch.metadata]
@@ -128,6 +129,7 @@ addopts = "--cov=transcribe_api"
 markers = [
     "real_jurisdictions: use the real jurisdiction lookup, not every user an IAC judge (tests/unit/conftest.py)",
     "real_feature_flags: read the system_feature_flag table, not assume no flag has a row (tests/unit/conftest.py)",
+    "azurite: storage is Azurite (Testcontainers, or TEST_AZURITE_CONNECTION_STRING), skipped without (tests/unit/recording/conftest.py)",
 ]
 
 [tool.ruff]

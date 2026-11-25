@@ -1,14 +1,15 @@
 """DIAAT-408: the worker's preparation of uploads the API accepted without converting them
 (stt/preparation_service.py).
 
-Real ffmpeg on real small files, the local-directory storage, SQLite for the job table and the mock
-Speech backend: the whole of "claim, convert, store, submit, tidy up" runs through the real code.
+Real ffmpeg on real small files, storage in memory (tests/unit/recording/blob_stores.py), SQLite for the job table
+and the mock Speech backend: the whole of "claim, convert, store, submit, tidy up" runs through the real code.
 Only the failures that need a broken storage or a crash are simulated.
 """
 
 from __future__ import annotations
 
 import asyncio
+import io
 import wave
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -19,26 +20,27 @@ from hmcts_otel.testing import capture_telemetry
 from sqlalchemy import update
 from sqlmodel import Session
 
+from tests.unit.recording.blob_stores import install_memory_blob_storage, installed_memory_blob_storage
 from tests.unit.recording.unit.async_upload_helpers import add_job, new_engine, reload_job, tone
 from transcribe_api.domain import interface_recording as jobs
 from transcribe_api.domain.models_recording import BatchJobStatus, JobStatus, SpeechBatchJob
 from transcribe_api.runtime import settings_dictation, settings_recording
+from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
 from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.runtime.telemetry import configure_telemetry
-from transcribe_api.stt import audio_storage, local_storage, submission
+from transcribe_api.stt import audio_storage, submission
 from transcribe_api.stt import preparation_service as prep
 from transcribe_api.stt.batch_client import BatchSubmissionError
 from transcribe_api.stt.preparation_service import PreparationService
 
 
 @pytest.fixture(autouse=True)
-def environment(tmp_path, monkeypatch):
-    monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
-    monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path / "audio"))
-    monkeypatch.setenv("LOCAL_AUDIO_BASE_URL", "http://api.test")
+def environment(monkeypatch):
+    storage = install_memory_blob_storage(monkeypatch)
     monkeypatch.setenv("SPEECH_BACKEND", "mock")
     settings_recording.get_settings.cache_clear()
     settings_dictation.get_settings.cache_clear()
+    return storage
 
 
 @pytest.fixture
@@ -70,7 +72,7 @@ def no_azure(mocker):
 def _waiting(engine, body: bytes | None = None, **fields) -> SpeechBatchJob:
     """A deferred job with its original in storage."""
     job = add_job(engine, **fields)
-    local_storage.save(tone(".mp3", 3.0) if body is None else body, job.source_blob_path)
+    installed_memory_blob_storage().put(job.source_blob_path, tone(".mp3", 3.0) if body is None else body)
     return job
 
 
@@ -81,11 +83,7 @@ async def _prepare_all(service: PreparationService) -> int:
 
 
 def _exists(blob_name: str) -> bool:
-    try:
-        local_storage.size(blob_name)
-    except FileNotFoundError:
-        return False
-    return True
+    return blob_name in installed_memory_blob_storage()
 
 
 def _names(tel, job_id) -> list[str]:
@@ -106,13 +104,12 @@ async def test_a_waiting_job_is_converted_stored_submitted_and_its_original_remo
     assert row.batch_job_status == BatchJobStatus.NOT_STARTED and row.batch_job_id
     assert row.preparation_attempts == 1 and row.error_message is None
     # The WAV is where the upload said it would be, 16 kHz mono, as long as the recording.
-    wav_path = local_storage.path_of(job.audio_blob_path)
-    with wave.open(str(wav_path), "rb") as wav:
+    with wave.open(io.BytesIO(installed_memory_blob_storage().get(job.audio_blob_path)), "rb") as wav:
         assert (wav.getframerate(), wav.getnchannels(), wav.getsampwidth()) == (16000, 1, 2)
         assert wav.getnframes() / wav.getframerate() == pytest.approx(3.0, abs=0.2)
     assert not _exists(original)
     # Azure is sent the URL of the stored WAV, built by the server: not what the client sent.
-    assert row.audio_url.startswith("http://api.test/api/v1/local-audio/uploads/")
+    assert row.audio_url == AsyncAzureBlobManager().build_blob_url(job.audio_blob_path)
     assert "client.example" not in row.audio_url
     assert row.audio_duration_seconds == pytest.approx(3.0, abs=0.2)
 
@@ -235,8 +232,8 @@ async def test_a_refusal_by_azure_speech_leaves_the_job_failed_with_the_usual_se
 # Storage errors: retried, then failed ------------------------------------------------------------
 
 
-class FailingStorage(audio_storage.LocalAudioStorage):
-    """The local storage, with a step that fails the first ``failures`` times it is asked."""
+class FailingStorage(audio_storage.AzureAudioStorage):
+    """The storage, with a step that fails the first ``failures`` times it is asked."""
 
     def __init__(self, step: str, failures: int) -> None:
         self.step, self.failures, self.calls = step, failures, 0
@@ -301,7 +298,7 @@ async def test_a_job_waits_its_backoff_before_the_next_attempt(engine, mocker):
 
 
 async def test_a_store_that_reports_failure_is_retried_like_an_error(engine, fast_retries):
-    class Refuses(audio_storage.LocalAudioStorage):
+    class Refuses(audio_storage.AzureAudioStorage):
         async def upload(self, path, blob_name, *, concurrency=None):
             return False
 

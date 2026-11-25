@@ -15,20 +15,14 @@ from sqlmodel import Session
 from tests.unit.recording.unit.async_upload_helpers import USER_ID, add_job
 from transcribe_api.domain import interface_recording as jobs
 from transcribe_api.domain.models_recording import SpeechBatchJob, User
-from transcribe_api.stt import local_storage, part_submission
+from transcribe_api.stt import part_submission
 from transcribe_api.stt.part_submission import delete_job_and_parts, part_blob_name
 
 WAIT = 30
 
 
 @pytest.fixture
-def engine(fresh_postgres, tmp_path, monkeypatch):
-    monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
-    monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path / "audio"))
-    monkeypatch.setenv("LOCAL_AUDIO_BASE_URL", "http://api.test")
-    from transcribe_api.runtime import settings_recording
-
-    settings_recording.get_settings.cache_clear()
+def engine(fresh_postgres, azurite_blob_storage):
     with Session(fresh_postgres) as session:
         session.add(User(id=USER_ID, azure_user_id="oid", email="judge@example.test", role="Judge"))
         session.commit()
@@ -94,7 +88,9 @@ def test_a_part_inserted_while_the_delete_holds_the_job_waits_and_then_fails_its
         assert jobs.get_job_parts(session, job.id) == []
 
 
-async def test_a_part_the_worker_records_after_the_cleanup_is_released_before_the_job_is_deleted(engine, mocker):
+async def test_a_part_the_worker_records_after_the_cleanup_is_released_before_the_job_is_deleted(
+    engine, mocker, azurite_blob_storage
+):
     job = add_job(engine, source_blob_path=None)
     deleted = []
 
@@ -109,7 +105,7 @@ async def test_a_part_the_worker_records_after_the_cleanup_is_released_before_th
         clean = await real_cleanup(*args, **kwargs)
         with Session(engine) as session:
             (row,) = jobs.create_job_parts(session, job.id, [_plan(job)])
-            local_storage.save(b"part", row.blob_path)
+            azurite_blob_storage.put(row.blob_path, b"part")
             made.append(f"mock://batch-jobs/{uuid4()}")
             jobs.mark_part_submitted(session, row.id, "azure-1", made[0])
         return clean
@@ -122,8 +118,7 @@ async def test_a_part_the_worker_records_after_the_cleanup_is_released_before_th
     with Session(engine) as session:
         assert session.get(SpeechBatchJob, job.id) is None
         assert jobs.get_job_parts(session, job.id) == []
-    with pytest.raises(FileNotFoundError):
-        local_storage.size(part_blob_name(job.audio_blob_path, 1))
+    assert part_blob_name(job.audio_blob_path, 1) not in azurite_blob_storage
 
 
 def test_a_job_with_a_part_that_still_records_its_resources_is_not_deleted_and_nothing_is_lost(engine):
@@ -139,7 +134,7 @@ def test_a_job_with_a_part_that_still_records_its_resources_is_not_deleted_and_n
 
 
 async def test_an_azure_job_recorded_while_the_cleanup_deletes_the_blob_survives_the_release_on_postgres(
-    engine, mocker
+    engine, mocker, azurite_blob_storage
 ):
     job = add_job(engine, source_blob_path=None)
     deleted = []
@@ -150,11 +145,11 @@ async def test_an_azure_job_recorded_while_the_cleanup_deletes_the_blob_survives
     mocker.patch.object(part_submission, "delete_batch_job", new=delete_batch_job)
     with Session(engine) as session:
         (row,) = jobs.create_job_parts(session, job.id, [_plan(job)])
-    local_storage.save(b"part", row.blob_path)
+    azurite_blob_storage.put(row.blob_path, b"part")
     url = f"mock://batch-jobs/{uuid4()}"
     from transcribe_api.stt import audio_storage
 
-    real_delete = audio_storage.LocalAudioStorage.delete
+    real_delete = audio_storage.AzureAudioStorage.delete
     recorded = []
 
     async def delete_and_meanwhile_the_worker_records_the_job(self, blob_name):
@@ -164,7 +159,7 @@ async def test_an_azure_job_recorded_while_the_cleanup_deletes_the_blob_survives
             with Session(engine) as session:
                 assert jobs.mark_part_submitted(session, row.id, "azure-1", url)
 
-    mocker.patch.object(audio_storage.LocalAudioStorage, "delete", delete_and_meanwhile_the_worker_records_the_job)
+    mocker.patch.object(audio_storage.AzureAudioStorage, "delete", delete_and_meanwhile_the_worker_records_the_job)
 
     assert await delete_job_and_parts(job.id, engine=engine) is True
 

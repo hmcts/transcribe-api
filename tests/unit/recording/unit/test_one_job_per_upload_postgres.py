@@ -39,10 +39,7 @@ def _no_rate_limit():
 
 
 @pytest.fixture
-def engine(fresh_postgres, tmp_path, monkeypatch):
-    monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
-    monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path / "audio"))
-    monkeypatch.setenv("LOCAL_AUDIO_BASE_URL", "http://api.test")
+def engine(fresh_postgres, azurite_blob_storage, monkeypatch):
     monkeypatch.setenv("SPEECH_BACKEND", "mock")
     monkeypatch.setenv("ASYNC_UPLOAD_PREPARATION", "false")  # converted in the request: the job is submitted at once
     settings_recording.get_settings.cache_clear()

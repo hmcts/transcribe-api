@@ -91,8 +91,8 @@ def test_the_labels_survive_a_failed_labelling_step_still_apart_by_part(mocker):
 
 
 @pytest.fixture(autouse=True)
-def environment(tmp_path, monkeypatch, mocker):
-    scale_down(monkeypatch, mocker, tmp_path)
+def environment(monkeypatch, mocker):
+    return scale_down(monkeypatch, mocker)
 
 
 @pytest.fixture
