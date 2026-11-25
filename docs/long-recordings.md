@@ -314,7 +314,7 @@ about 2 minutes there and a 20 h recording about 4.5 to 5 minutes of conversion 
 
 **The end-to-end test.** `tests/unit/recording/long_e2e/` runs the real routes, the preparation service, the poller and real
 ffmpeg with the mock Speech backend over a 1 h, a 4 h (the limit), a 5 h and an 8 h recording, the three refusals (4 h 01 m with both
-flags off, with background preparation on and long recordings off, and 8 h 02 m), a corrupt file and a job deleted while its parts
+flags off, with background preparation on and long recordings off, and 20 h 02 m at the real size), a corrupt file and a job deleted while its parts
 are in flight. Every scenario runs in the normal suite at a scaled-down size (30 s stands for 240 minutes); the real sizes are
 deselected unless `RUN_LONG_E2E=1` (`pytest tests/unit/recording/long_e2e -m long_e2e`, optionally `LONG_E2E_DIR` for the generated
 audio and `LONG_E2E_REPORT` for a JSON of the timings; about 4 GB of temporary disk and 5 minutes).
