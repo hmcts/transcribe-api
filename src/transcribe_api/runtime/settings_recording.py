@@ -52,14 +52,14 @@ class Settings(BaseSettings):
     # resource and no network access at all.
     SPEECH_BACKEND: Literal["azure", "mock"] = "azure"
 
-    # DIAAT-408: the longest recording the service can accept, as decoded: 8 hours. What a
+    # DIAAT-408: the longest recording the service can accept, as decoded: 20 hours. What a
     # request is held to is the *effective* limit (stt/recording_limits.py): this value only
     # when both system feature flags `async_upload_preparation` and `long_recordings_enabled`
     # are on, otherwise at most AZURE_BATCH_FILE_LIMIT_SECONDS (240 minutes, Azure Speech's
     # limit per file for batch transcription with diarization, which every job uses). Past
     # that limit a recording has to be split before it is submitted: Azure would accept the
     # job and then fail it.
-    MAX_AUDIO_DURATION_SECONDS: int = 8 * 60 * 60
+    MAX_AUDIO_DURATION_SECONDS: int = 20 * 60 * 60
     # DIAAT-408: the longest part a recording over 240 minutes is split into (3 h 30 m, a
     # margin under Azure's per-file limit). Must be between 1 second and that limit.
     PART_TARGET_SECONDS: int = 12_600

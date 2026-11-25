@@ -10,7 +10,7 @@ from transcribe_api.runtime.settings_recording import AZURE_BATCH_FILE_LIMIT_SEC
 from transcribe_api.stt.recording_limits import current_limit_seconds, effective_limit_seconds
 
 FOUR_HOURS = 4 * 60 * 60
-EIGHT_HOURS = 8 * 60 * 60
+TWENTY_HOURS = 20 * 60 * 60
 
 
 def test_azures_limit_per_file_is_240_minutes():
@@ -23,13 +23,13 @@ def test_azures_limit_per_file_is_240_minutes():
         (False, False, FOUR_HOURS),
         (True, False, FOUR_HOURS),  # long recordings need background preparation as well
         (False, True, FOUR_HOURS),
-        (True, True, EIGHT_HOURS),
+        (True, True, TWENTY_HOURS),
     ],
 )
 def test_effective_limit_in_all_four_flag_combinations(long_recordings, async_preparation, expected):
     assert (
         effective_limit_seconds(
-            long_recordings=long_recordings, async_preparation=async_preparation, max_seconds=EIGHT_HOURS
+            long_recordings=long_recordings, async_preparation=async_preparation, max_seconds=TWENTY_HOURS
         )
         == expected
     )
@@ -66,7 +66,7 @@ def test_the_flags_are_off_by_default_and_the_limit_is_240_minutes(monkeypatch):
 
 @pytest.mark.parametrize(
     ("long_recordings", "async_preparation", "expected"),
-    [(False, False, FOUR_HOURS), (True, False, FOUR_HOURS), (False, True, FOUR_HOURS), (True, True, EIGHT_HOURS)],
+    [(False, False, FOUR_HOURS), (True, False, FOUR_HOURS), (False, True, FOUR_HOURS), (True, True, TWENTY_HOURS)],
 )
 def test_the_current_limit_reads_the_flags(monkeypatch, long_recordings, async_preparation, expected):
     _flag_defaults(monkeypatch, long_recordings=long_recordings, async_preparation=async_preparation)
@@ -78,7 +78,7 @@ def test_the_current_limit_reads_the_flags(monkeypatch, long_recordings, async_p
 
 def test_the_defaults():
     settings = Settings()
-    assert settings.MAX_AUDIO_DURATION_SECONDS == EIGHT_HOURS
+    assert settings.MAX_AUDIO_DURATION_SECONDS == TWENTY_HOURS
     assert settings.PART_TARGET_SECONDS == 12_600
     assert settings.MAX_PARALLEL_PARTS == 4
     assert settings.MAX_UPLOAD_BYTES == 1024**3
