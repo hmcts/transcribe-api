@@ -140,19 +140,12 @@ def find_hearing(session: Session, hearing_id: UUID, *, lock: bool = False) -> H
     hearing = session.exec(query).first()
     if hearing is not None:
         return _record(hearing)
-    job_query = select(SpeechBatchJob).options(*_without_transcripts()).where(SpeechBatchJob.id == hearing_id)
-    if not lock:
-        job = session.exec(job_query.where(col(SpeechBatchJob.hearing_id).is_(None))).first()
-        return _unstored(job) if job is not None else None
-    # Two days added at once to a job from before hearings would both store its hearing: the job's row
-    # serialises them, and the second then finds the hearing the first stored.
-    job = session.exec(job_query.with_for_update()).first()
-    if job is None:
-        return None
-    hearing = session.exec(query).first()
-    if hearing is not None:
-        return _record(hearing)
-    return _unstored(job) if job.hearing_id is None else None
+    job = session.exec(
+        select(SpeechBatchJob)
+        .options(*_without_transcripts())
+        .where(SpeechBatchJob.id == hearing_id, col(SpeechBatchJob.hearing_id).is_(None))
+    ).first()
+    return _unstored(job) if job is not None else None
 
 
 def new_hearing(session: Session, *, hearing_id: UUID, user_id: UUID, jurisdiction_id: UUID, metadata: dict) -> Hearing:
@@ -166,21 +159,34 @@ def new_hearing(session: Session, *, hearing_id: UUID, user_id: UUID, jurisdicti
 
 def store_unstored_hearing(session: Session, record: HearingRecord) -> None:
     """Make the job from before hearings a stored one-day hearing (a day is being added to it), as 0019
-    would have. Committed with the new day."""
-    session.add(
-        Hearing(
+    would have, and commit at once: no lock on the job is held while the new day is prepared. Two requests
+    doing it together store it once."""
+    created = record.created_datetime or _now()
+    session.execute(
+        _insert_for(session)(Hearing.__table__)
+        .values(
             id=record.id,
+            created_datetime=created,
             user_id=record.user_id,
             jurisdiction_id=record.jurisdiction_id,
-            metadata_=record.metadata,
-            created_datetime=record.created_datetime or _now(),
+            metadata=record.metadata,
         )
+        .on_conflict_do_nothing(index_elements=["id"])
     )
-    job = session.get(SpeechBatchJob, record.id)
-    if job is not None and job.hearing_id is None:
-        job.hearing_id = record.id
-        job.hearing_date = day_date(job)
-        session.add(job)
+    session.execute(
+        sa_update(SpeechBatchJob)
+        .where(col(SpeechBatchJob.id) == record.id, col(SpeechBatchJob.hearing_id).is_(None))
+        .values(hearing_id=record.id, hearing_date=london_date(created))
+    )
+    session.commit()
+
+
+def _insert_for(session: Session):
+    if session.get_bind().dialect.name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert
+    else:
+        from sqlalchemy.dialects.sqlite import insert
+    return insert
 
 
 def touch_hearing(session: Session, hearing_id: UUID) -> None:

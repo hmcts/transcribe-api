@@ -1169,8 +1169,6 @@ async def _submit_job(
         new_hearing(
             session, hearing_id=job_id, user_id=current_user.id, jurisdiction_id=jurisdiction.id, metadata=body.metadata
         )
-    elif not adding_to.stored:
-        store_unstored_hearing(session, adding_to)
     else:
         touch_hearing(session, hearing_id)
     audit.detail["hearing_id"] = str(hearing_id)
@@ -1274,6 +1272,9 @@ async def _hearing_to_add_to(
     except HTTPException:
         audit.skip()
         raise
+    if not hearing.stored:
+        await asyncio.to_thread(store_unstored_hearing, session, hearing)
+        hearing = await asyncio.to_thread(find_hearing, session, hearing_id, lock=True)
     return hearing
 
 

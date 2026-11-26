@@ -202,3 +202,21 @@ def test_the_hearing_goes_once_it_has_no_day_left(engine):
         session.commit()
         assert hearings.delete_hearing_if_empty(session, hearing_id) is True
         assert session.get(Hearing, hearing_id) is None
+
+
+def test_a_job_from_before_hearings_is_stored_as_its_hearing_once_on_postgres(fresh_postgres):
+    created = datetime(2026, 7, 1, 23, 30, tzinfo=UTC)
+    with Session(fresh_postgres) as session:
+        job = SpeechBatchJob(
+            audio_url="https://x/a.wav", created_datetime=created, metadata_={"case_reference": "PA/1"}
+        )
+        session.add(job)
+        session.commit()
+        record = hearings.find_hearing(session, job.id)
+        hearings.store_unstored_hearing(session, record)
+        hearings.store_unstored_hearing(session, record)  # a second request doing it at the same time
+
+        stored = hearings.find_hearing(session, job.id, lock=True)
+        session.refresh(job)
+        assert stored.stored and stored.metadata == {"case_reference": "PA/1"}
+        assert (job.hearing_id, job.hearing_date) == (job.id, date(2026, 7, 2))
