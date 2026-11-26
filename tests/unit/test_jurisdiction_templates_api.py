@@ -243,6 +243,7 @@ def test_a_save_sent_as_octet_stream_keeps_text_the_waf_would_block(as_admin):
         ("{}", "text/plain", 415),
         ("{}", None, 415),
         ("not json", "application/octet-stream", 422),
+        (b"\xff", "application/octet-stream", 422),  # not UTF-8
         ('{"name": "Missing its fields"}', "application/octet-stream", 422),
     ],
 )
@@ -256,6 +257,18 @@ def test_a_save_in_another_form_is_refused(as_admin, content, content_type, stat
     if status == 422:
         assert all(error["loc"][0] == "body" for error in refused.json()["detail"])
     assert as_admin.get("/api/admin/jurisdictions/ET/templates").json() == [template]  # nothing saved
+
+
+def test_the_api_description_gives_the_saves_body_in_both_forms(admin_app):
+    """The body is read by a dependency, so FastAPI is told what it is."""
+    operation = admin_app.openapi()["paths"]["/api/admin/jurisdictions/{code}/templates/{template_id}"]["put"]
+    body = operation["requestBody"]
+    assert body["required"] is True
+    assert set(body["content"]) == {"application/octet-stream", "application/json"}
+    schema = body["content"]["application/octet-stream"]["schema"]
+    assert {"name", "fields", "version"} <= set(schema["required"])
+    rule = schema["properties"]["fields"]["items"]["properties"]["rules"]
+    assert "$ref" not in json.dumps(rule)  # nested models written out
 
 
 def test_a_new_file_keeps_the_linked_fields_and_waits_for_its_new_boxes(as_admin):

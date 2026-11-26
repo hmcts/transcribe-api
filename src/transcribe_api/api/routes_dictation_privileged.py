@@ -745,9 +745,37 @@ async def _template_write(request: Request) -> TemplateWrite:
     try:
         return TemplateWrite.model_validate_json(await request.body())
     except ValidationError as exc:
+        # Without the input: raw bytes that are not UTF-8 cannot be put in the response.
         raise RequestValidationError(
-            [{**e, "loc": ("body", *e["loc"])} for e in exc.errors(include_url=False)]
+            [{**e, "loc": ("body", *e["loc"])} for e in exc.errors(include_url=False, include_input=False)]
         ) from None
+
+
+def _inlined_schema(model: type[BaseModel]) -> dict[str, Any]:
+    """``model``'s JSON schema with its nested models written out in place, for an
+    operation's own request body (its ``$defs`` would not resolve there)."""
+    schema = model.model_json_schema()
+    defs = schema.pop("$defs", {})
+
+    def inline(node: Any) -> Any:
+        if isinstance(node, dict):
+            if "$ref" in node:
+                return inline(defs[node["$ref"].rsplit("/", 1)[-1]])
+            return {key: inline(value) for key, value in node.items()}
+        if isinstance(node, list):
+            return [inline(value) for value in node]
+        return node
+
+    return inline(schema)
+
+
+# The body _template_write reads, which FastAPI cannot see in a dependency on Request.
+_TEMPLATE_WRITE_BODY = {
+    "requestBody": {
+        "required": True,
+        "content": {content_type: {"schema": _inlined_schema(TemplateWrite)} for content_type in _SAVE_CONTENT_TYPES},
+    }
+}
 
 
 def _audit_template_change(action: str, admin_user: User, code: str, row_id: str, detail: dict[str, Any]) -> None:
@@ -839,7 +867,11 @@ async def admin_upload_template(
     return TemplateAdminRecord(**record)
 
 
-@router.put("/jurisdictions/{code}/templates/{template_id}", response_model=TemplateAdminRecord)
+@router.put(
+    "/jurisdictions/{code}/templates/{template_id}",
+    response_model=TemplateAdminRecord,
+    openapi_extra=_TEMPLATE_WRITE_BODY,
+)
 def admin_update_template(
     code: str,
     template_id: UUID,
