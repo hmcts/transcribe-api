@@ -354,7 +354,11 @@ def test_flags_are_visible_to_any_signed_in_user_with_no_context_needed(app, rou
     finally:
         app.dependency_overrides.clear()
     assert response.status_code == 200
-    assert response.json() == {"dictation_enabled": enabled, "max_recording_seconds": 4 * 60 * 60}
+    assert response.json() == {
+        "dictation_enabled": enabled,
+        "max_recording_seconds": 4 * 60 * 60,
+        "multi_day_hearings": False,
+    }
     assert response.headers["cache-control"] == "no-store"
 
 
@@ -365,3 +369,15 @@ def test_flags_need_a_sign_in(app):
 def test_the_default_is_on_without_any_configuration(monkeypatch):
     _set_default(monkeypatch, None)
     assert settings_dictation.get_settings().DICTATION_ENABLED is True
+
+
+def test_multi_day_hearings_is_off_by_default_and_follows_its_setting(monkeypatch):
+    """DIAAT-428: adding a recording day to a hearing, deleting one day, and changing a day's date."""
+    from transcribe_api.runtime import settings_dictation
+
+    assert feature_flags.is_multi_day_hearings_enabled() is False
+    monkeypatch.setenv("MULTI_DAY_HEARINGS", "true")
+    settings_dictation.get_settings.cache_clear()
+    feature_flags.invalidate_cache()
+    assert feature_flags.is_multi_day_hearings_enabled() is True
+    assert feature_flags.MULTI_DAY_HEARINGS in feature_flags.FLAG_DESCRIPTIONS

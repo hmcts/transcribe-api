@@ -9,8 +9,8 @@ import socket
 import tempfile
 from collections import Counter
 from collections.abc import AsyncGenerator
-from contextlib import aclosing
-from datetime import UTC, datetime
+from contextlib import aclosing, nullcontext
+from datetime import UTC, date, datetime
 from pathlib import Path, PurePosixPath
 from typing import Annotated
 from urllib.parse import urlparse
@@ -39,6 +39,7 @@ from sqlmodel import Session
 
 from transcribe_api.domain import feature_flags
 from transcribe_api.domain.audit_recording import (
+    AuditAction,
     AuditRecord,
     AuditScope,
     DenialReason,
@@ -53,6 +54,21 @@ from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
 from transcribe_api.domain.auth.authorisation import public_endpoint, signed_url_endpoint
 from transcribe_api.domain.auth.context import context_of
 from transcribe_api.domain.auth.dependencies_recording import get_active_jurisdiction, require_permission
+from transcribe_api.domain.hearings import (
+    HearingRecord,
+    day_count,
+    day_date,
+    days_of,
+    delete_hearing_if_empty,
+    find_hearing,
+    hearing_of,
+    hearing_status,
+    list_hearings_paginated,
+    new_hearing,
+    store_unstored_hearing,
+    today_in_london,
+    touch_hearing,
+)
 from transcribe_api.domain.interface_recording import (
     blob_used_by_another_job,
     get_job_by_id,
@@ -62,7 +78,7 @@ from transcribe_api.domain.interface_recording import (
     lock_upload_for_submission,
     record_correction_dataset_entry,
 )
-from transcribe_api.domain.job_history import job_history
+from transcribe_api.domain.job_history import hearing_history, job_history
 from transcribe_api.domain.jurisdictions import (
     ActiveJurisdiction,
     job_owner_and_jurisdiction,
@@ -81,7 +97,9 @@ from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
 from transcribe_api.runtime.db_recording import get_session
 from transcribe_api.runtime.security_events import (
     AUDIO,
+    DELETE,
     JOB,
+    READ,
     SUBMIT,
     TRANSCRIPT,
     UPLOAD,
@@ -274,6 +292,10 @@ class SubmitJobRequest(BaseModel):
     # too late to show "Transcribing 2h 36m of audio" while still PROCESSING.
     audio_duration_seconds: float | None = None
     metadata: dict = Field(default_factory=dict)
+    # DIAAT-428: the hearing to add this recording to (one of the caller's, with the multi_day_hearings
+    # flag on); without it the job is a new one-day hearing. The day defaults to today in London.
+    hearing_id: UUID | None = None
+    hearing_date: date | None = None
 
     @field_validator("audio_duration_seconds")
     @classmethod
@@ -370,6 +392,7 @@ class NeedsReviewItemResponse(BaseModel):
     speaker: str
     start_time: float
     confidence: float
+    job_id: UUID | None = None
 
 
 class AccuracyResponse(BaseModel):
@@ -405,6 +428,9 @@ class JobResponse(BaseModel):
     # failed; the dashboard falls back to model_identifier. Contains only the
     # non-sensitive display name — never the Speech subscription key.
     model_display_name: str | None = None
+    # DIAAT-428: the hearing this job is a recording day of, and the day.
+    hearing_id: UUID | None = None
+    hearing_date: date | None = None
 
 
 class ListJobsResponse(BaseModel):
@@ -519,8 +545,8 @@ def _to_dialogue_entries(job: SpeechBatchJob) -> list[DialogueEntry] | None:
     return [_to_dialogue_entry(e) for e in _entries_with_ids(job)]
 
 
-def _to_response(job: SpeechBatchJob) -> JobResponse:
-    entries = _to_dialogue_entries(job)
+def _to_response(job: SpeechBatchJob, *, with_transcript: bool = True) -> JobResponse:
+    entries = _to_dialogue_entries(job) if with_transcript else None
     accuracy = None
     needs_review = None
     if entries is not None:
@@ -549,7 +575,7 @@ def _to_response(job: SpeechBatchJob) -> JobResponse:
         )
         needs_review = [
             NeedsReviewItemResponse(
-                speaker=item.speaker, start_time=item.start_time, confidence=item.confidence
+                speaker=item.speaker, start_time=item.start_time, confidence=item.confidence, job_id=job.id
             )
             for item in summary.needs_review
         ]
@@ -633,6 +659,8 @@ def _to_response(job: SpeechBatchJob) -> JobResponse:
         transcription_duration_seconds=job.transcription_duration_seconds,
         model_identifier=job.model_identifier,
         model_display_name=job.model_display_name,
+        hearing_id=hearing_of(job),
+        hearing_date=day_date(job),
     )
 
 
@@ -1072,6 +1100,10 @@ async def _submit_job(
         if existing:
             return _replay(existing, current_user, jurisdiction, audit)
 
+    adding_to = None
+    if body.hearing_id:
+        adding_to = await _hearing_to_add_to(body.hearing_id, session, current_user, jurisdiction, audit)
+
     # blob_name is later trusted by GET /jobs/{id}/audio to read straight from
     # storage — without this check a caller could point it at another user's
     # blob (upload_audio issues names under uploads/{current_user.id}/...) and
@@ -1131,6 +1163,37 @@ async def _submit_job(
     # is found by the user's and the upload's ids, so nothing the client sent names a blob; no original
     # (an upload that was converted in the request) is submitted as before.
     source_blob = await _waiting_source(body, current_user)
+    job_id = uuid4()
+    hearing_id = adding_to.id if adding_to else job_id
+    if adding_to is None:
+        new_hearing(
+            session, hearing_id=job_id, user_id=current_user.id, jurisdiction_id=jurisdiction.id, metadata=body.metadata
+        )
+    else:
+        touch_hearing(session, hearing_id)
+    audit.detail["hearing_id"] = str(hearing_id)
+    day = {"job_id": job_id, "hearing_id": hearing_id, "hearing_date": body.hearing_date or today_in_london()}
+    added = audited("hearing.add_recording", current_user.id, hearing_id, "hearing") if adding_to else nullcontext(None)
+    with added as added_audit:
+        job = await _create_job(body, session, current_user, jurisdiction, audit, source_blob, day)
+        if job.id != job_id:  # an idempotent replay: nothing was added, and its hearing is the job's own
+            audit.detail["hearing_id"] = str(hearing_of(job))
+            if added_audit is not None:
+                added_audit.skip()
+        elif added_audit is not None:
+            added_audit.detail["job_id"] = str(job.id)
+    return job
+
+
+async def _create_job(
+    body: SubmitJobRequest,
+    session: Session,
+    current_user: AuthenticatedUser,
+    jurisdiction: ActiveJurisdiction,
+    audit: AuditScope,
+    source_blob: str | None,
+    day: dict,
+) -> SpeechBatchJob:
     try:
         if source_blob is not None:
             job = defer_batch_job(
@@ -1145,6 +1208,7 @@ async def _submit_job(
                 audio_blob_path=body.blob_name,
                 user_id=current_user.id,
                 jurisdiction_id=jurisdiction.id,  # DIAAT-334
+                **day,
             )
         else:
             job = await submit_and_queue_batch_job(
@@ -1158,6 +1222,7 @@ async def _submit_job(
                 audio_blob_path=body.blob_name,
                 user_id=current_user.id,
                 jurisdiction_id=jurisdiction.id,  # DIAAT-334
+                **day,
             )
     except IntegrityError:
         # Two concurrent requests with the same idempotency_key both passed the
@@ -1183,6 +1248,57 @@ async def _submit_job(
         ) from None
 
     return job
+
+
+_HEARING_NOT_FOUND = "Hearing not found"
+_MULTI_DAY_OFF = "Hearings with recordings of several days are not switched on"
+
+
+async def _hearing_to_add_to(
+    hearing_id: UUID,
+    session: Session,
+    current_user: AuthenticatedUser,
+    jurisdiction: ActiveJurisdiction,
+    audit: AuditScope,
+) -> HearingRecord:
+    """DIAAT-428: the caller's own hearing in this jurisdiction, held until the new day is committed so it
+    cannot be deleted meanwhile. Anyone else's, or another jurisdiction's, is the 404 of an unknown one."""
+    if not await asyncio.to_thread(feature_flags.is_multi_day_hearings_enabled):
+        audit.skip()
+        raise HTTPException(status_code=403, detail=_MULTI_DAY_OFF)
+    hearing = await asyncio.to_thread(find_hearing, session, hearing_id, lock=True)
+    try:
+        _check_hearing_access(hearing, hearing_id, current_user, jurisdiction, "hearing.add_recording", JOB, SUBMIT)
+    except HTTPException:
+        audit.skip()
+        raise
+    if not hearing.stored:
+        await asyncio.to_thread(store_unstored_hearing, session, hearing)
+        hearing = await asyncio.to_thread(find_hearing, session, hearing_id, lock=True)
+    return hearing
+
+
+def _check_hearing_access(
+    hearing: HearingRecord | None,
+    hearing_id: UUID,
+    current_user: AuthenticatedUser,
+    jurisdiction: ActiveJurisdiction,
+    action: AuditAction,
+    resource_type: str,
+    security_action: str,
+) -> None:
+    """404 unless the hearing is the caller's and in the jurisdiction they work in; a refusal is recorded
+    as for a job (_check_job_access, _job_in_jurisdiction)."""
+    if hearing is None:
+        raise HTTPException(status_code=404, detail=_HEARING_NOT_FOUND)
+    if hearing.user_id is None or hearing.user_id != current_user.id:
+        record_ownership_violation(resource_type, security_action, "blocked")
+        reason: DenialReason = "legacy_job" if hearing.user_id is None else "not_owner"
+        write_audit(denied(action, current_user.id, hearing_id, reason, "hearing"))
+        raise HTTPException(status_code=404, detail=_HEARING_NOT_FOUND)
+    if hearing.jurisdiction_id != jurisdiction.id:
+        record_jurisdiction_blocked(resource_type, security_action, actor_id=current_user.id, object_id=hearing_id)
+        raise HTTPException(status_code=404, detail=_HEARING_NOT_FOUND)
 
 
 async def _waiting_source(body: SubmitJobRequest, current_user: AuthenticatedUser) -> str | None:
@@ -1974,6 +2090,8 @@ class HistoryItemResponse(BaseModel):
     actor_label: str
     actor_role: str | None
     outcome: str
+    # DIAAT-428: the recording day the row is about, if it is about one.
+    job_id: UUID | None = None
 
 
 class JobHistoryResponse(BaseModel):
@@ -2135,10 +2253,24 @@ async def delete_job(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     _check_job_access(job, current_user, "job", "delete")
+    # DIAAT-428: the job is one day of its hearing; the hearing goes with its last day. A job with no
+    # hearing_id (written by the previous release) is a one-day hearing of its own, with no row to delete.
+    hearing_id = job.hearing_id
+    if (
+        hearing_id is not None
+        and not await asyncio.to_thread(feature_flags.is_multi_day_hearings_enabled)
+        and await asyncio.to_thread(day_count, session, hearing_id) > 1
+    ):
+        raise HTTPException(status_code=403, detail=_MULTI_DAY_OFF)
     # DIAAT-286: success once the row is deleted; failed (http_502) if the audio could
     # not be deleted and the job was kept.
-    with audited("job.delete", current_user.id, job.id):
+    with audited("job.delete", current_user.id, job.id) as audit:
+        if hearing_id is not None:
+            audit.detail["hearing_id"] = str(hearing_id)
         await _delete_job(session, job)
+    if hearing_id is not None and not await asyncio.to_thread(delete_hearing_if_empty, session, hearing_id):
+        touch_hearing(session, hearing_id)
+        session.commit()
     return Response(status_code=204)
 
 
@@ -2197,3 +2329,256 @@ async def _delete_job(session: Session, job: SpeechBatchJob) -> None:
     await _delete_own_batch_job(job)
     session.delete(job)
     session.commit()
+
+
+# ---------------------------------------------------------------------------
+# Hearings (DIAAT-428): what a Judge sees as one recording, made of recording days
+# ---------------------------------------------------------------------------
+
+
+class HearingDaySummaryResponse(BaseModel):
+    job_id: UUID
+    day_number: int
+    hearing_date: date
+    audio_file_name: str | None = None
+    # The day's job status, as JobResponse.status: pending, submitted, running, succeeded or failed.
+    status: str
+    created_at: str
+    audio_duration_seconds: float | None = None
+    transcription_duration_seconds: float | None = None
+    model_identifier: str | None = None
+    model_display_name: str | None = None
+    error_message: str | None = None
+
+
+class _HearingFields(BaseModel):
+    hearing_id: UUID
+    created_at: str | None = None
+    updated_at: str | None = None
+    case_reference: str | None = None
+    tribunal: str | None = None
+    # processing while any day is; completed once every day is; failed if every day failed; else partial.
+    status: str
+    day_count: int
+    days_complete: int
+    days_failed: int
+
+
+class HearingSummaryResponse(_HearingFields):
+    days: list[HearingDaySummaryResponse]
+
+
+class ListHearingsResponse(BaseModel):
+    hearings: list[HearingSummaryResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+class HearingDayResponse(JobResponse):
+    day_number: int
+
+
+class HearingResponse(_HearingFields):
+    days: list[HearingDayResponse]
+
+
+class HearingDateRequest(BaseModel):
+    hearing_date: date
+
+
+def _iso(moment: datetime | None) -> str | None:
+    return moment.isoformat() if moment else None
+
+
+def _hearing_fields(hearing: HearingRecord, days: list[SpeechBatchJob]) -> dict[str, object]:
+    first = days[0].metadata_ if days else {}
+    states = [day.status for day in days]
+    return {
+        "hearing_id": hearing.id,
+        "created_at": _iso(hearing.created_datetime),
+        "updated_at": _iso(hearing.updated_datetime),
+        "case_reference": hearing.metadata.get("case_reference") or (first or {}).get("case_reference"),
+        "tribunal": hearing.metadata.get("tribunal") or (first or {}).get("tribunal"),
+        "status": hearing_status(days),
+        "day_count": len(days),
+        "days_complete": states.count(JobStatus.SUCCEEDED),
+        "days_failed": states.count(JobStatus.FAILED),
+    }
+
+
+def _hearing_summary(hearing: HearingRecord, days: list[SpeechBatchJob]) -> HearingSummaryResponse:
+    return HearingSummaryResponse(
+        **_hearing_fields(hearing, days),
+        days=[
+            HearingDaySummaryResponse(
+                job_id=day.id,
+                day_number=number,
+                hearing_date=day_date(day),
+                audio_file_name=(day.metadata_ or {}).get("audio_file_name"),
+                status=day.status.value,
+                created_at=day.created_datetime.isoformat(),
+                audio_duration_seconds=day.audio_duration_seconds,
+                transcription_duration_seconds=day.transcription_duration_seconds,
+                model_identifier=day.model_identifier,
+                model_display_name=day.model_display_name,
+                error_message=day.error_message,
+            )
+            for number, day in enumerate(days, start=1)
+        ],
+    )
+
+
+def _own_hearing(
+    session: Session,
+    hearing_id: UUID,
+    current_user: AuthenticatedUser,
+    jurisdiction: ActiveJurisdiction,
+    action: AuditAction,
+    resource_type: str,
+    security_action: str,
+) -> HearingRecord:
+    hearing = find_hearing(session, hearing_id)
+    _check_hearing_access(hearing, hearing_id, current_user, jurisdiction, action, resource_type, security_action)
+    return hearing
+
+
+@router.get("/hearings", response_model=ListHearingsResponse)
+async def list_hearings(
+    session: Session = Depends(get_session),
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
+    jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> ListHearingsResponse:
+    """The caller's hearings in the jurisdiction they work in, the one with the latest upload first: a
+    summary of each and of its days, never a transcript. Not audited as a view (as GET /jobs)."""
+    entries, total = list_hearings_paginated(session, current_user.id, jurisdiction.id, limit=limit, offset=offset)
+    return ListHearingsResponse(
+        hearings=[_hearing_summary(entry.hearing, entry.days) for entry in entries],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/hearings/{hearing_id}", response_model=HearingResponse)
+async def get_hearing(
+    hearing_id: UUID,
+    session: Session = Depends(get_session),
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
+    jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),
+    day: UUID | None = Query(default=None, description="Only this day's transcript (a job_id of the hearing)"),
+) -> HearingResponse:
+    """The hearing and every day in order, each with its transcript (with ``day``, only that day's). One
+    ``transcript.view`` of the hearing names the days whose transcript was returned; none while no day
+    has one yet."""
+    hearing = _own_hearing(session, hearing_id, current_user, jurisdiction, "transcript.view", TRANSCRIPT, READ)
+    days = days_of(session, hearing_id, transcripts=day is None)
+    if day is not None and day not in {d.id for d in days}:
+        raise HTTPException(status_code=404, detail="Day not found")
+    for each in days:
+        _assert_job_owner(each, current_user, "transcript", "read")
+    with audited("transcript.view", current_user.id, hearing_id, "hearing") as audit:
+        responses = [
+            HearingDayResponse(**dict(_to_response(each, with_transcript=day in (None, each.id))), day_number=number)
+            for number, each in enumerate(days, start=1)
+        ]
+        shown = [str(r.job_id) for r in responses if r.dialogue_entries is not None]
+        if shown:
+            audit.detail["job_ids"] = shown
+        else:
+            audit.skip()
+    return HearingResponse(**_hearing_fields(hearing, days), days=responses)
+
+
+@router.patch(
+    "/jobs/{job_id}/hearing-date", dependencies=[_job_in_jurisdiction(JOB)], response_model=HearingSummaryResponse
+)
+async def set_hearing_date(
+    job_id: UUID,
+    body: HearingDateRequest,
+    session: Session = Depends(get_session),
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
+) -> HearingSummaryResponse:
+    """Change the date of one day of a hearing (any date); the days are ordered by it. Returns the hearing."""
+    job = get_job_by_id(session, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    _check_job_access(job, current_user, "transcript", "write")
+    if not await asyncio.to_thread(feature_flags.is_multi_day_hearings_enabled):
+        raise HTTPException(status_code=403, detail=_MULTI_DAY_OFF)
+    hearing_id = hearing_of(job)
+    with audited("hearing.edit", current_user.id, hearing_id, "hearing") as audit:
+        audit.detail.update({"kind": "hearing_date", "job_id": str(job.id)})
+        job.hearing_date = body.hearing_date
+        job.updated_datetime = datetime.now(UTC)
+        session.add(job)
+        touch_hearing(session, hearing_id)
+        session.commit()
+    return _hearing_summary(find_hearing(session, hearing_id), days_of(session, hearing_id, transcripts=False))
+
+
+@router.delete("/hearings/{hearing_id}", status_code=204)
+async def delete_hearing(
+    hearing_id: UUID,
+    session: Session = Depends(get_session),
+    current_user: AuthenticatedUser = Depends(require_permission("recording.own")),
+    jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),
+) -> Response:
+    """Delete the hearing and every day of it, as DELETE /jobs/{id} deletes one. A day that cannot be
+    deleted is kept, with the hearing: 502, and the delete can be repeated for what is left."""
+    _own_hearing(session, hearing_id, current_user, jurisdiction, "hearing.delete", JOB, DELETE)
+    with audited("hearing.delete", current_user.id, hearing_id, "hearing") as audit:
+        kept = 0
+        for each in days_of(session, hearing_id, transcripts=False):
+            job = get_job_by_id(session, each.id)
+            if job is None:
+                continue
+            refusal = _ownership_refusal(job, current_user, "job", "delete")
+            if refusal is not None:
+                write_audit(refusal)
+                kept += 1
+                continue
+            try:
+                with audited("job.delete", current_user.id, job.id) as day_audit:
+                    day_audit.detail["hearing_id"] = str(hearing_id)
+                    await _delete_job(session, job)
+            except HTTPException:
+                kept += 1
+        if kept:
+            audit.detail["days_kept"] = kept
+            raise HTTPException(
+                status_code=502, detail="Not every recording of this hearing could be deleted. Please try again."
+            )
+        # A day added meanwhile keeps the hearing: say so, as for a day that could not be deleted.
+        if not await asyncio.to_thread(delete_hearing_if_empty, session, hearing_id):
+            raise HTTPException(
+                status_code=502, detail="Not every recording of this hearing could be deleted. Please try again."
+            )
+    return Response(status_code=204)
+
+
+@router.get("/hearings/{hearing_id}/history", response_model=JobHistoryResponse)
+async def get_hearing_history(
+    hearing_id: UUID,
+    session: Session = Depends(get_session),
+    current_user: AuthenticatedUser = Depends(require_permission("recording.audit.read")),
+    jurisdiction: ActiveJurisdiction = Depends(_recording_jurisdiction),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+) -> JobHistoryResponse:
+    """The hearing's audit history, as GET /jobs/{id}/history for one recording: the hearing's own rows,
+    its days', and those of days deleted from it, newest first; ``job_id`` says which day a row is about."""
+    _own_hearing(session, hearing_id, current_user, jurisdiction, "transcript.view", TRANSCRIPT, READ)
+    days = days_of(session, hearing_id, transcripts=False)
+    items, total = hearing_history(
+        session,
+        hearing_id,
+        [d.id for d in days],
+        current_user.id,
+        current_user.name or current_user.email,
+        page=page,
+        page_size=page_size,
+    )
+    return JobHistoryResponse(items=[HistoryItemResponse(**item.__dict__) for item in items], total=total)

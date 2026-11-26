@@ -26,6 +26,7 @@ EXPECTED_TABLES = {
     "caller",
     "correction_dataset_entry",
     "document_content",
+    "hearing",
     "jurisdiction",
     "jurisdiction_membership",
     "jurisdiction_template",
@@ -67,6 +68,7 @@ ADDED_AWARE_TIMESTAMP_COLUMNS = {
     "system_feature_flag": ["updated_at"],  # 0009
     "setting_version": ["saved_at"],  # 0015
     "transcription_job_part": ["created_datetime", "updated_datetime"],  # 0018
+    "hearing": ["created_datetime", "updated_datetime"],  # 0019
 }
 
 # Dictation migration a8f2c9d5e1b3 (fix for 15-20s p95 latency); 0001 lost them.
@@ -101,7 +103,7 @@ def _alter_type_sql(table: str, column: str, type_sql: str) -> re.Pattern[str]:
 def test_there_is_one_history_with_one_head():
     script = ScriptDirectory.from_config(migrations.alembic_config())
     assert script.get_bases() == ["0001"]
-    assert script.get_heads() == ["0018"]
+    assert script.get_heads() == ["0019"]
 
 
 def test_baseline_creates_every_table(monkeypatch):
@@ -936,7 +938,8 @@ def test_0004_and_0005_keep_every_existing_value_unchanged():
         # Whole rows, as JSON, without the columns 0004 adds.
         added = {
             "user": ["active_jurisdiction_id", "name", "is_active", "sysadmin"],  # 0004, then 0009, then 0014
-            "transcription_job": ["source_blob_path", "preparation_attempts"],  # 0017
+            # 0017; 0019 sets hearing_id and hearing_date (test_0019_makes_each_job_a_hearing_...)
+            "transcription_job": ["source_blob_path", "preparation_attempts", "hearing_id", "hearing_date"],
         }
         tables = (
             "user",
@@ -1456,3 +1459,65 @@ def test_0013_stores_the_administrators_judge_and_legal_text_manager_under_a_loc
     assert sql.index(lock) < sql.index("INSERT INTO role_assignment")
     assert "('Judge'), ('LegalTextManager')" in sql
     assert _forbidden_live_writes("0013", sql) == []
+
+
+@pytest.mark.skipif(not os.getenv("TEST_POSTGRES_URL"), reason="needs TEST_POSTGRES_URL (a throwaway Postgres)")
+def test_0019_makes_each_job_a_hearing_dated_the_day_it_was_uploaded_in_london_and_goes_up_down_up():
+    """DIAAT-428: every job becomes a one-day hearing whose id is the job's, so its links and audit rows
+    still name it; the day is the date of the upload in London, whatever the session's time zone."""
+    from datetime import date
+
+    from sqlalchemy import create_engine, text
+
+    from alembic import command
+
+    engine = create_engine(os.environ["TEST_POSTGRES_URL"], connect_args={"options": "-c timezone=UTC"})
+    try:
+        _reset(engine)
+        _migrate(engine, command.upgrade, "0018")
+        uploads = {
+            "00000000-0000-4000-8000-000000000001": "2026-07-01 23:30:00+00",  # BST: 00:30 on 2 July in London
+            "00000000-0000-4000-8000-000000000002": "2026-01-01 23:30:00+00",  # GMT: still 1 January
+            "00000000-0000-4000-8000-000000000003": "2026-10-24 23:00:00+00",  # BST until 25 October: midnight in London
+        }
+        with engine.begin() as connection:
+            for job_id, created in uploads.items():
+                connection.execute(
+                    text(
+                        "INSERT INTO transcription_job (id, created_datetime, status, audio_url, locale,"
+                        " enable_diarization, needs_cleanup, metadata, dialogue_entries)"
+                        " VALUES (:id, :created, 'SUCCEEDED', 'https://x/a.wav', 'en-GB', true, false,"
+                        """ '{"case_reference": "PA/1", "audio_file_name": "a.mp3"}', '[]')"""
+                    ),
+                    {"id": job_id, "created": created},
+                )
+
+        _migrate(engine, command.upgrade, "head")
+
+        with engine.connect() as connection:
+            days = connection.execute(
+                text("SELECT id::text, hearing_id::text, hearing_date FROM transcription_job ORDER BY id")
+            ).all()
+            hearings = connection.execute(text("SELECT id::text, metadata FROM hearing ORDER BY id")).all()
+        assert [(d[0] == d[1], d[2]) for d in days] == [
+            (True, date(2026, 7, 2)),
+            (True, date(2026, 1, 1)),
+            (True, date(2026, 10, 25)),
+        ]
+        assert hearings == [(job_id, {"case_reference": "PA/1"}) for job_id in uploads]
+
+        _migrate(engine, command.downgrade, "0018")
+        with engine.connect() as connection:
+            columns = connection.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns"
+                    " WHERE table_name = 'transcription_job' AND column_name LIKE 'hearing%'"
+                )
+            ).all()
+            tables = connection.execute(text("SELECT to_regclass('hearing')")).scalar_one()
+            jobs = connection.execute(text("SELECT count(*) FROM transcription_job")).scalar_one()
+        assert (columns, tables, jobs) == ([], None, 3)
+
+        _migrate(engine, command.upgrade, "head")
+    finally:
+        engine.dispose()

@@ -23,6 +23,8 @@ class FlagsResponse(BaseModel):
     # DIAAT-408: the longest recording the upload accepts now (stt/recording_limits.py: 4 hours
     # unless both async_upload_preparation and long_recordings_enabled are on), for the upload page's hint.
     max_recording_seconds: int
+    # DIAAT-428: whether a hearing can have recordings of several days.
+    multi_day_hearings: bool
 
 
 # A plain def: the flag lookup is a database read, so FastAPI runs it in the threadpool.
@@ -33,4 +35,5 @@ def get_flags(response: Response, _user=Depends(signed_in_endpoint)) -> FlagsRes
     return FlagsResponse(
         dictation_enabled=feature_flags.is_dictation_enabled(),
         max_recording_seconds=current_limit_seconds(),
+        multi_day_hearings=feature_flags.is_multi_day_hearings_enabled(),
     )

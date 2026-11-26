@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, DateTime, ForeignKey, Index, Text, UniqueConstraint, Uuid, text
+from sqlalchemy import Column, Date, DateTime, ForeignKey, Index, Text, UniqueConstraint, Uuid, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -569,6 +569,18 @@ class Caller(BaseTable, table=True):
     azure_app_id: str | None = Field(default=None)
 
 
+class Hearing(BaseTable, table=True):
+    """DIAAT-428 (0019): a hearing, what a Judge sees as one recording. Its days are the jobs whose
+    ``hearing_id`` names it (domain/hearings.py). ``metadata`` keeps what the days share: case_reference
+    and tribunal."""
+
+    __tablename__ = "hearing"
+
+    user_id: UUID | None = Field(default=None, foreign_key="user.id", index=True)
+    jurisdiction_id: UUID | None = Field(default=None, foreign_key="jurisdiction.id", index=True)
+    metadata_: dict = Field(default_factory=dict, sa_column=Column("metadata", JSONB))
+
+
 class SpeechBatchJob(BaseTable, table=True):
     __tablename__ = "transcription_job"
     __table_args__ = (
@@ -586,6 +598,7 @@ class SpeechBatchJob(BaseTable, table=True):
             postgresql_where=text("user_id IS NOT NULL AND idempotency_key IS NOT NULL"),
         ),
         Index("ix_transcription_job_dialogue_entries_gin", "dialogue_entries", postgresql_using="gin"),
+        Index("ix_transcription_job_hearing_order", "hearing_id", "hearing_date", "created_datetime"),
     )
 
     # NULL for JWT-authenticated submissions (no Caller row exists).
@@ -598,6 +611,17 @@ class SpeechBatchJob(BaseTable, table=True):
     # before is the IAC's; NULL only for a job no jurisdiction can reach.
     jurisdiction_id: UUID | None = Field(default=None, foreign_key="jurisdiction.id", index=True)
     status: JobStatus = Field(default=JobStatus.PENDING)
+    # DIAAT-428 (0019): the hearing this job is a day of, and the day. Nullable until a later migration:
+    # a job written by the previous release during the rollout has neither (domain/hearings.py).
+    hearing_id: UUID | None = Field(
+        default=None,
+        sa_column=Column(
+            Uuid,
+            ForeignKey("hearing.id", ondelete="RESTRICT", name="fk_transcription_job_hearing_id_hearing"),
+            nullable=True,
+        ),
+    )
+    hearing_date: date | None = Field(default=None, sa_type=Date)
 
     # Submission fields
     audio_url: str

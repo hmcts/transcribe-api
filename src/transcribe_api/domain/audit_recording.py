@@ -12,7 +12,11 @@ Audited actions (the vocabulary is ``runtime/telemetry_schema.AUDIT_ACTIONS``):
 * ``transcript.view``: a transcript was returned by the job detail (GET /jobs/{id});
 * ``audio.export``: the job's audio was streamed back (the only audio egress);
 * ``job.delete``: a job and its audio were deleted;
-* ``job.submit``: a transcription job was submitted;
+* ``job.submit``: a transcription job was submitted (``detail.hearing_id``: the hearing it is a day of);
+* ``hearing.add_recording``, ``hearing.edit`` and ``hearing.delete`` (DIAAT-428): a recording day was added to a
+  hearing (``detail.job_id``), a day's date was changed (``detail.kind`` ``hearing_date``, ``detail.job_id``), a hearing
+  was deleted with all its days. Their object is the hearing (``object_type`` ``hearing``). ``job.delete`` of a day has
+  ``detail.hearing_id``;
 * ``transcript.edit`` (a correction, a merge, a baseline), ``transcript.rename_speaker``, ``transcript.rollback`` and
   ``transcript.accept``: recorded when done (DIAAT-395; ``transcript.edit`` also when refused). ``detail`` has the kind of edit
   and a segment ID, never its text.
@@ -82,9 +86,12 @@ AuditAction = Literal[
     "transcript.accept",
     "audio.export",
     "job.delete",
+    "hearing.add_recording",
+    "hearing.edit",
+    "hearing.delete",
 ]
 AuditOutcome = Literal["success", "denied", "failed"]
-AuditObjectType = Literal["job", "upload"]
+AuditObjectType = Literal["job", "upload", "hearing"]
 SecurityResourceType = Literal["job", "transcript", "audio", "upload"]
 SecurityAction = Literal["read", "write", "delete", "submit"]
 

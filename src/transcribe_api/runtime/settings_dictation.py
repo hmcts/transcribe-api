@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     # SystemAdministrator overrides them (domain/feature_flags.py).
     ASYNC_UPLOAD_PREPARATION: bool = False
     LONG_RECORDINGS_ENABLED: bool = False
+    # DIAAT-428: the default of the flag `multi_day_hearings` (adding a recording day to a hearing,
+    # deleting one day of several, changing a day's date). Off until the web app is ready for it.
+    MULTI_DAY_HEARINGS: bool = False
     # DIAAT-373: signs the BenchNotes access token (domain/auth/app_token.py). Required
     # outside local and test (the API refuses to start without it): at least 32 characters.
     # Generate: python -c "import secrets; print(secrets.token_urlsafe(48))"
