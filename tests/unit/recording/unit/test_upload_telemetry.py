@@ -212,12 +212,12 @@ def test_recording_exactly_at_the_limit_is_accepted(tel, mocker):
 
 
 def test_effective_duration_limit_is_azures_240_minutes_per_file_with_the_flags_off():
-    # DIAAT-408: the setting is 8 hours, but a recording over Azure's 240 minutes per file is
+    # DIAAT-408: the setting is 20 hours, but a recording over Azure's 240 minutes per file is
     # accepted only with both flags on (tests/unit/recording/unit/audio/test_recording_limits.py).
     from transcribe_api.runtime.settings_recording import Settings
     from transcribe_api.stt.recording_limits import current_limit_seconds
 
-    assert Settings.model_fields["MAX_AUDIO_DURATION_SECONDS"].default == 8 * 60 * 60
+    assert Settings.model_fields["MAX_AUDIO_DURATION_SECONDS"].default == 20 * 60 * 60
     assert current_limit_seconds() == 240 * 60
 
 
@@ -603,16 +603,16 @@ def test_five_hours_is_accepted_with_both_flags_on(tel, mocker, monkeypatch, tmp
     assert _post(_client(mocker)).status_code == 201
 
 
-def test_over_eight_hours_is_refused_with_both_flags_on_naming_the_8_hour_limit(tel, mocker, monkeypatch, tmp_path):
+def test_over_twenty_hours_is_refused_with_both_flags_on_naming_the_20_hour_limit(tel, mocker, monkeypatch, tmp_path):
     _both_flags(monkeypatch, True)
     _store_locally(monkeypatch, tmp_path)
     mocker.patch(
         "transcribe_api.api.routes_recording.probe_audio_duration",
-        new=mocker.AsyncMock(return_value=ProbedDuration(8 * 3600.0 + 120, exact=True)),
+        new=mocker.AsyncMock(return_value=ProbedDuration(20 * 3600.0 + 120, exact=True)),
     )
     response = _post(_client(mocker))
     assert response.status_code == 422
-    assert response.json()["detail"] == "The recording is 8 hours 2 minutes long. Recordings can be at most 8 hours."
+    assert response.json()["detail"] == "The recording is 20 hours 2 minutes long. Recordings can be at most 20 hours."
 
 
 def test_one_flag_alone_does_not_lift_the_4_hour_limit(tel, mocker, monkeypatch):

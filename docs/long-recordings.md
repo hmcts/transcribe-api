@@ -1,6 +1,6 @@
 # Long recordings (DIAAT-408)
 
-Recordings of up to 8 hours, and uploads that never wait on the 30 second limit of the frontend Application Gateway: how the
+Recordings of up to 20 hours, and uploads that never wait on the 30 second limit of the frontend Application Gateway: how the
 service accepts, prepares, cuts, submits and assembles them, how to roll the flags out and back, and what to check on AAT. The
 [README](../README.md) has the short version and the settings that matter day to day.
 
@@ -16,7 +16,7 @@ accepted.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `MAX_AUDIO_DURATION_SECONDS` | 28800 (8 h) | The longest recording the service can accept, as decoded. It applies in full only while both flags below are on; otherwise the limit is `min(this, 14400)`. |
+| `MAX_AUDIO_DURATION_SECONDS` | 72000 (20 h) | The longest recording the service can accept, as decoded. It applies in full only while both flags below are on; otherwise the limit is `min(this, 14400)`. |
 | `PART_TARGET_SECONDS` | 12600 (3 h 30 m) | The longest part a recording over 240 minutes is split into. 1 to 14400 (Azure's per-file limit). |
 | `MAX_PARALLEL_PARTS` | 4 | How many parts of one recording are prepared and submitted at once. |
 | `MAX_UPLOAD_BYTES` | 1 GiB | Backstop on the size of one upload (HTTP 413 above it). **transcribe-web reads the same figure from its own `MAX_UPLOAD_BYTES` environment variable: set both to the same value.** 1 GiB is the agreed limit for now; a larger one would also need an upload in blocks that can resume (not built, no follow-up planned). |
@@ -116,7 +116,7 @@ lifecycle rule on the prefix would be a safety net for the abandoned ones, and i
 ## Recordings over 240 minutes (`long_recordings_enabled`, with `async_upload_preparation`)
 
 Azure fails a file over 240 minutes, so with **both flags on** a recording longer than that (up to `MAX_AUDIO_DURATION_SECONDS`,
-8 hours) is cut into parts by the worker, and each part is its own Azure batch job. A recording of 240 minutes or less is never cut:
+20 hours) is cut into parts by the worker, and each part is its own Azure batch job. A recording of 240 minutes or less is never cut:
 it keeps the single-file path above, with no part rows. With either flag off the limit is 240 minutes, and a longer recording is
 refused with the 4-hour sentence: by the upload from its header (or, if the header states no length, by the exact check after
 conversion), or by the worker for a job that was deferred.
@@ -128,7 +128,7 @@ conversion), or by the worker for a job that was deferred.
   into the parts, in a thread, at the frame nearest each planned cut (no re-encode, exact to the sample; about a third of a second
   per hour of audio on a development machine with the file cached, memory 128 KiB). Nothing goes through a command line: ffmpeg's
   segment muxer, used before, took every cut time in ONE argument, and Linux limits one argument to 128 KiB, so a long recording cut
-  into short parts (`PART_TARGET_SECONDS` is valid down to 1: 28,799 cuts for 8 hours, about 363 KB) could never even be started, and
+  into short parts (`PART_TARGET_SECONDS` is valid down to 1: 71,999 cuts for 20 hours, about 0.9 MB) could never even be started, and
   the muxer cut at packet boundaries that differ between ffmpeg versions (about 0.06 s with 8.0.1, up to 0.128 s with the 9.0.2 of
   the production image). The parts are numbered `part-000.wav` upward, in cutting order, and each part's offset and length are still
   measured from its file. The planner keeps every part a second inside the limit (`SEGMENT_SLACK_SECONDS`, a margin that was sized
@@ -228,7 +228,7 @@ conversion), or by the worker for a job that was deferred.
 | `PART_MAX_ATTEMPTS` / `PART_RETRY_BACKOFF_SECONDS` | 3 / 5 | Attempts at one part before the job fails, and the wait (times the attempt number) between them. |
 | `JOB_STUCK_PART_FACTOR` | 1.5 | A job in parts is stuck after this many times its longest part has run (above). |
 
-Temporary disk for a recording in parts: the converted WAV and its parts (about 115 MB per hour each, so about 1.8 GB for 8 hours)
+Temporary disk for a recording in parts: the converted WAV and its parts (about 115 MB per hour each, so about 4.6 GB for 20 hours)
 per job being prepared, beside the original while it is downloaded.
 
 ## Long recordings: rollout, rollback and operation (DIAAT-408)
@@ -245,12 +245,12 @@ browser makes answers in seconds whatever the recording's length, up to the size
 | Setting | Default | What it costs, or what to know |
 |---|---|---|
 | `MAX_UPLOAD_BYTES` | 1073741824 (1 GiB) | The backstop on one upload. **The web pod's `MAX_UPLOAD_BYTES` environment variable must be the same number** (the web refuses a declared size over its own before any of the body is read). 1 GiB is the agreed limit for now. One request through the gateway chain is untested above it, and a larger figure would also need an upload in blocks that can resume (not built, no follow-up planned). |
-| `MAX_AUDIO_DURATION_SECONDS` | 28800 (8 h) | Applies in full only with both flags on; otherwise the limit is `min(this, 14400)`. |
+| `MAX_AUDIO_DURATION_SECONDS` | 72000 (20 h) | Applies in full only with both flags on; otherwise the limit is `min(this, 14400)`. |
 | `PART_TARGET_SECONDS` | 12600 (3 h 30 m) | Longest part aimed for; 1 to 14400. |
 | `MAX_PARALLEL_PARTS` | 4 | Parts stored and submitted at once: that many Azure batch jobs at once for one recording. Azure's concurrency quota for the Speech resource was not looked up (`SPEECH_CONCURRENT_JOBS_LIMIT` only drives a utilisation gauge and throttles nothing). |
 | `BLOB_UPLOAD_CONCURRENCY` | 8 | Blocks sent in parallel per blob: 8 x 4 MiB of memory per upload in flight (API pod: the original, 512 Mi limit; worker: per part and for the full WAV). Only the asynchronous path uses it. |
 | `PREPARE_POLL_INTERVAL_SECONDS` | 5 | How often the worker looks for jobs to prepare. |
-| `PREPARE_MAX_CONCURRENT` | 2 | Jobs prepared at once by one worker: each needs temporary disk for its WAV and parts (about 115 MB per hour of audio each, so about 2 x 0.9 GB for 8 h, plus the original while it is downloaded and converted, up to `MAX_UPLOAD_BYTES`). The worker pod has no ephemeral-storage limit (the shared Helm chart only sets memory and CPU), so this is node disk. |
+| `PREPARE_MAX_CONCURRENT` | 2 | Jobs prepared at once by one worker: each needs temporary disk for its WAV and parts (about 115 MB per hour of audio each, so about 2 x 2.3 GB for 20 h, plus the original while it is downloaded and converted, up to `MAX_UPLOAD_BYTES`). The worker pod has no ephemeral-storage limit (the shared Helm chart only sets memory and CPU), so this is node disk. |
 | `PREPARE_MAX_ATTEMPTS` | 3 | Attempts at a job before it fails (a crashed attempt counts). |
 | `PREPARE_LEASE_SECONDS` / `PREPARE_HEARTBEAT_SECONDS` | 300 / 30 | A job being prepared is renewed every heartbeat; another worker may take it over once the lease has run out. A crash is therefore retried after up to 5 minutes. The lease must be at least twice the heartbeat. |
 | `PREPARE_RETRY_BACKOFF_SECONDS` | 30 | Wait before a failed attempt is repeated (times the attempt number). |
@@ -274,7 +274,7 @@ still waiting when either `long_recordings_enabled` or `async_upload_preparation
 **Infrastructure (not in this repository).** (a) The worker's temporary files are on the node's disk: the shared Helm chart sets
 only memory and CPU, so no ephemeral-storage limit can be set from this repository, and the AKS nodes use ephemeral OS disks of a
 size that depends on the VM size, which is not recorded here. Check what disk the nodes give the worker, or watch the worker's
-restarts during the 8-hour test on AAT; a node under disk pressure evicts the worker, and the job is prepared again from the
+restarts during the long-recording tests on AAT; a node under disk pressure evicts the worker, and the job is prepared again from the
 start. (b) A lifecycle rule on the `incoming/` prefix of the recordings storage account that deletes blobs after a day is a safety
 net for originals of uploads that never became a job (the worker deletes all others). The storage module's `policy` option can
 only delete blob versions, so the rule would be an `azurerm_storage_management_policy` resource in the shared-infrastructure
@@ -310,11 +310,11 @@ ffmpeg's own peak memory was about 55 MB in each step. The browser-facing reques
 answered in 0.35 s (`/uploads`, 3.6 MB) to 0.9 s (28.8 MB) and 0.03-0.13 s (`/jobs`). The heavy end-to-end test (opt-in, below) ran
 in 4 min 28 s with a peak of 507 MB resident for the whole test process (the API, the services and the test; ffmpeg is a separate
 process). AAT measured 13-14 s per hour of conversion on a pod for real uploads: expect the preparation of an 8 h recording to take
-minutes there, and size the worker's disk from the table above, not from these figures.
+about 2 minutes there and a 20 h recording about 4.5 to 5 minutes of conversion before cutting, and size the worker's disk from the table above, not from these figures.
 
 **The end-to-end test.** `tests/unit/recording/long_e2e/` runs the real routes, the preparation service, the poller and real
 ffmpeg with the mock Speech backend over a 1 h, a 4 h (the limit), a 5 h and an 8 h recording, the three refusals (4 h 01 m with both
-flags off, with background preparation on and long recordings off, and 8 h 02 m), a corrupt file and a job deleted while its parts
+flags off, with background preparation on and long recordings off, and 20 h 02 m at the real size), a corrupt file and a job deleted while its parts
 are in flight. Every scenario runs in the normal suite at a scaled-down size (30 s stands for 240 minutes); the real sizes are
 deselected unless `RUN_LONG_E2E=1` (`pytest tests/unit/recording/long_e2e -m long_e2e`, optionally `LONG_E2E_DIR` for the generated
 audio and `LONG_E2E_REPORT` for a JSON of the timings; about 4 GB of temporary disk and 5 minutes).
@@ -341,14 +341,15 @@ the risk accepted; `GET /api/flags` shows `max_recording_seconds: 14400`.
 | Flip the flag off with an upload in flight | Jobs already deferred still complete; an upload made with the flag on whose `/jobs` lands after the flip still gives a `pending` job that the worker prepares and submits. |
 | Telemetry | `preparation.started/completed` per job, no 504s, server time per request under 10 s; the stuck gauge does not trip for preparing jobs. |
 
-**Part B, `long_recordings_enabled` on as well** (`max_recording_seconds` 28800):
+**Part B, `long_recordings_enabled` on as well** (`max_recording_seconds` 72000):
 
 | File | Expected |
 |---|---|
 | `over.mp3` (4 h 01 m) | Accepted; two parts; completes. |
 | A 5 h recording | Two parts; the transcript's second half starts at the second part's offset (about 2.5 h), times monotonic; speakers labelled `Part 1 · Speaker N`, `Part 2 · Speaker N`; one `job.finished` with `job.part_count` 2. |
 | An 8 h recording | Three parts, each at most 4 h (about 2 h 40 m with the defaults); record the wall clock of conversion, `splitting.completed`, each part's `job.part_finished` and the whole job; the worker pod's memory and disk while it prepares (`kubectl top` and ephemeral storage). |
-| An 8 h 02 m recording | A 422 with the 8-hour sentence in under 10 s. |
+| A 20 h recording (it needs a file under 1 GiB: at most about 119 kbps, e.g. a 64 kbps MP3 is about 576 MB) | Six parts of about 3 h 20 m, four prepared and submitted at once, two waves; record the wall clock of conversion, of the splitting and of each part, and the worker pod's memory and disk (about 4.6 GB of temporary disk for the WAV and its parts). |
+| A 20 h 02 m recording | A 422 with the 20-hour sentence in under 10 s. |
 | Speaker rename across parts | In the job page, rename `Part 1 · Speaker 0` and `Part 2 · Speaker 0` to the same name with "Replace all": one speaker. |
 | A job deleted mid-parts | No part blob, Azure job or row left. |
 | A part that fails (if one can be provoked) | The job fails at once naming the part; the others' Azure jobs and blobs are deleted. |

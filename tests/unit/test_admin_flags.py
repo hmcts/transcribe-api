@@ -81,7 +81,7 @@ def test_the_recording_flags_are_off_by_default_and_described(world, cast):
 
 
 def test_the_two_recording_flags_together_raise_the_recording_limit_at_once(world, cast, monkeypatch):
-    """DIAAT-408: GET /api/flags says how long a recording may be: 4 hours, 8 hours only with both flags on."""
+    """DIAAT-408: GET /api/flags says how long a recording may be: 4 hours, 20 hours only with both flags on."""
     monkeypatch.setattr(feature_flags, "CACHE_TTL_SECONDS", 60.0)  # a long one: only an invalidation can explain it
     headers = cast.judge.headers(JUDGE, "IAC")
 
@@ -92,7 +92,7 @@ def test_the_two_recording_flags_together_raise_the_recording_limit_at_once(worl
     cast.sysadmin.put("/api/admin/feature-flags/long_recordings_enabled", json={"value": True})
     assert limit() == 4 * 3600  # not on its own
     cast.sysadmin.put("/api/admin/feature-flags/async_upload_preparation", json={"value": True})
-    assert limit() == 8 * 3600
+    assert limit() == 20 * 3600
     cast.sysadmin.put("/api/admin/feature-flags/long_recordings_enabled", json={"value": False})
     assert limit() == 4 * 3600
     (first, second, third) = world.audit("feature_flag.changed")[:3]

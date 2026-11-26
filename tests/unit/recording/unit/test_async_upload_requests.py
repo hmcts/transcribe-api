@@ -213,17 +213,17 @@ def test_the_message_for_a_long_recording_names_the_effective_limit(client, monk
     assert response.json()["detail"] == "The recording is 4 hours 2 minutes long. Recordings can be at most 4 hours."
 
 
-def test_with_both_flags_on_the_same_recording_is_accepted_up_to_8_hours(client, monkeypatch, normalize, mocker):
+def test_with_both_flags_on_the_same_recording_is_accepted_up_to_20_hours(client, monkeypatch, normalize, mocker):
     _flag(monkeypatch, True, long_recordings=True)
     probe = mocker.patch(
         "transcribe_api.api.routes_recording.probe_audio_duration",
         new=mocker.AsyncMock(return_value=ProbedDuration(4 * 3600 + 120.0, exact=True)),
     )
     assert _upload(client).status_code == 201
-    probe.return_value = ProbedDuration(8 * 3600 + 120.0, exact=True)
+    probe.return_value = ProbedDuration(20 * 3600 + 120.0, exact=True)
     response = _upload(client)
     assert response.status_code == 422
-    assert response.json()["detail"] == "The recording is 8 hours 2 minutes long. Recordings can be at most 8 hours."
+    assert response.json()["detail"] == "The recording is 20 hours 2 minutes long. Recordings can be at most 20 hours."
 
 
 def test_a_recording_exactly_at_the_limit_is_accepted(client, monkeypatch, normalize, mocker):
@@ -353,7 +353,7 @@ def test_a_synchronous_upload_is_capped_at_azures_limit_when_the_flags_come_on_w
     client, monkeypatch, mocker, converting, tel
 ):
     """The upload chose the synchronous path (flag off); by the time it reads the limit both flags are on, so
-    the limit reads 8 hours: it must still refuse a 5 hour recording, which would be stored as ONE file."""
+    the limit reads 20 hours: it must still refuse a 5 hour recording, which would be stored as ONE file."""
     from transcribe_api.api import routes_recording
 
     _flag(monkeypatch, False)

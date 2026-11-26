@@ -56,17 +56,17 @@ class Scale:
     name: str
     limit: float  # Azure's limit per file (240 minutes)
     target: float  # the part target (3 h 30 m)
-    maximum: float  # the longest recording with both flags on (8 h)
+    maximum: float  # the longest recording with both flags on (20 h; the small scale's 64 s is a stand-in)
     one_hour: float
     exact_limit: float  # a recording exactly at the limit: one part
     five_hours: float
     over_limit: float  # 4 h 01 m
     eight_hours: float
-    over_maximum: float  # 8 h 02 m
+    over_maximum: float  # 20 h 02 m (the small scale's 68 s is just over its maximum)
 
 
-REAL = Scale("real", 14_400, 12_600, 28_800, 3_600, 14_400, 18_000, 14_460, 28_800, 28_920)
-# The same shape at 1/450: 30 s is 240 minutes, 64 s is 8 hours (three parts of about 21 s). The refusals
+REAL = Scale("real", 14_400, 12_600, 72_000, 3_600, 14_400, 18_000, 14_460, 28_800, 72_120)
+# The same shape at 1/450: 30 s is 240 minutes, 64 s is 8 hours (three parts of about 21 s) and is also the small scale's maximum. The refusals
 # are scaled by more than 1/450 (4 h 01 m would be 30.13 s): the header is refused on only beyond
 # HEADER_TOLERANCE_SECONDS (2 s, for the encoder delay and padding that differ between ffmpeg versions),
 # so a file meant to be refused from its header is more than that over, and one meant to be accepted
@@ -372,7 +372,7 @@ def test_with_both_flags_on_a_recording_over_the_maximum_is_refused_from_the_hea
 
     assert response.status_code == 422 and "Recordings can be at most" in response.json()["detail"]
     assert seconds < REQUEST_BUDGET_SECONDS and "convert in the request" not in h.timings and h.stored_files() == []
-    h.record("8 h 02 m (refused)", file_bytes=path.stat().st_size, refused_after=round(seconds, 2))
+    h.record("over the maximum (20 h 02 m at the real size, refused)", file_bytes=path.stat().st_size, refused_after=round(seconds, 2))
 
 
 SENTENCE = "The audio file could not be decoded. It may be corrupt or in an unsupported format."

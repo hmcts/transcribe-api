@@ -279,8 +279,8 @@ async def test_with_a_flag_off_a_recording_over_the_limit_still_fails_with_the_s
     assert _parts(engine, job.id) == [] and azure.submitted == []
 
 
-async def test_over_the_8_hour_setting_fails_even_with_both_flags_on(engine, azure, mocker):
-    mocker.patch.object(get_settings(), "MAX_AUDIO_DURATION_SECONDS", 60)  # 8 hours, scaled down; 64 s is over it
+async def test_over_the_20_hour_setting_fails_even_with_both_flags_on(engine, azure, mocker):
+    mocker.patch.object(get_settings(), "MAX_AUDIO_DURATION_SECONDS", 60)  # 20 hours, scaled down; 64 s is over it
     job = _waiting(engine)
     await _prepare()
     row = reload_job(engine, job.id)
@@ -288,7 +288,7 @@ async def test_over_the_8_hour_setting_fails_even_with_both_flags_on(engine, azu
     assert _parts(engine, job.id) == [] and azure.submitted == []
 
 
-async def test_the_real_limits_240_minutes_with_the_flags_off_and_8_hours_with_both_on(monkeypatch, mocker):
+async def test_the_real_limits_240_minutes_with_the_flags_off_and_20_hours_with_both_on(monkeypatch, mocker):
     """Unscaled: what _check_length enforces (the planner and the check agree on the same constants)."""
     mocker.stopall()  # drop the scaled limits of this module's fixtures
     service = PreparationService()
@@ -302,10 +302,11 @@ async def test_the_real_limits_240_minutes_with_the_flags_off_and_8_hours_with_b
     monkeypatch.setenv("ASYNC_UPLOAD_PREPARATION", "true")
     settings_dictation.get_settings.cache_clear()
     await service._check_length(5 * 3600.0)  # accepted: it will be split
-    await service._check_length(8 * 3600.0)
+    await service._check_length(8 * 3600.0)  # the old limit is no longer the limit
+    await service._check_length(20 * 3600.0)
     with pytest.raises(prep.PreparationFailed) as too_long:
-        await service._check_length(8 * 3600.0 + 120)
-    assert too_long.value.message == "The recording is 8 hours 2 minutes long. Recordings can be at most 8 hours."
+        await service._check_length(20 * 3600.0 + 120)
+    assert too_long.value.message == "The recording is 20 hours 2 minutes long. Recordings can be at most 20 hours."
 
 
 # Parallelism and order ----------------------------------------------------------------------------

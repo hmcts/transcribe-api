@@ -108,7 +108,7 @@ file names), every request gets an `X-Request-Id`, and health probes are not tra
 
 ## Recording length and size limits (DIAAT-408)
 
-Recordings of up to 8 hours are accepted when both system feature flags below are on; otherwise the limit is 240 minutes
+Recordings of up to 20 hours are accepted when both system feature flags below are on; otherwise the limit is 240 minutes
 (Azure batch transcription with diarization fails a file over that, so a longer recording is cut into parts, each its own Azure
 job, and merged). Every upload has its length read from the file header first, so an over-long or unreadable file is refused
 within seconds, whatever the flag. With `async_upload_preparation` on, `POST /uploads` only stores the original and the worker
@@ -119,7 +119,7 @@ operator checklist (not yet executed) are in [`docs/long-recordings.md`](docs/lo
 
 | Setting or flag (admin > Feature flags) | Default | Effect |
 |---|---|---|
-| `MAX_AUDIO_DURATION_SECONDS` | 28800 (8 h) | Longest recording, as decoded. In full only with both flags on; otherwise `min(this, 14400)`. |
+| `MAX_AUDIO_DURATION_SECONDS` | 72000 (20 h) | Longest recording, as decoded. In full only with both flags on; otherwise `min(this, 14400)`. |
 | `MAX_UPLOAD_BYTES` | 1 GiB | Backstop on one upload (413 above it). **transcribe-web reads the same figure from its own `MAX_UPLOAD_BYTES` environment variable: set both to the same value.** |
 | `async_upload_preparation` | `ASYNC_UPLOAD_PREPARATION=false` | `POST /uploads` stores the original and answers at once; the worker converts it and submits the job. |
 | `long_recordings_enabled` | `LONG_RECORDINGS_ENABLED=false` | Recordings over 240 minutes, up to `MAX_AUDIO_DURATION_SECONDS`. Takes effect only with `async_upload_preparation` on. |

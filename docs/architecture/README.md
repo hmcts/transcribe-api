@@ -243,7 +243,7 @@ flowchart TB
   up["Web sends each file to the API<br/>POST /api/v1/uploads"]
   check{"Allowed type and under<br/>MAX_UPLOAD_BYTES (1 GB)?"}
   probe["API reads the length from the file header (ffprobe)<br/>before it converts or stores anything"]
-  probeok{"Readable audio and not over<br/>the limit? 4 hours; 8 hours if both flags<br/>are on. (A header with no length passes)"}
+  probeok{"Readable audio and not over<br/>the limit? 4 hours; 20 hours if both flags<br/>are on. (A header with no length passes)"}
   mode{"Flag async_upload_preparation<br/>on?"}
   conv["API converts it to 16 kHz mono WAV<br/>with ffmpeg, inside the request"]
   decode{"Audio<br/>decodable?"}
