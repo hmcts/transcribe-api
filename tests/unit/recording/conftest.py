@@ -114,6 +114,52 @@ def fake_blob_storage(monkeypatch):
     return storage
 
 
+@pytest.fixture
+def memory_blob_storage(monkeypatch):
+    """Azure Blob Storage in memory (blob_stores.MemoryBlobStorage), for unit and functional tests."""
+    from tests.unit.recording.blob_stores import install_memory_blob_storage
+
+    return install_memory_blob_storage(monkeypatch)
+
+
+@pytest.fixture(scope="session")
+def azurite_connection_string():
+    """An Azurite for the session: TEST_AZURITE_CONNECTION_STRING's, or one Testcontainers starts. Skipped without."""
+    from tests.unit.recording.blob_stores import AZURITE_BLOB_PORT, azurite_connection_string_for, start_azurite
+
+    configured = os.environ.get("TEST_AZURITE_CONNECTION_STRING")
+    if configured:
+        yield configured
+        return
+    try:
+        container = start_azurite()
+    except Exception as exc:
+        pytest.skip(f"needs Azurite: Docker for Testcontainers, or TEST_AZURITE_CONNECTION_STRING ({type(exc).__name__})")
+    try:
+        yield azurite_connection_string_for(container.get_container_host_ip(), container.get_exposed_port(AZURITE_BLOB_PORT))
+    finally:
+        container.stop()
+
+
+@pytest.fixture
+def azurite_blob_storage(azurite_connection_string, monkeypatch):
+    """A container of its own in Azurite, as the storage of the code under test, for integration tests."""
+    from uuid import uuid4
+
+    from tests.unit.recording.blob_stores import AzuriteBlobStorage, storage_settings
+
+    storage = AzuriteBlobStorage(azurite_connection_string, [f"test-{uuid4().hex[:16]}"])
+    storage_settings(monkeypatch, connection_string=azurite_connection_string, container=storage.container)
+    yield storage
+    storage.remove()
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        if "azurite_blob_storage" in getattr(item, "fixturenames", ()):
+            item.add_marker(pytest.mark.azurite)
+
+
 class AuditCapture:
     """The audit inserts a test made: one list of rows per INSERT."""
 

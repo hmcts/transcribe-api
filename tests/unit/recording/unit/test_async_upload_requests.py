@@ -17,6 +17,7 @@ from hmcts_otel import conventions as c
 from hmcts_otel.testing import capture_telemetry
 from sqlmodel import Session, select
 
+from tests.unit.recording.blob_stores import installed_memory_blob_storage
 from tests.unit.recording.unit.async_upload_helpers import USER_ID, add_job, new_engine, tone
 from transcribe_api.api.app import create_app
 from transcribe_api.domain.auth.app_token import Context
@@ -24,10 +25,11 @@ from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
 from transcribe_api.domain.auth.dependencies_recording import get_current_user
 from transcribe_api.domain.models_recording import JobStatus, SpeechBatchJob, User
 from transcribe_api.runtime import settings_dictation
+from transcribe_api.runtime.blob_recording import AsyncAzureBlobManager
 from transcribe_api.runtime.db_recording import get_session
 from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.runtime.telemetry import configure_telemetry
-from transcribe_api.stt import audio_storage, local_storage, submission
+from transcribe_api.stt import audio_storage, submission
 from transcribe_api.stt.audio_storage import job_wav_name, source_blob_name
 from transcribe_api.stt.preprocessing import ProbedDuration
 from transcribe_api.stt.recording_limits import HEADER_TOLERANCE_SECONDS
@@ -46,14 +48,8 @@ def _no_rate_limit():
 
 
 @pytest.fixture(autouse=True)
-def local_storage_dir(tmp_path, monkeypatch):
-    monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
-    monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path / "audio"))
-    monkeypatch.setenv("LOCAL_AUDIO_BASE_URL", "http://api.test")
-    from transcribe_api.runtime import settings_recording
-
-    settings_recording.get_settings.cache_clear()
-    return tmp_path / "audio"
+def _storage_in_memory(memory_blob_storage):
+    """Every test here stores in memory (tests/unit/recording/blob_stores.py), unless it patches its own."""
 
 
 def _flag(monkeypatch, on: bool, *, long_recordings: bool = False) -> None:
@@ -113,7 +109,7 @@ def _upload_id(blob_name: str) -> UUID:
 # POST /uploads ---------------------------------------------------------------------------------
 
 
-def test_the_upload_stores_the_original_and_never_converts_it(client, monkeypatch, normalize, local_storage_dir):
+def test_the_upload_stores_the_original_and_never_converts_it(client, monkeypatch, normalize, memory_blob_storage):
     _flag(monkeypatch, True)
     body = tone(".mp3", 3.0)
 
@@ -127,12 +123,11 @@ def test_the_upload_stores_the_original_and_never_converts_it(client, monkeypatc
     blob_name = response.json()["blob_name"]
     # The response is the one a converting upload gives: the WAV's future name, under uploads/{user}/.
     assert blob_name.startswith(f"uploads/{USER_ID}/") and blob_name.endswith("-hearing.wav")
-    assert "/api/v1/local-audio/" in response.json()["audio_url"]
+    assert response.json()["audio_url"] == AsyncAzureBlobManager().build_blob_url(blob_name)
     # The original is waiting under incoming/ as it was sent; there is no WAV yet.
     source = source_blob_name(USER_ID, _upload_id(blob_name), ".mp3")
-    assert local_storage.read(source) == body
-    with pytest.raises(FileNotFoundError):
-        local_storage.size(blob_name)
+    assert memory_blob_storage.get(source) == body
+    assert blob_name not in memory_blob_storage
 
 
 def test_the_request_does_not_wait_for_a_slow_conversion(client, monkeypatch, mocker):
@@ -151,7 +146,7 @@ def test_the_request_does_not_wait_for_a_slow_conversion(client, monkeypatch, mo
     converter.assert_not_called()
 
 
-def test_with_the_flag_off_the_upload_still_converts_in_the_request(client, monkeypatch, mocker, local_storage_dir):
+def test_with_the_flag_off_the_upload_still_converts_in_the_request(client, monkeypatch, mocker, memory_blob_storage):
     _flag(monkeypatch, False)
 
     async def convert(input_path, wav_path):
@@ -161,14 +156,13 @@ def test_with_the_flag_off_the_upload_still_converts_in_the_request(client, monk
     response = _upload(client)
     assert response.status_code == 201
     converter.assert_called_once()
-    local_storage.read(response.json()["blob_name"])  # the WAV is stored now
-    with pytest.raises(FileNotFoundError):
-        local_storage.size(source_blob_name(USER_ID, _upload_id(response.json()["blob_name"]), ".mp3"))
+    assert response.json()["blob_name"] in memory_blob_storage  # the WAV is stored now
+    assert source_blob_name(USER_ID, _upload_id(response.json()["blob_name"]), ".mp3") not in memory_blob_storage
 
 
 @pytest.mark.parametrize("body", [b"this is not audio " * 50, b"\x00" * 4096])
 def test_a_file_that_is_not_audio_is_refused_in_the_request_and_stores_nothing(
-    client, monkeypatch, normalize, tel, local_storage_dir, body
+    client, monkeypatch, normalize, tel, memory_blob_storage, body
 ):
     _flag(monkeypatch, True)
     started = time.perf_counter()
@@ -181,12 +175,12 @@ def test_a_file_that_is_not_audio_is_refused_in_the_request_and_stores_nothing(
     )
     (invalid,) = tel.events("upload.validation_failed")
     assert invalid[c.ERROR_CODE] == "upload.undecodable"
-    assert not local_storage_dir.exists() or not any(local_storage_dir.iterdir())
+    assert memory_blob_storage.names() == []
     normalize.assert_not_called()
 
 
 def test_a_recording_over_the_limit_is_refused_with_the_sentence_before_anything_is_stored(
-    client, monkeypatch, normalize, tel, local_storage_dir, mocker
+    client, monkeypatch, normalize, tel, memory_blob_storage, mocker
 ):
     _flag(monkeypatch, True)
     mocker.patch.object(get_settings(), "MAX_AUDIO_DURATION_SECONDS", 60)  # 4 hours, scaled down
@@ -198,7 +192,7 @@ def test_a_recording_over_the_limit_is_refused_with_the_sentence_before_anything
     (failed,) = tel.events("upload.failed")
     assert failed[c.ERROR_CODE] == "upload.too_long"
     assert failed["audio.duration_seconds"] == pytest.approx(125.0, abs=1.0)
-    assert not local_storage_dir.exists() or not any(local_storage_dir.iterdir())
+    assert memory_blob_storage.names() == []
     normalize.assert_not_called()
 
 
@@ -326,7 +320,7 @@ def test_audio_shorter_than_its_video_is_not_refused_for_the_length_of_the_video
 
 @pytest.mark.parametrize("flag_on", [False, True], ids=["flag_off", "flag_on"])
 def test_a_video_without_sound_is_a_422_and_nothing_is_stored_or_queued(
-    client, engine, monkeypatch, tmp_path, local_storage_dir, flag_on
+    client, engine, monkeypatch, tmp_path, memory_blob_storage, flag_on
 ):
     """ffprobe reads a video-only MP4 happily; it is not a recording. With async preparation on it used to be
     stored and answered 201, and the job failed later: it is refused before anything is stored, as with the flag off."""
@@ -344,7 +338,7 @@ def test_a_video_without_sound_is_a_422_and_nothing_is_stored_or_queued(
 
     assert response.status_code == 422
     assert response.json()["detail"].startswith("The audio file could not be decoded")
-    assert not local_storage_dir.exists() or not any(local_storage_dir.iterdir())
+    assert memory_blob_storage.names() == []
     with Session(engine) as session:
         assert session.exec(select(SpeechBatchJob)).all() == []
 
@@ -477,7 +471,7 @@ def test_the_azure_upload_stores_under_incoming_and_answers_with_the_wavs_future
 
 def _store_original(upload_id: UUID, body: bytes = b"original", extension: str = ".mp3") -> str:
     name = source_blob_name(USER_ID, upload_id, extension)
-    local_storage.save(body, name)
+    installed_memory_blob_storage().put(name, body)
     return name
 
 
@@ -532,7 +526,7 @@ def test_the_source_is_found_by_the_users_and_uploads_ids_not_by_anything_the_cl
     _flag(monkeypatch, True)
     upload_id = uuid4()
     other_users_original = f"incoming/{uuid4()}/{upload_id}.mp3"
-    local_storage.save(b"x", other_users_original)
+    installed_memory_blob_storage().put(other_users_original, b"x")
     submit = mocker.patch(
         "transcribe_api.api.routes_recording.submit_and_queue_batch_job",
         new=mocker.AsyncMock(return_value=add_job(engine, source_blob_path=None)),
@@ -614,7 +608,7 @@ def test_a_failed_lookup_is_a_502_and_nothing_is_submitted_whatever_the_flag(
 
 
 def _broken_lookup(mocker, engine):
-    class Broken(audio_storage.LocalAudioStorage):
+    class Broken(audio_storage.AzureAudioStorage):
         async def find_source(self, user_id, upload_id):
             raise audio_storage.StorageError("storage down")
 
@@ -626,7 +620,7 @@ def _broken_lookup(mocker, engine):
 
 
 async def test_the_rollback_sequence_an_upload_made_with_the_flag_on_is_prepared_after_it_is_turned_off(
-    client, engine, monkeypatch, mocker, normalize, local_storage_dir
+    client, engine, monkeypatch, mocker, normalize, memory_blob_storage
 ):
     """Upload with the flag on, turn it off, POST /jobs: the job waits (it is not sent to Azure with a
     WAV that does not exist), then the worker, which does not read the flag, prepares and submits it."""
@@ -654,9 +648,8 @@ async def test_the_rollback_sequence_an_upload_made_with_the_flag_on_is_prepared
     assert job.status == JobStatus.PENDING and job.source_blob_path == source
     assert job.batch_job_id is None
     azure.assert_not_called()
-    local_storage.read(source)  # the original is still there for the worker
-    with pytest.raises(FileNotFoundError):
-        local_storage.size(blob_name)
+    assert source in memory_blob_storage  # the original is still there for the worker
+    assert blob_name not in memory_blob_storage
 
     # The worker, with the flag still off.
     service = prep.PreparationService()
@@ -667,10 +660,9 @@ async def test_the_rollback_sequence_an_upload_made_with_the_flag_on_is_prepared
         row = session.get(SpeechBatchJob, job.id)
     assert row.status == JobStatus.SUBMITTED and row.batch_job_id
     azure.assert_called_once()
-    assert local_storage.size(row.audio_blob_path) > 0  # the job's own WAV now exists
+    assert memory_blob_storage.get(row.audio_blob_path)  # the job's own WAV now exists
     assert row.audio_blob_path != blob_name and str(job.id) in row.audio_blob_path
-    with pytest.raises(FileNotFoundError):
-        local_storage.size(source)  # and the original is removed
+    assert source not in memory_blob_storage  # and the original is removed
 
 
 def test_a_replay_with_the_same_idempotency_key_returns_the_same_pending_job(client, engine, monkeypatch, no_azure):
@@ -720,13 +712,12 @@ def test_the_azure_original_is_looked_up_by_prefix_with_the_users_and_uploads_id
 # DELETE ----------------------------------------------------------------------------------------
 
 
-def test_deleting_a_job_that_is_waiting_removes_its_original(client, engine, monkeypatch, local_storage_dir):
+def test_deleting_a_job_that_is_waiting_removes_its_original(client, engine, monkeypatch, memory_blob_storage):
     _flag(monkeypatch, True)
     upload_id = uuid4()
     source = _store_original(upload_id)
     job = add_job(engine, upload_id=upload_id, source_blob_path=source)
     assert client.delete(f"/api/v1/jobs/{job.id}").status_code == 204
-    with pytest.raises(FileNotFoundError):
-        local_storage.size(source)
+    assert source not in memory_blob_storage
     with Session(engine) as session:
         assert session.get(SpeechBatchJob, job.id) is None

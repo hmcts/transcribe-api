@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
+from azure.core.exceptions import HttpResponseError
 from fastapi.testclient import TestClient
 from hmcts_otel import conventions as c
 from hmcts_otel.testing import capture_telemetry
@@ -52,13 +53,10 @@ def _reset_rate_limits():
 
 
 @pytest.fixture
-def local_audio(monkeypatch, mocker):
-    monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
-    get_settings.cache_clear()
-    storage = mocker.patch(f"{ROUTES}.local_storage")
-    storage.size.return_value = 10
-    storage.read_range.return_value = b"0123456789"
-    return storage
+def stored_audio(memory_blob_storage):
+    """The job's recording, ten bytes, in storage (in memory)."""
+    memory_blob_storage.put(_job().audio_blob_path, b"0123456789")
+    return memory_blob_storage
 
 
 def _job(user_id: uuid.UUID | None = CALLER_ID, status: JobStatus = JobStatus.SUCCEEDED) -> SpeechBatchJob:
@@ -213,7 +211,7 @@ def test_list_records_only_the_refusal(tel, mocker, audit_capture):
 # exported ----------------------------------------------------------------------------------
 
 
-def test_audio_stream_is_an_export(local_audio, mocker, audit_capture):
+def test_audio_stream_is_an_export(stored_audio, mocker, audit_capture):
     job = _job()
     mocker.patch(f"{ROUTES}.get_job_by_id", return_value=job)
 
@@ -225,7 +223,7 @@ def test_audio_stream_is_an_export(local_audio, mocker, audit_capture):
     _assert_safe(row)
 
 
-def test_audio_range_request_is_a_partial_export(local_audio, mocker, audit_capture):
+def test_audio_range_request_is_a_partial_export(stored_audio, mocker, audit_capture):
     job = _job()
     mocker.patch(f"{ROUTES}.get_job_by_id", return_value=job)
 
@@ -235,10 +233,10 @@ def test_audio_range_request_is_a_partial_export(local_audio, mocker, audit_capt
     assert _summary(_only_row(audit_capture))[4] == {"partial": True}
 
 
-def test_audio_missing_after_authorisation_is_a_failed_export(local_audio, mocker, audit_capture):
+def test_audio_missing_after_authorisation_is_a_failed_export(stored_audio, mocker, audit_capture):
     job = _job()
     mocker.patch(f"{ROUTES}.get_job_by_id", return_value=job)
-    local_audio.size.side_effect = FileNotFoundError(job.audio_blob_path)
+    stored_audio.delete(job.audio_blob_path)
 
     assert _client().get(f"/api/v1/jobs/{job.id}/audio").status_code == 404
     row = _only_row(audit_capture)
@@ -298,7 +296,7 @@ def test_streamed_audio_that_fails_to_download_is_a_failed_export(azure_audio, m
 # deleted -----------------------------------------------------------------------------------
 
 
-def test_delete_is_audited_after_the_row_is_deleted(local_audio, mocker, audit_capture):
+def test_delete_is_audited_after_the_row_is_deleted(stored_audio, mocker, audit_capture):
     job = _job()
     mocker.patch(f"{ROUTES}.get_job_by_id", return_value=job)
     session = mocker.MagicMock()
@@ -319,10 +317,10 @@ def test_delete_is_audited_after_the_row_is_deleted(local_audio, mocker, audit_c
     assert _summary(row) == ("job.delete", "success", "job", job.id, None)
 
 
-def test_delete_that_keeps_the_job_is_failed(local_audio, mocker, audit_capture):
+def test_delete_that_keeps_the_job_is_failed(stored_audio, mocker, audit_capture):
     job = _job()
     mocker.patch(f"{ROUTES}.get_job_by_id", return_value=job)
-    local_audio.delete.side_effect = OSError("disk")
+    stored_audio.fail_next("delete_blob", HttpResponseError(message="disk"))
 
     assert _client().delete(f"/api/v1/jobs/{job.id}").status_code == 502
     row = _only_row(audit_capture)
@@ -441,7 +439,7 @@ def test_detected_access_is_a_denied_record(tel, mocker, audit_capture, route, a
 
 
 @pytest.mark.parametrize("route", ["get", "audio", "delete"])
-def test_a_failed_audit_write_never_breaks_the_request(tel, local_audio, mocker, monkeypatch, route):
+def test_a_failed_audit_write_never_breaks_the_request(tel, stored_audio, mocker, monkeypatch, route):
     def broken(rows):
         raise ConnectionError("database down")
 

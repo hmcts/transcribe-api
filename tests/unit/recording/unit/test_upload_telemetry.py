@@ -582,20 +582,17 @@ def test_five_hours_is_refused_with_the_flags_off_naming_the_4_hour_limit(tel, m
     assert response.json()["detail"] == "The recording is 5 hours long. Recordings can be at most 4 hours."
 
 
-def _store_locally(monkeypatch, tmp_path) -> None:
+def _store_in_memory(monkeypatch) -> None:
     """With async_upload_preparation on the upload stores the original through the audio storage."""
-    from transcribe_api.runtime import settings_recording
+    from tests.unit.recording.blob_stores import install_memory_blob_storage
 
-    monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
-    monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path / "audio"))
-    monkeypatch.setenv("LOCAL_AUDIO_BASE_URL", "http://api.test")
-    settings_recording.get_settings.cache_clear()
+    install_memory_blob_storage(monkeypatch)
 
 
-def test_five_hours_is_accepted_with_both_flags_on(tel, mocker, monkeypatch, tmp_path):
+def test_five_hours_is_accepted_with_both_flags_on(tel, mocker, monkeypatch):
     # Both flags on is the asynchronous path: the length is the file header's (ffprobe).
     _both_flags(monkeypatch, True)
-    _store_locally(monkeypatch, tmp_path)
+    _store_in_memory(monkeypatch)
     mocker.patch(
         "transcribe_api.api.routes_recording.probe_audio_duration",
         new=mocker.AsyncMock(return_value=ProbedDuration(5 * 3600.0, exact=True)),
@@ -603,9 +600,9 @@ def test_five_hours_is_accepted_with_both_flags_on(tel, mocker, monkeypatch, tmp
     assert _post(_client(mocker)).status_code == 201
 
 
-def test_over_eight_hours_is_refused_with_both_flags_on_naming_the_8_hour_limit(tel, mocker, monkeypatch, tmp_path):
+def test_over_eight_hours_is_refused_with_both_flags_on_naming_the_8_hour_limit(tel, mocker, monkeypatch):
     _both_flags(monkeypatch, True)
-    _store_locally(monkeypatch, tmp_path)
+    _store_in_memory(monkeypatch)
     mocker.patch(
         "transcribe_api.api.routes_recording.probe_audio_duration",
         new=mocker.AsyncMock(return_value=ProbedDuration(8 * 3600.0 + 120, exact=True)),

@@ -2,14 +2,15 @@
 job (stt/preparation_service.py, stt/part_submission.py, stt/splitter.py).
 
 Real ffmpeg on small tone-and-silence audio, with the limits scaled down (Azure's 240 minutes becomes
-30 seconds, the part target 22 seconds): the same code at a size a test can afford. Storage is the local
-directory backend, the job table is SQLite, Speech is the mock backend (every submission is a distinct
-mock job) with ``submit_batch_job`` wrapped to count and to fail on demand.
+30 seconds, the part target 22 seconds): the same code at a size a test can afford. Storage is in memory
+(tests/unit/recording/blob_stores.py), the job table is SQLite, Speech is the mock backend (every submission is
+a distinct mock job) with ``submit_batch_job`` wrapped to count and to fail on demand.
 """
 
 from __future__ import annotations
 
 import asyncio
+import io
 import itertools
 import wave
 from datetime import UTC, datetime, timedelta
@@ -21,6 +22,7 @@ from hmcts_otel.testing import capture_telemetry
 from sqlalchemy import update
 from sqlmodel import Session
 
+from tests.unit.recording.blob_stores import install_memory_blob_storage, installed_memory_blob_storage
 from tests.unit.recording.unit.async_upload_helpers import (
     USER_ID,
     add_job,
@@ -33,7 +35,7 @@ from transcribe_api.domain.models_recording import JobStatus, SpeechBatchJob, Tr
 from transcribe_api.runtime import settings_dictation, settings_recording
 from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.runtime.telemetry import configure_telemetry, upload_id_from_blob
-from transcribe_api.stt import audio_storage, local_storage, part_submission, recording_limits
+from transcribe_api.stt import audio_storage, part_submission, recording_limits
 from transcribe_api.stt import preparation_service as prep
 from transcribe_api.stt.batch_client import BatchSubmissionError
 from transcribe_api.stt.part_submission import cleanup_job_parts, delete_job_and_parts, part_blob_name
@@ -46,10 +48,8 @@ FIVE_PARTS = tuple(itertools.chain.from_iterable((("t", 20.0), ("s", 2.0)) for _
 
 
 @pytest.fixture(autouse=True)
-def environment(tmp_path, monkeypatch, mocker):
-    monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
-    monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path / "audio"))
-    monkeypatch.setenv("LOCAL_AUDIO_BASE_URL", "http://api.test")
+def environment(monkeypatch, mocker):
+    storage = install_memory_blob_storage(monkeypatch)
     monkeypatch.setenv("SPEECH_BACKEND", "mock")
     # Both flags on: the effective limit is MAX_AUDIO_DURATION_SECONDS.
     monkeypatch.setenv("ASYNC_UPLOAD_PREPARATION", "true")
@@ -63,6 +63,7 @@ def environment(tmp_path, monkeypatch, mocker):
     mocker.patch.object(settings, "PREPARE_RETRY_BACKOFF_SECONDS", 0)
     mocker.patch.object(prep, "AZURE_BATCH_FILE_LIMIT_SECONDS", LIMIT)
     mocker.patch.object(recording_limits, "AZURE_BATCH_FILE_LIMIT_SECONDS", LIMIT)
+    return storage
 
 
 @pytest.fixture
@@ -125,7 +126,7 @@ def _waiting(engine, pattern=THREE_PARTS, **fields) -> SpeechBatchJob:
     """A deferred job whose original (a WAV: the service converts it anyway) is in storage."""
     upload_id = uuid4()
     job = add_job(engine, upload_id=upload_id, source_blob_path=f"incoming/{USER_ID}/{upload_id}.wav", **fields)
-    local_storage.save(tone_and_silence(pattern), job.source_blob_path)
+    installed_memory_blob_storage().put(job.source_blob_path, tone_and_silence(pattern))
     return job
 
 
@@ -137,13 +138,7 @@ async def _prepare(service: PreparationService | None = None) -> PreparationServ
 
 
 def _exists(blob_name: str | None) -> bool:
-    if blob_name is None:
-        return False
-    try:
-        local_storage.size(blob_name)
-    except FileNotFoundError:
-        return False
-    return True
+    return blob_name is not None and blob_name in installed_memory_blob_storage()
 
 
 def _parts(engine, job_id) -> list[TranscriptionJobPart]:
@@ -152,7 +147,7 @@ def _parts(engine, job_id) -> list[TranscriptionJobPart]:
 
 
 def _seconds(blob_name: str) -> float:
-    with wave.open(str(local_storage.path_of(blob_name)), "rb") as wav:
+    with wave.open(io.BytesIO(installed_memory_blob_storage().get(blob_name)), "rb") as wav:
         return wav.getnframes() / wav.getframerate()
 
 
@@ -341,7 +336,7 @@ async def test_part_1_is_submitted_as_soon_as_its_blob_is_stored_before_later_pa
     log: list[str] = []
     part_1_submitted = asyncio.Event()
 
-    class Recording(audio_storage.LocalAudioStorage):
+    class Recording(audio_storage.AzureAudioStorage):
         async def upload(self, path, blob_name, *, concurrency=None):
             if blob_name == job.audio_blob_path:
                 await asyncio.wait_for(part_1_submitted.wait(), 20)  # the full WAV waits for part 1's submission
@@ -484,7 +479,7 @@ async def test_a_job_whose_parts_were_all_submitted_before_the_worker_died_is_se
             )
         )
         session.commit()
-    local_storage.save(tone_and_silence(THREE_PARTS), job.source_blob_path)
+    installed_memory_blob_storage().put(job.source_blob_path, tone_and_silence(THREE_PARTS))
 
     await _prepare()
 
@@ -512,7 +507,7 @@ async def test_a_recording_that_does_not_cut_into_the_recorded_parts_is_not_resu
             )
         )
         session.commit()
-    local_storage.save(tone_and_silence(THREE_PARTS), job.source_blob_path)
+    installed_memory_blob_storage().put(job.source_blob_path, tone_and_silence(THREE_PARTS))
 
     await _prepare()
 
@@ -543,7 +538,7 @@ async def test_a_job_deleted_while_a_part_is_being_submitted_leaves_no_azure_job
     async def delete_the_job_during_part_2(name):
         if name.endswith("part-2"):
             assert await delete_job_and_parts(job.id, engine=engine)  # what DELETE /jobs/{id} does
-            local_storage.delete(job.audio_blob_path)
+            installed_memory_blob_storage().delete(job.audio_blob_path)
 
     azure.on_submit = delete_the_job_during_part_2
     await _prepare()
@@ -608,7 +603,7 @@ async def test_parts_recorded_by_the_worker_after_the_deletes_cleanup_are_releas
         plan = jobs.PartPlan(1, 1, 0.0, 10.0, "start", part_blob_name(job.audio_blob_path, 1))
         with Session(engine) as session:
             (row,) = jobs.create_job_parts(session, job.id, [plan])
-            local_storage.save(b"part", row.blob_path)
+            installed_memory_blob_storage().put(row.blob_path, b"part")
             url = f"mock://batch-jobs/{uuid4()}"
             made.append(url)
             jobs.mark_part_submitted(session, row.id, "azure-1", url)
@@ -661,9 +656,9 @@ async def test_an_azure_job_recorded_while_the_cleanup_deletes_the_blob_is_not_f
     plan = jobs.PartPlan(1, 1, 0.0, 10.0, "start", part_blob_name(job.audio_blob_path, 1))
     with Session(engine) as session:
         (row,) = jobs.create_job_parts(session, job.id, [plan])
-    local_storage.save(b"part", row.blob_path)  # what the worker stored; its Azure job is not recorded yet
+    installed_memory_blob_storage().put(row.blob_path, b"part")  # what the worker stored; its Azure job is not recorded yet
     url = f"mock://batch-jobs/{uuid4()}"
-    real_delete = audio_storage.LocalAudioStorage.delete
+    real_delete = audio_storage.AzureAudioStorage.delete
     recorded = []
 
     async def delete_and_meanwhile_the_worker_records_the_job(self, blob_name):
@@ -673,7 +668,7 @@ async def test_an_azure_job_recorded_while_the_cleanup_deletes_the_blob_is_not_f
             with Session(engine) as session:
                 assert jobs.mark_part_submitted(session, row.id, "azure-1", url)
 
-    mocker.patch.object(audio_storage.LocalAudioStorage, "delete", delete_and_meanwhile_the_worker_records_the_job)
+    mocker.patch.object(audio_storage.AzureAudioStorage, "delete", delete_and_meanwhile_the_worker_records_the_job)
 
     assert await cleanup_job_parts(job.id, engine=engine) is True
     (kept,) = _parts(engine, job.id)

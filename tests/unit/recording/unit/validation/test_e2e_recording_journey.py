@@ -4,7 +4,7 @@ AC2 ("a batch job has been traced end to end"), automated. Each scenario drives 
 real FastAPI app (POST /uploads, POST /jobs, GET /jobs/{id}, GET /jobs/{id}/audio) and
 the real BatchPollingService loop (run_polling_loop, one iteration per poll) through
 the real Azure Speech client, database code and telemetry. Only the boundaries are
-replaced: Azure Speech at HTTP (httpx.AsyncClient), blob storage (the blob manager),
+replaced: Azure Speech at HTTP (httpx.AsyncClient), blob storage (Azurite, tests/unit/recording/blob_stores.py),
 the database (SQLite in memory) and the audit insert (captured, tests/conftest.py).
 
 Scenarios: a success; an upload rejected by validation; Azure Speech reporting the
@@ -27,7 +27,6 @@ import io
 import wave
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
-from typing import Self
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
@@ -42,6 +41,7 @@ from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
+from tests.unit.recording.blob_stores import AzuriteBlobStorage
 from tests.unit.recording.unit.validation.prohibited_content import (
     APPELLANT,
     AZURE_ERROR_MESSAGE,
@@ -73,7 +73,6 @@ AZURE_AUDIO_SECONDS = 5.1
 TRANSCRIPTIONS = f"{ENDPOINT}/speechtotext/v3.2/transcriptions"
 MODEL_URL = f"{ENDPOINT}/speechtotext/v3.2/models/base/e418c4a9-9937-4db7-b2c9-8afbff72d950"
 RESULTS_HOST = "https://spsvcprodukso.blob.core.windows.net"
-STORAGE = "https://teststorage.blob.core.windows.net/test-container"
 USER_ID = UUID("00000000-0000-4000-8000-0000000000c1")
 HEARING_ID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301"
 
@@ -209,53 +208,13 @@ THROTTLED = (
 )
 
 
-# Blob storage ------------------------------------------------------------------------------
-
-
-class FakeBlobs:
-    """The blob store behind AsyncAzureBlobManager (routes and the poller)."""
-
-    def __init__(self) -> None:
-        self.blobs: dict[str, bytes] = {}
-        self.metadata: dict[str, dict] = {}
-
-    def __call__(self, *_args, **_kwargs) -> FakeBlobs:  # AsyncAzureBlobManager()
-        return self
-
-    async def __aenter__(self) -> Self:
-        return self
-
-    async def __aexit__(self, *_exc) -> bool:
-        return False
-
-    async def create_blob_from_file(self, file_path, blob_name: str) -> bool:
-        self.blobs[blob_name] = file_path.read_bytes()  # CNP stores the WAV from a file
-        return True
-
-    def build_blob_url(self, blob_name: str) -> str:
-        return f"{STORAGE}/{blob_name}?sv=2024-05-04&se=2026-10-23&sp=r&sig={SAS_SIGNATURE}"
-
-    async def get_blob_size(self, blob_name: str) -> int | None:
-        return len(self.blobs[blob_name]) if blob_name in self.blobs else None
-
-    async def stream_blob_range(self, blob_name: str, start: int, length: int):
-        yield self.blobs[blob_name][start : start + length]
-
-    async def close(self) -> None:
-        pass
-
-    async def set_blob_metadata(self, blob_name: str, metadata: dict) -> bool:
-        self.metadata[blob_name] = metadata
-        return True
-
-
 # The service, wired to the fakes ----------------------------------------------------------
 
 
 class Service:
     """The API and the poller of one deployment, sharing one database."""
 
-    def __init__(self, engine, speech: FakeSpeech, blobs: FakeBlobs, client: TestClient) -> None:
+    def __init__(self, engine, speech: FakeSpeech, blobs: AzuriteBlobStorage, client: TestClient) -> None:
         self.engine = engine
         self.speech = speech
         self.blobs = blobs
@@ -330,7 +289,7 @@ def engine():
 
 
 @pytest.fixture
-def service(tel, engine, monkeypatch) -> Iterator[Service]:
+def service(tel, engine, azurite_blob_storage, monkeypatch) -> Iterator[Service]:
     from transcribe_api.api.app import create_app
     from transcribe_api.domain.auth.app_token import Context
     from transcribe_api.domain.auth.auth_models_recording import AuthenticatedUser
@@ -341,16 +300,13 @@ def service(tel, engine, monkeypatch) -> Iterator[Service]:
     monkeypatch.setenv("ENVIRONMENT", "test")
     monkeypatch.setenv("AZURE_SPEECH_ENDPOINT", ENDPOINT)
     monkeypatch.setenv("AZURE_SPEECH_KEY", SPEECH_KEY)
-    monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "azure")
     get_settings.cache_clear()
 
     speech = FakeSpeech()
     monkeypatch.setattr(httpx.AsyncClient, "post", lambda _self, url, **kw: speech.post(url, **kw))
     monkeypatch.setattr(httpx.AsyncClient, "get", lambda _self, url, **kw: speech.get(url, **kw))
     monkeypatch.setattr(httpx.AsyncClient, "delete", lambda _self, url, **kw: speech.delete(url, **kw))
-    blobs = FakeBlobs()
-    monkeypatch.setattr("transcribe_api.api.routes_recording.AsyncAzureBlobManager", blobs)
-    monkeypatch.setattr(polling_service, "AsyncAzureBlobManager", blobs)
+    blobs = azurite_blob_storage
 
     async def normalise(_input_path, wav_path) -> None:
         wav_path.write_bytes(_wav())  # ffmpeg's output: 16 kHz mono PCM, written to a file
@@ -579,7 +535,7 @@ def test_rejected_upload_ends_its_journey_with_a_validation_code(
         "upload.validation_failed",
         "upload.failed",
     ]
-    assert service.blobs.blobs == {} and service.speech.submitted == []
+    assert service.blobs.names() == [] and service.speech.submitted == []
     assert not [e for e in tel.events() if e.get(c.JOURNEY_TYPE) == JOURNEY_JOB]
 
 
@@ -607,8 +563,7 @@ def test_job_azure_speech_fails_is_attributed_to_the_dependency(service, tel):
     # The record keeps Azure's message for the user; the audio is marked failed.
     job = service.job(job_id)
     assert job.status == JobStatus.FAILED and job.error_message == AZURE_ERROR_MESSAGE
-    (metadata,) = service.blobs.metadata.values()
-    assert metadata["status"] == "permanently_failed"
+    assert service.blobs.metadata(job.audio_blob_path)["status"] == "permanently_failed"
     viewed = service.client.get(f"/api/v1/jobs/{job_id}")
     assert viewed.json()["status"] == "failed"
     (counted,) = tel.metric_points(METRIC_JOBS_FINISHED)

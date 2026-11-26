@@ -1,7 +1,7 @@
 """DIAAT-408: recordings of 1 hour to 8 hours, end to end, through the real code.
 
-The real routes (``POST /uploads``, ``POST /jobs``, ``DELETE /jobs/{id}``) over the local storage
-backend, the real PreparationService (real ffmpeg: conversion, silence detection, cutting), the real
+The real routes (``POST /uploads``, ``POST /jobs``, ``DELETE /jobs/{id}``) over Azurite, Microsoft's storage
+emulator (tests/unit/recording/blob_stores.py), the real PreparationService (real ffmpeg: conversion, silence detection, cutting), the real
 BatchPollingService and the mock Speech backend (every part is its own mock job with its own
 transcript), and a SQLite file database. Files are real tone-and-silence MP3s (8 kHz mono, 8 kbps: 3.6 MB
 per hour) made by ffmpeg in a temporary directory that is removed afterwards.
@@ -10,7 +10,7 @@ Every scenario runs twice: at a **scaled-down size** in the normal suite (Azure'
 the 3 h 30 m part target 22 seconds, the 8 hour maximum 64 seconds: the same code and the same assertions),
 and at the **real size** (1 h, 4 h, 5 h, 8 h) behind ``RUN_LONG_E2E=1`` (see conftest.py). The real run
 writes its timings to ``LONG_E2E_REPORT`` (a file path) if that is set; ``LONG_E2E_DIR`` says where the
-generated audio and the storage live (the default is the system temporary directory).
+generated audio lives (the default is the system temporary directory).
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
+from tests.unit.recording.blob_stores import AzuriteBlobStorage
 from tests.unit.recording.unit.async_upload_helpers import USER_ID, new_engine
 from transcribe_api.api import routes_recording
 from transcribe_api.api.app import create_app
@@ -128,7 +129,7 @@ def write_report():
 def workdir():
     base = tempfile.mkdtemp(prefix="long-e2e-", dir=os.environ.get("LONG_E2E_DIR"))
     yield Path(base)
-    shutil.rmtree(base, ignore_errors=True)  # the generated audio and the storage: never left behind
+    shutil.rmtree(base, ignore_errors=True)  # the generated audio: never left behind
 
 
 @pytest.fixture(autouse=True)
@@ -143,13 +144,10 @@ def _no_rate_limit():
 class Harness:
     """The real API and services of one deployment, a way to run each step, and the timings."""
 
-    def __init__(self, scale: Scale, workdir: Path, monkeypatch, mocker) -> None:
+    def __init__(self, scale: Scale, workdir: Path, storage: AzuriteBlobStorage, monkeypatch, mocker) -> None:
         self.scale, self.workdir, self.monkeypatch = scale, workdir, monkeypatch
-        self.storage = workdir / "storage"
+        self.storage = storage
         self.timings: dict[str, float] = {}
-        monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
-        monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(self.storage))
-        monkeypatch.setenv("LOCAL_AUDIO_BASE_URL", "http://api.test")
         monkeypatch.setenv("SPEECH_BACKEND", "mock")
         self.set_flags(True, True)
         settings = get_settings()
@@ -245,8 +243,8 @@ class Harness:
         with Session(self.engine) as session:
             return jobs.get_job_parts(session, UUID(job_id))
 
-    def stored_files(self) -> list[Path]:
-        return [p for p in self.storage.glob("*") if p.is_file()] if self.storage.exists() else []
+    def stored_files(self) -> list[str]:
+        return self.storage.names()
 
     def record(self, scenario: str, **extra) -> None:
         _REPORT.append(
@@ -260,8 +258,8 @@ class Harness:
 
 
 @pytest.fixture(params=SCALES)
-def h(request, workdir, monkeypatch, mocker):
-    return Harness(request.param, workdir, monkeypatch, mocker)
+def h(request, workdir, azurite_blob_storage, monkeypatch, mocker):
+    return Harness(request.param, workdir, azurite_blob_storage, monkeypatch, mocker)
 
 
 def _accepted(h: Harness, path: Path) -> tuple[str, dict]:

@@ -20,6 +20,7 @@ from hmcts_otel.testing import capture_telemetry
 from sqlalchemy import update
 from sqlmodel import Session
 
+from tests.unit.recording.blob_stores import installed_memory_blob_storage
 from tests.unit.recording.unit.async_upload_helpers import new_engine, reload_job
 from tests.unit.recording.unit.audio.multipart_helpers import prepare as prepare_job
 from tests.unit.recording.unit.audio.multipart_helpers import scale_down, use_engine, waiting
@@ -27,14 +28,14 @@ from transcribe_api.domain import interface_recording as jobs
 from transcribe_api.domain.models_recording import BatchJobStatus, JobStatus, SpeechBatchJob, TranscriptionJobPart
 from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.runtime.telemetry import configure_telemetry
-from transcribe_api.stt import local_storage, part_submission, polling_service
+from transcribe_api.stt import part_submission, polling_service
 from transcribe_api.stt.batch_client import BatchResults, BatchResultsInvalidError
 from transcribe_api.stt.polling_service import BatchPollingService
 
 
 @pytest.fixture(autouse=True)
-def environment(tmp_path, monkeypatch, mocker):
-    scale_down(monkeypatch, mocker, tmp_path)
+def environment(monkeypatch, mocker):
+    return scale_down(monkeypatch, mocker)
 
 
 @pytest.fixture
@@ -112,13 +113,7 @@ def _parts(engine, job_id) -> list[TranscriptionJobPart]:
 
 
 def _exists(name: str | None) -> bool:
-    if not name:
-        return False
-    try:
-        local_storage.size(name)
-    except FileNotFoundError:
-        return False
-    return True
+    return bool(name) and name in installed_memory_blob_storage()
 
 
 # Running ----------------------------------------------------------------------------------------

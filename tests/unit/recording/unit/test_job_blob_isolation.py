@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
+from tests.unit.recording.blob_stores import install_memory_blob_storage, installed_memory_blob_storage
 from tests.unit.recording.unit.async_upload_helpers import USER_ID, new_engine, tone, tone_and_silence
 from transcribe_api.api.app import create_app
 from transcribe_api.domain import interface_recording as jobs
@@ -27,7 +28,7 @@ from transcribe_api.runtime import settings_dictation, settings_recording
 from transcribe_api.runtime.db_recording import get_session
 from transcribe_api.runtime.settings_recording import get_settings
 from transcribe_api.runtime.telemetry import upload_id_from_blob
-from transcribe_api.stt import local_storage, part_submission, recording_limits
+from transcribe_api.stt import part_submission, recording_limits
 from transcribe_api.stt import preparation_service as prep
 from transcribe_api.stt.audio_storage import source_blob_name
 from transcribe_api.stt.batch_client import BatchSubmissionError
@@ -39,10 +40,8 @@ THREE_PARTS = (("t", 20.0), ("s", 2.0), ("t", 20.0), ("s", 2.0), ("t", 20.0))  #
 
 
 @pytest.fixture(autouse=True)
-def environment(tmp_path, monkeypatch, mocker):
-    monkeypatch.setenv("AUDIO_STORAGE_BACKEND", "local")
-    monkeypatch.setenv("LOCAL_AUDIO_STORAGE_DIR", str(tmp_path / "audio"))
-    monkeypatch.setenv("LOCAL_AUDIO_BASE_URL", "http://api.test")
+def environment(monkeypatch, mocker):
+    storage = install_memory_blob_storage(monkeypatch)
     monkeypatch.setenv("SPEECH_BACKEND", "mock")
     monkeypatch.setenv("ASYNC_UPLOAD_PREPARATION", "true")
     monkeypatch.setenv("LONG_RECORDINGS_ENABLED", "true")
@@ -56,6 +55,7 @@ def environment(tmp_path, monkeypatch, mocker):
     mocker.patch.object(settings, "PREPARE_MAX_CONCURRENT", 1)  # one job at a time: the order is the test's
     mocker.patch.object(prep, "AZURE_BATCH_FILE_LIMIT_SECONDS", LIMIT)
     mocker.patch.object(recording_limits, "AZURE_BATCH_FILE_LIMIT_SECONDS", LIMIT)
+    return storage
 
 
 @pytest.fixture(autouse=True)
@@ -124,13 +124,7 @@ def azure(mocker):
 
 
 def _exists(name: str | None) -> bool:
-    if name is None:
-        return False
-    try:
-        local_storage.size(name)
-    except FileNotFoundError:
-        return False
-    return True
+    return name is not None and name in installed_memory_blob_storage()
 
 
 def _upload(client, flag_on: bool, monkeypatch, mocker) -> dict:
@@ -226,7 +220,7 @@ def _deferred(engine, upload_id: UUID, *, original: bytes | None = None) -> Spee
     """A deferred job from the upload, as POST /jobs makes it (the original is stored once per upload)."""
     source = source_blob_name(USER_ID, upload_id, ".wav")
     if not _exists(source):
-        local_storage.save(original if original is not None else tone(".wav", 3.0), source)
+        installed_memory_blob_storage().put(source, original if original is not None else tone(".wav", 3.0))
     with Session(engine) as session:
         return defer_batch_job(
             session,
@@ -341,7 +335,7 @@ def test_a_part_row_naming_a_blob_that_is_not_derived_from_its_job_is_never_dele
     upload_id = uuid4()
     mine, other = _deferred(engine, upload_id), _deferred(engine, upload_id)
     others_blob = part_submission.part_blob_name(other.audio_blob_path, 1)
-    local_storage.save(b"the other job's part", others_blob)
+    installed_memory_blob_storage().put(others_blob, b"the other job's part")
     with Session(engine) as session:
         jobs.create_job_parts(session, mine.id, [jobs.PartPlan(1, 1, 0.0, 10.0, "start", others_blob)])
 
