@@ -1178,7 +1178,11 @@ async def _submit_job(
     added = audited("hearing.add_recording", current_user.id, hearing_id, "hearing") if adding_to else nullcontext(None)
     with added as added_audit:
         job = await _create_job(body, session, current_user, jurisdiction, audit, source_blob, day)
-        if added_audit is not None:
+        if job.id != job_id:  # an idempotent replay: nothing was added, and its hearing is the job's own
+            audit.detail["hearing_id"] = str(hearing_of(job))
+            if added_audit is not None:
+                added_audit.skip()
+        elif added_audit is not None:
             added_audit.detail["job_id"] = str(job.id)
     return job
 
@@ -1264,7 +1268,7 @@ async def _hearing_to_add_to(
     if not await asyncio.to_thread(feature_flags.is_multi_day_hearings_enabled):
         audit.skip()
         raise HTTPException(status_code=403, detail=_MULTI_DAY_OFF)
-    hearing = find_hearing(session, hearing_id, lock=True)
+    hearing = await asyncio.to_thread(find_hearing, session, hearing_id, lock=True)
     try:
         _check_hearing_access(hearing, hearing_id, current_user, jurisdiction, "hearing.add_recording", JOB, SUBMIT)
     except HTTPException:
@@ -2254,7 +2258,7 @@ async def delete_job(
     if (
         hearing_id is not None
         and not await asyncio.to_thread(feature_flags.is_multi_day_hearings_enabled)
-        and day_count(session, hearing_id) > 1
+        and await asyncio.to_thread(day_count, session, hearing_id) > 1
     ):
         raise HTTPException(status_code=403, detail=_MULTI_DAY_OFF)
     # DIAAT-286: success once the row is deleted; failed (http_502) if the audio could
@@ -2263,7 +2267,7 @@ async def delete_job(
         if hearing_id is not None:
             audit.detail["hearing_id"] = str(hearing_id)
         await _delete_job(session, job)
-    if hearing_id is not None and not delete_hearing_if_empty(session, hearing_id):
+    if hearing_id is not None and not await asyncio.to_thread(delete_hearing_if_empty, session, hearing_id):
         touch_hearing(session, hearing_id)
         session.commit()
     return Response(status_code=204)
@@ -2469,7 +2473,7 @@ async def get_hearing(
     ``transcript.view`` of the hearing names the days whose transcript was returned; none while no day
     has one yet."""
     hearing = _own_hearing(session, hearing_id, current_user, jurisdiction, "transcript.view", TRANSCRIPT, READ)
-    days = days_of(session, hearing_id)
+    days = days_of(session, hearing_id, transcripts=day is None)
     if day is not None and day not in {d.id for d in days}:
         raise HTTPException(status_code=404, detail="Day not found")
     for each in days:
@@ -2523,7 +2527,7 @@ async def delete_hearing(
 ) -> Response:
     """Delete the hearing and every day of it, as DELETE /jobs/{id} deletes one. A day that cannot be
     deleted is kept, with the hearing: 502, and the delete can be repeated for what is left."""
-    hearing = _own_hearing(session, hearing_id, current_user, jurisdiction, "hearing.delete", JOB, DELETE)
+    _own_hearing(session, hearing_id, current_user, jurisdiction, "hearing.delete", JOB, DELETE)
     with audited("hearing.delete", current_user.id, hearing_id, "hearing") as audit:
         kept = 0
         for each in days_of(session, hearing_id, transcripts=False):
@@ -2546,8 +2550,11 @@ async def delete_hearing(
             raise HTTPException(
                 status_code=502, detail="Not every recording of this hearing could be deleted. Please try again."
             )
-        if hearing.stored:
-            delete_hearing_if_empty(session, hearing_id)
+        # A day added meanwhile keeps the hearing: say so, as for a day that could not be deleted.
+        if not await asyncio.to_thread(delete_hearing_if_empty, session, hearing_id):
+            raise HTTPException(
+                status_code=502, detail="Not every recording of this hearing could be deleted. Please try again."
+            )
     return Response(status_code=204)
 
 

@@ -140,12 +140,19 @@ def find_hearing(session: Session, hearing_id: UUID, *, lock: bool = False) -> H
     hearing = session.exec(query).first()
     if hearing is not None:
         return _record(hearing)
-    job = session.exec(
-        select(SpeechBatchJob)
-        .options(*_without_transcripts())
-        .where(SpeechBatchJob.id == hearing_id, col(SpeechBatchJob.hearing_id).is_(None))
-    ).first()
-    return _unstored(job) if job is not None else None
+    job_query = select(SpeechBatchJob).options(*_without_transcripts()).where(SpeechBatchJob.id == hearing_id)
+    if not lock:
+        job = session.exec(job_query.where(col(SpeechBatchJob.hearing_id).is_(None))).first()
+        return _unstored(job) if job is not None else None
+    # Two days added at once to a job from before hearings would both store its hearing: the job's row
+    # serialises them, and the second then finds the hearing the first stored.
+    job = session.exec(job_query.with_for_update()).first()
+    if job is None:
+        return None
+    hearing = session.exec(query).first()
+    if hearing is not None:
+        return _record(hearing)
+    return _unstored(job) if job.hearing_id is None else None
 
 
 def new_hearing(session: Session, *, hearing_id: UUID, user_id: UUID, jurisdiction_id: UUID, metadata: dict) -> Hearing:
@@ -234,6 +241,8 @@ def list_hearings_paginated(
     entries = []
     for k in keys:
         ordered = order_days(days[k])
+        if not ordered:  # deleted since the page was read
+            continue
         entries.append(HearingEntry(stored.get(k) or _unstored(ordered[0]), ordered))
     return entries, total
 

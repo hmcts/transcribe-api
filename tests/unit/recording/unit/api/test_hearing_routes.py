@@ -586,3 +586,31 @@ def test_the_hearing_actions_are_in_the_audit_vocabulary_and_the_history():
     actions = {"hearing.add_recording", "hearing.edit", "hearing.delete"}
     assert actions <= set(get_args(AuditAction)) & set(AUDIT_ACTIONS_APP) & set(HISTORY_ACTIONS)
     assert "hearing" in set(get_args(AuditObjectType)) & set(HISTORY_OBJECT_TYPES)
+
+
+def test_an_idempotent_replay_adds_nothing_to_the_hearing_it_names(client, engine, audit_capture, multi_day):
+    first = _submit(client, idempotency_key="k1").json()
+    other = _hearing(engine)
+    audit_capture.inserts.clear()
+
+    replay = _submit(client, idempotency_key="k1", hearing_id=str(other))
+
+    assert replay.status_code == 201 and replay.json()["job_id"] == first["job_id"]
+    assert _rows(audit_capture, "hearing.add_recording") == []
+    (submit,) = _rows(audit_capture, "job.submit")
+    assert submit["detail"] == {"replayed": True}
+
+
+def test_a_hearing_that_gained_a_day_while_it_was_deleted_is_kept_and_the_delete_says_so(client, engine, mocker):
+    hearing_id = _hearing(engine)
+    _day(engine, hearing_id)
+    mocker.patch("transcribe_api.api.routes_recording.delete_hearing_if_empty", return_value=False)
+    assert client.delete(f"/api/v1/hearings/{hearing_id}").status_code == 502
+
+
+def test_asking_for_one_day_loads_only_that_days_transcript(client, engine):
+    hearing_id = _hearing(engine)
+    _day(engine, hearing_id, day=date(2026, 11, 2))
+    day_2 = _day(engine, hearing_id, day=date(2026, 11, 3))
+    body = client.get(f"/api/v1/hearings/{hearing_id}", params={"day": str(day_2.id)}).json()
+    assert body["days"][1]["dialogue_entries"][0]["text"] == SPOKEN
