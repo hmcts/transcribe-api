@@ -222,6 +222,42 @@ def test_a_save_from_a_stale_form_is_refused(as_admin):
     assert stale.status_code == 409
 
 
+def test_a_save_sent_as_octet_stream_keeps_text_the_waf_would_block(as_admin):
+    """Front Door's WAF blocks a JSON body whose text looks like code, so the browser
+    sends the same JSON as application/octet-stream."""
+    template = upload(as_admin).json()
+    name = "Select the reason from the list -- <u>{{Reference}}</u>"
+    saved = as_admin.put(
+        f"/api/admin/jurisdictions/ET/templates/{template['id']}",
+        content=json.dumps(complete(template, name=name)),
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    assert saved.status_code == 200
+    assert saved.json()["name"] == name
+    assert as_admin.get("/api/admin/jurisdictions/ET/templates").json()[0]["name"] == name
+
+
+@pytest.mark.parametrize(
+    ("content", "content_type", "status"),
+    [
+        ("{}", "text/plain", 415),
+        ("{}", None, 415),
+        ("not json", "application/octet-stream", 422),
+        ('{"name": "Missing its fields"}', "application/octet-stream", 422),
+    ],
+)
+def test_a_save_in_another_form_is_refused(as_admin, content, content_type, status):
+    template = upload(as_admin).json()
+    headers = {"Content-Type": content_type} if content_type else {}
+
+    refused = as_admin.put(f"/api/admin/jurisdictions/ET/templates/{template['id']}", content=content, headers=headers)
+
+    assert refused.status_code == status
+    if status == 422:
+        assert all(error["loc"][0] == "body" for error in refused.json()["detail"])
+    assert as_admin.get("/api/admin/jurisdictions/ET/templates").json() == [template]  # nothing saved
+
+
 def test_a_new_file_keeps_the_linked_fields_and_waits_for_its_new_boxes(as_admin):
     template = upload(as_admin).json()
     path = f"/api/admin/jurisdictions/ET/templates/{template['id']}"

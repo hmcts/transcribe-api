@@ -23,8 +23,9 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, StringConstraints
+from pydantic import BaseModel, StringConstraints, ValidationError
 from pydantic import Field as PydanticField
 from sqlmodel import Session, select
 from starlette.background import BackgroundTask
@@ -729,6 +730,26 @@ class TemplateWrite(BaseModel):
         return STAGE_LIVE if self.enabled else STAGE_DRAFT
 
 
+# A save's JSON comes as application/octet-stream too, like the uploads: Front Door's WAF
+# reads a JSON body and blocks the admin's free text when it looks like code ("select
+# the reason from", "--", <u>, {{Tag}}), and lets this one through (azure-platform-terraform).
+_SAVE_CONTENT_TYPES = (UPLOAD_CONTENT_TYPE, "application/json")
+
+
+async def _template_write(request: Request) -> TemplateWrite:
+    """The save's body: JSON, as application/octet-stream or (the previous web release)
+    application/json. 415 for another Content-Type, 422 as for any invalid body."""
+    content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if content_type not in _SAVE_CONTENT_TYPES:
+        raise HTTPException(status_code=415, detail=f"Send the template as {UPLOAD_CONTENT_TYPE}.")
+    try:
+        return TemplateWrite.model_validate_json(await request.body())
+    except ValidationError as exc:
+        raise RequestValidationError(
+            [{**e, "loc": ("body", *e["loc"])} for e in exc.errors(include_url=False)]
+        ) from None
+
+
 def _audit_template_change(action: str, admin_user: User, code: str, row_id: str, detail: dict[str, Any]) -> None:
     record_audit(
         action,
@@ -822,8 +843,9 @@ async def admin_upload_template(
 def admin_update_template(
     code: str,
     template_id: UUID,
-    body: TemplateWrite,
+    # The permission first: a caller without it is refused whatever it sent.
     admin_user: User = Depends(_TEMPLATE_ADMIN),
+    body: TemplateWrite = Depends(_template_write),
 ) -> TemplateAdminRecord:
     """Save a template's name, fields and who can choose it (``stage``, DIAAT-347).
     Refused (400, ``template_not_ready``, with ``problems`` naming each box) unless
