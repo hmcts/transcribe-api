@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from uuid import UUID, uuid4
 
 from hmcts_otel import (
@@ -53,6 +53,8 @@ def create_job(
     jurisdiction_id: UUID | None = None,
     source_blob_path: str | None = None,
     job_id: UUID | None = None,
+    hearing_id: UUID | None = None,
+    hearing_date: date | None = None,
 ) -> SpeechBatchJob:
     """Create and store the job record, PENDING, and nothing else.
 
@@ -73,6 +75,8 @@ def create_job(
         audio_duration_seconds=audio_duration_seconds,
         audio_blob_path=audio_blob_path,
         source_blob_path=source_blob_path,
+        hearing_id=hearing_id,
+        hearing_date=hearing_date,
         status=JobStatus.PENDING,
         # DIAAT-276: the poller links the job's later processing to this request.
         trace_parent=capture_trace_context(),
@@ -97,6 +101,9 @@ async def submit_and_queue_batch_job(
     audio_blob_path: str | None = None,
     user_id: UUID | None = None,
     jurisdiction_id: UUID | None = None,
+    job_id: UUID | None = None,
+    hearing_id: UUID | None = None,
+    hearing_date: date | None = None,
 ) -> SpeechBatchJob:
     """Submit audio to Azure Batch Transcription and persist the initial job record.
 
@@ -122,6 +129,9 @@ async def submit_and_queue_batch_job(
         audio_blob_path=audio_blob_path,
         user_id=user_id,
         jurisdiction_id=jurisdiction_id,
+        job_id=job_id,
+        hearing_id=hearing_id,
+        hearing_date=hearing_date,
     )
     return await submit_existing_job(session, job, created=True)
 
@@ -135,7 +145,7 @@ def defer_batch_job(session: Session, audio_url: str, source_blob_path: str, **f
     """
     # The WAV the worker stores (and the parts cut from it) is named from this job as well as the upload, so
     # that two jobs made from one upload never share a blob (stt/audio_storage.py, job_wav_name).
-    job_id = uuid4()
+    job_id = fields.pop("job_id", None) or uuid4()
     if fields.get("audio_blob_path"):
         fields["audio_blob_path"] = job_wav_name(fields["audio_blob_path"], job_id)
     job = create_job(session, audio_url, source_blob_path=source_blob_path, job_id=job_id, **fields)

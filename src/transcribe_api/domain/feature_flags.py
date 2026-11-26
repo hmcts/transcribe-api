@@ -19,6 +19,11 @@ with no row has its default, which comes from configuration. The flags:
     accepted. It takes effect only while ``async_upload_preparation`` is on as well
     (stt/recording_limits.py). Default: ``LONG_RECORDINGS_ENABLED`` (false).
 
+``multi_day_hearings``
+    DIAAT-428. Whether POST /api/v1/jobs adds a recording to an existing hearing (``hearing_id``),
+    DELETE /api/v1/jobs/{id} deletes one day of a hearing that has others, and PATCH
+    /api/v1/jobs/{id}/hearing-date changes a day's date. Default: ``MULTI_DAY_HEARINGS`` (false).
+
 A flag is read with a short in-process cache (``CACHE_TTL_SECONDS``, 5 s): the permission check
 reads ``dictation_enabled`` on every dictation request, and that is one database read per five
 seconds per process instead of one per request. A change made through this process
@@ -54,12 +59,14 @@ logger = logging.getLogger(__name__)
 DICTATION_ENABLED = "dictation_enabled"
 ASYNC_UPLOAD_PREPARATION = "async_upload_preparation"
 LONG_RECORDINGS_ENABLED = "long_recordings_enabled"
+MULTI_DAY_HEARINGS = "multi_day_hearings"
 
 # Every flag, with the setting its default comes from.
 FLAG_DEFAULTS: dict[str, str] = {
     DICTATION_ENABLED: "DICTATION_ENABLED",
     ASYNC_UPLOAD_PREPARATION: "ASYNC_UPLOAD_PREPARATION",
     LONG_RECORDINGS_ENABLED: "LONG_RECORDINGS_ENABLED",
+    MULTI_DAY_HEARINGS: "MULTI_DAY_HEARINGS",
 }
 # What each flag does, for the admin list.
 FLAG_DESCRIPTIONS: dict[str, str] = {
@@ -71,6 +78,10 @@ FLAG_DESCRIPTIONS: dict[str, str] = {
     LONG_RECORDINGS_ENABLED: (
         "Whether recordings longer than 4 hours (up to the configured maximum) are accepted. "
         "Takes effect only while background upload preparation is on too."
+    ),
+    MULTI_DAY_HEARINGS: (
+        "Whether a Judge can add recordings of further days to a hearing, delete one day of a hearing "
+        "and change a day's date."
     ),
 }
 
@@ -159,6 +170,11 @@ def is_async_upload_preparation_enabled() -> bool:
 def is_long_recordings_enabled() -> bool:
     """Whether recordings over 240 minutes are accepted (DIAAT-408); see stt/recording_limits.py."""
     return flag_value(LONG_RECORDINGS_ENABLED)
+
+
+def is_multi_day_hearings_enabled() -> bool:
+    """Whether a hearing can have days added, deleted one at a time and redated (DIAAT-428)."""
+    return flag_value(MULTI_DAY_HEARINGS)
 
 
 @dataclass(frozen=True)

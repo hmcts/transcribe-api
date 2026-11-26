@@ -342,7 +342,8 @@ def test_submission_is_audited_with_the_new_job(mocker, audit_capture):
 
     assert _submit(_client()).status_code == 201
     row = _only_row(audit_capture)
-    assert _summary(row) == ("job.submit", "success", "job", job.id, None)
+    # DIAAT-428: the hearing the new job is a day of (a new one, here).
+    assert _summary(row) == ("job.submit", "success", "job", job.id, {"hearing_id": mocker.ANY})
 
 
 def test_idempotent_replay_is_audited_as_a_replay(mocker, audit_capture):
@@ -362,7 +363,7 @@ def test_failed_submission_is_audited_as_failed(mocker, audit_capture):
 
     assert _submit(_client()).status_code == 500
     row = _only_row(audit_capture)
-    assert _summary(row) == ("job.submit", "failed", "job", None, {"reason": "error"})
+    assert _summary(row) == ("job.submit", "failed", "job", None, {"reason": "error", "hearing_id": mocker.ANY})
 
 
 def test_foreign_upload_is_one_denied_record_naming_the_upload(tel, mocker, audit_capture):

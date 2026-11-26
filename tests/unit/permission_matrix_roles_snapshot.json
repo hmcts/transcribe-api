@@ -22,6 +22,9 @@
   "DELETE /api/transcriptions/{transcription_id}/tags/{tag_name}": [
     "Judge"
   ],
+  "DELETE /api/v1/hearings/{hearing_id}": [
+    "Judge"
+  ],
   "DELETE /api/v1/jobs/{job_id}": [
     "Judge"
   ],
@@ -161,6 +164,15 @@
     "JurisdictionAdministrator",
     "JurisdictionSuperAdministrator"
   ],
+  "GET /api/v1/hearings": [
+    "Judge"
+  ],
+  "GET /api/v1/hearings/{hearing_id}": [
+    "Judge"
+  ],
+  "GET /api/v1/hearings/{hearing_id}/history": [
+    "Judge"
+  ],
   "GET /api/v1/jobs": [
     "Judge"
   ],
@@ -171,6 +183,9 @@
     "Judge"
   ],
   "GET /api/v1/jobs/{job_id}/history": [
+    "Judge"
+  ],
+  "PATCH /api/v1/jobs/{job_id}/hearing-date": [
     "Judge"
   ],
   "PATCH /api/v1/jobs/{job_id}/segments/{segment}": [

@@ -77,6 +77,10 @@ AUDIT_ACTIONS_APP = (
     "access_request.withdrawn",
     # DIAAT-392: a system feature flag was set (from, to, and the role acted as).
     "feature_flag.changed",
+    # DIAAT-428: a recording day added to a hearing, a day's date changed, a hearing deleted with its days.
+    "hearing.add_recording",
+    "hearing.edit",
+    "hearing.delete",
 )
 AUDIT_ACTIONS = AUDIT_ACTIONS_AUTH_LIBRARY + AUDIT_ACTIONS_APP
 

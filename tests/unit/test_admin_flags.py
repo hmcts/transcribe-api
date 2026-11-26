@@ -20,7 +20,7 @@ from transcribe_api.runtime import settings_dictation
 pytestmark = [pytest.mark.real_jurisdictions, pytest.mark.real_feature_flags]
 
 # DIAAT-408 added the last two: off by default.
-ALL_FLAGS = ["dictation_enabled", "async_upload_preparation", "long_recordings_enabled"]
+ALL_FLAGS = ["dictation_enabled", "async_upload_preparation", "long_recordings_enabled", "multi_day_hearings"]
 
 
 @pytest.fixture

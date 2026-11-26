@@ -25,6 +25,9 @@
   "DELETE /api/transcriptions/{transcription_id}/tags/{tag_name}": [
     "dictation.use"
   ],
+  "DELETE /api/v1/hearings/{hearing_id}": [
+    "recording.own"
+  ],
   "DELETE /api/v1/jobs/{job_id}": [
     "recording.own"
   ],
@@ -169,6 +172,15 @@
   "GET /api/v1/health": [
     "exempt:public"
   ],
+  "GET /api/v1/hearings": [
+    "recording.own"
+  ],
+  "GET /api/v1/hearings/{hearing_id}": [
+    "recording.own"
+  ],
+  "GET /api/v1/hearings/{hearing_id}/history": [
+    "recording.audit.read"
+  ],
   "GET /api/v1/jobs": [
     "recording.own"
   ],
@@ -189,6 +201,9 @@
   ],
   "GET /health": [
     "exempt:public"
+  ],
+  "PATCH /api/v1/jobs/{job_id}/hearing-date": [
+    "recording.own"
   ],
   "PATCH /api/v1/jobs/{job_id}/segments/{segment}": [
     "recording.own"

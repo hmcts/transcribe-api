@@ -114,7 +114,7 @@ def test_a_judges_own_actions_are_in_the_history_newest_first_with_who_and_when(
         "transcript.view",
     ]
     for item in body["items"]:
-        assert set(item) == {"id", "timestamp", "action", "actor_label", "actor_role", "outcome"}
+        assert set(item) == {"id", "timestamp", "action", "actor_label", "actor_role", "outcome", "job_id"}
         assert item["actor_label"] == "Ivy Judge" and item["actor_role"] == JUDGE and item["outcome"] == "success"
     stamps = [i["timestamp"] for i in body["items"]]
     assert stamps == sorted(stamps, reverse=True)

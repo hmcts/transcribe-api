@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlmodel import Session, select
 
 from transcribe_api.domain.models_dictation import AuditLog
@@ -33,11 +33,14 @@ HISTORY_ACTIONS = (
     "transcript.accept",
     "audio.export",
     "job.delete",
+    "hearing.add_recording",
+    "hearing.edit",
+    "hearing.delete",
 )
 
 # The audit object types the recording writers use (domain/audit_recording.py ``AuditObjectType``). Dictation's
 # heritage rows share some action names (``transcript.view``) but record a ``transcription``: not a recording.
-HISTORY_OBJECT_TYPES = ("job", "upload")
+HISTORY_OBJECT_TYPES = ("job", "upload", "hearing")
 
 ANOTHER_USER = "Another user"
 
@@ -50,14 +53,52 @@ class HistoryItem:
     actor_label: str
     actor_role: str | None
     outcome: str
+    # The recording day the row is about (DIAAT-428): a job's own rows, or the day a hearing row names.
+    job_id: UUID | None = None
 
 
 def job_history(
     session: Session, job_id: UUID, owner_id: UUID, owner_label: str, *, page: int, page_size: int
 ) -> tuple[list[HistoryItem], int]:
     """The audit rows of the recording, newest first, and how many there are."""
+    return _history(session, AuditLog.object_id == str(job_id), owner_id, owner_label, page=page, page_size=page_size)
+
+
+def hearing_history(
+    session: Session,
+    hearing_id: UUID,
+    day_ids: list[UUID],
+    owner_id: UUID,
+    owner_label: str,
+    *,
+    page: int,
+    page_size: int,
+) -> tuple[list[HistoryItem], int]:
+    """The audit rows of a hearing (DIAAT-428), newest first: the hearing's own, its days', and those of the
+    days deleted from it (found through their ``job.delete`` rows, which name the hearing)."""
+    deleted_days = select(AuditLog.object_id).where(
+        AuditLog.event_type == "job.delete",
+        AuditLog.object_type == "job",
+        AuditLog.detail["hearing_id"].as_string() == str(hearing_id),  # type: ignore[index]
+    )
+    objects = [str(hearing_id), *(str(day) for day in day_ids)]
+    about = or_(AuditLog.object_id.in_(objects), AuditLog.object_id.in_(deleted_days))  # type: ignore[union-attr]
+    return _history(session, about, owner_id, owner_label, page=page, page_size=page_size)
+
+
+def _day_of(row: AuditLog) -> UUID | None:
+    raw = row.object_id if row.object_type == "job" else (row.detail or {}).get("job_id")
+    try:
+        return UUID(str(raw)) if raw else None
+    except ValueError:
+        return None
+
+
+def _history(
+    session: Session, about, owner_id: UUID, owner_label: str, *, page: int, page_size: int
+) -> tuple[list[HistoryItem], int]:
     wanted = (
-        (AuditLog.object_id == str(job_id))
+        about
         & AuditLog.event_type.in_(HISTORY_ACTIONS)  # type: ignore[attr-defined]
         & AuditLog.object_type.in_(HISTORY_OBJECT_TYPES)  # type: ignore[union-attr]
     )
@@ -80,6 +121,7 @@ def job_history(
                 actor_label=owner_label if mine else ANOTHER_USER,
                 actor_role=row.active_role if mine else None,
                 outcome=row.outcome or "success",
+                job_id=_day_of(row),
             )
         )
     return items, total

@@ -2379,7 +2379,7 @@ class TestMergeSegmentWithNext:
         job.dialogue_entries[0]["confidence"] = 0.95
         job.dialogue_entries[0]["corrected_text"] = "Good"
         response, _ = self._post(client, mocker, job, 0)
-        assert response.json()["needs_review"] == [{"speaker": "Speaker 1", "start_time": 0.0, "confidence": 0.5}]
+        assert response.json()["needs_review"] == [{"speaker": "Speaker 1", "start_time": 0.0, "confidence": 0.5, "job_id": str(job.id)}]
 
         client.app.dependency_overrides[get_session] = lambda: MagicMock()
         try:
@@ -2415,7 +2415,7 @@ class TestMergeSegmentWithNext:
         finally:
             client.app.dependency_overrides.pop(get_session, None)
         assert response.json()["dialogue_entries"][0]["accepted"] is False
-        assert response.json()["needs_review"] == [{"speaker": "Speaker 1", "start_time": 0.0, "confidence": 0.5}]
+        assert response.json()["needs_review"] == [{"speaker": "Speaker 1", "start_time": 0.0, "confidence": 0.5, "job_id": str(job.id)}]
 
     def test_history_rollback_on_merged_word_corrections_keeps_display_text(self, client, as_current_user, mocker):
         from transcribe_api.runtime.db_recording import get_session
@@ -2473,7 +2473,7 @@ class TestMergeSegmentWithNext:
         finally:
             client.app.dependency_overrides.pop(get_session, None)
         assert response.status_code == 200
-        assert response.json()["needs_review"] == [{"speaker": "Speaker 1", "start_time": 0.0, "confidence": 0.5}]
+        assert response.json()["needs_review"] == [{"speaker": "Speaker 1", "start_time": 0.0, "confidence": 0.5, "job_id": str(job.id)}]
 
     @pytest.mark.parametrize("path", ["rollback", "history/0/rollback"])
     def test_rolled_back_merged_part_is_not_counted_as_corrected_when_merged_again(
@@ -2677,7 +2677,7 @@ class TestRollbackSegment:
         entry = body["dialogue_entries"][0]
         assert entry["accepted"] is False
         assert entry["correction_history"] is None
-        assert body["needs_review"] == [{"speaker": "0", "start_time": 0.0, "confidence": 0.4}]
+        assert body["needs_review"] == [{"speaker": "0", "start_time": 0.0, "confidence": 0.4, "job_id": str(job.id)}]
         mock_session.commit.assert_called_once()
 
 

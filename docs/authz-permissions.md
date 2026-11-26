@@ -181,6 +181,11 @@ the shared routes.)
 | `GET` | `/api/v1/jobs/{job_id}/history` | `recording.audit.read` | Judge (the owner) |
 | `GET` | `/api/v1/jobs/{job_id}/audio` | `recording.own` | Judge |
 | `DELETE` | `/api/v1/jobs/{job_id}` | `recording.own` | Judge |
+| `PATCH` | `/api/v1/jobs/{job_id}/hearing-date` | `recording.own` | Judge |
+| `GET` | `/api/v1/hearings` | `recording.own` | Judge |
+| `GET` | `/api/v1/hearings/{hearing_id}` | `recording.own` | Judge |
+| `DELETE` | `/api/v1/hearings/{hearing_id}` | `recording.own` | Judge |
+| `GET` | `/api/v1/hearings/{hearing_id}/history` | `recording.audit.read` | Judge (the owner) |
 | `GET` | `/health` | (exempt: public) | - |
 
 ### The exemptions (the whole list)

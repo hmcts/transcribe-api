@@ -123,6 +123,7 @@ operator checklist (not yet executed) are in [`docs/long-recordings.md`](docs/lo
 | `MAX_UPLOAD_BYTES` | 1 GiB | Backstop on one upload (413 above it). **transcribe-web reads the same figure from its own `MAX_UPLOAD_BYTES` environment variable: set both to the same value.** |
 | `async_upload_preparation` | `ASYNC_UPLOAD_PREPARATION=false` | `POST /uploads` stores the original and answers at once; the worker converts it and submits the job. |
 | `long_recordings_enabled` | `LONG_RECORDINGS_ENABLED=false` | Recordings over 240 minutes, up to `MAX_AUDIO_DURATION_SECONDS`. Takes effect only with `async_upload_preparation` on. |
+| `multi_day_hearings` | `MULTI_DAY_HEARINGS=false` | DIAAT-428: `POST /jobs` with `hearing_id` adds a recording day to a hearing, `DELETE /jobs/{id}` deletes one day of several, `PATCH /jobs/{id}/hearing-date` changes a day's date. |
 
 The effective limit is what `GET /api/flags` returns as `max_recording_seconds`. Turning either flag off needs no deploy and
 fails no job except one over 240 minutes that is still waiting to be prepared (the limit is 240 minutes unless both flags are on).
