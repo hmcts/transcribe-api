@@ -1028,16 +1028,11 @@ def local(monkeypatch):
 
 
 def seed_personas(db):
-    """What scripts-seed-personas.py does, into the test database."""
-    import importlib.util
-    from pathlib import Path
+    """What tests/data/seed_local.py does for the personas, into the test database."""
+    from tests.data import seed_local
 
-    path = Path(__file__).resolve().parents[2] / "scripts-seed-personas.py"
-    spec = importlib.util.spec_from_file_location("scripts_seed_personas", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
     with Session(db) as session:
-        module.seed(session)
+        seed_local.seed_personas(session)
         session.commit()
 
 

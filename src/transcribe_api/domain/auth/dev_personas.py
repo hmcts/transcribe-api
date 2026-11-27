@@ -1,7 +1,7 @@
 """Local development personas (DIAAT-373): who you can sign in as without Entra.
 
 ``POST /api/auth/session`` with ``X-Dev-Persona: <name>`` signs in as one of these, and only
-when ENVIRONMENT=local: anywhere else the header is refused (401). ``scripts-seed-personas.py``
+when ENVIRONMENT=local: anywhere else the header is refused (401). ``tests/data/seed_local.py``
 creates them (idempotently) with their jurisdictions and assignments, so a developer can
 test "a Judge in ET cannot manage IAC users" with a few clicks. A persona goes through the
 same mint path as a real sign-in (domain/auth/sessions.py): its assignments are read from the
